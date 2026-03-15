@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RNG Query Web</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="backdrop"></div>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <h1>RNG Query Studio</h1>
+        <p>ReacNetGenerator 路径检索 + SMILES 结构可视化</p>
+      </div>
+      <div class="endpoint">API: <code id="apiRoot">/api</code></div>
+    </header>
+
+    <section class="global-config card">
+      <div class="field wide">
+        <label for="reacFile">reactionabcd 文件</label>
+        <input id="reacFile" type="text" placeholder="留空使用默认探测路径，或填写你的 .reactionabcd 绝对路径" />
+      </div>
+      <div class="field slim">
+        <label for="minTp">min_tp</label>
+        <input id="minTp" type="number" min="1" value="1" />
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card query-card" id="card-species">
+        <h2>按分子式查 SMILES</h2>
+        <div class="row">
+          <div class="field">
+            <label for="qFormula">Formula</label>
+            <input id="qFormula" type="text" placeholder="C6H4" value="C6H4" />
+          </div>
+          <div class="field mini">
+            <label for="qSpeciesTop">Top</label>
+            <input id="qSpeciesTop" type="number" min="1" value="20" />
+          </div>
+        </div>
+        <button id="btnSpecies">查询</button>
+      </article>
+
+      <article class="card query-card" id="card-mass">
+        <h2>按质量数查 MD 物种</h2>
+        <div class="row">
+          <div class="field">
+            <label for="qMass">Mass</label>
+            <input id="qMass" type="number" step="0.0001" value="128" />
+          </div>
+          <div class="field mini">
+            <label for="qMassMode">Mode</label>
+            <select id="qMassMode">
+              <option value="nominal">nominal</option>
+              <option value="exact">exact</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qMassTol">Tol</label>
+            <input id="qMassTol" type="number" step="0.0001" value="0" />
+          </div>
+          <div class="field mini">
+            <label for="qMassTop">Top</label>
+            <input id="qMassTop" type="number" min="1" value="50" />
+          </div>
+        </div>
+        <button id="btnMass">查询</button>
+      </article>
+
+      <article class="card query-card" id="card-next">
+        <h2>按 SMILES 查后续路径</h2>
+        <div class="field">
+          <label for="qSmiles">SMILES</label>
+          <input id="qSmiles" type="text" placeholder="[H][C]1..." value="[H][C]1=[C][C]=[C]([H])[C]([H])=[C]1[H]" />
+        </div>
+        <div class="row">
+          <div class="field mini">
+            <label for="qRole">Role</label>
+            <select id="qRole">
+              <option value="consume">consume</option>
+              <option value="produce">produce</option>
+              <option value="both">both</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qNextTop">Top</label>
+            <input id="qNextTop" type="number" min="1" value="20" />
+          </div>
+          <div class="field mini checkline">
+            <label for="qNetPositive">Net+ only</label>
+            <input id="qNetPositive" type="checkbox" />
+          </div>
+        </div>
+        <button id="btnNext">查询</button>
+      </article>
+
+      <article class="card query-card" id="card-intermediate">
+        <h2>Species 中间体筛选</h2>
+        <div class="field">
+          <label for="qInterSpeciesFile">Species 文件(可选)</label>
+          <input id="qInterSpeciesFile" type="text" placeholder="留空自动由 reactionabcd 推导" />
+        </div>
+        <div class="row row-int-main">
+          <div class="field mini">
+            <label for="qInterKind">类别</label>
+            <select id="qInterKind">
+              <option value="intermediate">intermediate</option>
+              <option value="product">product</option>
+              <option value="reactant">reactant</option>
+              <option value="all">all</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qInterTop">Top</label>
+            <input id="qInterTop" type="number" min="1" value="120" />
+          </div>
+          <div class="field mini">
+            <label for="qInterAbundance">丰度阈值</label>
+            <input id="qInterAbundance" type="number" min="0" step="0.1" value="5" />
+          </div>
+        </div>
+        <div class="row row-int-crit">
+          <div class="field mini">
+            <label for="qInterStartRatio">StartRatioMax</label>
+            <input id="qInterStartRatio" type="number" min="0" max="1" step="0.01" value="0.1" />
+          </div>
+          <div class="field mini">
+            <label for="qInterDecayAlpha">DecayAlpha</label>
+            <input id="qInterDecayAlpha" type="number" min="0" max="1" step="0.01" value="0.8" />
+          </div>
+          <div class="field mini">
+            <label for="qInterFwhmMin">FWHMMin(ps)</label>
+            <input id="qInterFwhmMin" type="number" min="0" step="0.01" value="0.5" />
+          </div>
+          <div class="field mini">
+            <label for="qInterTimestepPs">Timestep(ps)</label>
+            <input id="qInterTimestepPs" type="number" min="0" step="0.00001" value="0.0001" />
+          </div>
+        </div>
+        <div class="row row-int-opt">
+          <div class="field mini checkline">
+            <label for="qInterRequireFwhm">RequireFWHM</label>
+            <input id="qInterRequireFwhm" type="checkbox" checked />
+          </div>
+          <div class="field mini checkline">
+            <label for="qInterWithFlux">WithFlux</label>
+            <input id="qInterWithFlux" type="checkbox" checked />
+          </div>
+          <div class="field mini">
+            <label for="qInterFluxTop">FluxTop</label>
+            <input id="qInterFluxTop" type="number" min="0" value="10" />
+          </div>
+        </div>
+        <button id="btnIntermediate">筛选候选</button>
+      </article>
+
+      <article class="card query-card" id="card-rxn">
+        <h2>按公式级反应检索</h2>
+        <div class="field">
+          <label for="qReactants">Reactants (可选)</label>
+          <input id="qReactants" type="text" value="C6H4O2+C6H4" placeholder="可留空；支持 C6H4O2+C6H4" />
+        </div>
+        <div class="field">
+          <label for="qProducts">Products (可选)</label>
+          <input id="qProducts" type="text" value="C12H8O2" placeholder="可留空；支持 C12H8O2" />
+        </div>
+        <div class="row row-rxn-main">
+          <div class="field mini">
+            <label for="qMode">Mode</label>
+            <select id="qMode">
+              <option value="exact">exact</option>
+              <option value="contains">contains</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qRxnTop">Top</label>
+            <input id="qRxnTop" type="number" min="1" value="30" />
+          </div>
+        </div>
+        <div class="row row-rxn-share">
+          <div class="field mini checkline">
+            <label for="qRxnWithShare">Top占比</label>
+            <input id="qRxnWithShare" type="checkbox" />
+          </div>
+          <div class="field mini">
+            <label for="qRxnShareMetric">占比指标</label>
+            <select id="qRxnShareMetric">
+              <option value="net_tp">net_tp</option>
+              <option value="tp">tp</option>
+              <option value="reverse_tp">reverse_tp</option>
+            </select>
+          </div>
+          <div class="field mini checkline">
+            <label for="qRxnShareAbs">ShareAbs</label>
+            <input id="qRxnShareAbs" type="checkbox" />
+          </div>
+          <div class="field mini checkline">
+            <label for="qRxnSharePositive">Positive only</label>
+            <input id="qRxnSharePositive" type="checkbox" />
+          </div>
+        </div>
+        <button id="btnRxn">查询</button>
+      </article>
+
+    </section>
+
+    <section class="panel-grid">
+      <article class="card results">
+        <div class="card-head">
+          <h2>检索结果</h2>
+          <button id="btnExport" class="ghost" disabled>导出当前结果 CSV</button>
+        </div>
+        <pre id="metaBox" class="meta"></pre>
+        <div id="tableWrap" class="table-wrap">
+          <table id="resultTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card viewer">
+        <h2>SMILES 结构查看</h2>
+        <div class="field">
+          <label for="viewerSmiles">SMILES</label>
+          <textarea id="viewerSmiles" rows="3" placeholder="粘贴单个 SMILES，或点击结果中的“View”"></textarea>
+        </div>
+        <div class="field mini checkline">
+          <label for="viewerShowH">显示H</label>
+          <input id="viewerShowH" type="checkbox" checked />
+        </div>
+        <div class="actions">
+          <button id="btnRenderOne">渲染单分子</button>
+          <button id="btnRenderReaction" class="ghost">按反应式渲染</button>
+        </div>
+        <div id="svgGallery" class="svg-gallery"></div>
+      </article>
+    </section>
+
+    <section class="plot-grid">
+      <article class="card query-card" id="card-plot">
+        <h2>时间曲线 Plot</h2>
+        <div class="field">
+          <label for="qPlotTarget">Targets</label>
+          <textarea id="qPlotTarget" rows="3" placeholder="每行一个, 支持 formula/SMILES 与 label::query">C6H4
+[H][O][H]</textarea>
+        </div>
+        <div class="field">
+          <label for="qPlotSpeciesFile">Species 文件(可选)</label>
+          <input id="qPlotSpeciesFile" type="text" placeholder="留空自动由 reactionabcd 推导" />
+        </div>
+        <div class="row">
+          <div class="field mini">
+            <label for="qPlotFormulaMode">FormulaMode</label>
+            <select id="qPlotFormulaMode">
+              <option value="sum">sum</option>
+              <option value="split">split</option>
+              <option value="both">both</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qPlotXAxis">X-axis</label>
+            <select id="qPlotXAxis">
+              <option value="ps">ps</option>
+              <option value="step">step</option>
+              <option value="ns">ns</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qPlotNormalize">Normalize</label>
+            <select id="qPlotNormalize">
+              <option value="none">none</option>
+              <option value="initial">initial</option>
+              <option value="max">max</option>
+            </select>
+          </div>
+          <div class="field mini">
+            <label for="qPlotSmooth">Smooth</label>
+            <input id="qPlotSmooth" type="number" min="1" value="1" />
+          </div>
+          <div class="field mini">
+            <label for="qPlotDownsample">Downsample</label>
+            <input id="qPlotDownsample" type="number" min="100" value="1800" />
+          </div>
+        </div>
+        <button id="btnPlot">绘图</button>
+      </article>
+
+      <section class="card plot-panel">
+        <div class="card-head">
+          <h2>物种时间曲线</h2>
+          <div class="plot-actions">
+            <button id="btnPlotExportCsv" class="ghost" disabled>导出 Plot CSV</button>
+            <button id="btnPlotExportPng" class="ghost" disabled>导出 Plot PNG</button>
+          </div>
+        </div>
+        <pre id="plotMeta" class="meta"></pre>
+        <div class="plot-canvas-wrap">
+          <div id="plotChart"></div>
+          <canvas id="plotCanvas"></canvas>
+        </div>
+        <div id="plotLegend" class="plot-legend"></div>
+      </section>
+    </section>
+
+    <section class="card usage-guide">
+      <h2>使用说明</h2>
+      <div class="guide-grid">
+        <article>
+          <h3>快速开始</h3>
+          <ol>
+            <li>先确认顶部 <code>reactionabcd 文件</code> 与 <code>min_tp</code>。</li>
+            <li>在任一检索卡片输入条件并点击“查询”。</li>
+            <li>点击结果表中的 <code>View</code> 或 <code>View Rxn</code> 查看结构。</li>
+            <li>需要时间曲线时，在 <code>时间曲线 Plot</code> 输入目标后点击“绘图”。</li>
+          </ol>
+        </article>
+        <article>
+          <h3>常用模块</h3>
+          <ul>
+            <li><code>按分子式查 SMILES</code>：查同分子式下的全部/Top 物种。</li>
+            <li><code>按质量数查 MD 物种</code>：按 nominal/exact 质量筛选候选物种。</li>
+            <li><code>按 SMILES 查后续路径</code>：看某物种的消耗/生成通道。</li>
+            <li><code>Species 中间体筛选</code>：按先升后降 + 丰度 + FWHM 自动筛候选。</li>
+            <li><code>按公式级反应检索</code>：支持仅填反应物、仅填产物或双侧同时填写。</li>
+            <li><code>按公式级反应检索</code>中的<code>Top占比</code>可直接算检索结果的占比。</li>
+          </ul>
+        </article>
+        <article>
+          <h3>输入格式示例</h3>
+          <ul>
+            <li>分子式：<code>C6H4</code>、<code>C6H4O2</code></li>
+            <li>SMILES：<code>[H][O][H]</code></li>
+            <li>多项输入：使用 <code>+</code>、<code>,</code> 或换行分隔。</li>
+            <li>Plot 目标支持：<code>label::query</code>，如 <code>oBenzyne::C6H4</code>。</li>
+          </ul>
+        </article>
+        <article>
+          <h3>占比说明</h3>
+          <ul>
+            <li><code>Top占比</code>基于当前反应检索结果计算，无需额外 CSV。</li>
+            <li><code>ShareMetric</code>可选 <code>net_tp</code> / <code>tp</code> / <code>reverse_tp</code>。</li>
+            <li><code>ShareAbs</code>用于按绝对值统计（适合净通量正负并存场景）。</li>
+            <li><code>Positive only</code>只统计大于 0 的指标值。</li>
+            <li>Plot 的 <code>Species 文件(可选)</code> 留空会由 reactionabcd 自动推导。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
