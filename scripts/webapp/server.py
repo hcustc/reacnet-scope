@@ -20,7 +20,7 @@ import sys
 import tempfile
 import threading
 import time
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -134,6 +134,19 @@ FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 SPECIES_TS_PREFIX_RE = re.compile(r"^Timestep\s+(\d+):")
 ROUTE_LINE_RE = re.compile(r"^\s*Atom\s+(\d+)\s+\S+:\s*(.*)$")
 ROUTE_STEP_RE = re.compile(r"(\d+)\s+(\S+)")
+
+COVALENT_RADII: dict[str, float] = {
+    "H": 0.31,
+    "C": 0.76,
+    "N": 0.71,
+    "O": 0.66,
+    "F": 0.57,
+    "P": 1.07,
+    "S": 1.05,
+    "Cl": 1.02,
+    "Br": 1.20,
+    "I": 1.39,
+}
 
 
 def split_terms(expr: str) -> list[str]:
@@ -1477,6 +1490,251 @@ def _prepare_reaction_query(reaction_text: str) -> dict[str, Any]:
     }
 
 
+def _reaction_query_token_order(reaction_query: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in [*reaction_query["reactant_tokens"], *reaction_query["product_tokens"]]:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def _format_token_counter_summary(
+    counter: dict[str, int] | Counter[str],
+    ordered_tokens: list[str],
+) -> str:
+    if not ordered_tokens:
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for token in ordered_tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        parts.append(f"{token}({int(counter.get(token, 0))})")
+    extras = sorted(
+        token
+        for token, value in counter.items()
+        if token not in seen and int(value) != 0
+    )
+    for token in extras:
+        parts.append(f"{token}({int(counter.get(token, 0))})")
+    return "; ".join(parts)
+
+
+def _format_token_delta_summary(
+    before_counter: dict[str, int] | Counter[str],
+    after_counter: dict[str, int] | Counter[str],
+    ordered_tokens: list[str],
+) -> str:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for token in ordered_tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        before_value = int(before_counter.get(token, 0))
+        after_value = int(after_counter.get(token, 0))
+        delta = after_value - before_value
+        if delta == 0:
+            continue
+        parts.append(f"{token}: {before_value}->{after_value} ({delta:+d})")
+    if not parts:
+        return "no net species change"
+    return "; ".join(parts)
+
+
+def _collect_reaction_species_token_snapshots(
+    species_file: str,
+    *,
+    requested_frames: list[int],
+    query_tokens: list[str],
+    match_mode: str,
+    progress_callback: Any = None,
+    progress_start: float = 0.0,
+    progress_span: float = 1.0,
+) -> dict[int, dict[str, int]]:
+    wanted = sorted({int(frame) for frame in requested_frames if frame is not None})
+    if not wanted:
+        return {}
+    token_set = {str(token or "").strip() for token in query_tokens if str(token or "").strip()}
+    if not token_set:
+        return {int(frame): {} for frame in wanted}
+
+    def emit(progress: float, message: str, **extra: Any) -> None:
+        if progress_callback is None:
+            return
+        payload = {
+            "progress": max(0.0, min(float(progress), 1.0)),
+            "phase": "reading_species",
+            "message": message,
+        }
+        payload.update(extra)
+        progress_callback(payload)
+
+    file_size = max(os.path.getsize(species_file), 1)
+    bytes_read = 0
+    last_emit = 0.0
+    wanted_set = set(wanted)
+    snapshots: dict[int, dict[str, int]] = {}
+    emit(progress_start, f"Scanning species snapshots for {len(wanted)} comparison frame(s)")
+    with open(species_file, encoding="utf-8") as fh:
+        for line in fh:
+            bytes_read += len(line)
+            parsed = parse_species_timestep_line(line)
+            if parsed is None:
+                continue
+            ts, pairs = parsed
+            if ts not in wanted_set:
+                now = time.monotonic()
+                frac = bytes_read / file_size
+                if frac >= 0.99 or (now - last_emit) >= 1.0:
+                    emit(
+                        progress_start + progress_span * min(frac, 1.0),
+                        f"Scanning species file: {frac * 100:.1f}%",
+                        n_snapshots=len(snapshots),
+                    )
+                    last_emit = now
+                continue
+            counts: Counter[str] = Counter()
+            for label, count in pairs:
+                canonical, formula = _normalize_route_species_label(label)
+                token = canonical if match_mode == "canonical_smiles" else formula
+                if token and token in token_set:
+                    counts[token] += int(count)
+            snapshots[int(ts)] = {token: int(counts.get(token, 0)) for token in token_set}
+            wanted_set.discard(ts)
+            now = time.monotonic()
+            frac = bytes_read / file_size
+            if frac >= 0.99 or (now - last_emit) >= 1.0:
+                emit(
+                    progress_start + progress_span * min(frac, 1.0),
+                    f"Collecting species comparison frame {ts}",
+                    frame=ts,
+                    n_snapshots=len(snapshots),
+                )
+                last_emit = now
+            if not wanted_set:
+                break
+    for frame in wanted:
+        snapshots.setdefault(int(frame), {token: 0 for token in token_set})
+    emit(
+        progress_start + progress_span,
+        f"Species comparison snapshots ready: {len(snapshots)} frame(s)",
+        n_snapshots=len(snapshots),
+    )
+    return snapshots
+
+
+def _validate_reaction_candidate_rows(
+    candidate_rows: list[dict[str, Any]],
+    *,
+    reaction_query: dict[str, Any],
+    species_snapshots: dict[int, dict[str, int]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    accepted_rows: list[dict[str, Any]] = []
+    discarded_rows: list[dict[str, Any]] = []
+    ordered_tokens = _reaction_query_token_order(reaction_query)
+    reactant_tokens = [str(token) for token in reaction_query["reactant_tokens"]]
+    product_tokens = [str(token) for token in reaction_query["product_tokens"]]
+
+    for candidate in candidate_rows:
+        candidate_id = str(candidate.get("candidate_id") or candidate.get("event_id") or "").strip()
+        before_frame = int(candidate.get("comparison_before_frame", candidate.get("route_event_start_frame", 0)))
+        after_frame = int(candidate.get("comparison_after_frame", candidate.get("anchor_frame", 0)))
+        before_counter = Counter(species_snapshots.get(before_frame) or {})
+        after_counter = Counter(species_snapshots.get(after_frame) or {})
+        from_summary = _format_token_counter_summary(before_counter, ordered_tokens)
+        to_summary = _format_token_counter_summary(after_counter, ordered_tokens)
+        net_summary = _format_token_delta_summary(before_counter, after_counter, ordered_tokens)
+
+        reactant_loss = sum(max(0, int(before_counter.get(token, 0)) - int(after_counter.get(token, 0))) for token in reactant_tokens)
+        reactant_gain = sum(max(0, int(after_counter.get(token, 0)) - int(before_counter.get(token, 0))) for token in reactant_tokens)
+        product_gain = sum(max(0, int(after_counter.get(token, 0)) - int(before_counter.get(token, 0))) for token in product_tokens)
+        product_loss = sum(max(0, int(before_counter.get(token, 0)) - int(after_counter.get(token, 0))) for token in product_tokens)
+
+        forward_score = reactant_loss + product_gain
+        reverse_score = reactant_gain + product_loss
+        changed = any(int(before_counter.get(token, 0)) != int(after_counter.get(token, 0)) for token in ordered_tokens)
+
+        row = dict(candidate)
+        row["candidate_id"] = candidate_id
+        row["comparison_before_frame"] = before_frame
+        row["comparison_after_frame"] = after_frame
+        row["from_multiset_summary"] = from_summary
+        row["to_multiset_summary"] = to_summary
+        row["net_reaction_summary"] = net_summary
+        row["route_species_forward_score"] = int(forward_score)
+        row["route_species_reverse_score"] = int(reverse_score)
+
+        failure_reason = ""
+        event_quality = "net_reaction_verified"
+        if not changed:
+            failure_reason = "net_reaction_zero"
+            event_quality = "discarded_zero_net_change"
+        elif forward_score <= 0 and reverse_score <= 0:
+            failure_reason = "no_query_token_change"
+            event_quality = "discarded_no_query_token_change"
+        elif reverse_score > forward_score:
+            failure_reason = "direction_mismatch"
+            event_quality = "discarded_direction_mismatch"
+        elif reverse_score == forward_score and forward_score > 0:
+            failure_reason = "mixed_direction"
+            event_quality = "discarded_mixed_direction"
+        elif reactant_loss <= 0 or product_gain <= 0:
+            event_quality = "net_reaction_partial"
+
+        row["failure_reason"] = failure_reason
+        row["event_quality"] = event_quality
+        if not failure_reason:
+            confidence = float(row.get("confidence", 0.55) or 0.55)
+            confidence += 0.12 if reactant_loss > 0 and product_gain > 0 else 0.05
+            confidence -= 0.05 if reverse_score > 0 else 0.0
+            row["confidence"] = round(max(0.0, min(confidence, 0.995)), 3)
+            accepted_rows.append(row)
+            continue
+
+        discarded_rows.append(
+            {
+                "candidate_id": candidate_id,
+                "anchor_frame": int(row.get("anchor_frame", 0)),
+                "route_event_start_frame": int(row.get("route_event_start_frame", 0)),
+                "route_event_end_frame": int(row.get("route_event_end_frame", 0)),
+                "comparison_before_frame": before_frame,
+                "comparison_after_frame": after_frame,
+                "from_multiset_summary": from_summary,
+                "to_multiset_summary": to_summary,
+                "net_reaction_summary": net_summary,
+                "failure_reason": failure_reason,
+                "event_quality": event_quality,
+                "confidence": round(float(row.get("confidence", 0.0) or 0.0), 3),
+                "matched_smiles_at_anchor": row.get("matched_smiles_at_anchor", ""),
+            }
+        )
+
+    accepted_rows.sort(
+        key=lambda row: (
+            int(row.get("route_event_start_frame", row.get("anchor_frame", 0))),
+            int(row.get("anchor_frame", 0)),
+            -int(row.get("core_atom_count", 0)),
+        )
+    )
+    discarded_rows.sort(
+        key=lambda row: (
+            int(row.get("route_event_start_frame", row.get("anchor_frame", 0))),
+            int(row.get("anchor_frame", 0)),
+        )
+    )
+    for idx, row in enumerate(accepted_rows, 1):
+        row["event_index"] = idx
+    for idx, row in enumerate(discarded_rows, 1):
+        row["candidate_index"] = idx
+    return accepted_rows, discarded_rows
+
+
 def _event_ids_text(atom_ids: set[int] | list[int] | tuple[int, ...]) -> str:
     values = sorted({int(atom_id) for atom_id in atom_ids if atom_id is not None})
     return ",".join(str(item) for item in values)
@@ -1509,6 +1767,24 @@ def _next_available_frame(frames: list[int], target_frame: int) -> int:
     if not frames:
         return int(target_frame)
     pos = bisect_left(frames, int(target_frame))
+    if pos >= len(frames):
+        return int(frames[-1])
+    return int(frames[pos])
+
+
+def _previous_available_frame_strict(frames: list[int], target_frame: int) -> int:
+    if not frames:
+        return int(target_frame)
+    pos = bisect_left(frames, int(target_frame))
+    if pos <= 0:
+        return int(frames[0])
+    return int(frames[pos - 1])
+
+
+def _next_available_frame_strict(frames: list[int], target_frame: int) -> int:
+    if not frames:
+        return int(target_frame)
+    pos = bisect_right(frames, int(target_frame))
     if pos >= len(frames):
         return int(frames[-1])
     return int(frames[pos])
@@ -1549,10 +1825,105 @@ def _distance_cluster_atom_ids(
     return normalized or [set(atom_ids)]
 
 
+def _resolve_atom_element(
+    atom: dict[str, Any],
+    type_element_map: dict[str, str] | None = None,
+) -> str:
+    element = str(atom.get("element", "") or "").strip()
+    if element:
+        return element[0].upper() + element[1:].lower()
+    atom_type = _normalize_atom_type_token(atom.get("type", ""))
+    if type_element_map and atom_type:
+        mapped = str(type_element_map.get(atom_type, "") or "").strip()
+        if mapped:
+            return mapped[0].upper() + mapped[1:].lower()
+    return ""
+
+
+def _bond_cutoff_sq(
+    atom_a: dict[str, Any],
+    atom_b: dict[str, Any],
+    box: list[tuple[float, float]],
+    *,
+    type_element_map: dict[str, str] | None = None,
+) -> float | None:
+    element_a = _resolve_atom_element(atom_a, type_element_map)
+    element_b = _resolve_atom_element(atom_b, type_element_map)
+    radius_a = COVALENT_RADII.get(element_a)
+    radius_b = COVALENT_RADII.get(element_b)
+    if radius_a is None or radius_b is None:
+        return None
+    cutoff = 1.25 * (float(radius_a) + float(radius_b)) + 0.25
+    cutoff = min(max(cutoff, 0.85), 2.35)
+    return cutoff * cutoff
+
+
+def _expand_connected_component_atom_ids(
+    atoms_by_id: dict[int, dict[str, Any]],
+    box: list[tuple[float, float]],
+    seed_ids: set[int],
+    *,
+    type_element_map: dict[str, str] | None = None,
+    max_passes: int = 12,
+) -> tuple[set[int], str]:
+    available_seed = {int(atom_id) for atom_id in seed_ids if atom_id in atoms_by_id}
+    if not available_seed:
+        return set(), "none"
+
+    mol_ids: set[str] = set()
+    for atom_id in available_seed:
+        mol = str(atoms_by_id[atom_id].get("mol", "") or "").strip()
+        if mol and mol not in {"0", "0.0"}:
+            mol_ids.add(mol)
+    if mol_ids:
+        full_group = {
+            int(atom_id)
+            for atom_id, atom in atoms_by_id.items()
+            if str(atom.get("mol", "") or "").strip() in mol_ids
+        }
+        return full_group or set(available_seed), "same_molecule"
+
+    group = set(available_seed)
+    frontier = set(available_seed)
+    remaining = {int(atom_id) for atom_id in atoms_by_id.keys() if atom_id not in group}
+    inferred_any = False
+    for _ in range(max(1, int(max_passes))):
+        if not frontier or not remaining:
+            break
+        new_frontier: set[int] = set()
+        frontier_atoms = [atoms_by_id[atom_id] for atom_id in sorted(frontier) if atom_id in atoms_by_id]
+        if not frontier_atoms:
+            break
+        for atom_id in list(remaining):
+            atom = atoms_by_id.get(atom_id)
+            if atom is None:
+                remaining.discard(atom_id)
+                continue
+            for front_atom in frontier_atoms:
+                cutoff_sq = _bond_cutoff_sq(atom, front_atom, box, type_element_map=type_element_map)
+                if cutoff_sq is None:
+                    continue
+                if _distance_sq_pbc(atom, front_atom, box) <= cutoff_sq:
+                    new_frontier.add(atom_id)
+                    break
+        if not new_frontier:
+            break
+        inferred_any = True
+        group.update(new_frontier)
+        frontier = new_frontier
+        remaining.difference_update(new_frontier)
+
+    if inferred_any:
+        return group, "connected_component"
+    return set(available_seed), "core_only"
+
+
 def _expand_reaction_context_atom_ids(
     atoms_by_id: dict[int, dict[str, Any]],
     box: list[tuple[float, float]],
     core_ids: set[int],
+    *,
+    type_element_map: dict[str, str] | None = None,
 ) -> tuple[set[int], str]:
     if not core_ids:
         return set(), "none"
@@ -1560,18 +1931,14 @@ def _expand_reaction_context_atom_ids(
     if not available_core:
         return set(core_ids), "core_only"
 
-    mol_ids: set[str] = set()
-    for atom_id in available_core:
-        mol = str(atoms_by_id[atom_id].get("mol", "") or "").strip()
-        if mol and mol not in {"0", "0.0"}:
-            mol_ids.add(mol)
-    if mol_ids:
-        context_ids = {
-            int(atom_id)
-            for atom_id, atom in atoms_by_id.items()
-            if str(atom.get("mol", "") or "").strip() in mol_ids
-        }
-        return context_ids or set(available_core), "same_molecule"
+    connected_ids, connected_source = _expand_connected_component_atom_ids(
+        atoms_by_id,
+        box,
+        available_core,
+        type_element_map=type_element_map,
+    )
+    if connected_ids and connected_source in {"same_molecule", "connected_component"}:
+        return connected_ids, connected_source
 
     cutoff_sq = 2.35 * 2.35
     context_ids = set(available_core)
@@ -1584,7 +1951,44 @@ def _expand_reaction_context_atom_ids(
             if core_id in atoms_by_id
         ):
             context_ids.add(int(atom_id))
-    return context_ids or set(available_core), "distance_shell"
+    return context_ids or set(available_core), "distance_shell_fallback"
+
+
+def _expand_reaction_context_ids_for_frames(
+    parsed_frames: dict[int, dict[str, Any]],
+    *,
+    focus_frames: list[int],
+    core_atom_ids: set[int],
+    type_element_map: dict[str, str] | None = None,
+) -> tuple[set[int], str]:
+    if not core_atom_ids:
+        return set(), "none"
+    union_ids: set[int] = set(core_atom_ids)
+    sources: list[str] = []
+    for frame in focus_frames:
+        parsed = parsed_frames.get(int(frame)) or {}
+        atoms_by_id = parsed.get("atoms") or {}
+        if not atoms_by_id:
+            continue
+        context_ids, source = _expand_reaction_context_atom_ids(
+            atoms_by_id,
+            parsed.get("box", []),
+            core_atom_ids,
+            type_element_map=type_element_map,
+        )
+        if context_ids:
+            union_ids.update(context_ids)
+        sources.append(source)
+    if not sources:
+        return union_ids, "core_only"
+    normalized = set(sources)
+    if normalized == {"same_molecule"}:
+        return union_ids, "same_molecule_union"
+    if normalized.issubset({"same_molecule", "connected_component"}):
+        return union_ids, "connected_component_union"
+    if "distance_shell_fallback" in normalized:
+        return union_ids, "distance_shell_fallback"
+    return union_ids, sources[0]
 
 
 def _build_reaction_event_id(reaction_signature: str, anchor_frame: int, core_ids: set[int]) -> str:
@@ -3238,6 +3642,7 @@ def _build_reaction_event_rows(
     after_frames: int,
     trajectory_file: str,
     trajectory_exists: bool,
+    type_element_map: dict[str, str] | None = None,
     progress_callback: Any = None,
     progress_start: float = 0.60,
     progress_span: float = 0.18,
@@ -3256,31 +3661,18 @@ def _build_reaction_event_rows(
         payload.update(extra)
         progress_callback(payload)
 
-    anchor_requests = sorted(
-        {
-            _next_available_frame(
-                available_frames,
-                max(int(hit.get("end_frame", 0)) for hit in group),
-            )
-            for group in time_groups
-        }
-    )
-    anchor_blocks: dict[int, bytes] = {}
-    if trajectory_exists and anchor_requests:
-        anchor_blocks = read_trajectory_requested_frame_blocks(
-            trajectory_file,
-            anchor_requests,
-            progress_callback=progress_callback,
-            progress_start=progress_start,
-            progress_span=progress_span * 0.65,
-        )
-
-    rows: list[dict[str, Any]] = []
-    total_groups = max(1, len(time_groups))
+    group_specs: list[dict[str, Any]] = []
+    requested_anchor_frames: set[int] = set()
     for group_index, group_hits in enumerate(time_groups, 1):
         route_start = min(int(hit["start_frame"]) for hit in group_hits)
         route_end = max(int(hit["end_frame"]) for hit in group_hits)
         anchor_frame = _next_available_frame(available_frames, route_end)
+        pre_reaction_frame = _previous_available_frame_strict(available_frames, route_start)
+        post_reaction_frame = _next_available_frame_strict(available_frames, anchor_frame)
+        compare_before_frame = _previous_available_frame_strict(available_frames, route_start)
+        compare_after_frame = _next_available_frame_strict(available_frames, route_end)
+        if compare_before_frame == compare_after_frame and available_frames:
+            compare_after_frame = _next_available_frame(available_frames, route_end)
         window_frames = _expand_event_window_frames(
             available_frames,
             route_event_start_frame=route_start,
@@ -3288,9 +3680,61 @@ def _build_reaction_event_rows(
             before_frames=before_frames,
             after_frames=after_frames,
         )
+        group_specs.append(
+            {
+                "group_index": group_index,
+                "group_hits": group_hits,
+                "route_start": route_start,
+                "route_end": route_end,
+                "anchor_frame": anchor_frame,
+                "pre_reaction_frame": pre_reaction_frame,
+                "post_reaction_frame": post_reaction_frame,
+                "comparison_before_frame": compare_before_frame,
+                "comparison_after_frame": compare_after_frame,
+                "window_frames": window_frames,
+            }
+        )
+        requested_anchor_frames.update(
+            {
+                int(pre_reaction_frame),
+                int(anchor_frame),
+                int(post_reaction_frame),
+            }
+        )
+
+    frame_blocks: dict[int, bytes] = {}
+    if trajectory_exists and requested_anchor_frames:
+        frame_blocks = read_trajectory_requested_frame_blocks(
+            trajectory_file,
+            sorted(requested_anchor_frames),
+            progress_callback=progress_callback,
+            progress_start=progress_start,
+            progress_span=progress_span * 0.65,
+        )
+
+    rows: list[dict[str, Any]] = []
+    total_groups = max(1, len(time_groups))
+    for spec in group_specs:
+        group_index = int(spec["group_index"])
+        group_hits = list(spec["group_hits"])
+        route_start = int(spec["route_start"])
+        route_end = int(spec["route_end"])
+        anchor_frame = int(spec["anchor_frame"])
+        pre_reaction_frame = int(spec["pre_reaction_frame"])
+        post_reaction_frame = int(spec["post_reaction_frame"])
+        compare_before_frame = int(spec["comparison_before_frame"])
+        compare_after_frame = int(spec["comparison_after_frame"])
+        window_frames = [int(frame) for frame in spec["window_frames"]]
         core_candidate_ids = {int(hit["atom_id"]) for hit in group_hits}
-        anchor_block = anchor_blocks.get(anchor_frame)
-        parsed_anchor = parse_lammpstrj_frame_block(anchor_block) if anchor_block else {"atoms": {}, "box": [], "frame": anchor_frame}
+        parsed_frames = {
+            int(frame): (
+                parse_lammpstrj_frame_block(frame_blocks.get(int(frame), b""))
+                if frame_blocks.get(int(frame))
+                else {"atoms": {}, "box": [], "frame": int(frame)}
+            )
+            for frame in {pre_reaction_frame, anchor_frame, post_reaction_frame}
+        }
+        parsed_anchor = parsed_frames.get(anchor_frame) or {"atoms": {}, "box": [], "frame": anchor_frame}
         cluster_sets = [set(core_candidate_ids)]
         if parsed_anchor.get("atoms"):
             cluster_sets = _distance_cluster_atom_ids(
@@ -3316,11 +3760,12 @@ def _build_reaction_event_rows(
                 for hit in cluster_hits
                 if str(hit.get("to_token", "")) in reaction_query["product_token_set"]
             }
-            if parsed_anchor.get("atoms"):
-                context_atom_ids, context_source = _expand_reaction_context_atom_ids(
-                    parsed_anchor["atoms"],
-                    parsed_anchor.get("box", []),
-                    core_atom_ids,
+            if parsed_frames:
+                context_atom_ids, context_source = _expand_reaction_context_ids_for_frames(
+                    parsed_frames,
+                    focus_frames=[pre_reaction_frame, anchor_frame, post_reaction_frame],
+                    core_atom_ids=core_atom_ids,
+                    type_element_map=type_element_map,
                 )
             else:
                 context_atom_ids, context_source = set(core_atom_ids), "core_only"
@@ -3334,12 +3779,13 @@ def _build_reaction_event_rows(
                 int(hit["atom_id"])
                 for hit in cluster_hits
                 if str(hit.get("direction", "")) == "product_to_reactant"
-            }
+                }
             event_id = _build_reaction_event_id(
                 reaction_query["reaction_signature"],
                 anchor_frame,
                 core_atom_ids,
             )
+            candidate_id = event_id
             confidence = min(
                 0.99,
                 0.55
@@ -3348,11 +3794,16 @@ def _build_reaction_event_rows(
                 + (0.10 if product_to_reactant_atom_ids else 0.0),
             )
             row = {
+                "candidate_id": candidate_id,
                 "event_id": event_id,
                 "reaction_smiles": reaction_query["raw"],
                 "reaction_match_mode": reaction_query["match_mode"],
                 "event_type": "reaction",
                 "anchor_frame": int(anchor_frame),
+                "pre_reaction_frame": int(pre_reaction_frame),
+                "post_reaction_frame": int(post_reaction_frame),
+                "comparison_before_frame": int(compare_before_frame),
+                "comparison_after_frame": int(compare_after_frame),
                 "route_event_start_frame": int(route_start),
                 "route_event_end_frame": int(route_end),
                 "window_start": int(window_frames[0]) if window_frames else int(route_start),
@@ -3366,6 +3817,7 @@ def _build_reaction_event_rows(
                 "context_atom_count": len(context_atom_ids),
                 "confidence": round(confidence, 3),
                 "failure_reason": "",
+                "event_quality": "route_candidate",
                 "matched_smiles_at_anchor": _sample_route_labels(cluster_hits, "to_label"),
                 "transition_from_samples": _sample_route_labels(cluster_hits, "from_label"),
                 "transition_to_samples": _sample_route_labels(cluster_hits, "to_label"),
@@ -3389,6 +3841,8 @@ def _build_reaction_event_rows(
                 "route_product_to_reactant_atom_ids": _event_ids_text(product_to_reactant_atom_ids),
                 "route_target_atom_count": len(core_atom_ids),
                 "route_target_atom_ids": _event_ids_text(core_atom_ids),
+                "route_changed_target_atoms": len(core_atom_ids),
+                "route_changed_target_atom_ids": _event_ids_text(core_atom_ids),
                 "n_window_frames": len(window_frames),
                 "step2_extractable": True,
                 "step2_visualizable": True,
@@ -3430,9 +3884,10 @@ def build_reaction_event_locate_payload(
     if not files["route_exists"]:
         raise FileNotFoundError(f"route file not found: {files['route_file']}")
 
-    before_frames = max(0, int_param(params, "before_frames", 2))
-    after_frames = max(0, int_param(params, "after_frames", 2))
+    before_frames = max(0, int_param(params, "before_frames", 5))
+    after_frames = max(0, int_param(params, "after_frames", 5))
     max_events = max(1, min(int_param(params, "max_events", 12), 200))
+    type_element_map = parse_type_element_map_specs((params.get("type_element_map", [""])[0] or "").strip())
     reaction_query = _prepare_reaction_query(reaction_text)
 
     def report(progress: float, phase: str, message: str, **extra: Any) -> None:
@@ -3493,12 +3948,14 @@ def build_reaction_event_locate_payload(
                 "species_timestep_step": step,
                 "matched_atom_transitions": 0,
                 "rows": 0,
+                "discarded_rows": 0,
             },
             "rows": [],
+            "discarded_rows": [],
         }
 
     time_groups = _group_reaction_hits_by_time(raw_hits, merge_gap=max(1, step))
-    rows = _build_reaction_event_rows(
+    candidate_rows = _build_reaction_event_rows(
         reaction_query=reaction_query,
         time_groups=time_groups,
         available_frames=available_frames,
@@ -3506,14 +3963,51 @@ def build_reaction_event_locate_payload(
         after_frames=after_frames,
         trajectory_file=str(files["trajectory_file"]),
         trajectory_exists=bool(files["trajectory_exists"]),
+        type_element_map=type_element_map,
         progress_callback=progress_callback,
         progress_start=0.60,
         progress_span=0.18,
     )
+    comparison_frames = sorted(
+        {
+            int(row.get("comparison_before_frame", row.get("route_event_start_frame", 0)))
+            for row in candidate_rows
+        }
+        | {
+            int(row.get("comparison_after_frame", row.get("anchor_frame", 0)))
+            for row in candidate_rows
+        }
+    )
+    report(0.79, "reading_species", "Validating route candidates against species net changes")
+    species_snapshots = SPECIES_TOKEN_SNAPSHOT_STORE.get(
+        files["species_file"],
+        requested_frames=comparison_frames,
+        query_tokens=_reaction_query_token_order(reaction_query),
+        match_mode=str(reaction_query["match_mode"]),
+        progress_callback=progress_callback,
+        progress_start=0.80,
+        progress_span=0.12,
+    )
+    rows, discarded_rows = _validate_reaction_candidate_rows(
+        candidate_rows,
+        reaction_query=reaction_query,
+        species_snapshots=species_snapshots,
+    )
     rows = rows[:max_events]
     for idx, row in enumerate(rows, 1):
         row["event_index"] = idx
-    report(1.0, "completed", f"Located {len(rows)} route-resolved reaction event(s)")
+    if discarded_rows:
+        for idx, row in enumerate(discarded_rows, 1):
+            row["candidate_index"] = idx
+
+    status = "ok" if rows else "failed"
+    if rows:
+        message = f"Located {len(rows)} net-reaction event(s)"
+    elif discarded_rows:
+        message = "Route candidates were found, but none passed the net-reaction consistency checks"
+    else:
+        message = "No reaction-event candidate survived route/species validation"
+    report(1.0, "completed", message, rows=len(rows), discarded_rows=len(discarded_rows))
     return {
         "ok": True,
         "query": {
@@ -3526,10 +4020,11 @@ def build_reaction_event_locate_payload(
             "before_frames": before_frames,
             "after_frames": after_frames,
             "max_events": max_events,
+            "type_element_map": ";".join(f"{key}:{value}" for key, value in sorted(type_element_map.items(), key=lambda item: int(item[0]))),
         },
         "meta": {
-            "status": "ok",
-            "message": "reaction-first event location completed",
+            "status": status,
+            "message": message,
             "reaction_smiles": reaction_query["raw"],
             "reaction_match_mode": reaction_query["match_mode"],
             "species_file": files["species_file"],
@@ -3539,9 +4034,12 @@ def build_reaction_event_locate_payload(
             "matched_atom_transitions": int(scan_result["matched_atom_transitions"]),
             "scanned_route_atoms": int(scan_result["scanned_atoms"]),
             "temporal_groups": len(time_groups),
+            "candidate_rows": len(candidate_rows),
+            "discarded_rows": len(discarded_rows),
             "rows": len(rows),
         },
         "rows": rows,
+        "discarded_rows": discarded_rows,
     }
 
 
@@ -3552,18 +4050,18 @@ def _build_storyboard_frames(
     ordered_frames = [int(row["frame"]) for row in frame_rows if row.get("frame") is not None]
     if not ordered_frames:
         return [], []
-    route_start = int(selected_event.get("route_event_start_frame", ordered_frames[0]))
-    route_end = int(selected_event.get("route_event_end_frame", ordered_frames[-1]))
-    anchor_frame = int(selected_event.get("anchor_frame", route_end))
+    pre_reaction_frame = int(selected_event.get("pre_reaction_frame", ordered_frames[0]))
+    anchor_frame = int(selected_event.get("anchor_frame", ordered_frames[min(len(ordered_frames) - 1, len(ordered_frames) // 2)]))
+    post_reaction_frame = int(selected_event.get("post_reaction_frame", ordered_frames[-1]))
 
     def nearest(frame_value: int) -> int:
         return _nearest_available_frame(ordered_frames, frame_value)
 
     candidates = [
         ("pre_start", ordered_frames[0]),
-        ("pre_reaction", nearest(route_start)),
+        ("pre_reaction", nearest(pre_reaction_frame)),
         ("anchor", nearest(anchor_frame)),
-        ("post_reaction", _next_available_frame(ordered_frames, route_end)),
+        ("post_reaction", nearest(post_reaction_frame)),
         ("post_end", ordered_frames[-1]),
     ]
     items: list[dict[str, Any]] = []
@@ -3597,8 +4095,8 @@ def build_reaction_event_extract_payload(
 
     type_element_map = parse_type_element_map_specs((params.get("type_element_map", [""])[0] or "").strip())
     inline_viewer = bool_param(params, "inline_viewer", False)
-    before_frames = max(0, int_param(params, "before_frames", 2))
-    after_frames = max(0, int_param(params, "after_frames", 2))
+    before_frames = max(0, int_param(params, "before_frames", 5))
+    after_frames = max(0, int_param(params, "after_frames", 5))
     max_events = max(1, min(int_param(params, "max_events", 200), 200))
 
     locate_params = {
@@ -3610,6 +4108,7 @@ def build_reaction_event_extract_payload(
         "before_frames": [str(before_frames)],
         "after_frames": [str(after_frames)],
         "max_events": [str(max_events)],
+        "type_element_map": [";".join(f"{key}:{value}" for key, value in sorted(type_element_map.items(), key=lambda item: int(item[0])))],
     }
     locate_payload = REACTION_EVENT_LOCATE_STORE.get(
         locate_params,
@@ -3628,6 +4127,12 @@ def build_reaction_event_extract_payload(
     context_atom_ids = {int(atom_id) for atom_id in selected_event.get("context_atom_ids", [])}
     if not context_atom_ids:
         raise RuntimeError("selected event does not contain context_atom_ids")
+    atom_groups = {
+        "core_atom_ids": [int(atom_id) for atom_id in selected_event.get("core_atom_ids", [])],
+        "context_atom_ids": [int(atom_id) for atom_id in selected_event.get("context_atom_ids", [])],
+        "reactant_atom_ids": [int(atom_id) for atom_id in selected_event.get("reactant_atom_ids", [])],
+        "product_atom_ids": [int(atom_id) for atom_id in selected_event.get("product_atom_ids", [])],
+    }
 
     trajectory_atom_info = inspect_lammpstrj_atom_columns(files["trajectory_file"])
     subset_result = extract_lammpstrj_subset(
@@ -3660,15 +4165,17 @@ def build_reaction_event_extract_payload(
         selected_event,
     )
     storyboard_frame_set = set(storyboard_frames)
+    pre_reaction_frame = int(selected_event.get("pre_reaction_frame", selected_frames[0]))
+    post_reaction_frame = int(selected_event.get("post_reaction_frame", selected_frames[-1]))
     for frame in selected_frames:
         phase = ""
         if frame == storyboard_frames[0] if storyboard_frames else False:
             phase = "pre_start"
-        elif frame == int(selected_event.get("route_event_start_frame", frame)):
+        elif frame == pre_reaction_frame:
             phase = "pre_reaction"
         elif frame == anchor_frame:
             phase = "anchor"
-        elif frame == int(selected_event.get("route_event_end_frame", frame)):
+        elif frame == post_reaction_frame:
             phase = "post_reaction"
         elif storyboard_frames and frame == storyboard_frames[-1]:
             phase = "post_end"
@@ -3678,6 +4185,8 @@ def build_reaction_event_extract_payload(
                 "event_refs": f"{selected_event['event_id']}@{anchor_frame}",
                 "core_atom_count": int(selected_event.get("core_atom_count", 0)),
                 "context_atom_count": int(selected_event.get("context_atom_count", 0)),
+                "pre_reaction_frame": int(selected_event.get("pre_reaction_frame", anchor_frame)),
+                "post_reaction_frame": int(selected_event.get("post_reaction_frame", anchor_frame)),
                 "route_target_atom_count": int(selected_event.get("route_target_atom_count", selected_event.get("core_atom_count", 0))),
                 "route_target_atom_ids": selected_event.get("route_target_atom_ids", selected_event.get("route_event_atom_ids", "")),
                 "reaction_smiles": selected_event.get("reaction_smiles", ""),
@@ -3723,6 +4232,7 @@ def build_reaction_event_extract_payload(
         },
         "rows": [selected_event],
         "selected_event": selected_event,
+        "atom_groups": atom_groups,
         "frame_rows": frame_rows,
         "trajectory_text": subset_result.get("trajectory_text", ""),
         "trajectory_preview_text": subset_result.get("trajectory_preview_text", ""),
@@ -5864,6 +6374,71 @@ class SpeciesFrameIndexStore:
 SPECIES_FRAME_INDEX_STORE = SpeciesFrameIndexStore()
 
 
+class SpeciesTokenSnapshotStore:
+    def __init__(self, max_entries: int = 64) -> None:
+        self._lock = threading.Lock()
+        self._cache: OrderedDict[tuple[Any, ...], dict[int, dict[str, int]]] = OrderedDict()
+        self._max_entries = max(8, int(max_entries))
+
+    def get(
+        self,
+        species_file: str,
+        *,
+        requested_frames: list[int],
+        query_tokens: list[str],
+        match_mode: str,
+        progress_callback: Any = None,
+        progress_start: float = 0.0,
+        progress_span: float = 1.0,
+    ) -> dict[int, dict[str, int]]:
+        path = os.path.abspath(species_file)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"species file not found: {path}")
+        mtime = os.path.getmtime(path)
+        size = os.path.getsize(path)
+        query_key = (
+            path,
+            mtime,
+            size,
+            tuple(sorted({int(frame) for frame in requested_frames if frame is not None})),
+            tuple(sorted({str(token or "").strip() for token in query_tokens if str(token or "").strip()})),
+            str(match_mode or ""),
+        )
+        with self._lock:
+            cached = self._cache.get(query_key)
+            if cached is not None:
+                self._cache.move_to_end(query_key)
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "progress": max(0.0, min(progress_start + progress_span, 1.0)),
+                            "phase": "cached_species_snapshots",
+                            "message": f"Using cached species snapshots: {os.path.basename(path)}",
+                            "n_snapshots": len(cached),
+                        }
+                    )
+                return cached
+
+        fresh = _collect_reaction_species_token_snapshots(
+            path,
+            requested_frames=requested_frames,
+            query_tokens=query_tokens,
+            match_mode=match_mode,
+            progress_callback=progress_callback,
+            progress_start=progress_start,
+            progress_span=progress_span,
+        )
+        with self._lock:
+            self._cache[query_key] = fresh
+            self._cache.move_to_end(query_key)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+        return fresh
+
+
+SPECIES_TOKEN_SNAPSHOT_STORE = SpeciesTokenSnapshotStore()
+
+
 class RouteAnalysisStore:
     def __init__(self, max_entries: int = 32) -> None:
         self._lock = threading.Lock()
@@ -5950,9 +6525,10 @@ class ReactionEventLocateStore:
         files = _resolve_reaction_context_files(params)
         reaction_text = _resolve_reaction_query_text(params)
         reaction_query = _prepare_reaction_query(reaction_text)
-        before_frames = max(0, int_param(params, "before_frames", 2))
-        after_frames = max(0, int_param(params, "after_frames", 2))
+        before_frames = max(0, int_param(params, "before_frames", 5))
+        after_frames = max(0, int_param(params, "after_frames", 5))
         max_events = max(1, min(int_param(params, "max_events", 12), 200))
+        type_element_map = parse_type_element_map_specs((params.get("type_element_map", [""])[0] or "").strip())
 
         def file_sig(path_text: str) -> tuple[str, float, int]:
             path = os.path.abspath(path_text) if path_text else ""
@@ -5968,6 +6544,7 @@ class ReactionEventLocateStore:
             int(before_frames),
             int(after_frames),
             int(max_events),
+            tuple(sorted(type_element_map.items(), key=lambda item: int(item[0]))),
         )
 
     def get(

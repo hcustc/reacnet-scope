@@ -538,18 +538,19 @@
                 </div>
                 <div class="row row-context-window">
                   <div class="field mini">
-                    <label for="qContextReactionBefore">Frames Before</label>
-                    <input id="qContextReactionBefore" type="number" min="0" value="2" />
+                    <label for="qContextReactionBefore">Display Padding (Pre)</label>
+                    <input id="qContextReactionBefore" type="number" min="0" value="5" />
                   </div>
                   <div class="field mini">
-                    <label for="qContextReactionAfter">Frames After</label>
-                    <input id="qContextReactionAfter" type="number" min="0" value="2" />
+                    <label for="qContextReactionAfter">Display Padding (Post)</label>
+                    <input id="qContextReactionAfter" type="number" min="0" value="5" />
                   </div>
                   <div class="field mini">
                     <label for="qContextReactionMaxEvents">Max Events</label>
                     <input id="qContextReactionMaxEvents" type="number" min="1" value="12" />
                   </div>
                 </div>
+                <div class="field-note">这里的 Pre / Post 只决定最终展示窗口与 Step 2 轨迹切片 padding，不改变真实反应事件本身的 route 核心窗口与 event_id。</div>
                 <div id="contextReactionProgress" class="progress-card is-idle">
                   <div class="progress-head">
                     <strong id="contextReactionProgressLabel">Idle</strong>
@@ -568,7 +569,7 @@
 
               <article class="card module-result-card hidden" id="contextReactionResultCard">
                 <div class="card-head">
-                  <h2>Step 1 输出: 反应事件候选实例</h2>
+                  <h2>Step 1 输出: 净反应事件实例</h2>
                   <div class="plot-actions">
                     <button id="btnExportContextReactionCsv" class="ghost" disabled>导出事件 CSV</button>
                   </div>
@@ -580,6 +581,19 @@
                     <tbody></tbody>
                   </table>
                 </div>
+                <details class="option-fold plot-option-group">
+                  <summary>查看已丢弃候选 / 调试</summary>
+                  <div class="option-fold-body">
+                    <div class="field-note">这些候选已经被 `.species` 净变化校验拒绝，不会进入 Step 2。常见原因是前后 comparison frame 没有净物种变化，或方向与查询反应不一致。</div>
+                    <pre id="contextReactionDiscardedMetaBox" class="meta"></pre>
+                    <div class="table-wrap table-wrap-compact">
+                      <table id="contextReactionDiscardedTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                </details>
               </article>
 
               <article class="card query-card" id="card-context-extract">

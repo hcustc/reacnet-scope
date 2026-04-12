@@ -592,6 +592,7 @@ function renderRowsToTable(tableEl, rows, viewerKey = "general") {
 function contextPreferredColumns(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
   const hasReactionEventId = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "event_id"));
+  const hasCandidateId = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "candidate_id"));
   const hasEventIndex = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "event_index"));
   const hasRangeIndex = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "range_index"));
   const base = hasReactionEventId
@@ -602,13 +603,34 @@ function contextPreferredColumns(rows) {
         "anchor_frame",
         "route_event_start_frame",
         "route_event_end_frame",
+        "comparison_before_frame",
+        "comparison_after_frame",
         "window_start",
         "window_end",
         "n_window_frames",
+        "from_multiset_summary",
+        "to_multiset_summary",
+        "net_reaction_summary",
         "core_atom_count",
         "context_atom_count",
-        "route_reactant_to_product_atoms",
-        "route_product_to_reactant_atoms",
+        "event_quality",
+        "confidence",
+        "matched_smiles_at_anchor",
+      ]
+    : hasCandidateId
+    ? [
+        "candidate_index",
+        "candidate_id",
+        "anchor_frame",
+        "route_event_start_frame",
+        "route_event_end_frame",
+        "comparison_before_frame",
+        "comparison_after_frame",
+        "from_multiset_summary",
+        "to_multiset_summary",
+        "net_reaction_summary",
+        "failure_reason",
+        "event_quality",
         "confidence",
         "matched_smiles_at_anchor",
       ]
@@ -828,6 +850,8 @@ function renderContextSelectedEventBox() {
   if (!resolvedAtomIds) {
     box.textContent = `${box.textContent}\nroute 原子解析为空：请确认已生成对应 .route 文件，或该事件没有可识别的原子变化。`;
     box.textContent = `${box.textContent}\n${resolution.reason}`;
+  } else if (String(row.from_multiset_summary || "").trim() || String(row.to_multiset_summary || "").trim()) {
+    box.textContent = `${box.textContent}\nfrom_multiset=${String(row.from_multiset_summary || "").trim() || "-"}\nto_multiset=${String(row.to_multiset_summary || "").trim() || "-"}\nnet=${String(row.net_reaction_summary || "").trim() || "-"}\nquality=${String(row.event_quality || "").trim() || "-"}`;
   } else if (String(row.transition_from_samples || "").trim() || String(row.transition_to_samples || "").trim()) {
     box.textContent = `${box.textContent}\nfrom=${String(row.transition_from_samples || "").trim() || "-"}\nto=${String(row.transition_to_samples || "").trim() || "-"}`;
   } else if (!resolution.step2Visualizable) {
@@ -846,17 +870,35 @@ function renderContextLocateResultCard(moduleKey, cardId, metaId, tableId, expor
   const metaEl = q(metaId);
   const tableEl = q(tableId);
   const exportCsvBtn = q(exportBtnId);
+  const discardedMetaEl = q("contextReactionDiscardedMetaBox");
+  const discardedTableEl = q("contextReactionDiscardedTable");
   if (!card || !metaEl || !tableEl || !exportCsvBtn) return;
   const hasRows = !!(slot.rows || []).length;
+  const discardedRows = Array.isArray(slot.meta?.discarded_rows) ? slot.meta.discarded_rows : [];
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || (status && status !== "idle");
+  const shouldShow = hasRows || discardedRows.length || (status && status !== "idle");
   card.classList.toggle("hidden", !shouldShow);
-  metaEl.textContent = JSON.stringify(slot.meta || {}, null, 2);
+  const safeMeta = { ...(slot.meta || {}) };
+  delete safeMeta.discarded_rows;
+  metaEl.textContent = JSON.stringify(safeMeta, null, 2);
   renderContextRowsToTable(tableEl, slot.rows || [], {
     actionLabel: "选为 Step 2",
     actionClass: "btn-context-load-row",
     selectedRow: state.contextExtract.selectedEventRow,
   });
+  if (discardedMetaEl) {
+    discardedMetaEl.textContent = JSON.stringify({
+      status,
+      discarded_rows: discardedRows.length,
+    }, null, 2);
+  }
+  if (discardedTableEl) {
+    renderContextRowsToTable(discardedTableEl, discardedRows, {
+      actionLabel: "",
+      actionClass: "",
+      selectedRow: null,
+    });
+  }
   exportCsvBtn.disabled = !hasRows;
 }
 
@@ -4203,9 +4245,10 @@ function buildContextReactionLocateParams(overrides = {}) {
     trajectory_file: effectiveTrajectoryFile("qContextTrajectoryFile"),
     route_file: effectiveRouteFile("qContextRouteFile"),
     reaction_smiles: value("qContextReactionLocateSmiles"),
-    before_frames: value("qContextReactionBefore") || 2,
-    after_frames: value("qContextReactionAfter") || 2,
+    before_frames: value("qContextReactionBefore") || 5,
+    after_frames: value("qContextReactionAfter") || 5,
     max_events: value("qContextReactionMaxEvents") || 12,
+    type_element_map: value("qContextTypeElementMap"),
     ...overrides,
   };
 }
@@ -4330,7 +4373,13 @@ async function runContextLocateTask({ moduleKey, params, setProgress, taskKey, s
     });
     if (state[taskKey] !== taskId) return data;
     setResultData(moduleKey, {
-      meta: { query: data.query, meta: data.meta, task_id: taskId },
+      meta: {
+        query: data.query,
+        meta: data.meta,
+        task_id: taskId,
+        status: data?.meta?.status || "ok",
+        discarded_rows: data.discarded_rows || [],
+      },
       rows: data.rows || [],
     });
     focusResultModule(moduleKey);
@@ -4411,8 +4460,8 @@ async function runContextExtract(mode = "auto") {
       reaction_smiles: selectedConfig.reaction_smiles || selectedRow.reaction_smiles || value("qContextReactionLocateSmiles") || value("qContextReactionSmiles"),
       reaction_formulas: selectedConfig.reaction_formulas || selectedRow.reaction_formulas || "",
       event_id: selectedRow.event_id,
-      before_frames: selectedConfig.before_frames || value("qContextReactionBefore") || 2,
-      after_frames: selectedConfig.after_frames || value("qContextReactionAfter") || 2,
+      before_frames: selectedConfig.before_frames || value("qContextReactionBefore") || 5,
+      after_frames: selectedConfig.after_frames || value("qContextReactionAfter") || 5,
       max_events: value("qContextReactionMaxEvents") || 12,
       type_element_map: value("qContextTypeElementMap"),
       inline_viewer: q("qContextInlineViewer").checked ? 1 : 0,
@@ -4849,8 +4898,8 @@ function bindEvents() {
     source: "reaction_first",
     source_label: "Reaction-First 反应事件",
     species_file: effectiveSpeciesFile("qContextSpeciesFile"),
-    before_frames: value("qContextReactionBefore") || 2,
-    after_frames: value("qContextReactionAfter") || 2,
+    before_frames: value("qContextReactionBefore") || 5,
+    after_frames: value("qContextReactionAfter") || 5,
     reaction_smiles: value("qContextReactionLocateSmiles"),
     event_id: "",
   }));
