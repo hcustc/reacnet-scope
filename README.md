@@ -13,6 +13,8 @@ It parses ReacNetGenerator outputs and provides integrated query, filtering, and
 - Species lookup by formula, SMILES, and mass (nominal/exact).
 - Reaction-pathway search by species or formula-level equations.
 - Time-series plotting from species files with formula/SMILES aggregation.
+- Carbon-number evolution plotting from tidy species tables for parent decay,
+  fragment growth, molecular growth, and oxidation tracking.
 - Intermediate candidate mining using abundance, rise-fall behavior, and lifetime criteria.
 - SMILES structure rendering and pathway auditing in a lightweight web UI.
 
@@ -70,7 +72,7 @@ uv run ./run_cli.sh species --reac /path/to/xxx.reactionabcd --formula C6H4
 
 - Python 3.10+
 - 基础依赖：`pandas`、`openpyxl`、`rdkit`
-- 可选绘图增强：`matplotlib`（CLI `plot --out-png` 时需要）
+- 可选绘图增强：`matplotlib`、`scipy`（CLI `plot --out-png`、Carbon-number evolution plot 时需要）
 
 ### 使用 uv 安装
 
@@ -85,6 +87,116 @@ uv sync
 ```bash
 uv sync --extra plot
 ```
+
+## Carbon-Number Evolution Plotter
+
+`rng_tools.carbon_plot` 提供了一个可复用的碳数演化绘图模块，核心接口包括：
+
+- `parse_formula_to_atom_counts(...)`
+- `aggregate_counts_by_carbon_number(...)`
+- `summarize_carbon_evolution(...)`
+- `plot_carbon_number_evolution(...)`
+
+这个图把所有物种按碳原子数聚合，而不是逐个分子式分别作图，因此更适合回答以下问题：
+
+- 母体碳骨架是否正在被持续消耗
+- 小碎片 `C1-C4` 是否正在累积，表征裂解/氧化分解
+- 大碳数物种是否出现并增长，表征并聚或 soot precursor 倾向
+- 不同气氛下碳骨架是更快向小分子迁移，还是保留/增长为更大分子
+
+最小示例数据和演示脚本位于：
+
+- `examples/carbon_number_evolution_minimal.csv`
+- `examples/carbon_number_evolution_demo.py`
+
+运行示例：
+
+```bash
+MPLCONFIGDIR=/tmp python examples/carbon_number_evolution_demo.py
+```
+
+CLI 已接入独立子命令，可直接从 tidy CSV/Excel 或 RNG `.species` 文件绘图：
+
+```bash
+MPLCONFIGDIR=/tmp python scripts/rng_query_cli.py carbon-plot \
+  --data examples/carbon_number_evolution_minimal.csv \
+  --system-col system \
+  --replicate-col replicate \
+  --parent-carbon-number 24 \
+  --layout subplots \
+  --layout-regions 'Small fragments:1-4;Intermediate fragments:5-15;Parent neighborhood:16-30;Growth region:31+' \
+  --legend-mode detailed \
+  --out-fig /tmp/carbon_plot.png \
+  --out-summary /tmp/carbon_plot_summary.json \
+  --out-csv /tmp/carbon_plot_data.csv
+```
+
+Web 端也已接入新面板：
+
+- 打开 `reacnet-scope-web`
+- 在 `时间演化绘图` 中切换 `Species Time-Series / Carbon-Number Evolution`
+- 前后端统一走 evolution plot facade（模式 `species | carbon`），内部复用各自引擎
+- 可直接从 `.species` 构建碳数演化图并导出 SVG/CSV
+- `Display Ranges` 可动态筛选要显示的碳数/区间（如 `C1;C2;C24;C30+`）
+- `Merge Ranges` 可把多个碳数区间合并为单曲线（如 `Small:1-4;Growth:30+`）
+- 绘图后可在 `Curve Filter / 曲线列表` 中勾选曲线即时重绘，不会重新读取 `.species`
+- `Local Merge Ranges` 支持在同一绘图窗口内本地合并曲线做对比
+- 默认使用通用 `single` 布局，不再预设 `Small/Intermediate/Parent` 子图；原始 Matplotlib SVG 改为可选展开
+
+### Web 输入规范（统一）
+
+- 顶部 `Reaction Network(.reactionabcd，可选)`：仅用于网络检索类模块（分子式/质量/路径/公式反应）和中间体 `with_flux=true` 富集。
+- `Species Time-Series / Carbon-Number Evolution` 绘图：优先使用模块内的 species 输入，不强依赖顶部 `reactionabcd`。
+- 单文件输入（`Species 文件`）支持两种后缀：
+  - `.species`：直接读取
+  - `.reactionabcd`：自动转为同名 `.species`
+- 多文件输入（`多文件对比`）每行格式统一为：
+  - `system@replicate::/abs/path/file.species`
+  - `system@replicate::/abs/path/file.reactionabcd`（自动转 `.species`）
+- 示例清单见 [`examples/multi_species_sources.example.txt`](examples/multi_species_sources.example.txt)。
+
+最小调用示例：
+
+```python
+import pandas as pd
+
+from rng_tools import plot_carbon_number_evolution
+
+data = pd.read_csv("examples/carbon_number_evolution_minimal.csv")
+fig, ax, summary, plot_data = plot_carbon_number_evolution(
+    data=data,
+    time_col="time",
+    species_col="species",
+    count_col="count",
+    system_col="system",
+    replicate_col="replicate",
+    parent_carbon_number=24,
+    mode="exact",
+    layout="subplots",
+    layout_regions=[
+        ("Small fragments", 1, 4),
+        ("Intermediate fragments", 5, 15),
+        ("Parent neighborhood", 16, 30),
+        ("Growth region", 31, None),
+    ],
+    system_mode="facet",
+    legend_mode="detailed",
+    smoothing={"method": "rolling", "window": 2},
+    output_path="carbon_number_evolution_demo.png",
+)
+```
+
+输入表至少需要三列：
+
+- `time`
+- `species`
+- `count`
+
+可选列：
+
+- `system`
+- `replicate`
+- 其他业务列会被保留在原始输入里，但不会参与碳数聚合
 
 ## 发布到 GitHub/PyPI
 

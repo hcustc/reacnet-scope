@@ -19,8 +19,9 @@
 
     <section class="global-config card">
       <div class="field wide">
-        <label for="reacFile">reactionabcd 文件</label>
-        <input id="reacFile" type="text" placeholder="留空使用默认探测路径，或填写你的 .reactionabcd 绝对路径" />
+        <label for="reacFile">Reaction Network(.reactionabcd，可选)</label>
+        <input id="reacFile" type="text" placeholder="仅网络检索/WithFlux需要；Plot/Carbon 使用 species 输入可不填" />
+        <div class="field-note">用于“按分子式/质量/路径/公式反应检索”与中间体的 flux 富集。仅绘图时可留空。</div>
       </div>
       <div class="field slim">
         <label for="minTp">min_tp</label>
@@ -28,219 +29,787 @@
       </div>
     </section>
 
-    <section class="grid">
-      <article class="card query-card" id="card-species">
-        <h2>按分子式查 SMILES</h2>
-        <div class="row">
-          <div class="field">
-            <label for="qFormula">Formula</label>
-            <input id="qFormula" type="text" placeholder="C6H4" value="C6H4" />
-          </div>
-          <div class="field mini">
-            <label for="qSpeciesTop">Top</label>
-            <input id="qSpeciesTop" type="number" min="1" value="20" />
-          </div>
-        </div>
-        <button id="btnSpecies">查询</button>
-      </article>
-
-      <article class="card query-card" id="card-mass">
-        <h2>按质量数查 MD 物种</h2>
-        <div class="row">
-          <div class="field">
-            <label for="qMass">Mass</label>
-            <input id="qMass" type="number" step="0.0001" value="128" />
-          </div>
-          <div class="field mini">
-            <label for="qMassMode">Mode</label>
-            <select id="qMassMode">
-              <option value="nominal">nominal</option>
-              <option value="exact">exact</option>
-            </select>
-          </div>
-          <div class="field mini">
-            <label for="qMassTol">Tol</label>
-            <input id="qMassTol" type="number" step="0.0001" value="0" />
-          </div>
-          <div class="field mini">
-            <label for="qMassTop">Top</label>
-            <input id="qMassTop" type="number" min="1" value="50" />
-          </div>
-        </div>
-        <button id="btnMass">查询</button>
-      </article>
-
-      <article class="card query-card" id="card-next">
-        <h2>按 SMILES 查后续路径</h2>
+    <section class="shared-datasource card" id="globalDatasourceCard">
+      <div class="card-head">
+        <h2>共享数据源</h2>
+      </div>
+      <div class="row row-global-datasource">
         <div class="field">
-          <label for="qSmiles">SMILES</label>
-          <input id="qSmiles" type="text" placeholder="[H][C]1..." value="[H][C]1=[C][C]=[C]([H])[C]([H])=[C]1[H]" />
-        </div>
-        <div class="row">
-          <div class="field mini">
-            <label for="qRole">Role</label>
-            <select id="qRole">
-              <option value="consume">consume</option>
-              <option value="produce">produce</option>
-              <option value="both">both</option>
-            </select>
-          </div>
-          <div class="field mini">
-            <label for="qNextTop">Top</label>
-            <input id="qNextTop" type="number" min="1" value="20" />
-          </div>
-          <div class="field mini checkline">
-            <label for="qNetPositive">Net+ only</label>
-            <input id="qNetPositive" type="checkbox" />
-          </div>
-        </div>
-        <button id="btnNext">查询</button>
-      </article>
-
-      <article class="card query-card" id="card-intermediate">
-        <h2>Species 中间体筛选</h2>
-        <div class="field">
-          <label for="qInterSpeciesFile">Species 文件(可选)</label>
-          <input id="qInterSpeciesFile" type="text" placeholder="留空自动由 reactionabcd 推导" />
-        </div>
-        <div class="row row-int-main">
-          <div class="field mini">
-            <label for="qInterKind">类别</label>
-            <select id="qInterKind">
-              <option value="intermediate">intermediate</option>
-              <option value="product">product</option>
-              <option value="reactant">reactant</option>
-              <option value="all">all</option>
-            </select>
-          </div>
-          <div class="field mini">
-            <label for="qInterTop">Top</label>
-            <input id="qInterTop" type="number" min="1" value="120" />
-          </div>
-          <div class="field mini">
-            <label for="qInterAbundance">丰度阈值</label>
-            <input id="qInterAbundance" type="number" min="0" step="0.1" value="5" />
-          </div>
-        </div>
-        <div class="row row-int-crit">
-          <div class="field mini">
-            <label for="qInterStartRatio">StartRatioMax</label>
-            <input id="qInterStartRatio" type="number" min="0" max="1" step="0.01" value="0.1" />
-          </div>
-          <div class="field mini">
-            <label for="qInterDecayAlpha">DecayAlpha</label>
-            <input id="qInterDecayAlpha" type="number" min="0" max="1" step="0.01" value="0.8" />
-          </div>
-          <div class="field mini">
-            <label for="qInterFwhmMin">FWHMMin(ps)</label>
-            <input id="qInterFwhmMin" type="number" min="0" step="0.01" value="0.5" />
-          </div>
-          <div class="field mini">
-            <label for="qInterTimestepPs">Timestep(ps)</label>
-            <input id="qInterTimestepPs" type="number" min="0" step="0.00001" value="0.0001" />
-          </div>
-        </div>
-        <div class="row row-int-opt">
-          <div class="field mini checkline">
-            <label for="qInterRequireFwhm">RequireFWHM</label>
-            <input id="qInterRequireFwhm" type="checkbox" checked />
-          </div>
-          <div class="field mini checkline">
-            <label for="qInterWithFlux">WithFlux</label>
-            <input id="qInterWithFlux" type="checkbox" checked />
-          </div>
-          <div class="field mini">
-            <label for="qInterFluxTop">FluxTop</label>
-            <input id="qInterFluxTop" type="number" min="0" value="10" />
-          </div>
-        </div>
-        <button id="btnIntermediate">筛选候选</button>
-      </article>
-
-      <article class="card query-card" id="card-rxn">
-        <h2>按公式级反应检索</h2>
-        <div class="field">
-          <label for="qReactants">Reactants (可选)</label>
-          <input id="qReactants" type="text" value="C6H4O2+C6H4" placeholder="可留空；支持 C6H4O2+C6H4" />
+          <label for="sharedSpeciesFile">Shared Species 文件(可选)</label>
+          <input id="sharedSpeciesFile" type="text" placeholder="支持 .species/.reactionabcd；单文件检索与绘图默认使用这里" />
         </div>
         <div class="field">
-          <label for="qProducts">Products (可选)</label>
-          <input id="qProducts" type="text" value="C12H8O2" placeholder="可留空；支持 C12H8O2" />
+          <label for="sharedTrajectoryFile">Shared Trajectory 文件(可选)</label>
+          <input id="sharedTrajectoryFile" type="text" placeholder="支持 .lammpstrj；事件可视化默认使用这里" />
         </div>
-        <div class="row row-rxn-main">
-          <div class="field mini">
-            <label for="qMode">Mode</label>
-            <select id="qMode">
-              <option value="exact">exact</option>
-              <option value="contains">contains</option>
-            </select>
-          </div>
-          <div class="field mini">
-            <label for="qRxnTop">Top</label>
-            <input id="qRxnTop" type="number" min="1" value="30" />
-          </div>
+        <div class="field">
+          <label for="sharedRouteFile">Shared Route 文件(可选)</label>
+          <input id="sharedRouteFile" type="text" placeholder="支持 .route；需要自动解析事件 atom ids 时默认使用这里" />
         </div>
-        <div class="row row-rxn-share">
-          <div class="field mini checkline">
-            <label for="qRxnWithShare">Top占比</label>
-            <input id="qRxnWithShare" type="checkbox" />
-          </div>
-          <div class="field mini">
-            <label for="qRxnShareMetric">占比指标</label>
-            <select id="qRxnShareMetric">
-              <option value="net_tp">net_tp</option>
-              <option value="tp">tp</option>
-              <option value="reverse_tp">reverse_tp</option>
-            </select>
-          </div>
-          <div class="field mini checkline">
-            <label for="qRxnShareAbs">ShareAbs</label>
-            <input id="qRxnShareAbs" type="checkbox" />
-          </div>
-          <div class="field mini checkline">
-            <label for="qRxnSharePositive">Positive only</label>
-            <input id="qRxnSharePositive" type="checkbox" />
-          </div>
-        </div>
-        <button id="btnRxn">查询</button>
-      </article>
-
+      </div>
+      <div class="field-note">未填写模块覆盖项时，中间体检索、反应事件可视化、单文件时间曲线、单文件 Carbon 图都会默认使用这里的路径。多文件对比仍在各模块内单独填写。</div>
     </section>
 
-    <section class="panel-grid">
-      <article class="card results">
-        <div class="card-head">
-          <h2>检索结果</h2>
-          <button id="btnExport" class="ghost" disabled>导出当前结果 CSV</button>
-        </div>
-        <pre id="metaBox" class="meta"></pre>
-        <div id="tableWrap" class="table-wrap">
-          <table id="resultTable">
-            <thead></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </article>
+    <section class="query-result-workbench">
+      <div class="workbench-query">
+        <section class="query-module-shell">
+          <details class="query-module-group" data-query-module-group="general" open>
+            <summary class="query-module-summary">
+              <strong>通用检索</strong>
+              <span>分子式 / 质量数</span>
+            </summary>
+            <div class="query-module-body">
+              <article class="card query-card" id="card-general">
+                <h2>通用检索条件</h2>
+                <div class="general-query-pane">
+                  <div class="query-subtitle">按分子式查 SMILES</div>
+                  <div class="row">
+                    <div class="field">
+                      <label for="qFormula">Formula</label>
+                      <input id="qFormula" type="text" placeholder="C6H4" value="C6H4" />
+                    </div>
+                    <div class="field mini">
+                      <label for="qSpeciesTop">Top</label>
+                      <input id="qSpeciesTop" type="number" min="1" value="20" />
+                    </div>
+                  </div>
+                  <div class="card-actions">
+                    <button id="btnSpecies">查询</button>
+                    <button class="ghost btn-jump-result" type="button" data-result-module="species">查看结果</button>
+                  </div>
+                </div>
 
-      <article class="card viewer">
-        <h2>SMILES 结构查看</h2>
-        <div class="field">
-          <label for="viewerSmiles">SMILES</label>
-          <textarea id="viewerSmiles" rows="3" placeholder="粘贴单个 SMILES，或点击结果中的“View”"></textarea>
-        </div>
-        <div class="field mini checkline">
-          <label for="viewerShowH">显示H</label>
-          <input id="viewerShowH" type="checkbox" checked />
-        </div>
-        <div class="actions">
-          <button id="btnRenderOne">渲染单分子</button>
-          <button id="btnRenderReaction" class="ghost">按反应式渲染</button>
-        </div>
-        <div id="svgGallery" class="svg-gallery"></div>
-      </article>
+                <div class="general-query-pane">
+                  <div class="query-subtitle">按质量数查 MD 物种</div>
+                  <div class="row">
+                    <div class="field">
+                      <label for="qMass">Mass</label>
+                      <input id="qMass" type="number" step="0.0001" value="128" />
+                    </div>
+                    <div class="field mini">
+                      <label for="qMassMode">Mode</label>
+                      <select id="qMassMode">
+                        <option value="nominal">nominal</option>
+                        <option value="exact">exact</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="row">
+                    <div class="field mini">
+                      <label for="qMassTol">Tol</label>
+                      <input id="qMassTol" type="number" step="0.0001" value="0" />
+                    </div>
+                    <div class="field mini">
+                      <label for="qMassTop">Top</label>
+                      <input id="qMassTop" type="number" min="1" value="50" />
+                    </div>
+                  </div>
+                  <div class="card-actions">
+                    <button id="btnMass">查询</button>
+                    <button class="ghost btn-jump-result" type="button" data-result-module="mass">查看结果</button>
+                  </div>
+                </div>
+              </article>
+
+              <article class="card module-result-card hidden" id="generalResultCard">
+                <div class="card-head">
+                  <h2 id="generalResultTitle">通用检索结果</h2>
+                  <button id="btnExportGeneral" class="ghost" disabled>导出结果 CSV</button>
+                </div>
+                <pre id="generalMetaBox" class="meta"></pre>
+                <div class="table-wrap table-wrap-compact">
+                  <table id="generalResultTable">
+                    <thead></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="card structure-preview-card hidden" id="generalStructureCard">
+                <div class="card-head">
+                  <h2>结果结构列表</h2>
+                  <span class="viewer-note" id="generalStructureNote">查询后自动显示对应结构</span>
+                </div>
+                <div class="viewer-toolbar">
+                  <label class="viewer-inline-toggle" for="generalViewerShowH">
+                    <input id="generalViewerShowH" class="viewer-show-h" data-viewer-key="general" type="checkbox" checked />
+                    <span>显示 H</span>
+                  </label>
+                </div>
+                <div id="generalSvgGallery" class="svg-gallery"></div>
+              </article>
+            </div>
+          </details>
+
+          <details class="query-module-group" data-query-module-group="intermediate">
+            <summary class="query-module-summary">
+              <strong>中间体检索</strong>
+              <span>Species candidates</span>
+            </summary>
+            <div class="query-module-body">
+              <article class="card query-card" id="card-intermediate">
+                <h2>Species 中间体筛选</h2>
+                <div class="field">
+                  <label for="qInterSpeciesFile">Species 覆盖(可选)</label>
+                  <input id="qInterSpeciesFile" type="text" placeholder="留空则使用顶部共享 Species；若共享也为空，再由 reactionabcd 推导" />
+                  <div class="field-note">只有该模块需要临时切换到另一份 species 数据时才填写。</div>
+                </div>
+                <div class="row row-int-main">
+                  <div class="field mini">
+                    <label for="qInterKind">类别</label>
+                    <select id="qInterKind">
+                      <option value="intermediate">intermediate</option>
+                      <option value="product">product</option>
+                      <option value="reactant">reactant</option>
+                      <option value="all">all</option>
+                    </select>
+                  </div>
+                  <div class="field mini">
+                    <label for="qInterTop">Top</label>
+                    <input id="qInterTop" type="number" min="1" value="120" />
+                  </div>
+                  <div class="field mini">
+                    <label for="qInterAbundance">丰度阈值</label>
+                    <input id="qInterAbundance" type="number" min="0" step="0.1" value="5" />
+                  </div>
+                </div>
+                <details class="option-fold">
+                  <summary>高级参数</summary>
+                  <div class="option-fold-body">
+                    <div class="row row-int-crit">
+                      <div class="field mini">
+                        <label for="qInterStartRatio">StartRatioMax</label>
+                        <input id="qInterStartRatio" type="number" min="0" max="1" step="0.01" value="0.1" />
+                      </div>
+                      <div class="field mini">
+                        <label for="qInterDecayAlpha">DecayAlpha</label>
+                        <input id="qInterDecayAlpha" type="number" min="0" max="1" step="0.01" value="0.8" />
+                      </div>
+                      <div class="field mini">
+                        <label for="qInterFwhmMin">FWHMMin(ps)</label>
+                        <input id="qInterFwhmMin" type="number" min="0" step="0.01" value="0.5" />
+                      </div>
+                      <div class="field mini">
+                        <label for="qInterTimestepPs">Timestep(ps)</label>
+                        <input id="qInterTimestepPs" type="number" min="0" step="0.00001" value="0.0001" />
+                      </div>
+                    </div>
+                    <div class="row row-int-opt">
+                      <div class="field mini checkline">
+                        <label for="qInterRequireFwhm">RequireFWHM</label>
+                        <input id="qInterRequireFwhm" type="checkbox" checked />
+                      </div>
+                      <div class="field mini checkline">
+                        <label for="qInterWithFlux">WithFlux</label>
+                        <input id="qInterWithFlux" type="checkbox" checked />
+                      </div>
+                      <div class="field mini">
+                        <label for="qInterFluxTop">FluxTop</label>
+                        <input id="qInterFluxTop" type="number" min="0" value="10" />
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <div id="intermediateProgress" class="progress-card is-idle">
+                  <div class="progress-head">
+                    <strong id="intermediateProgressLabel">Idle</strong>
+                    <span id="intermediateProgressPct">0%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div id="intermediateProgressFill" class="progress-fill"></div>
+                  </div>
+                  <div id="intermediateProgressMsg" class="progress-msg">等待开始</div>
+                </div>
+                <div class="card-actions">
+                  <button id="btnIntermediate">筛选候选</button>
+                  <button class="ghost btn-jump-result" type="button" data-result-module="intermediate">查看结果</button>
+                </div>
+              </article>
+
+              <article class="card module-result-card" id="intermediateResultCard">
+                <div class="card-head">
+                  <h2>中间体筛选结果</h2>
+                  <button id="btnExportIntermediate" class="ghost" disabled>导出中间体 CSV</button>
+                </div>
+                <pre id="intermediateMetaBox" class="meta"></pre>
+                <div class="table-wrap table-wrap-compact">
+                  <table id="intermediateResultTable">
+                    <thead></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="card structure-preview-card hidden" id="intermediateStructureCard">
+                <div class="card-head">
+                  <h2>结果结构列表</h2>
+                  <span class="viewer-note" id="intermediateStructureNote">查询后自动显示对应结构</span>
+                </div>
+                <div class="viewer-toolbar">
+                  <label class="viewer-inline-toggle" for="intermediateViewerShowH">
+                    <input id="intermediateViewerShowH" class="viewer-show-h" data-viewer-key="intermediate" type="checkbox" checked />
+                    <span>显示 H</span>
+                  </label>
+                </div>
+                <div id="intermediateSvgGallery" class="svg-gallery"></div>
+              </article>
+            </div>
+          </details>
+
+          <details class="query-module-group" data-query-module-group="reaction">
+            <summary class="query-module-summary">
+              <strong>反应式检索</strong>
+              <span>SMILES path / Formula reaction</span>
+            </summary>
+            <div class="query-module-body">
+              <details class="subtool-group" data-reaction-tool="next" open>
+                <summary>路径检索</summary>
+                <div class="subtool-body">
+                  <article class="card query-card" id="card-next">
+                    <h2>按 SMILES / 分子式查后续路径</h2>
+                    <div class="field">
+                      <label for="qSmiles">Start species (SMILES / Formula)</label>
+                      <input id="qSmiles" type="text" placeholder="例如 C6H5ClO 或 [H][C]1..." value="C6H4" />
+                      <div class="field-note">输入分子式时会自动解析为该公式下总通量最高的 MD 物种 SMILES。</div>
+                    </div>
+                    <div class="row">
+                      <div class="field mini">
+                        <label for="qRole">Role</label>
+                        <select id="qRole">
+                          <option value="consume">consume</option>
+                          <option value="produce">produce</option>
+                          <option value="both">both</option>
+                        </select>
+                      </div>
+                      <div class="field mini">
+                        <label for="qNextTop">Top</label>
+                        <input id="qNextTop" type="number" min="1" value="20" />
+                      </div>
+                      <div class="field mini checkline">
+                        <label for="qNetPositive">Net+ only</label>
+                        <input id="qNetPositive" type="checkbox" />
+                      </div>
+                    </div>
+                    <div class="card-actions">
+                      <button id="btnNext">查询</button>
+                      <button class="ghost btn-jump-result" type="button" data-result-module="next">查看结果</button>
+                    </div>
+                  </article>
+
+                  <article class="card module-result-card hidden" id="nextResultCard">
+                    <div class="card-head">
+                      <h2>路径检索结果</h2>
+                      <button id="btnExportNext" class="ghost" disabled>导出路径 CSV</button>
+                    </div>
+                    <pre id="nextMetaBox" class="meta"></pre>
+                    <div class="table-wrap table-wrap-compact">
+                      <table id="nextResultTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </article>
+
+                  <article class="card structure-preview-card hidden" id="nextStructureCard">
+                    <div class="card-head">
+                      <h2>结果结构列表</h2>
+                      <span class="viewer-note" id="nextStructureNote">查询后自动显示对应结构</span>
+                    </div>
+                    <div class="viewer-toolbar">
+                      <label class="viewer-inline-toggle" for="nextViewerShowH">
+                        <input id="nextViewerShowH" class="viewer-show-h" data-viewer-key="next" type="checkbox" checked />
+                        <span>显示 H</span>
+                      </label>
+                    </div>
+                    <div id="nextSvgGallery" class="svg-gallery"></div>
+                  </article>
+                </div>
+              </details>
+
+              <details class="subtool-group" data-reaction-tool="rxn">
+                <summary>公式反应检索</summary>
+                <div class="subtool-body">
+                  <article class="card query-card" id="card-rxn">
+                    <h2>按公式级反应检索</h2>
+                    <div class="field">
+                      <label for="qReactants">Reactants (可选)</label>
+                      <input id="qReactants" type="text" value="C6H4O2+C6H4" placeholder="可留空；支持 C6H4O2+C6H4" />
+                    </div>
+                    <div class="field">
+                      <label for="qProducts">Products (可选)</label>
+                      <input id="qProducts" type="text" value="C12H8O2" placeholder="可留空；支持 C12H8O2" />
+                    </div>
+                    <div class="row row-rxn-main">
+                      <div class="field mini">
+                        <label for="qMode">Mode</label>
+                        <select id="qMode">
+                          <option value="exact">exact</option>
+                          <option value="contains">contains</option>
+                        </select>
+                      </div>
+                      <div class="field mini">
+                        <label for="qRxnTop">Top</label>
+                        <input id="qRxnTop" type="number" min="1" value="30" />
+                      </div>
+                    </div>
+                    <div class="row row-rxn-share">
+                      <div class="field mini checkline">
+                        <label for="qRxnWithShare">Top占比</label>
+                        <input id="qRxnWithShare" type="checkbox" />
+                      </div>
+                      <div class="field mini">
+                        <label for="qRxnShareMetric">占比指标</label>
+                        <select id="qRxnShareMetric">
+                          <option value="net_tp">net_tp</option>
+                          <option value="tp">tp</option>
+                          <option value="reverse_tp">reverse_tp</option>
+                        </select>
+                      </div>
+                      <div class="field mini checkline">
+                        <label for="qRxnShareAbs">ShareAbs</label>
+                        <input id="qRxnShareAbs" type="checkbox" />
+                      </div>
+                      <div class="field mini checkline">
+                        <label for="qRxnSharePositive">Positive only</label>
+                        <input id="qRxnSharePositive" type="checkbox" />
+                      </div>
+                    </div>
+                    <div class="card-actions">
+                      <button id="btnRxn">查询</button>
+                      <button class="ghost btn-jump-result" type="button" data-result-module="rxn">查看结果</button>
+                    </div>
+                  </article>
+
+                  <article class="card module-result-card hidden" id="rxnResultCard">
+                    <div class="card-head">
+                      <h2>公式反应检索结果</h2>
+                      <button id="btnExportRxn" class="ghost" disabled>导出反应 CSV</button>
+                    </div>
+                    <pre id="rxnMetaBox" class="meta"></pre>
+                    <div class="table-wrap table-wrap-compact">
+                      <table id="rxnResultTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </article>
+
+                  <article class="card structure-preview-card hidden" id="rxnStructureCard">
+                    <div class="card-head">
+                      <h2>结果结构列表</h2>
+                      <span class="viewer-note" id="rxnStructureNote">查询后自动显示对应结构</span>
+                    </div>
+                    <div class="viewer-toolbar">
+                      <label class="viewer-inline-toggle" for="rxnViewerShowH">
+                        <input id="rxnViewerShowH" class="viewer-show-h" data-viewer-key="rxn" type="checkbox" checked />
+                        <span>显示 H</span>
+                      </label>
+                    </div>
+                    <div id="rxnSvgGallery" class="svg-gallery"></div>
+                  </article>
+                </div>
+              </details>
+            </div>
+          </details>
+
+          <details class="query-module-group" data-query-module-group="context">
+            <summary class="query-module-summary">
+              <strong>反应事件可视化</strong>
+              <span>Step 1 定位事件 -> Step 2 提取并打开子轨迹</span>
+            </summary>
+            <div class="query-module-body">
+              <article class="card query-card" id="card-context-datasource">
+                <h2>Step 0. 本模块覆盖数据源(可选)</h2>
+                <div class="row row-context-datasource">
+                  <div class="field">
+                    <label for="qContextSpeciesFile">Species 覆盖(可选)</label>
+                    <input id="qContextSpeciesFile" type="text" placeholder="留空则使用顶部共享 Species；若共享也为空，再由 reactionabcd 推导" />
+                  </div>
+                  <div class="field">
+                    <label for="qContextTrajectoryFile">Trajectory 覆盖(可选)</label>
+                    <input id="qContextTrajectoryFile" type="text" placeholder="留空则使用顶部共享 Trajectory；若共享也为空，再尝试由 .species 自动推导" />
+                  </div>
+                  <div class="field">
+                    <label for="qContextRouteFile">Route 覆盖(可选)</label>
+                    <input id="qContextRouteFile" type="text" placeholder="留空则使用顶部共享 Route；若共享也为空，再由 trajectory/species 推导" />
+                  </div>
+                </div>
+                <div class="field-note">这里是“反应事件可视化”模块的局部覆盖项。主流程默认使用 <code>.species + .route + .lammpstrj</code> 三件套：<code>.species</code> 给离散时间轴，<code>.route</code> 给反应核原子变化，<code>.lammpstrj</code> 用于切局部子轨迹和生成关键帧故事板。</div>
+              </article>
+
+              <details class="option-fold plot-option-group context-legacy-flow">
+                <summary>Legacy / 调试: 物种事件定位（可选）</summary>
+                <div class="option-fold-body">
+              <article class="card query-card" id="card-context-species-locate">
+                <h2>物种事件定位</h2>
+                <div class="field">
+                  <label for="qContextTarget">目标物种</label>
+                  <input id="qContextTarget" type="text" placeholder="例如 C6H5ClO 或 [H][C]1..." value="C6H4" />
+                  <div class="field-note">这个入口保留给调试或做物种级时间定位时使用，不属于 reaction-first 主流程。</div>
+                </div>
+                <div class="row row-context-locate">
+                  <div class="field mini">
+                    <label for="qContextMatchMode">匹配方式</label>
+                    <select id="qContextMatchMode">
+                      <option value="auto">自动判断</option>
+                      <option value="smiles">精确 SMILES</option>
+                      <option value="formula">按分子式聚合</option>
+                    </select>
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextEventMode">事件类型</label>
+                    <select id="qContextEventMode">
+                      <option value="appear">出现</option>
+                      <option value="disappear">消失</option>
+                    </select>
+                    <div class="field-note">仅用于 legacy 物种定位调试。</div>
+                  </div>
+                </div>
+                <details class="option-fold plot-option-group">
+                  <summary>高级事件模式</summary>
+                  <div class="option-fold-body">
+                    <div class="field">
+                      <label for="qContextEventModeAdvanced">覆盖基础事件类型</label>
+                      <select id="qContextEventModeAdvanced">
+                        <option value="">使用上面的基础事件类型</option>
+                        <option value="production">production: 数量增加</option>
+                        <option value="consumption">consumption: 数量减少</option>
+                        <option value="peak">peak: 峰值帧</option>
+                        <option value="nonzero">nonzero: 只要存在就算</option>
+                      </select>
+                      <div class="field-note">这些模式更偏向统计筛选，不属于 reaction-first 主路径。</div>
+                    </div>
+                  </div>
+                </details>
+                <div class="row row-context-window">
+                  <div class="field mini">
+                    <label for="qContextBefore">Frames Before</label>
+                    <input id="qContextBefore" type="number" min="0" value="3" />
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextAfter">Frames After</label>
+                    <input id="qContextAfter" type="number" min="0" value="3" />
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextMaxEvents">Max Events</label>
+                    <input id="qContextMaxEvents" type="number" min="1" value="12" />
+                  </div>
+                </div>
+                <div id="contextSpeciesProgress" class="progress-card is-idle">
+                  <div class="progress-head">
+                    <strong id="contextSpeciesProgressLabel">Idle</strong>
+                    <span id="contextSpeciesProgressPct">0%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div id="contextSpeciesProgressFill" class="progress-fill"></div>
+                  </div>
+                  <div id="contextSpeciesProgressMsg" class="progress-msg">等待开始</div>
+                </div>
+                <div class="card-actions">
+                  <button id="btnContextLocateSpecies">定位物种事件</button>
+                  <button class="ghost btn-jump-result" type="button" data-result-module="context_species">查看定位结果</button>
+                </div>
+              </article>
+
+              <article class="card module-result-card hidden" id="contextSpeciesResultCard">
+                <div class="card-head">
+                  <h2>物种事件候选</h2>
+                  <div class="plot-actions">
+                    <button id="btnExportContextSpeciesCsv" class="ghost" disabled>导出事件 CSV</button>
+                  </div>
+                </div>
+                <pre id="contextSpeciesMetaBox" class="meta"></pre>
+                <div class="table-wrap table-wrap-compact">
+                  <table id="contextSpeciesResultTable">
+                    <thead></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </article>
+                </div>
+              </details>
+
+              <article class="card query-card" id="card-context-reaction-locate">
+                <h2>Step 1. Reaction-First 反应事件定位</h2>
+                <div class="field">
+                  <label for="qContextReactionLocateSmiles">反应式</label>
+                  <input id="qContextReactionLocateSmiles" type="text" placeholder="例如 A + B -> C + D；优先按 canonical SMILES 匹配，失败后退回公式匹配" />
+                  <div class="field-note">推荐直接从上方“反应式检索”结果点击进入。Step 1 的输出每一行都应该是一个 <code>route-resolved</code> 的具体反应事件实例，而不是物种出现/消失事件。</div>
+                </div>
+                <div class="row row-context-window">
+                  <div class="field mini">
+                    <label for="qContextReactionBefore">Frames Before</label>
+                    <input id="qContextReactionBefore" type="number" min="0" value="2" />
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextReactionAfter">Frames After</label>
+                    <input id="qContextReactionAfter" type="number" min="0" value="2" />
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextReactionMaxEvents">Max Events</label>
+                    <input id="qContextReactionMaxEvents" type="number" min="1" value="12" />
+                  </div>
+                </div>
+                <div id="contextReactionProgress" class="progress-card is-idle">
+                  <div class="progress-head">
+                    <strong id="contextReactionProgressLabel">Idle</strong>
+                    <span id="contextReactionProgressPct">0%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div id="contextReactionProgressFill" class="progress-fill"></div>
+                  </div>
+                  <div id="contextReactionProgressMsg" class="progress-msg">等待开始</div>
+                </div>
+                <div class="card-actions">
+                  <button id="btnContextLocateReaction">定位反应事件</button>
+                  <button class="ghost btn-jump-result" type="button" data-result-module="context_reaction">查看定位结果</button>
+                </div>
+              </article>
+
+              <article class="card module-result-card hidden" id="contextReactionResultCard">
+                <div class="card-head">
+                  <h2>Step 1 输出: 反应事件候选实例</h2>
+                  <div class="plot-actions">
+                    <button id="btnExportContextReactionCsv" class="ghost" disabled>导出事件 CSV</button>
+                  </div>
+                </div>
+                <pre id="contextReactionMetaBox" class="meta"></pre>
+                <div class="table-wrap table-wrap-compact">
+                  <table id="contextReactionResultTable">
+                    <thead></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="card query-card" id="card-context-extract">
+                <h2>Step 2. 选中单事件并提取局部反应轨迹</h2>
+                <div class="field-note context-extract-intro">
+                  主流程只做两件事：先从 Step 1 里选中一条 <code>reaction-resolved</code> 事件，再在这里直接生成该单事件的局部子轨迹、5 帧关键帧故事板，并一键打开 OVITO / VMD。手工帧范围和 atom ids 覆盖项只保留在下方高级区。
+                </div>
+                <div class="context-extract-grid">
+                  <section class="context-extract-block">
+                    <div class="context-extract-block-head">
+                      <h3>从当前已选事件直接下钻</h3>
+                      <p>在 Step 1 结果表中点击“选为 Step 2”后，这里会自动带入该事件的 anchor、window 和 route 解析结果，直接生成用于动态核查的事件子轨迹。</p>
+                    </div>
+                    <div class="field">
+                      <label>Selected Event</label>
+                      <div id="contextSelectedEventBox" class="selected-event-box">尚未选择事件。请先在上方 Step 1 的“反应事件候选实例”中载入一条事件，或在右侧填写手工切片范围。</div>
+                      <div class="field-note">这个入口会优先使用“已选事件”的 anchor、window 和 route 解析结果，不依赖你右侧手工填写的覆盖项。</div>
+                    </div>
+                    <div class="field">
+                      <label for="qContextResolvedAtomIds">Resolved Visualization Atom IDs (只读, 供 VMD / OVITO 复制)</label>
+                      <textarea id="qContextResolvedAtomIds" rows="3" readonly placeholder="载入事件后，这里会显示 route 推断并筛选后的原始 LAMMPS atom ids。"></textarea>
+                      <div class="field-note">优先显示“用于轨迹可视化的上下文原子集”，通常会比纯变化原子更完整，更适合看前后几帧的动态过程。这里给出的是原始 <code>LAMMPS atom id</code>，不是 VMD 的 <code>index</code>。</div>
+                    </div>
+                    <div class="card-actions compact-actions">
+                      <button id="btnCopyContextResolvedAtomIds" class="ghost" type="button">复制 Atom IDs</button>
+                    </div>
+                    <div class="field">
+                      <label for="qContextOvitoSelectionExpr">OVITO Selection Expression (只读, 供 Expression selection)</label>
+                      <textarea id="qContextOvitoSelectionExpr" rows="4" readonly placeholder="载入事件后，这里会自动生成 OVITO 的 ParticleIdentifier 选择表达式。"></textarea>
+                      <div class="field-note">在 OVITO 中添加 <code>Expression selection</code> modifier，并粘贴这里的表达式，即可按原始 atom id 精确选中参与事件的原子。</div>
+                    </div>
+                    <div class="card-actions compact-actions">
+                      <button id="btnCopyContextOvitoExpr" class="ghost" type="button">复制 OVITO 表达式</button>
+                    </div>
+                    <div class="card-actions">
+                      <button id="btnContextExtractAuto" type="button">生成事件子轨迹</button>
+                      <button id="btnContextExtractOpenOvito" class="ghost" type="button">生成并用 OVITO 打开</button>
+                      <button id="btnContextExtractOpenVmd" class="ghost" type="button">生成并用 VMD 打开</button>
+                      <button id="btnContextClearSelection" class="ghost" type="button">清除已选事件</button>
+                    </div>
+                  </section>
+
+                  <section class="context-extract-block context-extract-block-manual">
+                    <div class="context-extract-block-head">
+                      <h3>高级: 手工帧 / 原子覆盖</h3>
+                      <p>只有当你要绕过 Step 1 事件选择，或需要手工修正 frame ranges / atom ids 时才展开这里。</p>
+                    </div>
+                    <details class="option-fold plot-option-group">
+                      <summary>展开手工切片与高级参数</summary>
+                      <div class="option-fold-body">
+                        <div class="field">
+                          <label for="qContextFrameRanges">Frame Ranges</label>
+                          <textarea id="qContextFrameRanges" rows="2" placeholder="例如 1216900-1217700;3649200-3649800。这里是手工模式的主输入。"></textarea>
+                          <div class="field-note">手工模式会直接按这里的区间切片。若这里为空，则手工入口不可用。</div>
+                        </div>
+                        <div class="field">
+                          <label for="qContextAtomIds">Atom IDs (可选, 手工覆盖)</label>
+                          <textarea id="qContextAtomIds" rows="2" placeholder="例如 101 205 318 或 101,205,318 或 101-110。填写后将直接按这些 atom id 过滤轨迹，可绕过 .route。"></textarea>
+                          <div class="field-note">你可以把上面自动解析出的 atom ids 拷到这里后再手工增删。与 Frame Ranges 配合使用时，会直接按 atom id 切轨迹，不再依赖 <code>.route</code> 反推原子。</div>
+                        </div>
+                        <div class="field">
+                          <label for="qContextReactionSmiles">辅助 Reaction SMILES(可选, 用于原子变化判定)</label>
+                          <input id="qContextReactionSmiles" type="text" placeholder="例如 [H] + C6H4 -> C6H5，支持 SMILES 或分子式写法" />
+                        </div>
+                        <div class="field">
+                          <label for="qContextTypeElementMap">Type -> Element Map(可选, 给 OVITO/VMD 注入元素标签)</label>
+                          <input id="qContextTypeElementMap" type="text" placeholder="例如 1:H;2:C;3:O;4:Cl" />
+                          <div class="field-note">当原始 <code>lammpstrj</code> 只有 <code>id type x y z</code> 而没有 <code>element</code> 列时，填写这里可在导出的事件子轨迹中补上元素列，方便 OVITO / VMD 正确识别 H/C/O/Cl。</div>
+                        </div>
+                        <div class="row row-context-extract-opt">
+                          <div class="field mini checkline">
+                            <label for="qContextIncludeRouteTrace">Include Route Atom Trace</label>
+                            <input id="qContextIncludeRouteTrace" type="checkbox" checked />
+                          </div>
+                          <div class="field mini checkline">
+                            <label for="qContextInlineViewer">Inline Viewer</label>
+                            <input id="qContextInlineViewer" type="checkbox" />
+                          </div>
+                          <div class="field mini">
+                            <label for="qContextRouteSampleLimit">Route Atom Sample</label>
+                            <input id="qContextRouteSampleLimit" type="number" min="1" max="200" value="80" />
+                          </div>
+                          <div class="field mini">
+                            <label for="qContextTrajectoryAtomScope">Trajectory Atom Scope</label>
+                            <select id="qContextTrajectoryAtomScope">
+                              <option value="event">event atoms only</option>
+                              <option value="all">all atoms (full frame)</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div class="card-actions">
+                          <button id="btnContextExtractManual" type="button">按手工范围提取轨迹</button>
+                        </div>
+                      </div>
+                    </details>
+                  </section>
+                </div>
+                <div id="contextExtractModeHint" class="context-extract-status">先从 Step 1 结果中选中一条 route-resolved 事件，再进入 Step 2 提取和查看局部反应轨迹。</div>
+                <div id="contextExtractProgress" class="progress-card is-idle">
+                  <div class="progress-head">
+                    <strong id="contextExtractProgressLabel">Idle</strong>
+                    <span id="contextExtractProgressPct">0%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div id="contextExtractProgressFill" class="progress-fill"></div>
+                  </div>
+                  <div id="contextExtractProgressMsg" class="progress-msg">等待开始</div>
+                </div>
+                <div class="card-actions">
+                  <button class="ghost btn-jump-result" type="button" data-result-module="context_extract">查看提取结果</button>
+                </div>
+              </article>
+
+              <article class="card module-result-card hidden" id="contextExtractResultCard">
+                <div class="card-head">
+                  <h2>Step 2 输出: 事件子轨迹与导出</h2>
+                  <div class="plot-actions">
+                    <button id="btnExportContextFrames" class="ghost" disabled>导出帧列表 CSV</button>
+                    <button id="btnExportContextTraj" class="ghost" disabled>导出轨迹片段</button>
+                    <button id="btnOpenContextTraj" class="ghost" disabled>默认程序打开</button>
+                    <button id="btnOpenContextTrajVmd" class="ghost" disabled>VMD 打开</button>
+                    <button id="btnOpenContextTrajOvito" class="ghost" disabled>OVITO 打开</button>
+                    <button id="btnOpenContextTrajPymol" class="ghost" disabled>PyMOL 打开</button>
+                    <button id="btnRevealContextTraj" class="ghost" disabled>定位轨迹文件</button>
+                  </div>
+                </div>
+                <pre id="contextExtractMetaBox" class="meta"></pre>
+                <div class="table-wrap table-wrap-compact">
+                  <table id="contextExtractResultTable">
+                    <thead></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <details class="meta-panel">
+                  <summary>邻域帧列表</summary>
+                  <pre id="contextExtractFramesBox" class="meta meta-compact"></pre>
+                </details>
+              </article>
+
+              <article class="card viewer hidden" id="contextTrajectoryCard">
+                <div class="card-head">
+                  <h2>Step 2 预览: 关键帧与轨迹浏览</h2>
+                  <span class="viewer-note" id="contextTrajectoryNote">只显示当前选中事件的 context subset；最终高质量渲染建议交给 OVITO / VMD</span>
+                </div>
+                <div class="context-storyboard-shell">
+                  <div class="card-head context-storyboard-head">
+                    <h3>关键帧快照</h3>
+                    <span class="viewer-note">点击快照切换到对应帧；用于快速核查反应前后动态</span>
+                  </div>
+                  <div id="contextStoryboardGrid" class="context-storyboard-grid"></div>
+                </div>
+                <div class="viewer-toolbar trajectory-toolbar">
+                  <div class="actions card-actions">
+                    <button id="btnContextFramePrev" type="button" class="ghost" disabled>上一帧</button>
+                    <button id="btnContextFrameNext" type="button" class="ghost" disabled>下一帧</button>
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextFrameSelect">Frame</label>
+                    <select id="qContextFrameSelect"></select>
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextFrameView">View</label>
+                    <select id="qContextFrameView">
+                      <option value="3d">3D</option>
+                      <option value="xy">XY</option>
+                      <option value="xz">XZ</option>
+                      <option value="yz">YZ</option>
+                    </select>
+                  </div>
+                  <div class="field mini">
+                    <label for="qContextHighlightMode">Highlight</label>
+                    <select id="qContextHighlightMode">
+                      <option value="route_target">reaction core</option>
+                      <option value="route_context">context shell</option>
+                      <option value="route_reactant">reactant-side atoms</option>
+                      <option value="route_product">product-side atoms</option>
+                      <option value="event_reactant_to_product">reactant→product transitions</option>
+                      <option value="event_product_to_reactant">product→reactant transitions</option>
+                      <option value="none">none</option>
+                    </select>
+                  </div>
+                  <label class="viewer-inline-toggle" for="qContextFocusEventAtoms">
+                    <input id="qContextFocusEventAtoms" type="checkbox" checked />
+                    <span>仅事件原子</span>
+                  </label>
+                  <label class="viewer-inline-toggle" for="qContextShowTrails">
+                    <input id="qContextShowTrails" type="checkbox" checked />
+                    <span>轨迹线</span>
+                  </label>
+                  <div class="field mini">
+                    <label for="qContextTrailWindow">Trail Frames</label>
+                    <input id="qContextTrailWindow" type="number" min="1" max="60" step="1" value="8" />
+                  </div>
+                  <label class="viewer-inline-toggle" for="qContextFrameShowBox">
+                    <input id="qContextFrameShowBox" type="checkbox" checked />
+                    <span>显示 Box</span>
+                  </label>
+                  <div class="field mini">
+                    <label for="qContextFrameZoom">Zoom</label>
+                    <input id="qContextFrameZoom" type="range" min="0.4" max="2.4" step="0.05" value="1" />
+                  </div>
+                </div>
+                <div id="contextFrameSummary" class="stat-chips"></div>
+                <div class="context-frame-stage">
+                  <canvas id="contextFrameCanvas"></canvas>
+                </div>
+                <pre id="contextFrameAtomInfo" class="meta meta-compact">拖动旋转 3D 视图；滚轮缩放。</pre>
+              </article>
+            </div>
+          </details>
+        </section>
+      </div>
     </section>
 
-    <section class="plot-grid">
+    <section class="card plot-unified-switch">
+      <div class="card-head">
+        <h2>时间演化绘图</h2>
+      </div>
+      <div class="row">
+        <div class="field mini">
+          <label for="qUnifiedPlotMode">Plot Mode</label>
+          <select id="qUnifiedPlotMode">
+            <option value="species">Species Time-Series</option>
+            <option value="carbon">Carbon-Number Evolution</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section id="plotSectionSpecies" class="plot-grid">
       <article class="card query-card" id="card-plot">
         <h2>时间曲线 Plot</h2>
         <div class="field">
@@ -249,8 +818,14 @@
 [H][O][H]</textarea>
         </div>
         <div class="field">
-          <label for="qPlotSpeciesFile">Species 文件(可选)</label>
-          <input id="qPlotSpeciesFile" type="text" placeholder="留空自动由 reactionabcd 推导" />
+          <label for="qPlotSpeciesFile">Species 覆盖(可选)</label>
+          <input id="qPlotSpeciesFile" type="text" placeholder="单文件模式留空则使用顶部共享 Species；若共享也为空，再由 reactionabcd 推导" />
+          <div class="field-note">只在该绘图模块需要临时切换单文件输入时填写。</div>
+        </div>
+        <div class="field">
+          <label for="qPlotSpeciesFiles">多文件对比(可选, 每行一个)</label>
+          <textarea id="qPlotSpeciesFiles" rows="3" placeholder="2500K@seed1::/path/run1.species&#10;2500K@seed2::/path/run2.reactionabcd&#10;3000K@seed1::/path/run3.species"></textarea>
+          <div class="field-note">多文件模式支持 <code>.species</code> 与 <code>.reactionabcd</code>。填写后会忽略上方单文件输入。</div>
         </div>
         <div class="row">
           <div class="field mini">
@@ -285,6 +860,14 @@
             <label for="qPlotDownsample">Downsample</label>
             <input id="qPlotDownsample" type="number" min="100" value="1800" />
           </div>
+          <div class="field mini">
+            <label for="qPlotTimeAlign">Time Align</label>
+            <select id="qPlotTimeAlign">
+              <option value="raw">raw</option>
+              <option value="truncate">truncate(common end)</option>
+              <option value="relative">relative(0~1)</option>
+            </select>
+          </div>
         </div>
         <button id="btnPlot">绘图</button>
       </article>
@@ -297,12 +880,296 @@
             <button id="btnPlotExportPng" class="ghost" disabled>导出 Plot PNG</button>
           </div>
         </div>
+        <div id="plotProgress" class="progress-card is-idle">
+          <div class="progress-head">
+            <strong id="plotProgressLabel">Idle</strong>
+            <span id="plotProgressPct">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div id="plotProgressFill" class="progress-fill"></div>
+          </div>
+          <div id="plotProgressMsg" class="progress-msg">等待开始</div>
+        </div>
+        <div id="plotCurveTools" class="carbon-curve-tools hidden">
+          <div class="row row-carbon-main">
+            <div class="field mini">
+              <label for="qPlotCurveFilter">Curve Filter</label>
+              <input id="qPlotCurveFilter" type="text" placeholder="按曲线名筛选" />
+            </div>
+          </div>
+          <div class="actions">
+            <button id="btnPlotCurveSelectAll" class="ghost">全选</button>
+            <button id="btnPlotCurveTop12" class="ghost">前12条</button>
+            <button id="btnPlotCurveClear" class="ghost">清空</button>
+          </div>
+          <div id="plotCurveList" class="carbon-curve-list"></div>
+        </div>
         <pre id="plotMeta" class="meta"></pre>
         <div class="plot-canvas-wrap">
           <div id="plotChart"></div>
           <canvas id="plotCanvas"></canvas>
         </div>
         <div id="plotLegend" class="plot-legend"></div>
+        <article class="card structure-preview-card hidden" id="plotStructureCard">
+          <div class="card-head">
+            <h2>结构列表</h2>
+            <span class="viewer-note" id="plotStructureNote">点击曲线成员中的分子式后固定显示</span>
+          </div>
+          <div class="viewer-toolbar">
+            <label class="viewer-inline-toggle" for="plotViewerShowH">
+              <input id="plotViewerShowH" class="viewer-show-h" data-viewer-key="plot" type="checkbox" checked />
+              <span>显示 H</span>
+            </label>
+          </div>
+          <div id="plotSvgGallery" class="svg-gallery"></div>
+        </article>
+      </section>
+    </section>
+
+    <section id="plotSectionCarbon" class="plot-grid">
+      <article class="card query-card" id="card-carbon-plot">
+        <h2>Carbon-Number Evolution</h2>
+        <details class="option-fold plot-option-group" open>
+          <summary>数据源</summary>
+          <div class="option-fold-body">
+            <div class="field">
+              <label for="qCarbonData">Tidy CSV/Excel(可选)</label>
+              <input id="qCarbonData" type="text" placeholder="留空则从 .species 构建 tidy table" />
+            </div>
+            <div class="field">
+              <label for="qCarbonSpeciesFile">Species 覆盖(可选)</label>
+              <input id="qCarbonSpeciesFile" type="text" placeholder="单文件模式留空则使用顶部共享 Species；若共享也为空，再由 reactionabcd 推导" />
+              <div class="field-note">只在该 Carbon 绘图模块需要临时切换单文件输入时填写。</div>
+            </div>
+            <div class="field">
+              <label for="qCarbonSpeciesFiles">多文件对比(可选, 每行一个)</label>
+              <textarea id="qCarbonSpeciesFiles" rows="3" placeholder="2500K@seed1::/path/run1.species&#10;2500K@seed2::/path/run2.reactionabcd&#10;3000K@seed1::/path/run3.species"></textarea>
+              <div class="field-note">多文件模式支持 <code>.species</code> 与 <code>.reactionabcd</code>。填写后会忽略上方单文件输入。</div>
+            </div>
+          </div>
+        </details>
+        <details class="option-fold plot-option-group" open>
+          <summary>绘图参数</summary>
+          <div class="option-fold-body">
+            <div class="row">
+              <div class="field mini">
+                <label for="qCarbonXAxis">X-axis</label>
+                <select id="qCarbonXAxis">
+                  <option value="ps">ps</option>
+                  <option value="step">step</option>
+                  <option value="ns">ns</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonTimestepPs">Timestep(ps)</label>
+                <input id="qCarbonTimestepPs" type="number" min="0.000001" step="0.0001" value="0.0001" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonMode">Mode</label>
+                <select id="qCarbonMode">
+                  <option value="exact">exact</option>
+                  <option value="binned">binned</option>
+                  <option value="topk">topk</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonLayout">Layout</label>
+                <select id="qCarbonLayout">
+                  <option value="single" selected>single</option>
+                  <option value="subplots">subplots</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonTheme">Theme</label>
+                <select id="qCarbonTheme">
+                  <option value="light">light</option>
+                  <option value="dark">dark</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonTimeAlign">Time Align</label>
+                <select id="qCarbonTimeAlign">
+                  <option value="raw">raw</option>
+                  <option value="truncate">truncate(common end)</option>
+                  <option value="relative">relative(0~1)</option>
+                </select>
+              </div>
+            </div>
+            <div class="row row-carbon-main">
+              <div class="field mini">
+                <label for="qCarbonParent">Parent C</label>
+                <input id="qCarbonParent" type="number" min="0" placeholder="留空自动推断" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonSmall">Small Range</label>
+                <input id="qCarbonSmall" type="text" value="1-4" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonLarge">Large Threshold</label>
+                <input id="qCarbonLarge" type="number" min="1" value="30" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonTopK">Top K</label>
+                <input id="qCarbonTopK" type="number" min="1" value="12" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonMaxExact">Max Exact</label>
+                <input id="qCarbonMaxExact" type="number" min="1" value="24" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="qCarbonDisplayRanges">Display Ranges(可选)</label>
+              <input id="qCarbonDisplayRanges" type="text" placeholder="仅显示这些碳数/区间，例如 C1;C2;C24;C30+" />
+            </div>
+            <div class="field">
+              <label for="qCarbonMergeRanges">Merge Ranges(可选)</label>
+              <input id="qCarbonMergeRanges" type="text" placeholder="把区间合并成单曲线，例如 Small:1-4; Parent:24; Growth:30+" />
+            </div>
+          </div>
+        </details>
+        <details class="option-fold plot-option-group">
+          <summary>高级参数</summary>
+          <div class="option-fold-body">
+            <div class="row row-carbon-main">
+              <div class="field mini">
+                <label for="qCarbonLegend">Legend</label>
+                <select id="qCarbonLegend">
+                  <option value="compact">compact</option>
+                  <option value="detailed" selected>detailed</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonSystemMode">System Mode</label>
+                <select id="qCarbonSystemMode">
+                  <option value="">auto</option>
+                  <option value="facet">facet</option>
+                  <option value="overlay">overlay</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonSmoothing">Smoothing</label>
+                <select id="qCarbonSmoothing">
+                  <option value="none">none</option>
+                  <option value="rolling">rolling</option>
+                  <option value="savgol">savgol</option>
+                </select>
+              </div>
+              <div class="field mini">
+                <label for="qCarbonSmoothWindow">Smooth Window</label>
+                <input id="qCarbonSmoothWindow" type="number" min="1" value="5" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonSmoothPolyorder">Polyorder</label>
+                <input id="qCarbonSmoothPolyorder" type="number" min="1" value="2" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonFigWidth">Fig Width</label>
+                <input id="qCarbonFigWidth" type="number" min="4" step="0.5" value="11.5" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonFigHeight">Fig Height</label>
+                <input id="qCarbonFigHeight" type="number" min="4" step="0.5" value="8.0" />
+              </div>
+              <div class="field mini">
+                <label for="qCarbonMaxFormula">Formula List Size</label>
+                <input id="qCarbonMaxFormula" type="number" min="5" max="200" value="30" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="qCarbonBins">Carbon Bins(可选)</label>
+              <input id="qCarbonBins" type="text" placeholder="例如 1-4;5-15;16-30;31+" />
+            </div>
+            <div id="carbonRegionsField" class="field hidden">
+              <label for="qCarbonRegions">Layout Regions(可选)</label>
+              <textarea id="qCarbonRegions" rows="3" placeholder="仅 subplots 生效，例如 panel1:1-4; panel2:5-15; panel3:16-30; panel4:31+"></textarea>
+            </div>
+          </div>
+        </details>
+        <button id="btnCarbonPlot">绘制 Carbon Plot</button>
+      </article>
+
+      <section class="card plot-panel">
+        <div class="card-head">
+          <h2>Carbon-Number Plot</h2>
+          <div class="plot-actions">
+            <button id="btnCarbonPlotExportCsv" class="ghost" disabled>导出 Plot CSV</button>
+            <button id="btnCarbonPlotExportSvg" class="ghost" disabled>导出 SVG</button>
+          </div>
+        </div>
+        <div id="carbonPlotProgress" class="progress-card is-idle">
+          <div class="progress-head">
+            <strong id="carbonPlotProgressLabel">Idle</strong>
+            <span id="carbonPlotProgressPct">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div id="carbonPlotProgressFill" class="progress-fill"></div>
+          </div>
+          <div id="carbonPlotProgressMsg" class="progress-msg">等待开始</div>
+        </div>
+        <div id="carbonPlotHighlights" class="stat-chips"></div>
+        <div id="carbonCurveTools" class="carbon-curve-tools hidden">
+          <div class="row row-carbon-main">
+            <div class="field mini">
+              <label for="qCarbonCurveFilter">Curve Filter</label>
+              <input id="qCarbonCurveFilter" type="text" placeholder="按名称筛选曲线" />
+            </div>
+            <div class="field mini">
+              <label for="qCarbonCurveMerge">Local Merge Ranges</label>
+              <input id="qCarbonCurveMerge" type="text" placeholder="窗口内合并, 例如 Small:1-4; Growth:30+" />
+            </div>
+            <div class="field mini field-inline-check">
+              <label for="qCarbonCompareLogY">Compare Y</label>
+              <div class="inline-check">
+                <input id="qCarbonCompareLogY" type="checkbox" />
+                <span>log scale</span>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="btnCarbonCurveSelectAll" class="ghost">全选</button>
+            <button id="btnCarbonCurveTop12" class="ghost">前12条</button>
+            <button id="btnCarbonCurveClear" class="ghost">清空</button>
+            <button id="btnCarbonCurveApplyMerge" class="ghost">应用本地合并</button>
+            <button id="btnCarbonCurveResetMerge" class="ghost">重置本地合并</button>
+          </div>
+          <div id="carbonMergeDropZone" class="carbon-merge-dropzone">
+            拖动 C 分组到另一项上可立即合并；也可先拖到这里，再拖第二项到这里合并。
+          </div>
+          <div id="carbonCurveList" class="carbon-curve-list"></div>
+        </div>
+        <div id="carbonCompareWrap" class="plot-canvas-wrap carbon-compare-wrap hidden">
+          <div id="carbonPlotChart"></div>
+          <canvas id="carbonPlotCanvas"></canvas>
+        </div>
+        <details id="carbonRawSvgPanel" class="meta-panel">
+          <summary>Raw Matplotlib SVG(可选)</summary>
+          <div class="plot-canvas-wrap plot-image-wrap raw-svg-wrap">
+            <img id="carbonPlotImage" alt="carbon plot" />
+          </div>
+        </details>
+        <div class="meta-stack">
+          <details class="meta-panel">
+            <summary>Plot Meta</summary>
+            <pre id="carbonPlotMeta" class="meta meta-compact"></pre>
+          </details>
+          <details class="meta-panel">
+            <summary>Summary JSON</summary>
+            <pre id="carbonPlotSummary" class="meta meta-tall"></pre>
+          </details>
+        </div>
+        <article class="card structure-preview-card hidden" id="carbonStructureCard">
+          <div class="card-head">
+            <h2>结构列表</h2>
+            <span class="viewer-note" id="carbonStructureNote">点击碳数分组中的分子式后固定显示</span>
+          </div>
+          <div class="viewer-toolbar">
+            <label class="viewer-inline-toggle" for="carbonViewerShowH">
+              <input id="carbonViewerShowH" class="viewer-show-h" data-viewer-key="carbon" type="checkbox" checked />
+              <span>显示 H</span>
+            </label>
+          </div>
+          <div id="carbonSvgGallery" class="svg-gallery"></div>
+        </article>
       </section>
     </section>
 
@@ -312,10 +1179,11 @@
         <article>
           <h3>快速开始</h3>
           <ol>
-            <li>先确认顶部 <code>reactionabcd 文件</code> 与 <code>min_tp</code>。</li>
+            <li>如果要做网络检索/flux富集，先确认顶部 <code>reactionabcd 文件</code> 与 <code>min_tp</code>。</li>
             <li>在任一检索卡片输入条件并点击“查询”。</li>
-            <li>点击结果表中的 <code>View</code> 或 <code>View Rxn</code> 查看结构。</li>
-            <li>需要时间曲线时，在 <code>时间曲线 Plot</code> 输入目标后点击“绘图”。</li>
+            <li>结果表会自动生成结构列表；鼠标悬停在 SMILES 上可快速预览。</li>
+            <li>在 <code>时间演化绘图</code> 选择 <code>Species</code> 或 <code>Carbon</code> 模式后绘图。</li>
+            <li>Carbon 模式可从 <code>.species</code> 直接出图并在同窗口勾选曲线对比。</li>
           </ol>
         </article>
         <article>
@@ -323,9 +1191,10 @@
           <ul>
             <li><code>按分子式查 SMILES</code>：查同分子式下的全部/Top 物种。</li>
             <li><code>按质量数查 MD 物种</code>：按 nominal/exact 质量筛选候选物种。</li>
-            <li><code>按 SMILES 查后续路径</code>：看某物种的消耗/生成通道。</li>
+            <li><code>按 SMILES / 分子式查后续路径</code>：看某物种的消耗/生成通道。</li>
             <li><code>Species 中间体筛选</code>：按先升后降 + 丰度 + FWHM 自动筛候选。</li>
             <li><code>按公式级反应检索</code>：支持仅填反应物、仅填产物或双侧同时填写。</li>
+            <li><code>事件轨迹提取</code>：先定位物种/反应事件，再按事件窗口或手工帧范围提取 <code>lammpstrj</code> 子轨迹，用于在 OVITO / VMD 中检查动态过程。</li>
             <li><code>按公式级反应检索</code>中的<code>Top占比</code>可直接算检索结果的占比。</li>
           </ul>
         </article>
@@ -336,6 +1205,7 @@
             <li>SMILES：<code>[H][O][H]</code></li>
             <li>多项输入：使用 <code>+</code>、<code>,</code> 或换行分隔。</li>
             <li>Plot 目标支持：<code>label::query</code>，如 <code>oBenzyne::C6H4</code>。</li>
+            <li>多文件对比：<code>system@replicate::/abs/path.species</code> 或 <code>system@replicate::/abs/path.reactionabcd</code>（每行一个）。</li>
           </ul>
         </article>
         <article>
@@ -345,7 +1215,7 @@
             <li><code>ShareMetric</code>可选 <code>net_tp</code> / <code>tp</code> / <code>reverse_tp</code>。</li>
             <li><code>ShareAbs</code>用于按绝对值统计（适合净通量正负并存场景）。</li>
             <li><code>Positive only</code>只统计大于 0 的指标值。</li>
-            <li>Plot 的 <code>Species 文件(可选)</code> 留空会由 reactionabcd 自动推导。</li>
+            <li>绘图模块会优先使用你填写的 <code>.species/.reactionabcd</code> 数据源，不强依赖顶部 <code>reactionabcd</code>。</li>
           </ul>
         </article>
       </div>

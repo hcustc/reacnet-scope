@@ -26,6 +26,7 @@ classifiers = [
 [project.optional-dependencies]
 plot = [
   "matplotlib>=3.8",
+  "scipy>=1.11",
 ]
 
 [project.scripts]
@@ -45,6 +46,7 @@ include = [
   "/run_web.sh",
   "/run_rng_query.sh",
   "/run_rng_query_web.sh",
+  "/examples",
   "/rng_tools",
   "/scripts",
 ]

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -33,6 +34,11 @@ from rng_tools.network import (  # noqa: E402
     ReactionNetwork,
     parse_reactionabcd,
     smiles_to_formula_fast,
+)
+from rng_tools.carbon_plot import (  # noqa: E402
+    parse_carbon_range_specs,
+    plot_carbon_number_evolution,
+    species_file_to_tidy_table,
 )
 
 
@@ -782,9 +788,136 @@ def cmd_plot(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_carbon_plot(args: argparse.Namespace) -> int:
+    data_path = (args.data or "").strip()
+    species_file = (args.species_file or "").strip()
+    if not data_path:
+        species_file = species_file or derive_species_path(args.reac)
+        if not os.path.exists(species_file):
+            print(f"[ERROR] species file not found: {species_file}")
+            return 2
+
+    carbon_bins = parse_carbon_range_specs(args.carbon_bins) or None
+    display_ranges = parse_carbon_range_specs(args.display_ranges) or None
+    merge_ranges = parse_carbon_range_specs(args.merge_ranges) or None
+    layout_regions = parse_carbon_range_specs(args.layout_regions) or None
+
+    smoothing = None
+    if args.smoothing == "rolling":
+        smoothing = {"method": "rolling", "window": args.smooth_window}
+    elif args.smoothing == "savgol":
+        smoothing = {
+            "method": "savgol",
+            "window_length": args.smooth_window,
+            "polyorder": args.smooth_polyorder,
+        }
+
+    system_col = args.system_col.strip() or None
+    replicate_col = args.replicate_col.strip() or None
+    parent_carbon_number = args.parent_carbon_number if args.parent_carbon_number > 0 else None
+    system_mode = args.system_mode.strip() or None
+    highlight_small = tuple(args.highlight_small)
+
+    if data_path:
+        source = data_path
+        source_desc = data_path
+    else:
+        source = species_file_to_tidy_table(
+            species_file=species_file,
+            time_axis=args.x_axis,
+            timestep_ps=args.timestep_ps,
+            species_resolver=smiles_to_formula_fast,
+            system=args.system_name.strip() or None,
+            replicate=args.replicate_id.strip() or None,
+        )
+        if args.system_name.strip() and system_col is None:
+            system_col = "system"
+        if args.replicate_id.strip() and replicate_col is None:
+            replicate_col = "replicate"
+        source_desc = species_file
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, _, summary, plot_data = plot_carbon_number_evolution(
+        data=source,
+        time_col=args.time_col,
+        species_col=args.species_col,
+        count_col=args.count_col,
+        system_col=system_col,
+        replicate_col=replicate_col,
+        carbon_bins=carbon_bins,
+        display_ranges=display_ranges,
+        merge_ranges=merge_ranges,
+        mode=args.mode,
+        top_k=args.top_k,
+        max_exact_lines=args.max_exact_lines,
+        parent_carbon_number=parent_carbon_number,
+        highlight_small=highlight_small,
+        highlight_large=args.highlight_large,
+        smoothing=smoothing,
+        layout=args.layout,
+        layout_regions=layout_regions,
+        system_mode=system_mode,
+        legend_mode=args.legend_mode,
+        palette=args.palette,
+        theme=args.theme,
+        figsize=(args.fig_width, args.fig_height),
+        return_summary=True,
+        show_uncertainty=not args.no_uncertainty,
+        output_path=None,
+    )
+
+    if args.out_csv:
+        os.makedirs(os.path.dirname(args.out_csv) or ".", exist_ok=True)
+        plot_data.to_csv(args.out_csv, index=False)
+        print(f"[OK] wrote: {args.out_csv}")
+
+    if args.out_summary:
+        os.makedirs(os.path.dirname(args.out_summary) or ".", exist_ok=True)
+        with open(args.out_summary, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
+        print(f"[OK] wrote: {args.out_summary}")
+
+    if args.out_fig:
+        os.makedirs(os.path.dirname(args.out_fig) or ".", exist_ok=True)
+        fig.savefig(args.out_fig, bbox_inches="tight", dpi=args.dpi)
+        print(f"[OK] wrote: {args.out_fig}")
+
+    print(f"# source={source_desc}")
+    print(f"# plot_rows={len(plot_data)}, plot_mode={summary.get('plot_mode', args.mode)}")
+    if "group_by" in summary:
+        systems = ", ".join(sorted(summary.get("by_system", {}).keys()))
+        print(f"# group_by={summary['group_by']}, systems={systems}")
+        overall = summary.get("overall", {})
+        print(
+            f"# overall parent=C{overall.get('parent_carbon_number')} "
+            f"peak={overall.get('parent_peak_count', 0):.6g} "
+            f"final={overall.get('parent_final_count', 0):.6g} "
+            f"decay_onset={overall.get('parent_decay_onset_time')}"
+        )
+    else:
+        print(
+            f"# parent=C{summary.get('parent_carbon_number')} "
+            f"peak={summary.get('parent_peak_count', 0):.6g} "
+            f"final={summary.get('parent_final_count', 0):.6g} "
+            f"decay_onset={summary.get('parent_decay_onset_time')}"
+        )
+        print(
+            f"# small_peak={summary.get('small_fragment_peak_time')} "
+            f"large_peak={summary.get('large_hydrocarbon_peak_time')} "
+            f"max_carbon={summary.get('max_carbon_number_observed')}"
+        )
+
+    plt.close(fig)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ReacNetGenerator 常用检索终端工具 (formula/smiles/path/topshare/plot)."
+        description="ReacNetGenerator 常用检索终端工具 (formula/smiles/path/topshare/plot/carbon-plot)."
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -923,6 +1056,96 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅输出目标展开映射(公式->SMILES), 不绘图",
     )
     sp_plot.set_defaults(func=cmd_plot)
+
+    sp_carbon = sub.add_parser(
+        "carbon-plot",
+        help="按碳数聚合绘制分子数量时间演化图",
+    )
+    add_reac_flags(sp_carbon)
+    sp_carbon.add_argument("--data", default="", help="tidy CSV/Excel 路径, 提供后优先于 --species-file")
+    sp_carbon.add_argument(
+        "--species-file",
+        default="",
+        help="RNG .species 文件路径, 默认由 --reac 自动推导",
+    )
+    sp_carbon.add_argument("--time-col", default="time", help="tidy 表时间列名")
+    sp_carbon.add_argument("--species-col", default="species", help="tidy 表物种列名")
+    sp_carbon.add_argument("--count-col", default="count", help="tidy 表计数列名")
+    sp_carbon.add_argument("--system-col", default="", help="tidy 表体系列名")
+    sp_carbon.add_argument("--replicate-col", default="", help="tidy 表重复列名")
+    sp_carbon.add_argument("--system-name", default="", help="从 .species 读取时附加的 system 常量值")
+    sp_carbon.add_argument("--replicate-id", default="", help="从 .species 读取时附加的 replicate 常量值")
+    sp_carbon.add_argument(
+        "--x-axis",
+        choices=["step", "ps", "ns"],
+        default="ps",
+        help=".species 输入时的时间轴单位",
+    )
+    sp_carbon.add_argument(
+        "--timestep-ps",
+        type=float,
+        default=0.0001,
+        help="LAMMPS 单步时间(ps), 用于 .species 的 step->ps/ns 转换",
+    )
+    sp_carbon.add_argument("--mode", choices=["exact", "binned", "topk"], default="exact", help="绘图模式")
+    sp_carbon.add_argument("--top-k", type=int, default=12, help="topk 模式保留的碳数数量")
+    sp_carbon.add_argument("--max-exact-lines", type=int, default=24, help="exact 模式自动切换阈值")
+    sp_carbon.add_argument(
+        "--carbon-bins",
+        default="",
+        help="分箱定义, 如 '1-4;5-15;16-30;31+' 或 'Small:1-4;Growth:31+'",
+    )
+    sp_carbon.add_argument(
+        "--display-ranges",
+        default="",
+        help="仅显示的碳数/区间, 如 'C1;C2;C24;C30+'",
+    )
+    sp_carbon.add_argument(
+        "--merge-ranges",
+        default="",
+        help="合并成单曲线的碳数区间, 如 'Small:1-4;Parent:24;Growth:30+'",
+    )
+    sp_carbon.add_argument("--layout", choices=["single", "subplots"], default="single", help="布局")
+    sp_carbon.add_argument(
+        "--layout-regions",
+        default="",
+        help="子图区间定义, 格式同 --carbon-bins",
+    )
+    sp_carbon.add_argument(
+        "--system-mode",
+        choices=["facet", "overlay"],
+        default="",
+        help="多体系时使用 facet 或 overlay",
+    )
+    sp_carbon.add_argument("--parent-carbon-number", type=int, default=0, help="母体碳数, 0 表示自动推断")
+    sp_carbon.add_argument(
+        "--highlight-small",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
+        default=[1, 4],
+        help="小碎片高亮区间, 例如 1 4",
+    )
+    sp_carbon.add_argument("--highlight-large", type=int, default=30, help="大分子增长阈值")
+    sp_carbon.add_argument(
+        "--smoothing",
+        choices=["none", "rolling", "savgol"],
+        default="none",
+        help="平滑方式",
+    )
+    sp_carbon.add_argument("--smooth-window", type=int, default=5, help="rolling/savgol 窗口")
+    sp_carbon.add_argument("--smooth-polyorder", type=int, default=2, help="savgol 多项式阶数")
+    sp_carbon.add_argument("--legend-mode", choices=["detailed", "compact"], default="compact", help="图例模式")
+    sp_carbon.add_argument("--theme", choices=["light", "dark"], default="light", help="主题")
+    sp_carbon.add_argument("--palette", default="viridis", help="中间碳数区调色板")
+    sp_carbon.add_argument("--fig-width", type=float, default=10.5, help="图宽(英寸)")
+    sp_carbon.add_argument("--fig-height", type=float, default=6.2, help="图高(英寸)")
+    sp_carbon.add_argument("--dpi", type=int, default=180, help="保留兼容性的 dpi 参数")
+    sp_carbon.add_argument("--no-uncertainty", action="store_true", help="有 replicate 时关闭标准差阴影")
+    sp_carbon.add_argument("--out-fig", default="", help="输出图像路径, 支持 PNG/SVG/PDF")
+    sp_carbon.add_argument("--out-csv", default="", help="输出 plot_data CSV")
+    sp_carbon.add_argument("--out-summary", default="", help="输出 summary JSON")
+    sp_carbon.set_defaults(func=cmd_carbon_plot)
 
     return p
 

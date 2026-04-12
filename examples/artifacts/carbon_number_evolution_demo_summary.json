@@ -1,0 +1,270 @@
+{
+  "group_by": "system",
+  "overall": {
+    "parent_carbon_number": 24,
+    "parent_initial_count": 23.0,
+    "parent_peak_count": 23.0,
+    "parent_final_count": 7.0,
+    "parent_decay_onset_time": 1.0,
+    "small_fragment_peak_time": 3.0,
+    "small_fragment_peak_count": 16.5,
+    "large_hydrocarbon_peak_time": 3.0,
+    "large_hydrocarbon_peak_count": 2.0,
+    "max_carbon_number_observed": 30,
+    "observed_carbon_numbers": [
+      1,
+      2,
+      24,
+      30
+    ],
+    "carbon_distribution_entropy": {
+      "time": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "value": [
+        0.3576271598532216,
+        0.846170003900893,
+        1.1644074866830934,
+        1.248065592846714
+      ]
+    },
+    "small_fragment_fraction_over_time": {
+      "time": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "value": [
+        0.11538461538461539,
+        0.32,
+        0.48,
+        0.6470588235294118
+      ]
+    },
+    "large_hydrocarbon_fraction_over_time": {
+      "time": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "value": [
+        0.0,
+        0.0,
+        0.04,
+        0.0784313725490196
+      ]
+    },
+    "oxidized_product_count_over_time": {
+      "time": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "value": [
+        0.0,
+        3.5,
+        6.5,
+        11.0
+      ]
+    },
+    "parent_carbon_to_oxidized_products_fraction_over_time": {
+      "time": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "value": [
+        0.0,
+        0.006340579710144928,
+        0.01177536231884058,
+        0.019927536231884056
+      ]
+    }
+  },
+  "by_system": {
+    "O2": {
+      "parent_carbon_number": 24,
+      "parent_initial_count": 11.5,
+      "parent_peak_count": 11.5,
+      "parent_final_count": 1.5,
+      "parent_decay_onset_time": 1.0,
+      "small_fragment_peak_time": 3.0,
+      "small_fragment_peak_count": 10.0,
+      "large_hydrocarbon_peak_time": 0.0,
+      "large_hydrocarbon_peak_count": 0.0,
+      "max_carbon_number_observed": 30,
+      "observed_carbon_numbers": [
+        1,
+        2,
+        24,
+        30
+      ],
+      "carbon_distribution_entropy": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.3576271598532216,
+          0.9191738293819782,
+          1.024010220294295,
+          0.6698932216137069
+        ]
+      },
+      "small_fragment_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.11538461538461539,
+          0.375,
+          0.625,
+          0.8695652173913043
+        ]
+      },
+      "large_hydrocarbon_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "oxidized_product_count_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          2.5,
+          5.5,
+          9.0
+        ]
+      },
+      "parent_carbon_to_oxidized_products_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          0.009057971014492754,
+          0.019927536231884056,
+          0.03260869565217391
+        ]
+      }
+    },
+    "pyrolysis": {
+      "parent_carbon_number": 24,
+      "parent_initial_count": 11.5,
+      "parent_peak_count": 11.5,
+      "parent_final_count": 5.5,
+      "parent_decay_onset_time": 1.0,
+      "small_fragment_peak_time": 3.0,
+      "small_fragment_peak_count": 6.5,
+      "large_hydrocarbon_peak_time": 3.0,
+      "large_hydrocarbon_peak_count": 2.0,
+      "max_carbon_number_observed": 30,
+      "observed_carbon_numbers": [
+        1,
+        2,
+        24,
+        30
+      ],
+      "carbon_distribution_entropy": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.3576271598532216,
+          0.7435648254271452,
+          1.0652229694768618,
+          1.2878393642549475
+        ]
+      },
+      "small_fragment_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.11538461538461539,
+          0.2692307692307692,
+          0.34615384615384615,
+          0.4642857142857143
+        ]
+      },
+      "large_hydrocarbon_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          0.0,
+          0.07692307692307693,
+          0.14285714285714285
+        ]
+      },
+      "oxidized_product_count_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          1.0,
+          1.0,
+          2.0
+        ]
+      },
+      "parent_carbon_to_oxidized_products_fraction_over_time": {
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0
+        ],
+        "value": [
+          0.0,
+          0.0036231884057971015,
+          0.0036231884057971015,
+          0.007246376811594203
+        ]
+      }
+    }
+  },
+  "plot_mode": "exact"
+}
