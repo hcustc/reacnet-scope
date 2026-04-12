@@ -97,6 +97,7 @@ const state = {
     isRunning: false,
     selectedEventRow: null,
     selectedEventConfig: null,
+    atomGroups: null,
     frameRows: [],
     trajectoryText: "",
     trajectoryPreviewText: "",
@@ -366,6 +367,22 @@ function atomIdTextValue(value) {
       .join(",");
   }
   return String(value || "").trim();
+}
+
+function summarizeContextAtomGroups(atomGroups) {
+  const groups = atomGroups && typeof atomGroups === "object" ? atomGroups : {};
+  const orderedKeys = [
+    ["core_atom_ids", "core"],
+    ["context_atom_ids", "context"],
+    ["reactant_atom_ids", "reactant"],
+    ["product_atom_ids", "product"],
+  ];
+  const parts = orderedKeys
+    .map(([key, label]) => {
+      const values = Array.isArray(groups[key]) ? groups[key] : [];
+      return `${label}=${values.length}`;
+    });
+  return parts.join(" | ");
 }
 
 function resolveContextEventResolution(row) {
@@ -906,6 +923,7 @@ function renderContextExtractResultCard() {
   const slot = ensureResultSlot("context_extract");
   const card = q("contextExtractResultCard");
   const metaEl = q("contextExtractMetaBox");
+  const atomGroupsEl = q("contextExtractAtomGroupsSummary");
   const tableEl = q("contextExtractResultTable");
   const framesBox = q("contextExtractFramesBox");
   const exportFramesBtn = q("btnExportContextFrames");
@@ -921,6 +939,12 @@ function renderContextExtractResultCard() {
   const shouldShow = hasRows || (status && status !== "idle");
   card.classList.toggle("hidden", !shouldShow);
   metaEl.textContent = JSON.stringify(slot.meta || {}, null, 2);
+  if (atomGroupsEl instanceof HTMLElement) {
+    const atomGroups = state.contextExtract.atomGroups || {};
+    atomGroupsEl.textContent = Object.keys(atomGroups).length
+      ? `当前导出子轨迹默认采用“跨帧完整分子并集”上下文：${summarizeContextAtomGroups(atomGroups)}`
+      : "";
+  }
   renderContextRowsToTable(tableEl, slot.rows || []);
   const frameRows = state.contextExtract.frameRows || [];
   framesBox.textContent = JSON.stringify(frameRows, null, 2);
@@ -4316,6 +4340,7 @@ function loadContextSelectedEvent(row, config = {}) {
 
 function resetContextExtractPayload({ clearRows = false, clearSelection = false, status = "idle" } = {}) {
   state.contextExtract.taskId = "";
+  state.contextExtract.atomGroups = null;
   state.contextExtract.frameRows = [];
   state.contextExtract.trajectoryText = "";
   state.contextExtract.trajectoryPreviewText = "";
@@ -4489,6 +4514,7 @@ async function runContextExtract(mode = "auto") {
     });
     if (state.contextExtract.taskId !== taskId) return data;
     state.contextExtract.frameRows = data.frame_rows || [];
+    state.contextExtract.atomGroups = data.atom_groups || null;
     state.contextExtract.trajectoryText = data.trajectory_text || "";
     state.contextExtract.trajectoryPreviewText = data.trajectory_preview_text || data.trajectory_text || "";
     state.contextExtract.trajectoryFilename = data?.suggested_files?.trajectory || "";

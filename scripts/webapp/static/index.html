@@ -610,8 +610,9 @@
                     <div class="field">
                       <label>Selected Event</label>
                       <div id="contextSelectedEventBox" class="selected-event-box">尚未选择事件。请先在上方 Step 1 的“反应事件候选实例”中载入一条事件，或在右侧填写手工切片范围。</div>
-                      <div class="field-note">这个入口会优先使用“已选事件”的 anchor、window 和 route 解析结果，不依赖你右侧手工填写的覆盖项。</div>
-                    </div>
+                    <div class="field-note">这个入口会优先使用“已选事件”的 anchor、window 和 route 解析结果，不依赖你右侧手工填写的覆盖项。</div>
+                    <div class="field-note">默认导出的 subset 不是整盒子，也不是只有变化原子，而是围绕 reaction core 在关键三帧上取“完整分子并集”的上下文。</div>
+                  </div>
                     <div class="field">
                       <label for="qContextResolvedAtomIds">Resolved Visualization Atom IDs (只读, 供 VMD / OVITO 复制)</label>
                       <textarea id="qContextResolvedAtomIds" rows="3" readonly placeholder="载入事件后，这里会显示 route 推断并筛选后的原始 LAMMPS atom ids。"></textarea>
@@ -721,6 +722,7 @@
                   </div>
                 </div>
                 <pre id="contextExtractMetaBox" class="meta"></pre>
+                <div id="contextExtractAtomGroupsSummary" class="field-note"></div>
                 <div class="table-wrap table-wrap-compact">
                   <table id="contextExtractResultTable">
                     <thead></thead>
