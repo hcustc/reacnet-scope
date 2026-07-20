@@ -18,6 +18,10 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
+# Reference data files (large, not for github)
+ref_data/
+*.lammpstrj.route
+
 # OS/editor
 .DS_Store
 .idea/

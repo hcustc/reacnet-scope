@@ -534,7 +534,7 @@
                 <div class="field">
                   <label for="qContextReactionLocateSmiles">反应式</label>
                   <input id="qContextReactionLocateSmiles" type="text" placeholder="例如 A + B -> C + D；优先按 canonical SMILES 匹配，失败后退回公式匹配" />
-                  <div class="field-note">推荐直接从上方“反应式检索”结果点击进入。Step 1 的输出每一行都应该是一个 <code>route-resolved</code> 的具体反应事件实例，而不是物种出现/消失事件。</div>
+                  <div class="field-note">推荐直接从上方“反应式检索”结果点击进入。主表只保留“严格反应事件”；与查询有关但不够严格的过程会落到下方“相关候选过程”区，不再与主结果混排。</div>
                 </div>
                 <div class="row row-context-window">
                   <div class="field mini">
@@ -569,22 +569,36 @@
 
               <article class="card module-result-card hidden" id="contextReactionResultCard">
                 <div class="card-head">
-                  <h2>Step 1 输出: 净反应事件实例</h2>
+                  <h2>Step 1 输出: 严格反应事件</h2>
                   <div class="plot-actions">
                     <button id="btnExportContextReactionCsv" class="ghost" disabled>导出事件 CSV</button>
                   </div>
                 </div>
                 <pre id="contextReactionMetaBox" class="meta"></pre>
+                <div class="field-note">主表只保留前后净化学计量恰好等于 1 次查询反应、方向一致、真实轨迹采样足够且上下文恢复可靠的事件。</div>
                 <div class="table-wrap table-wrap-compact">
                   <table id="contextReactionResultTable">
                     <thead></thead>
                     <tbody></tbody>
                   </table>
                 </div>
+                <section class="plot-option-group">
+                  <div class="card-head compact">
+                    <h3>相关候选过程</h3>
+                  </div>
+                  <div class="field-note">这里保留与你查询反应相关、但不满足严格条件的过程，例如 partial、multiplicity、sampling sparse 或 context fallback。它们不再冒充主结果，但仍可单独下钻核查。</div>
+                  <pre id="contextReactionCandidateMetaBox" class="meta meta-compact"></pre>
+                  <div class="table-wrap table-wrap-compact">
+                    <table id="contextReactionCandidateTable">
+                      <thead></thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </section>
                 <details class="option-fold plot-option-group">
                   <summary>查看已丢弃候选 / 调试</summary>
                   <div class="option-fold-body">
-                    <div class="field-note">这些候选已经被 `.species` 净变化校验拒绝，不会进入 Step 2。常见原因是前后 comparison frame 没有净物种变化，或方向与查询反应不一致。</div>
+                    <div class="field-note">这些候选已经被硬拒绝，不会进入 Step 2。常见原因是前后 comparison frame 无净变化、方向错误，或完全不支持当前查询反应。</div>
                     <pre id="contextReactionDiscardedMetaBox" class="meta"></pre>
                     <div class="table-wrap table-wrap-compact">
                       <table id="contextReactionDiscardedTable">
@@ -599,7 +613,7 @@
               <article class="card query-card" id="card-context-extract">
                 <h2>Step 2. 选中单事件并提取局部反应轨迹</h2>
                 <div class="field-note context-extract-intro">
-                  主流程只做两件事：先从 Step 1 里选中一条 <code>reaction-resolved</code> 事件，再在这里直接生成该单事件的局部子轨迹、5 帧关键帧故事板，并一键打开 OVITO / VMD。手工帧范围和 atom ids 覆盖项只保留在下方高级区。
+                  主流程只做两件事：先从 Step 1 主表里选中一条“严格反应事件”，再在这里直接生成该单事件的局部子轨迹、5 帧关键帧故事板，并一键打开 OVITO / VMD。若你是从“相关候选过程”进入，这里会明确标记为候选核查模式。手工帧范围和 atom ids 覆盖项只保留在下方高级区。
                 </div>
                 <div class="context-extract-grid">
                   <section class="context-extract-block">
@@ -692,7 +706,7 @@
                     </details>
                   </section>
                 </div>
-                <div id="contextExtractModeHint" class="context-extract-status">先从 Step 1 结果中选中一条 route-resolved 事件，再进入 Step 2 提取和查看局部反应轨迹。</div>
+                <div id="contextExtractModeHint" class="context-extract-status">先从 Step 1 主表中选中一条严格反应事件，再进入 Step 2 提取和查看局部反应轨迹；候选过程只用于人工核查。</div>
                 <div id="contextExtractProgress" class="progress-card is-idle">
                   <div class="progress-head">
                     <strong id="contextExtractProgressLabel">Idle</strong>
@@ -723,6 +737,29 @@
                 </div>
                 <pre id="contextExtractMetaBox" class="meta"></pre>
                 <div id="contextExtractAtomGroupsSummary" class="field-note"></div>
+                <section id="contextExtractPathPanel" class="hidden">
+                  <div class="row row-context-extract-paths">
+                    <div class="field">
+                      <label for="contextExtractTrajectoryPath">Trajectory Subset</label>
+                      <input id="contextExtractTrajectoryPath" type="text" readonly placeholder="生成后显示 .lammpstrj 导出路径" />
+                    </div>
+                    <div class="field">
+                      <label for="contextExtractVmdScriptPath">VMD Script</label>
+                      <input id="contextExtractVmdScriptPath" type="text" readonly placeholder="生成后显示 .tcl 脚本路径" />
+                    </div>
+                    <div class="field">
+                      <label for="contextExtractTypeMapPath">Type Map (可选)</label>
+                      <input id="contextExtractTypeMapPath" type="text" readonly placeholder="若注入 Type -> Element Map，这里显示映射文件路径" />
+                    </div>
+                  </div>
+                  <div class="card-actions compact-actions">
+                    <button id="btnCopyContextTrajectoryPath" class="ghost" type="button" disabled>复制轨迹路径</button>
+                    <button id="btnCopyContextVmdScriptPath" class="ghost" type="button" disabled>复制 VMD 脚本路径</button>
+                    <button id="btnCopyContextTypeMapPath" class="ghost" type="button" disabled>复制 Type Map 路径</button>
+                    <button id="btnOpenContextExportDir" class="ghost" type="button" disabled>打开导出目录</button>
+                  </div>
+                  <div class="field-note">VMD 打开默认优先使用上面的 <code>.tcl</code> 脚本；如果你要手工导入，请使用 <code>Trajectory Subset</code> 对应的 <code>.lammpstrj</code> 文件。</div>
+                </section>
                 <div class="table-wrap table-wrap-compact">
                   <table id="contextExtractResultTable">
                     <thead></thead>

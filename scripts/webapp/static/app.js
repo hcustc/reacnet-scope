@@ -105,6 +105,7 @@ const state = {
     framesFilename: "",
     trajectoryPath: "",
     vmdScriptPath: "",
+    typeMapPath: "",
     parsedFrames: [],
     frameIndex: 0,
     viewMode: "3d",
@@ -387,6 +388,35 @@ function summarizeContextAtomGroups(atomGroups) {
 
 function resolveContextEventResolution(row) {
   const safeRow = row || {};
+  const verificationStatus = String(safeRow.verification_status || "").trim();
+  if (verificationStatus) {
+    const selectedEventClass = String(safeRow.selected_event_class || "").trim()
+      || (verificationStatus === "verified_exact"
+        ? "verified"
+        : (verificationStatus.startsWith("discarded_") ? "discarded" : "candidate"));
+    const label = String(safeRow.event_resolution_label || "").trim()
+      || (selectedEventClass === "verified"
+        ? "严格反应事件"
+        : (selectedEventClass === "candidate" ? "相关候选过程" : "已拒绝"));
+    const reason = String(safeRow.event_resolution_reason || "").trim()
+      || String(safeRow.failure_reason || "").trim()
+      || verificationStatus;
+    const step2Visualizable = safeRow.step2_visualizable == null
+      ? booleanish(safeRow.visualization_ready)
+      : booleanish(safeRow.step2_visualizable);
+    const step2Extractable = safeRow.step2_extractable == null
+      ? selectedEventClass !== "discarded"
+      : booleanish(safeRow.step2_extractable);
+    return {
+      key: selectedEventClass,
+      label,
+      reason,
+      step2Visualizable,
+      step2Extractable,
+      verificationStatus,
+      selectedEventClass,
+    };
+  }
   const explicitKey = String(safeRow.event_resolution || "").trim();
   const routeResolved = (
     numericOrZero(safeRow.core_atom_count) > 0
@@ -418,7 +448,7 @@ function resolveContextEventResolution(row) {
         : ".species 时间事件没有对应的 route 原子变化"));
   const step2Visualizable = safeRow.step2_visualizable == null ? (key === "route_resolved") : booleanish(safeRow.step2_visualizable);
   const step2Extractable = safeRow.step2_extractable == null ? (key !== "species_only") : booleanish(safeRow.step2_extractable);
-  return { key, label, reason, step2Visualizable, step2Extractable };
+  return { key, label, reason, step2Visualizable, step2Extractable, verificationStatus: "", selectedEventClass: "" };
 }
 
 function selectedEventModeValue(baseSelectId, advancedSelectId) {
@@ -493,6 +523,7 @@ function syncContextExtractActionState() {
   const selectedEvent = state.contextExtract.selectedEventRow;
   const hasSelectedEvent = !!selectedEvent;
   const selectedResolution = resolveContextEventResolution(selectedEvent);
+  const selectedClass = String(selectedResolution.selectedEventClass || "");
   const hasManualRanges = contextHasManualFrameRanges();
   const canAutoExtract = hasSelectedEvent && selectedResolution.step2Extractable;
   const canDirectOpen = hasSelectedEvent && selectedResolution.step2Visualizable;
@@ -518,11 +549,15 @@ function syncContextExtractActionState() {
     return;
   }
   if (hasSelectedEvent && !selectedResolution.step2Extractable) {
-    hint.textContent = `当前已选事件属于“${selectedResolution.label}”：${selectedResolution.reason}。请改选 route-resolved 事件后再进入 Step 2。`;
+    hint.textContent = `当前已选事件属于“${selectedResolution.label}”：${selectedResolution.reason}。这条记录不能进入 Step 2 主流程。`;
     return;
   }
   if (hasSelectedEvent && !selectedResolution.step2Visualizable) {
-    hint.textContent = `当前已选事件属于“${selectedResolution.label}”：可以提取锚点上下文，但不能直接作为反应事件打开 OVITO/VMD。`;
+    hint.textContent = `当前已选事件属于“${selectedResolution.label}”：可以导出候选过程上下文，但不能作为“严格反应事件”直接打开 OVITO/VMD。`;
+    return;
+  }
+  if (hasSelectedEvent && selectedClass === "candidate") {
+    hint.textContent = "当前已选的是候选过程。你可以继续导出局部轨迹做人工核查，但它不会被宣称为严格净反应事件。";
     return;
   }
   if (hasSelectedEvent && hasManualRanges) {
@@ -573,6 +608,15 @@ function flashButtonLabel(button, successText = "已复制", delayMs = 900) {
   }, delayMs);
 }
 
+function pathDirname(path) {
+  const text = String(path || "").trim();
+  if (!text) return "";
+  const normalized = text.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  if (idx <= 0) return normalized || "";
+  return normalized.slice(0, idx);
+}
+
 function renderRowsToTable(tableEl, rows, viewerKey = "general") {
   const thead = tableEl.querySelector("thead");
   const tbody = tableEl.querySelector("tbody");
@@ -608,11 +652,38 @@ function renderRowsToTable(tableEl, rows, viewerKey = "general") {
 
 function contextPreferredColumns(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
+  const hasVerificationStatus = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "verification_status"));
   const hasReactionEventId = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "event_id"));
   const hasCandidateId = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "candidate_id"));
   const hasEventIndex = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "event_index"));
   const hasRangeIndex = safeRows.some((row) => row && Object.prototype.hasOwnProperty.call(row, "range_index"));
-  const base = hasReactionEventId
+  const base = hasVerificationStatus
+    ? [
+        "event_index",
+        "candidate_index",
+        "event_id",
+        "reaction_match_mode",
+        "route_event_start_frame",
+        "route_event_end_frame",
+        "comparison_before_frame",
+        "comparison_after_frame",
+        "trajectory_pre_frame",
+        "trajectory_anchor_frame",
+        "trajectory_post_frame",
+        "window_start",
+        "window_end",
+        "n_window_frames",
+        "expected_delta_summary",
+        "observed_delta_summary",
+        "verification_status",
+        "route_confidence",
+        "reaction_confidence",
+        "trajectory_sampling_status",
+        "context_reconstruction_mode",
+        "visualization_ready",
+        "matched_smiles_at_anchor",
+      ]
+    : hasReactionEventId
     ? [
         "event_index",
         "event_id",
@@ -740,9 +811,7 @@ function renderContextRowsToTable(tableEl, rows, { actionLabel = "", actionClass
         })
         .join("");
       const isSelected = sameContextEventRow(row, selectedRow);
-      const rowActionLabel = isSelected
-        ? "已载入"
-        : (resolution.key === "route_resolved" ? actionLabel : (resolution.key === "anchor_only" ? "载入锚点" : "仅时间定位"));
+      const rowActionLabel = isSelected ? "已载入" : actionLabel;
       const actionTd = showAction
         ? `
         <td class="context-row-actions">
@@ -827,6 +896,7 @@ function renderContextSelectedEventBox() {
   }
   const parts = [];
   const resolution = resolveContextEventResolution(row);
+  const verificationStatus = String(row.verification_status || "").trim();
   if (selectedConfig.source_label) parts.push(selectedConfig.source_label);
   if (row.event_id) parts.push(`event_id=${row.event_id}`);
   if (row.event_index != null) parts.push(`事件 #${row.event_index}`);
@@ -867,6 +937,8 @@ function renderContextSelectedEventBox() {
   if (!resolvedAtomIds) {
     box.textContent = `${box.textContent}\nroute 原子解析为空：请确认已生成对应 .route 文件，或该事件没有可识别的原子变化。`;
     box.textContent = `${box.textContent}\n${resolution.reason}`;
+  } else if (verificationStatus) {
+    box.textContent = `${box.textContent}\nexpected_delta=${String(row.expected_delta_summary || "").trim() || "-"}\nobserved_delta=${String(row.observed_delta_summary || "").trim() || "-"}\nverification=${verificationStatus}\nsampling=${String(row.trajectory_sampling_status || "").trim() || "-"}\ncontext=${String(row.context_reconstruction_mode || "").trim() || "-"}\nroute_confidence=${String(row.route_confidence ?? "-")}\nreaction_confidence=${String(row.reaction_confidence ?? "-")}`;
   } else if (String(row.from_multiset_summary || "").trim() || String(row.to_multiset_summary || "").trim()) {
     box.textContent = `${box.textContent}\nfrom_multiset=${String(row.from_multiset_summary || "").trim() || "-"}\nto_multiset=${String(row.to_multiset_summary || "").trim() || "-"}\nnet=${String(row.net_reaction_summary || "").trim() || "-"}\nquality=${String(row.event_quality || "").trim() || "-"}`;
   } else if (String(row.transition_from_samples || "").trim() || String(row.transition_to_samples || "").trim()) {
@@ -887,15 +959,19 @@ function renderContextLocateResultCard(moduleKey, cardId, metaId, tableId, expor
   const metaEl = q(metaId);
   const tableEl = q(tableId);
   const exportCsvBtn = q(exportBtnId);
+  const candidateMetaEl = q("contextReactionCandidateMetaBox");
+  const candidateTableEl = q("contextReactionCandidateTable");
   const discardedMetaEl = q("contextReactionDiscardedMetaBox");
   const discardedTableEl = q("contextReactionDiscardedTable");
   if (!card || !metaEl || !tableEl || !exportCsvBtn) return;
   const hasRows = !!(slot.rows || []).length;
+  const candidateRows = Array.isArray(slot.meta?.candidate_rows) ? slot.meta.candidate_rows : [];
   const discardedRows = Array.isArray(slot.meta?.discarded_rows) ? slot.meta.discarded_rows : [];
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || discardedRows.length || (status && status !== "idle");
+  const shouldShow = hasRows || candidateRows.length || discardedRows.length || (status && status !== "idle");
   card.classList.toggle("hidden", !shouldShow);
   const safeMeta = { ...(slot.meta || {}) };
+  delete safeMeta.candidate_rows;
   delete safeMeta.discarded_rows;
   metaEl.textContent = JSON.stringify(safeMeta, null, 2);
   renderContextRowsToTable(tableEl, slot.rows || [], {
@@ -903,13 +979,26 @@ function renderContextLocateResultCard(moduleKey, cardId, metaId, tableId, expor
     actionClass: "btn-context-load-row",
     selectedRow: state.contextExtract.selectedEventRow,
   });
-  if (discardedMetaEl) {
+  if (moduleKey === "context_reaction" && candidateMetaEl) {
+    candidateMetaEl.textContent = JSON.stringify({
+      status,
+      candidate_rows: candidateRows.length,
+    }, null, 2);
+  }
+  if (moduleKey === "context_reaction" && candidateTableEl) {
+    renderContextRowsToTable(candidateTableEl, candidateRows, {
+      actionLabel: "按候选过程查看",
+      actionClass: "btn-context-load-candidate-row",
+      selectedRow: state.contextExtract.selectedEventRow,
+    });
+  }
+  if (moduleKey === "context_reaction" && discardedMetaEl) {
     discardedMetaEl.textContent = JSON.stringify({
       status,
       discarded_rows: discardedRows.length,
     }, null, 2);
   }
-  if (discardedTableEl) {
+  if (moduleKey === "context_reaction" && discardedTableEl) {
     renderContextRowsToTable(discardedTableEl, discardedRows, {
       actionLabel: "",
       actionClass: "",
@@ -924,6 +1013,14 @@ function renderContextExtractResultCard() {
   const card = q("contextExtractResultCard");
   const metaEl = q("contextExtractMetaBox");
   const atomGroupsEl = q("contextExtractAtomGroupsSummary");
+  const pathPanel = q("contextExtractPathPanel");
+  const trajectoryPathEl = q("contextExtractTrajectoryPath");
+  const vmdScriptPathEl = q("contextExtractVmdScriptPath");
+  const typeMapPathEl = q("contextExtractTypeMapPath");
+  const copyTrajectoryPathBtn = q("btnCopyContextTrajectoryPath");
+  const copyVmdScriptPathBtn = q("btnCopyContextVmdScriptPath");
+  const copyTypeMapPathBtn = q("btnCopyContextTypeMapPath");
+  const openExportDirBtn = q("btnOpenContextExportDir");
   const tableEl = q("contextExtractResultTable");
   const framesBox = q("contextExtractFramesBox");
   const exportFramesBtn = q("btnExportContextFrames");
@@ -933,7 +1030,12 @@ function renderContextExtractResultCard() {
   const openOvitoBtn = q("btnOpenContextTrajOvito");
   const openPymolBtn = q("btnOpenContextTrajPymol");
   const revealBtn = q("btnRevealContextTraj");
-  if (!card || !metaEl || !tableEl || !framesBox || !exportFramesBtn || !exportTrajBtn || !openBtn || !openVmdBtn || !openOvitoBtn || !openPymolBtn || !revealBtn) return;
+  if (
+    !card || !metaEl || !tableEl || !framesBox || !exportFramesBtn || !exportTrajBtn
+    || !openBtn || !openVmdBtn || !openOvitoBtn || !openPymolBtn || !revealBtn
+    || !trajectoryPathEl || !vmdScriptPathEl || !typeMapPathEl
+    || !copyTrajectoryPathBtn || !copyVmdScriptPathBtn || !copyTypeMapPathBtn || !openExportDirBtn
+  ) return;
   const hasRows = !!(slot.rows || []).length;
   const status = String(slot.meta?.status || "").toLowerCase();
   const shouldShow = hasRows || (status && status !== "idle");
@@ -941,9 +1043,19 @@ function renderContextExtractResultCard() {
   metaEl.textContent = JSON.stringify(slot.meta || {}, null, 2);
   if (atomGroupsEl instanceof HTMLElement) {
     const atomGroups = state.contextExtract.atomGroups || {};
-    atomGroupsEl.textContent = Object.keys(atomGroups).length
+    const truth = slot.meta?.meta?.event_truth_summary || {};
+    const classLabel = String(slot.meta?.meta?.selected_event_class || slot.meta?.selected_event_class || "")
+      || String(state.contextExtract.selectedEventConfig?.selected_event_class || "");
+    const truthParts = [];
+    if (classLabel) truthParts.push(classLabel === "verified" ? "严格事件" : "候选过程");
+    if (truth.expected_delta_summary) truthParts.push(`expected=${truth.expected_delta_summary}`);
+    if (truth.observed_delta_summary) truthParts.push(`observed=${truth.observed_delta_summary}`);
+    if (truth.trajectory_sampling_status) truthParts.push(`sampling=${truth.trajectory_sampling_status}`);
+    if (truth.context_reconstruction_mode) truthParts.push(`context=${truth.context_reconstruction_mode}`);
+    const groupSummary = Object.keys(atomGroups).length
       ? `当前导出子轨迹默认采用“跨帧完整分子并集”上下文：${summarizeContextAtomGroups(atomGroups)}`
       : "";
+    atomGroupsEl.textContent = [truthParts.join(" | "), groupSummary].filter(Boolean).join(" | ");
   }
   renderContextRowsToTable(tableEl, slot.rows || []);
   const frameRows = state.contextExtract.frameRows || [];
@@ -951,6 +1063,19 @@ function renderContextExtractResultCard() {
   exportFramesBtn.disabled = !frameRows.length;
   const hasTrajText = !!state.contextExtract.trajectoryText;
   const hasTrajPath = !!state.contextExtract.trajectoryPath;
+  const hasVmdScriptPath = !!state.contextExtract.vmdScriptPath;
+  const hasTypeMapPath = !!state.contextExtract.typeMapPath;
+  const exportDirPath = pathDirname(state.contextExtract.vmdScriptPath || state.contextExtract.trajectoryPath || state.contextExtract.typeMapPath || "");
+  trajectoryPathEl.value = state.contextExtract.trajectoryPath || "";
+  vmdScriptPathEl.value = state.contextExtract.vmdScriptPath || "";
+  typeMapPathEl.value = state.contextExtract.typeMapPath || "";
+  if (pathPanel instanceof HTMLElement) {
+    pathPanel.classList.toggle("hidden", !(hasTrajPath || hasVmdScriptPath || hasTypeMapPath));
+  }
+  copyTrajectoryPathBtn.disabled = !hasTrajPath;
+  copyVmdScriptPathBtn.disabled = !hasVmdScriptPath;
+  copyTypeMapPathBtn.disabled = !hasTypeMapPath;
+  openExportDirBtn.disabled = !exportDirPath;
   const query = slot.meta?.query || {};
   const manualExtraction = !!String(query.frame_ranges || "").trim() || numericOrZero(query.manual_atom_ids_count) > 0;
   const selectedResolution = resolveContextEventResolution(state.contextExtract.selectedEventRow);
@@ -965,7 +1090,7 @@ function renderContextExtractResultCard() {
     const trajectoryNote = slot.meta?.meta?.trajectory_note || slot.meta?.trajectory_note || "";
     const hint = trajectoryNote
       || (!allowExternalOpen
-        ? "当前提取结果不是 route-resolved 事件导出，因此外部查看按钮保持禁用。"
+        ? "当前提取结果不是“严格反应事件”导出，因此外部查看按钮保持禁用。"
         : "未生成可打开的轨迹子文件，因此 OVITO/VMD/PyMOL 按钮保持禁用。");
     if (metaEl.textContent && !String(metaEl.textContent).includes("viewer_button_hint")) {
       const payload = typeof slot.meta === "object" && slot.meta !== null
@@ -1688,6 +1813,19 @@ async function openContextTrajectoryPath(mode = "default") {
     : (state.contextExtract.trajectoryPath || "");
   if (!path) return;
   return fetchJson("/api/open_path", { path, mode });
+}
+
+async function openContextExportDirectory() {
+  const dir = pathDirname(
+    state.contextExtract.vmdScriptPath
+    || state.contextExtract.trajectoryPath
+    || state.contextExtract.typeMapPath
+    || ""
+  );
+  if (!dir) {
+    throw new Error("当前没有可打开的导出目录");
+  }
+  return fetchJson("/api/open_path", { path: dir, mode: "default" });
 }
 
 function resetContextTrajectoryViewer() {
@@ -4333,6 +4471,7 @@ function loadContextSelectedEvent(row, config = {}) {
         reaction_smiles: config.reaction_smiles || "",
         reaction_formulas: config.reaction_formulas || "",
         event_id: config.event_id || row?.event_id || "",
+        selected_event_class: config.selected_event_class || row?.selected_event_class || "",
       }
     : null;
   renderResultPanels();
@@ -4348,6 +4487,7 @@ function resetContextExtractPayload({ clearRows = false, clearSelection = false,
   state.contextExtract.framesFilename = "";
   state.contextExtract.trajectoryPath = "";
   state.contextExtract.vmdScriptPath = "";
+  state.contextExtract.typeMapPath = "";
   state.contextExtract.snapshotItems = [];
   resetContextTrajectoryViewer();
   if (clearSelection) {
@@ -4403,6 +4543,7 @@ async function runContextLocateTask({ moduleKey, params, setProgress, taskKey, s
         meta: data.meta,
         task_id: taskId,
         status: data?.meta?.status || "ok",
+        candidate_rows: data.candidate_rows || [],
         discarded_rows: data.discarded_rows || [],
       },
       rows: data.rows || [],
@@ -4485,6 +4626,7 @@ async function runContextExtract(mode = "auto") {
       reaction_smiles: selectedConfig.reaction_smiles || selectedRow.reaction_smiles || value("qContextReactionLocateSmiles") || value("qContextReactionSmiles"),
       reaction_formulas: selectedConfig.reaction_formulas || selectedRow.reaction_formulas || "",
       event_id: selectedRow.event_id,
+      selected_event_class: selectedConfig.selected_event_class || selectedRow.selected_event_class || "",
       before_frames: selectedConfig.before_frames || value("qContextReactionBefore") || 5,
       after_frames: selectedConfig.after_frames || value("qContextReactionAfter") || 5,
       max_events: value("qContextReactionMaxEvents") || 12,
@@ -4521,6 +4663,7 @@ async function runContextExtract(mode = "auto") {
     state.contextExtract.framesFilename = data?.suggested_files?.frames_csv || "";
     state.contextExtract.trajectoryPath = data.trajectory_saved_path || data?.meta?.trajectory_saved_path || "";
     state.contextExtract.vmdScriptPath = data.vmd_script_saved_path || data?.meta?.vmd_script_saved_path || "";
+    state.contextExtract.typeMapPath = data.type_map_saved_path || data?.meta?.type_map_saved_path || "";
     state.contextExtract.snapshotItems = Array.isArray(data.snapshot_items) ? data.snapshot_items : [];
     const refreshedSelectedRow = extractMode === "auto" && selectedRow
       ? ((data.rows || []).find((row) => sameContextEventRow(row, selectedRow))
@@ -4555,7 +4698,7 @@ async function runContextExtract(mode = "auto") {
 async function runContextExtractAndOpen(mode = "ovito") {
   const selectedResolution = resolveContextEventResolution(state.contextExtract.selectedEventRow);
   if (state.contextExtract.selectedEventRow && !selectedResolution.step2Visualizable) {
-    throw new Error(`当前已选事件属于“${selectedResolution.label}”，不能直接作为反应事件打开 OVITO/VMD。请改选 route-resolved 事件。`);
+    throw new Error(`当前已选事件属于“${selectedResolution.label}”，不能直接作为严格反应事件打开 OVITO/VMD。请改选主表中的严格事件，或先按候选过程导出后手工核查。`);
   }
   await runContextExtract("auto");
   if (!state.contextExtract.trajectoryPath) {
@@ -4856,6 +4999,30 @@ function bindEvents() {
       patchResultMeta("context_extract", { error: String(err) });
     }
   });
+  q("btnCopyContextTrajectoryPath").addEventListener("click", async (event) => {
+    try {
+      await copyTextToClipboard(state.contextExtract.trajectoryPath || "");
+      flashButtonLabel(event.currentTarget, "已复制轨迹路径");
+    } catch (err) {
+      patchResultMeta("context_extract", { error: String(err), trajectory_path: state.contextExtract.trajectoryPath || "" });
+    }
+  });
+  q("btnCopyContextVmdScriptPath").addEventListener("click", async (event) => {
+    try {
+      await copyTextToClipboard(state.contextExtract.vmdScriptPath || "");
+      flashButtonLabel(event.currentTarget, "已复制 VMD 路径");
+    } catch (err) {
+      patchResultMeta("context_extract", { error: String(err), vmd_script_path: state.contextExtract.vmdScriptPath || "" });
+    }
+  });
+  q("btnCopyContextTypeMapPath").addEventListener("click", async (event) => {
+    try {
+      await copyTextToClipboard(state.contextExtract.typeMapPath || "");
+      flashButtonLabel(event.currentTarget, "已复制 Type Map 路径");
+    } catch (err) {
+      patchResultMeta("context_extract", { error: String(err), type_map_path: state.contextExtract.typeMapPath || "" });
+    }
+  });
   q("btnExportContextSpeciesCsv").addEventListener("click", () => exportResultCsvByModule("context_species", "rng_context_species_events"));
   q("btnExportContextReactionCsv").addEventListener("click", () => exportResultCsvByModule("context_reaction", "rng_context_reaction_events"));
   q("btnExportContextFrames").addEventListener("click", exportContextFramesCsv);
@@ -4888,18 +5055,29 @@ function bindEvents() {
       patchResultMeta("context_extract", { error: String(err), trajectory_path: state.contextExtract.trajectoryPath || "" });
     });
   });
-  const bindContextLocateTable = (tableId, moduleKey, getConfig) => {
+  q("btnOpenContextExportDir").addEventListener("click", () => {
+    openContextExportDirectory().catch((err) => {
+      patchResultMeta("context_extract", {
+        error: String(err),
+        trajectory_path: state.contextExtract.trajectoryPath || "",
+        vmd_script_path: state.contextExtract.vmdScriptPath || "",
+        type_map_path: state.contextExtract.typeMapPath || "",
+      });
+    });
+  });
+  const bindContextLocateTable = (tableId, getRows, getConfig, buttonClass = "btn-context-load-row") => {
     const table = q(tableId);
     if (!table) return;
     table.addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      const loadBtn = target.closest(".btn-context-load-row");
+      const loadBtn = target.closest(`.${buttonClass}`);
       const rowEl = target.closest("tbody tr");
       if (!(rowEl instanceof HTMLTableRowElement) || !(rowEl.parentElement instanceof HTMLTableSectionElement)) return;
       const rowIndex = Array.from(rowEl.parentElement.rows).indexOf(rowEl);
       if (rowIndex < 0) return;
-      const row = (ensureResultSlot(moduleKey).rows || [])[rowIndex];
+      const sourceRows = typeof getRows === "function" ? getRows() : [];
+      const row = (sourceRows || [])[rowIndex];
       const resolution = resolveContextEventResolution(row);
       if (!resolution.step2Extractable) {
         return;
@@ -4909,7 +5087,7 @@ function bindEvents() {
       }
     });
   };
-  bindContextLocateTable("contextSpeciesResultTable", "context_species", () => ({
+  bindContextLocateTable("contextSpeciesResultTable", () => ensureResultSlot("context_species").rows || [], () => ({
     source: "species",
     source_label: "物种事件",
     species_file: effectiveSpeciesFile("qContextSpeciesFile"),
@@ -4920,15 +5098,26 @@ function bindEvents() {
     after_frames: value("qContextAfter") || 3,
     reaction_smiles: "",
   }));
-  bindContextLocateTable("contextReactionResultTable", "context_reaction", () => ({
+  bindContextLocateTable("contextReactionResultTable", () => ensureResultSlot("context_reaction").rows || [], () => ({
     source: "reaction_first",
-    source_label: "Reaction-First 反应事件",
+    source_label: "Reaction-First 严格反应事件",
     species_file: effectiveSpeciesFile("qContextSpeciesFile"),
     before_frames: value("qContextReactionBefore") || 5,
     after_frames: value("qContextReactionAfter") || 5,
     reaction_smiles: value("qContextReactionLocateSmiles"),
     event_id: "",
+    selected_event_class: "verified",
   }));
+  bindContextLocateTable("contextReactionCandidateTable", () => ensureResultSlot("context_reaction").meta?.candidate_rows || [], () => ({
+    source: "reaction_first_candidate",
+    source_label: "Reaction-First 候选过程",
+    species_file: effectiveSpeciesFile("qContextSpeciesFile"),
+    before_frames: value("qContextReactionBefore") || 5,
+    after_frames: value("qContextReactionAfter") || 5,
+    reaction_smiles: value("qContextReactionLocateSmiles"),
+    event_id: "",
+    selected_event_class: "candidate",
+  }), "btn-context-load-candidate-row");
   q("contextExtractResultTable").addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
