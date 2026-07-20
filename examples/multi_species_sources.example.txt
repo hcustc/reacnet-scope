@@ -1,0 +1,3 @@
+1500K@run1::/Volumes/T3000/200ps_rng_data/1500K_200ps_rng_data/2CP_O2_1ER_run1.lammpstrj.species
+1500K@run2::/Volumes/T3000/200ps_rng_data/1500K_200ps_rng_data/2CP_O2_1ER_run2.lammpstrj.reactionabcd
+2000K@run1::/Volumes/T3000/200ps_rng_data/2000K_200ps_rng_data/2CP_O2_1ER_run1.lammpstrj.species
