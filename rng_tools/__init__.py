@@ -18,6 +18,7 @@ __all__ = [
     "formula_nominal_mass",
     # io
     "load_table",
+    "load_transition_table",
     # carbon plot
     "parse_formula_to_atom_counts",
     "aggregate_counts_by_carbon_number",
@@ -35,7 +36,7 @@ from .formula import (
     formula_exact_mass,
     formula_nominal_mass,
 )
-from .io import load_table
+from .io import load_table, load_transition_table
 from .carbon_plot import (
     parse_formula_to_atom_counts,
     aggregate_counts_by_carbon_number,

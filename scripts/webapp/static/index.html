@@ -46,6 +46,10 @@
           <label for="sharedRouteFile">Shared Route 文件(可选)</label>
           <input id="sharedRouteFile" type="text" placeholder="支持 .route；需要自动解析事件 atom ids 时默认使用这里" />
         </div>
+        <div class="field">
+          <label for="sharedTableFile">Shared Table 文件(可选)</label>
+          <input id="sharedTableFile" type="text" placeholder="支持 .lammpstrj.table；转移网络默认使用这里" />
+        </div>
       </div>
       <div class="field-note">未填写模块覆盖项时，中间体检索、反应事件可视化、单文件时间曲线、单文件 Carbon 图都会默认使用这里的路径。多文件对比仍在各模块内单独填写。</div>
     </section>
@@ -1223,6 +1227,59 @@
           </div>
           <div id="carbonSvgGallery" class="svg-gallery"></div>
         </article>
+      </section>
+    </section>
+
+    <section id="transitionMatrixSection" class="transition-layout">
+      <article class="card query-card transition-controls">
+        <h2>Species Transition Matrix</h2>
+        <div class="field">
+          <label for="qTransitionTable">RNG Table</label>
+          <input id="qTransitionTable" type="text" placeholder="留空使用 ref_data/rng_rp3_test/rp3.lammpstrj.table" />
+        </div>
+        <div class="row transition-parameter-row">
+          <div class="field mini">
+            <label for="qTransitionMaxSpecies">显示物种数</label>
+            <input id="qTransitionMaxSpecies" type="number" min="5" max="100" value="40" />
+          </div>
+          <div class="field mini">
+            <label for="qTransitionMinCount">最小事件数</label>
+            <input id="qTransitionMinCount" type="number" min="1" value="1" />
+          </div>
+          <div class="field mini">
+            <label for="qTransitionTopEdges">强通道数</label>
+            <input id="qTransitionTopEdges" type="number" min="5" max="200" value="40" />
+          </div>
+        </div>
+        <button id="btnTransitionLoad">加载转移表</button>
+      </article>
+
+      <section id="transitionResultPanel" class="card plot-panel transition-panel hidden">
+        <div class="card-head transition-head">
+          <div>
+            <h2>物种转移图谱</h2>
+            <span id="transitionSourceLabel" class="viewer-note">等待加载</span>
+          </div>
+          <div class="segmented-control" role="group" aria-label="转移图显示模式">
+            <button id="btnTransitionHeatmap" type="button" class="is-selected" aria-pressed="true">矩阵</button>
+            <button id="btnTransitionNetwork" type="button" aria-pressed="false">网络</button>
+          </div>
+        </div>
+        <div id="transitionStats" class="stat-chips"></div>
+        <div id="transitionSelection" class="transition-selection" aria-live="polite">点击矩阵单元或网络节点查看通量详情</div>
+        <div id="transitionChart" class="transition-chart" role="img" aria-label="ReacNetGenerator 物种转移矩阵"></div>
+        <div class="transition-ranking">
+          <div class="card-head">
+            <h3>高通量转移通道</h3>
+            <button id="btnTransitionExport" class="ghost" type="button" disabled>导出 CSV</button>
+          </div>
+          <div class="table-wrap table-wrap-compact">
+            <table id="transitionEdgeTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
       </section>
     </section>
 

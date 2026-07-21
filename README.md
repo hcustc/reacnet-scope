@@ -3,6 +3,7 @@
 `reacnet-scope` 是一个面向 ReacNetGenerator 输出（`.reactionabcd` / species CSV）的轻量查询与可视化工具集，提供：
 
 - Web 前端：SMILES/分子式/质量数反应检索、结构渲染、时间曲线绘图、中间体候选筛选
+- Web 前端：支持最新 ReacNetGenerator `.lammpstrj.table` 物种转移矩阵的热图、方向网络和高通量通道排行
 - CLI：批量检索、路径导出、TOP-N 统计、曲线绘制
 
 ## Description
@@ -87,6 +88,17 @@ uv sync
 ```bash
 uv sync --extra plot
 ```
+
+## `.lammpstrj.table` 物种转移可视化
+
+ReacNetGenerator 新版输出的 `*.lammpstrj.table` 是一个带 SMILES 行列标签的物种转移矩阵，单元格表示来源物种到目标物种的事件数。Web 端新增 `Species Transition Matrix` 模块：
+
+- 默认读取仓库中的 `ref_data/rng_rp3_test/rp3.lammpstrj.table`，也可在 `RNG Table` 输入框指定其他文件；
+- `矩阵` 视图按事件数对数着色，点击单元格可查看完整 SMILES 与原始事件数；
+- `网络` 视图显示高通量有向边，节点大小对应总通量；
+- 可按最小事件数和显示物种数裁剪结果，并导出高通量通道 CSV。
+
+后端 API 也提供结构化结果：`GET /api/transition_table?table=/path/to/file.table`。
 
 ## Carbon-Number Evolution Plotter
 

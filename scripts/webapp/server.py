@@ -69,6 +69,7 @@ from rng_tools.network import (  # noqa: E402
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
+from rng_tools.io import load_transition_table  # noqa: E402
 from rng_tools.formula import formula_exact_mass, formula_nominal_mass  # noqa: E402
 from rng_tools.reaction import canonical_smiles  # noqa: E402
 from rng_tools.carbon_plot import (  # noqa: E402
@@ -132,7 +133,28 @@ def detect_default_reaction_file() -> Path:
     return candidates[0]
 
 
+def detect_default_transition_table() -> Path:
+    """Find the bundled RP3 transition matrix when no table is supplied."""
+
+    env_path = os.getenv("RNG_TRANSITION_TABLE", "").strip()
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.extend(
+        [
+            TOOL_ROOT / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+            PROJECT_ROOT / "reacnet-scope" / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+            Path.cwd() / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 DEFAULT_REACTION_FILE = detect_default_reaction_file()
+DEFAULT_TRANSITION_TABLE = detect_default_transition_table()
 
 FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 SPECIES_TS_PREFIX_RE = re.compile(r"^Timestep\s+(\d+):")
@@ -641,6 +663,75 @@ def derive_route_path(source_path: str) -> str:
         if candidate.lower().endswith(".route") and os.path.exists(candidate):
             return candidate
     return deduped[0] if deduped else path
+
+
+def _dataset_base_path(path_text: str) -> str:
+    """Return the shared RNG output stem for a known artifact path."""
+
+    path = (path_text or "").strip()
+    if not path:
+        return ""
+    for suffix in (".reactionabcd", ".species", ".route", ".table", ".json", ".html", ".svg"):
+        if path.lower().endswith(suffix):
+            return path[: -len(suffix)]
+    if path.lower().endswith(".lammpstrj"):
+        return path
+    return path
+
+
+def _dataset_file_descriptor(path_text: str, *, source: str) -> dict[str, Any]:
+    path = (path_text or "").strip()
+    exists = bool(path) and os.path.isfile(path)
+    return {
+        "path": path,
+        "source": source,
+        "exists": exists,
+        "size_bytes": os.path.getsize(path) if exists else None,
+    }
+
+
+def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]:
+    """Resolve a compact, shared view of a ReacNetGenerator output set."""
+
+    explicit = {
+        "reaction": (params.get("reac", [""])[0] or "").strip(),
+        "species": (params.get("species_file", [""])[0] or "").strip(),
+        "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
+        "route": (params.get("route_file", [""])[0] or "").strip(),
+        "table": (params.get("table_file", [""])[0] or "").strip(),
+    }
+    seed = next((value for value in explicit.values() if value), "")
+    base = _dataset_base_path(seed)
+    inferred = {
+        "reaction": f"{base}.reactionabcd" if base else "",
+        "species": f"{base}.species" if base else "",
+        "trajectory": base,
+        "route": f"{base}.route" if base else "",
+        "table": f"{base}.table" if base else "",
+    }
+    artifacts: dict[str, dict[str, Any]] = {}
+    for key in ("reaction", "species", "trajectory", "route", "table"):
+        selected = explicit[key] or inferred[key]
+        artifacts[key] = _dataset_file_descriptor(selected, source="explicit" if explicit[key] else "derived")
+
+    capabilities = {
+        "species": artifacts["reaction"]["exists"],
+        "intermediate": artifacts["species"]["exists"],
+        "reaction": artifacts["reaction"]["exists"],
+        "events": artifacts["species"]["exists"],
+        "evolution": artifacts["species"]["exists"],
+        "transition": artifacts["table"]["exists"],
+    }
+    return {
+        "ok": True,
+        "dataset": {
+            "base": base,
+            "label": Path(base).name if base else "未选择数据集",
+            "artifacts": artifacts,
+            "capabilities": capabilities,
+            "ready_count": sum(1 for item in artifacts.values() if item["exists"]),
+        },
+    }
 
 
 def resolve_start_smiles(net: ReactionNetwork, start_query: str) -> str | None:
@@ -5393,6 +5484,99 @@ def downsample_summary_payload(obj: Any, max_points: int) -> Any:
     return obj
 
 
+def _transition_species_summary(smiles: str, index: int, incoming: int, outgoing: int) -> dict[str, Any]:
+    formula = smiles_formula_cached(smiles)
+    return {
+        "index": int(index),
+        "smiles": smiles,
+        "formula": formula or "?",
+        "incoming": int(incoming),
+        "outgoing": int(outgoing),
+        "total": int(incoming + outgoing),
+    }
+
+
+def build_transition_table_payload(params: dict[str, list[str]]) -> dict[str, Any]:
+    """Build a compact visualization payload for RNG transition matrices."""
+
+    raw_path = (params.get("table", params.get("transition_table", [str(DEFAULT_TRANSITION_TABLE)]))[0] or "").strip()
+    table_path = Path(raw_path).expanduser() if raw_path else DEFAULT_TRANSITION_TABLE
+    if not table_path.exists() and not raw_path:
+        table_path = DEFAULT_TRANSITION_TABLE
+    parsed = load_transition_table(table_path)
+    labels = list(parsed["labels"])
+    matrix = parsed["matrix"]
+    min_count = max(0, int_param(params, "min_count", 1))
+    max_species = max(0, int_param(params, "max_species", 60))
+    top_edges_limit = max(1, min(500, int_param(params, "top_edges", 40)))
+
+    incoming = [sum(int(row[index]) for row in matrix) for index in range(len(labels))]
+    outgoing = [sum(int(value) for value in matrix[index]) for index in range(len(labels))]
+    ranking = sorted(
+        range(len(labels)),
+        key=lambda index: (-incoming[index] - outgoing[index], -incoming[index], labels[index]),
+    )
+    if max_species:
+        selected = ranking[: min(max_species, len(ranking))]
+    else:
+        selected = ranking
+    selected_set = set(selected)
+    selected = [index for index in ranking if index in selected_set]
+    # Keep the displayed matrix in rank order, which makes dominant species
+    # visible at the upper-left instead of preserving arbitrary file order.
+    submatrix = [[int(matrix[row][col]) for col in selected] for row in selected]
+    species = [
+        _transition_species_summary(labels[index], index, incoming[index], outgoing[index])
+        for index in selected
+    ]
+    for rank, item in enumerate(species, 1):
+        item["rank"] = rank
+
+    edges: list[dict[str, Any]] = []
+    for row_index in selected:
+        for col_index in selected:
+            count = int(matrix[row_index][col_index])
+            if count < min_count:
+                continue
+            edges.append(
+                {
+                    "source_index": int(row_index),
+                    "target_index": int(col_index),
+                    "source": labels[row_index],
+                    "target": labels[col_index],
+                    "source_formula": smiles_formula_cached(labels[row_index]) or "?",
+                    "target_formula": smiles_formula_cached(labels[col_index]) or "?",
+                    "count": count,
+                }
+            )
+    edges.sort(key=lambda edge: (-int(edge["count"]), edge["source"], edge["target"]))
+
+    total_events = int(sum(sum(int(value) for value in row) for row in matrix))
+    nonzero_events = int(sum(1 for row in matrix for value in row if int(value) >= min_count))
+    return {
+        "ok": True,
+        "mode": "transition_table",
+        "query": {
+            "table": str(table_path.resolve()),
+            "min_count": min_count,
+            "max_species": max_species,
+            "top_edges": top_edges_limit,
+        },
+        "meta": {
+            "n_species_total": len(labels),
+            "n_species_displayed": len(selected),
+            "n_edges_displayed": min(len(edges), top_edges_limit),
+            "total_events": total_events,
+            "nonzero_events": nonzero_events,
+            "density": round(nonzero_events / max(1, len(labels) ** 2), 6),
+        },
+        "labels": [labels[index] for index in selected],
+        "matrix": submatrix,
+        "species": species,
+        "edges": edges[:top_edges_limit],
+    }
+
+
 def build_species_plot_payload(
     params: dict[str, list[str]],
     *,
@@ -8398,6 +8582,22 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
+    def _api_transition_table(self, params: dict[str, list[str]]) -> None:
+        try:
+            self._send_json(build_transition_table_payload(params))
+        except ValueError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+        except FileNotFoundError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=404)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _api_dataset_status(self, params: dict[str, list[str]]) -> None:
+        try:
+            self._send_json(build_dataset_status_payload(params))
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
     def _resolve_evolution_mode(self, params: dict[str, list[str]]) -> str:
         for key in ("plot_kind", "evolution_mode", "mode"):
             raw = (params.get(key, [""])[0] or "").strip().lower()
@@ -8596,6 +8796,12 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/plot":
             self._api_plot(params)
+            return
+        if path == "/api/transition_table":
+            self._api_transition_table(params)
+            return
+        if path == "/api/dataset_status":
+            self._api_dataset_status(params)
             return
         if path == "/api/evolution_plot":
             self._api_evolution_plot(params)
