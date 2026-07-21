@@ -1,0 +1,51 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ReacNet Scope
+        - generic [ref=e7]: ·
+        - generic [ref=e8]: Dash WebUI V1
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - generic [ref=e11]: "目录:"
+          - generic [ref=e12]: 未选择
+        - generic [ref=e13]:
+          - generic [ref=e14]: "运行组:"
+          - generic [ref=e15]: 未选择
+        - generic [ref=e16]: 未加载数据
+      - button "管理数据" [ref=e17] [cursor=pointer]
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - button "物种检索" [ref=e20] [cursor=pointer]
+        - button "转化关系" [ref=e22] [cursor=pointer]
+        - button "反应式检索" [ref=e24] [cursor=pointer]
+        - button "中间体筛选" [ref=e26] [cursor=pointer]
+        - button "时间演化" [ref=e28] [cursor=pointer]
+        - button "碳数演化" [ref=e30] [cursor=pointer]
+        - button "事件证据" [ref=e32] [cursor=pointer]
+        - button "观察网络" [ref=e34] [cursor=pointer]
+      - generic [ref=e37]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: 类型
+          - generic [ref=e42]:
+            - textbox
+            - button "自动" [ref=e43] [cursor=pointer]
+          - generic [ref=e49]: 查询内容
+          - textbox "例如 H2O / [H][O] / 17.00274" [ref=e51]
+          - generic [ref=e52]: 质量容差
+          - spinbutton [ref=e54]: "0.5"
+          - button "查询" [ref=e55] [cursor=pointer]
+          - button "导出 CSV" [ref=e56] [cursor=pointer]
+        - generic [ref=e63]:
+          - grid:
+            - rowgroup [ref=e65]:
+              - row
+            - rowgroup [ref=e66]
+            - rowgroup
+            - rowgroup
+            - rowgroup
+            - generic: No Rows To Show
+      - generic [ref=e67]:
+        - heading "当前选中物种" [level=6] [ref=e68]
+        - generic [ref=e69]: 未选择物种
+  - contentinfo

@@ -13,6 +13,27 @@ const RESULT_MODULES = [
 const DEFAULT_RESULT_MODULE = "species";
 const WORKBENCH_STACK_BREAKPOINT = 980;
 const DEFAULT_GENERAL_QUERY_MODE = "formula";
+const ARTIFACT_LABELS = {
+  reaction: "Reaction",
+  species: "Species",
+  trajectory: "Trajectory",
+  route: "Route",
+  table: "Table",
+};
+const ARTIFACT_SUFFIX_LABELS = {
+  reaction: ".reactionabcd",
+  species: ".species",
+  trajectory: ".lammpstrj",
+  route: ".route",
+  table: ".table",
+};
+const WORKSPACE_MODULES = [
+  { key: "species", label: "物种身份", hint: "公式、质量、中间体", artifacts: ["reaction", "species"] },
+  { key: "reaction", label: "路径搜索", hint: "ReactionABCD 网络", artifacts: ["reaction"] },
+  { key: "events", label: "事件证据", hint: "Route + Trajectory", artifacts: ["species", "route", "trajectory"] },
+  { key: "evolution", label: "时间演化", hint: "Species / Carbon", artifacts: ["species"] },
+  { key: "transition", label: "观察网络", hint: "Table 强通道", artifacts: ["table"] },
+];
 const VIEWER_CONTEXTS = {
   general: {
     cardId: "generalStructureCard",
@@ -62,6 +83,9 @@ const state = {
   },
   ui: {
     generalQueryMode: DEFAULT_GENERAL_QUERY_MODE,
+    workspace: "species",
+    dataset: null,
+    datasetBase: "",
   },
   plot: {
     taskId: "",
@@ -89,6 +113,11 @@ const state = {
     dragMergeItem: null,
     mergeBasket: [],
     summary: null,
+  },
+  transition: {
+    data: null,
+    mode: "heatmap",
+    selected: null,
   },
   contextSpeciesTaskId: "",
   contextReactionTaskId: "",
@@ -133,7 +162,7 @@ function value(id) {
 }
 
 function globalReac() {
-  return value("reacFile");
+  return value("reacFile") || state.ui.dataset?.artifacts?.reaction?.path || "";
 }
 
 function globalMinTp() {
@@ -142,15 +171,56 @@ function globalMinTp() {
 }
 
 function globalSpeciesFile() {
-  return value("sharedSpeciesFile");
+  return value("sharedSpeciesFile") || state.ui.dataset?.artifacts?.species?.path || "";
 }
 
 function globalTrajectoryFile() {
-  return value("sharedTrajectoryFile");
+  return value("sharedTrajectoryFile") || state.ui.dataset?.artifacts?.trajectory?.path || "";
 }
 
 function globalRouteFile() {
-  return value("sharedRouteFile");
+  return value("sharedRouteFile") || state.ui.dataset?.artifacts?.route?.path || "";
+}
+
+function globalTableFile() {
+  return value("sharedTableFile") || state.ui.dataset?.artifacts?.table?.path || "";
+}
+
+function artifactLabel(kind) {
+  return ARTIFACT_LABELS[kind] || kind;
+}
+
+function artifactReady(dataset, kind) {
+  return !!dataset?.artifacts?.[kind]?.exists;
+}
+
+function moduleReadiness(moduleDef, dataset = state.ui.dataset) {
+  const required = moduleDef?.artifacts || [];
+  if (!required.length) return { required, ready: true, readyCount: 0, missing: [] };
+  const missing = required.filter((kind) => !artifactReady(dataset, kind));
+  return {
+    required,
+    ready: missing.length === 0,
+    readyCount: required.length - missing.length,
+    missing,
+  };
+}
+
+function missingArtifactMessage(kind) {
+  const label = artifactLabel(kind);
+  const suffix = ARTIFACT_SUFFIX_LABELS[kind] || "";
+  return `需要 ${label}${suffix ? ` (${suffix})` : ""}：请先在顶部导入 RNG 输出文件夹，或展开“手动文件覆盖”填写对应路径。`;
+}
+
+function ensureArtifactPath(kind, pathText) {
+  if (String(pathText || "").trim()) return;
+  throw new Error(missingArtifactMessage(kind));
+}
+
+function ensureAnyDataSource(options, message) {
+  const hasSource = (options || []).some((item) => String(item || "").trim());
+  if (hasSource) return;
+  throw new Error(message);
 }
 
 function effectiveSpeciesFile(overrideId = "") {
@@ -840,7 +910,7 @@ function renderModuleResultCard(moduleKey, metaId, tableId, exportBtnId) {
   const card = metaEl.closest(".module-result-card");
   const hasRows = !!(slot.rows || []).length;
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || (status && status !== "idle");
+  const shouldShow = hasRows || (status && !["idle", "ready"].includes(status));
   if (card instanceof HTMLElement) {
     card.classList.toggle("hidden", !shouldShow);
   }
@@ -867,7 +937,7 @@ function renderGeneralResultCard() {
   if (!metaEl || !tableEl || !exportBtn || !titleEl || !card) return;
   const hasRows = !!(slot.rows || []).length;
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || (status && status !== "idle");
+  const shouldShow = hasRows || (status && !["idle", "ready"].includes(status));
   card.classList.toggle("hidden", !shouldShow);
   titleEl.textContent = key === "mass" ? "质量数检索结果" : "分子式检索结果";
   metaEl.textContent = JSON.stringify(slot.meta || {}, null, 2);
@@ -968,7 +1038,7 @@ function renderContextLocateResultCard(moduleKey, cardId, metaId, tableId, expor
   const candidateRows = Array.isArray(slot.meta?.candidate_rows) ? slot.meta.candidate_rows : [];
   const discardedRows = Array.isArray(slot.meta?.discarded_rows) ? slot.meta.discarded_rows : [];
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || candidateRows.length || discardedRows.length || (status && status !== "idle");
+  const shouldShow = hasRows || candidateRows.length || discardedRows.length || (status && !["idle", "ready"].includes(status));
   card.classList.toggle("hidden", !shouldShow);
   const safeMeta = { ...(slot.meta || {}) };
   delete safeMeta.candidate_rows;
@@ -1038,7 +1108,7 @@ function renderContextExtractResultCard() {
   ) return;
   const hasRows = !!(slot.rows || []).length;
   const status = String(slot.meta?.status || "").toLowerCase();
-  const shouldShow = hasRows || (status && status !== "idle");
+  const shouldShow = hasRows || (status && !["idle", "ready"].includes(status));
   card.classList.toggle("hidden", !shouldShow);
   metaEl.textContent = JSON.stringify(slot.meta || {}, null, 2);
   if (atomGroupsEl instanceof HTMLElement) {
@@ -1164,10 +1234,206 @@ function patchResultMeta(moduleKey, patch) {
 }
 
 function openQueryModule(moduleKey) {
+  const workspaceKey = {
+    general: "species",
+    intermediate: "species",
+    reaction: "reaction",
+    context: "events",
+  }[moduleKey];
+  if (workspaceKey) setWorkspaceModule(workspaceKey, { focus: false });
   const key = moduleKey === "intermediate" || moduleKey === "reaction" || moduleKey === "context" ? moduleKey : "general";
   const details = document.querySelector(`[data-query-module-group="${key}"]`);
   if (details instanceof HTMLDetailsElement && !details.open) {
     details.open = true;
+  }
+}
+
+function workspacePanel(key) {
+  return q(`workspace-${key}`);
+}
+
+function workspaceLabel(key) {
+  return WORKSPACE_MODULES.find((item) => item.key === key)?.label || key;
+}
+
+function setWorkspaceModule(key, { focus = true } = {}) {
+  const next = WORKSPACE_MODULES.some((item) => item.key === key) ? key : "species";
+  state.ui.workspace = next;
+  document.querySelectorAll("[data-workspace-module]").forEach((button) => {
+    const active = button.dataset.workspaceModule === next;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  });
+  document.querySelectorAll(".workspace-panel").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.id !== `workspace-${next}`);
+  });
+  const title = q("workspaceTitle");
+  const hint = q("workspaceHint");
+  const item = WORKSPACE_MODULES.find((candidate) => candidate.key === next);
+  if (title) title.textContent = item?.label || "工作区";
+  if (hint) hint.textContent = item?.hint || "";
+  const url = new URL(window.location.href);
+  url.searchParams.set("module", next);
+  window.history.replaceState({}, "", url);
+  if (focus) {
+    const target = workspacePanel(next);
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function datasetRequestParams() {
+  return {
+    dataset_dir: value("datasetFolder"),
+    dataset_base: state.ui.datasetBase,
+    reac: value("reacFile"),
+    species_file: value("sharedSpeciesFile"),
+    trajectory_file: value("sharedTrajectoryFile"),
+    route_file: value("sharedRouteFile"),
+    table_file: value("sharedTableFile"),
+  };
+}
+
+function artifactSourceLabel(source) {
+  const key = String(source || "");
+  if (key === "explicit") return "手动";
+  if (key === "folder") return "文件夹";
+  if (key === "derived") return "推导";
+  return key || "-";
+}
+
+function renderDatasetCandidates(dataset) {
+  const field = q("datasetCandidateField");
+  const select = q("datasetCandidateSelect");
+  if (!(field instanceof HTMLElement) || !(select instanceof HTMLSelectElement)) return;
+  const candidates = Array.isArray(dataset?.candidates) ? dataset.candidates : [];
+  field.classList.toggle("hidden", candidates.length <= 1);
+  if (candidates.length <= 1) {
+    select.innerHTML = "";
+    return;
+  }
+  select.innerHTML = candidates
+    .map((item) => {
+      const kinds = (item.kinds || []).map((kind) => artifactLabel(kind)).join(", ");
+      const selected = item.selected ? " selected" : "";
+      return `<option value="${escapeHtml(item.base || "")}"${selected}>${escapeHtml(item.label || item.base || "run")} · ${Number(item.score || 0)}/5 · ${escapeHtml(kinds)}</option>`;
+    })
+    .join("");
+}
+
+function renderWorkspaceReadiness(dataset) {
+  document.querySelectorAll("[data-workspace-module]").forEach((button) => {
+    const key = button.dataset.workspaceModule || "species";
+    const moduleDef = WORKSPACE_MODULES.find((item) => item.key === key);
+    const readiness = moduleReadiness(moduleDef, dataset);
+    const status = readiness.ready ? "ready" : (readiness.readyCount > 0 ? "partial" : "missing");
+    button.classList.toggle("is-ready", status === "ready");
+    button.classList.toggle("is-partial", status === "partial");
+    button.classList.toggle("is-missing", status === "missing");
+    const badge = button.querySelector(".workspace-nav-status");
+    if (badge) {
+      badge.textContent = `${readiness.readyCount}/${readiness.required.length}`;
+    }
+    const missing = readiness.missing.map((kind) => artifactLabel(kind)).join(", ");
+    button.title = missing ? `缺少 ${missing}` : "";
+  });
+}
+
+function renderDatasetStatus(dataset) {
+  const status = q("datasetStatus");
+  const name = q("datasetName");
+  if (!status || !name) return;
+  const safe = dataset || {};
+  name.textContent = safe.label || "未选择 RNG 输出";
+  const importHint = q("datasetImportHint");
+  if (importHint) {
+    importHint.classList.remove("is-error");
+    if (safe.folder && safe.label) {
+      const candidateCount = Array.isArray(safe.candidates) ? safe.candidates.length : 0;
+      importHint.textContent = candidateCount > 1
+        ? `就绪 ${safe.ready_count || 0}/5 · ${candidateCount} 组`
+        : `就绪 ${safe.ready_count || 0}/5`;
+    } else {
+      importHint.textContent = "未导入";
+    }
+  }
+  status.innerHTML = Object.entries(ARTIFACT_LABELS)
+    .map(([key]) => {
+      const item = safe.artifacts?.[key] || {};
+      const exists = !!item.exists;
+      const mark = exists ? "✓" : "–";
+      const title = exists
+        ? `${artifactLabel(key)} · ${artifactSourceLabel(item.source)} · ${item.path || ""}`
+        : `${artifactLabel(key)} 缺失`;
+      return `<span class="dataset-chip ${exists ? "is-ready" : "is-missing"}" title="${escapeHtml(title)}"><strong>${artifactLabel(key)}</strong><span>${mark}</span></span>`;
+    })
+    .join("");
+  renderDatasetCandidates(safe);
+  renderWorkspaceReadiness(safe);
+  document.querySelectorAll("[data-requires-artifact]").forEach((element) => {
+    const required = String(element.dataset.requiresArtifact || "").split(",").filter(Boolean);
+    const missing = required.filter((key) => !safe.artifacts?.[key]?.exists);
+    element.classList.toggle("requires-dataset", missing.length > 0);
+    element.dataset.datasetHint = missing.length ? `需要 ${missing.join(", ")} 数据` : "";
+  });
+}
+
+async function refreshDatasetStatus({ silent = false } = {}) {
+  const status = q("datasetStatus");
+  if (!silent && status) status.innerHTML = '<span class="dataset-chip">检查文件...</span>';
+  const data = await fetchJson("/api/dataset_status", datasetRequestParams());
+  state.ui.dataset = data.dataset || null;
+  state.ui.datasetBase = state.ui.dataset?.selected_base || state.ui.datasetBase || "";
+  renderDatasetStatus(state.ui.dataset);
+  return data.dataset;
+}
+
+async function browseDatasetFolder() {
+  const browseBtn = q("btnBrowseDatasetFolder");
+  const hint = q("datasetImportHint");
+  if (browseBtn instanceof HTMLButtonElement) browseBtn.disabled = true;
+  if (hint) {
+    hint.classList.remove("is-error");
+    hint.textContent = "选择文件夹...";
+  }
+  try {
+    const data = await fetchJson("/api/pick_folder", { initial_dir: value("datasetFolder") });
+    if (data.canceled || !data.path) {
+      if (hint) hint.textContent = state.ui.dataset?.label ? `就绪 ${state.ui.dataset.ready_count || 0}/5` : "未导入";
+      return;
+    }
+    q("datasetFolder").value = data.path;
+    state.ui.datasetBase = "";
+    await refreshDatasetStatus();
+  } catch (err) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = String(err);
+    }
+  } finally {
+    if (browseBtn instanceof HTMLButtonElement) browseBtn.disabled = false;
+  }
+}
+
+async function importDatasetFolder() {
+  const hint = q("datasetImportHint");
+  const folder = value("datasetFolder");
+  if (!folder) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = "请先填写 RNG 输出文件夹路径。";
+    }
+    throw new Error("请先填写 RNG 输出文件夹路径");
+  }
+  if (state.ui.dataset?.folder !== folder) {
+    state.ui.datasetBase = "";
+  }
+  const dataset = await refreshDatasetStatus();
+  if (!dataset?.ready_count) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = "该文件夹中没有可识别的 ReacNetGenerator 输出文件。";
+    }
+    throw new Error("该文件夹中没有可识别的 ReacNetGenerator 输出文件");
   }
 }
 
@@ -1347,6 +1613,82 @@ function syncUnifiedPlotMode() {
   } else {
     q("qCarbonSpeciesFile").focus();
   }
+}
+
+function buildWorkspaceShell() {
+  const shell = document.querySelector("main.shell");
+  const datasetImport = q("datasetImportCard");
+  const globalConfig = document.querySelector(".global-config");
+  const source = q("globalDatasourceCard");
+  const query = document.querySelector(".query-result-workbench");
+  const plotSwitch = document.querySelector(".plot-unified-switch");
+  const plotSpecies = q("plotSectionSpecies");
+  const plotCarbon = q("plotSectionCarbon");
+  const transition = q("transitionMatrixSection");
+  if (!shell || !datasetImport || !globalConfig || !source || !query || !plotSwitch || !plotSpecies || !plotCarbon || !transition) return;
+  if (q("workspaceShell")) return;
+
+  const workspace = document.createElement("section");
+  workspace.id = "workspaceShell";
+  workspace.className = "workspace-shell";
+  workspace.innerHTML = `
+    <aside class="workspace-nav" aria-label="分析模块">
+      <div class="workspace-nav-head">
+        <span class="workspace-kicker">ReacNetGenerator</span>
+        <strong>分析工作台</strong>
+      </div>
+      <nav id="workspaceNav" class="workspace-nav-list"></nav>
+    </aside>
+    <section class="workspace-main">
+      <header class="workspace-header">
+        <div>
+          <span class="workspace-kicker">分析模块</span>
+          <h2 id="workspaceTitle">物种身份</h2>
+          <p id="workspaceHint">公式、质量、中间体</p>
+        </div>
+      </header>
+      <div id="workspace-species" class="workspace-panel hidden"></div>
+      <div id="workspace-reaction" class="workspace-panel hidden"></div>
+      <div id="workspace-events" class="workspace-panel hidden"></div>
+      <div id="workspace-evolution" class="workspace-panel hidden"></div>
+      <div id="workspace-transition" class="workspace-panel hidden"></div>
+    </section>
+  `;
+  shell.insertBefore(workspace, query);
+  const panels = {
+    species: q("workspace-species"),
+    reaction: q("workspace-reaction"),
+    events: q("workspace-events"),
+    evolution: q("workspace-evolution"),
+    transition: q("workspace-transition"),
+  };
+  const manualOverrides = document.createElement("details");
+  manualOverrides.className = "manual-overrides";
+  manualOverrides.innerHTML = "<summary>手动文件覆盖</summary><div class=\"manual-overrides-body\"></div>";
+  manualOverrides.querySelector(".manual-overrides-body").append(globalConfig, source);
+  datasetImport.append(manualOverrides);
+  panels.species.append(query);
+  panels.evolution.append(plotSwitch, plotSpecies, plotCarbon);
+  panels.transition.append(transition);
+
+  const queryGroups = Array.from(query.querySelectorAll(".query-module-group"));
+  const generalGroup = queryGroups.find((element) => element.dataset.queryModuleGroup === "general");
+  const intermediateGroup = queryGroups.find((element) => element.dataset.queryModuleGroup === "intermediate");
+  const reactionGroup = queryGroups.find((element) => element.dataset.queryModuleGroup === "reaction");
+  const contextGroup = queryGroups.find((element) => element.dataset.queryModuleGroup === "context");
+  if (generalGroup) panels.species.append(generalGroup);
+  if (intermediateGroup) panels.species.append(intermediateGroup);
+  if (reactionGroup) panels.reaction.append(reactionGroup);
+  if (contextGroup) panels.events.append(contextGroup);
+  query.remove();
+
+  const nav = q("workspaceNav");
+  nav.innerHTML = WORKSPACE_MODULES.map((item) => `
+    <button type="button" class="workspace-nav-item" data-workspace-module="${item.key}">
+      <strong>${escapeHtml(item.label)}<span class="workspace-nav-status">-</span></strong>
+      <span>${escapeHtml(item.hint)}</span>
+    </button>
+  `).join("");
 }
 
 function syncPlotSpeciesSourceMode() {
@@ -2563,7 +2905,7 @@ function renderContextTrajectoryViewer() {
     return;
   }
   const status = String(slot.meta?.status || slot.meta?.meta?.status || "").toLowerCase();
-  const shouldShow = !!(slot.rows || []).length || (status && status !== "idle");
+  const shouldShow = !!(slot.rows || []).length || (status && !["idle", "ready"].includes(status));
   card.classList.toggle("hidden", !shouldShow);
   if (!shouldShow) return;
 
@@ -3871,6 +4213,8 @@ const PLOT_COLORS = [
 let plotChart = null;
 let carbonPlotChart = null;
 let echartsLoadPromise = null;
+let cytoscapeLoadPromise = null;
+let transitionCy = null;
 
 function loadExternalScript(src) {
   return new Promise((resolve, reject) => {
@@ -3912,6 +4256,27 @@ async function ensureECharts() {
     return false;
   })();
   return echartsLoadPromise;
+}
+
+async function ensureCytoscape() {
+  if (window.cytoscape) return true;
+  if (cytoscapeLoadPromise) return cytoscapeLoadPromise;
+  cytoscapeLoadPromise = (async () => {
+    const cdns = [
+      "https://cdn.jsdelivr.net/npm/cytoscape@3.31.2/dist/cytoscape.umd.js",
+      "https://unpkg.com/cytoscape@3.31.2/dist/cytoscape.umd.js",
+    ];
+    for (const src of cdns) {
+      try {
+        await loadExternalScript(src);
+        if (window.cytoscape) return true;
+      } catch (err) {
+        // Try the alternate CDN endpoint.
+      }
+    }
+    return false;
+  })();
+  return cytoscapeLoadPromise;
 }
 
 function renderPlotLegend(curves) {
@@ -4268,9 +4633,11 @@ function exportCarbonPlotSvg() {
 async function runSpecies() {
   openQueryModule("general");
   setGeneralQueryMode("formula");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("species", { meta: { status: "running", module: resultModuleLabel("species") }, rows: [] });
   const data = await fetchJson("/api/species", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     formula: value("qFormula"),
     top: value("qSpeciesTop") || 20,
@@ -4282,9 +4649,11 @@ async function runSpecies() {
 async function runMass() {
   openQueryModule("general");
   setGeneralQueryMode("mass");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("mass", { meta: { status: "running", module: resultModuleLabel("mass") }, rows: [] });
   const data = await fetchJson("/api/species_mass", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     mass: value("qMass"),
     mode: q("qMassMode").value,
@@ -4298,9 +4667,11 @@ async function runMass() {
 async function runNext() {
   openQueryModule("reaction");
   openReactionTool("next");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("next", { meta: { status: "running", module: resultModuleLabel("next") }, rows: [] });
   const data = await fetchJson("/api/next", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     start: value("qSmiles"),
     role: q("qRole").value,
@@ -4313,11 +4684,15 @@ async function runNext() {
 
 async function runIntermediate() {
   openQueryModule("intermediate");
+  const reac = globalReac();
+  const speciesFile = effectiveSpeciesFile("qInterSpeciesFile");
+  ensureArtifactPath("species", speciesFile);
+  if (q("qInterWithFlux").checked) ensureArtifactPath("reaction", reac);
   setResultData("intermediate", { meta: { status: "starting", module: resultModuleLabel("intermediate") }, rows: [] });
   const params = {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
-    species_file: effectiveSpeciesFile("qInterSpeciesFile"),
+    species_file: speciesFile,
     kind: q("qInterKind").value,
     top: value("qInterTop") || 120,
     abundance_threshold: value("qInterAbundance") || 5,
@@ -4361,9 +4736,11 @@ async function runIntermediate() {
 async function runRxnFormula() {
   openQueryModule("reaction");
   openReactionTool("rxn");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("rxn", { meta: { status: "running", module: resultModuleLabel("rxn") }, rows: [] });
   const data = await fetchJson("/api/rxn_formula", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     reactants: value("qReactants"),
     products: value("qProducts"),
@@ -4559,6 +4936,10 @@ async function runContextLocateTask({ moduleKey, params, setProgress, taskKey, s
 }
 
 async function runContextLocateSpecies() {
+  ensureAnyDataSource(
+    [effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Species 文件，或可推导 Species 的 Reaction 文件：请先导入 RNG 输出文件夹，或在手动文件覆盖中填写路径。"
+  );
   clearContextSelectedEvent();
   resetContextExtractPayload({ clearRows: true, status: "idle" });
   return runContextLocateTask({
@@ -4570,6 +4951,14 @@ async function runContextLocateSpecies() {
 }
 
 async function runContextLocateReaction() {
+  ensureAnyDataSource(
+    [effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Species 文件，或可推导 Species 的 Reaction 文件：请先导入 RNG 输出文件夹，或在手动文件覆盖中填写路径。"
+  );
+  ensureAnyDataSource(
+    [effectiveRouteFile("qContextRouteFile"), effectiveTrajectoryFile("qContextTrajectoryFile"), effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Route 文件，或可推导 Route 的 Species/Trajectory/Reaction 路径。"
+  );
   clearContextSelectedEvent();
   resetContextExtractPayload({ clearRows: true, status: "idle" });
   return runContextLocateTask({
@@ -4765,16 +5154,21 @@ function loadContextRowForExtraction(row, config = {}) {
 
 async function runPlot() {
   resetPlotInteractive();
+  const speciesFilesText = value("qPlotSpeciesFiles");
+  const speciesFile = speciesFilesText ? "" : effectiveSpeciesFile("qPlotSpeciesFile");
+  ensureAnyDataSource(
+    [speciesFilesText, speciesFile, globalReac()],
+    "需要 Species 数据源：填写多文件列表、导入包含 Species 的数据集，或提供可推导 Species 的 Reaction 文件。"
+  );
   setResultData("plot", { meta: { status: "starting", module: resultModuleLabel("plot") }, rows: [] });
   setPlotProgress("Queued", 0, "等待后台开始读取 species 文件", true);
   setPlotMeta({ status: "starting", mode: "species" });
 
   const targets = parseTargetsForPlot(value("qPlotTarget"));
-  const speciesFilesText = value("qPlotSpeciesFiles");
   const params = {
     reac: globalReac(),
     min_tp: globalMinTp(),
-    species_file: speciesFilesText ? "" : effectiveSpeciesFile("qPlotSpeciesFile"),
+    species_file: speciesFile,
     species_files: speciesFilesText,
     target: targets,
     formula_mode: q("qPlotFormulaMode").value,
@@ -4862,9 +5256,14 @@ async function runCarbonPlot() {
   q("btnCarbonPlotExportSvg").disabled = true;
 
   const speciesFilesText = value("qCarbonSpeciesFiles");
+  const speciesFile = speciesFilesText ? "" : effectiveSpeciesFile("qCarbonSpeciesFile");
+  ensureAnyDataSource(
+    [value("qCarbonData"), speciesFilesText, speciesFile, globalReac()],
+    "需要 Carbon 数据源：填写 tidy CSV/Excel、多文件列表、Species 文件，或提供可推导 Species 的 Reaction 文件。"
+  );
   const params = {
     reac: globalReac(),
-    species_file: speciesFilesText ? "" : effectiveSpeciesFile("qCarbonSpeciesFile"),
+    species_file: speciesFile,
     species_files: speciesFilesText,
     data: value("qCarbonData"),
     x_axis: q("qCarbonXAxis").value,
@@ -4934,6 +5333,343 @@ async function runCarbonPlot() {
   }
 }
 
+function transitionLabel(species, fallbackIndex = 0) {
+  const formula = String(species?.formula || "?");
+  return `${formula} · #${Number(species?.rank || fallbackIndex + 1)}`;
+}
+
+function shortText(text, limit = 42) {
+  const raw = String(text || "");
+  return raw.length > limit ? `${raw.slice(0, Math.max(1, limit - 3))}...` : raw;
+}
+
+function renderTransitionStats(data) {
+  const meta = data?.meta || {};
+  const stats = [
+    ["物种", `${meta.n_species_displayed || 0}/${meta.n_species_total || 0}`],
+    ["观察次数", Number(meta.total_events || 0).toLocaleString()],
+    ["非零通道", Number(meta.nonzero_events || 0).toLocaleString()],
+    ["矩阵密度", `${(Number(meta.density || 0) * 100).toFixed(2)}%`],
+  ];
+  q("transitionStats").innerHTML = stats
+    .map(([label, value]) => `<span class="stat-chip"><strong>${escapeHtml(label)}</strong> ${escapeHtml(value)}</span>`)
+    .join("");
+}
+
+function renderTransitionSelection(selection = null) {
+  const box = q("transitionSelection");
+  const data = state.transition.data;
+  if (!data) {
+    box.textContent = "点击物种或观察转移查看证据";
+    return;
+  }
+  if (!selection) {
+    const lead = (data.species || [])[0];
+    if (!lead) {
+      box.textContent = "当前筛选没有可显示的物种";
+      return;
+    }
+    box.innerHTML = `<strong>${escapeHtml(transitionLabel(lead))}</strong><code>${escapeHtml(lead.smiles)}</code><span>入流 ${Number(lead.incoming).toLocaleString()} · 出流 ${Number(lead.outgoing).toLocaleString()}</span>`;
+    return;
+  }
+  if (selection.kind === "edge") {
+    box.innerHTML = `<strong>${escapeHtml(`${selection.source_formula} → ${selection.target_formula}`)}</strong><code>${escapeHtml(selection.source)}</code><span class="transition-arrow">→</span><code>${escapeHtml(selection.target)}</code><span>${Number(selection.count).toLocaleString()} events</span>`;
+    return;
+  }
+  if (selection.kind === "reaction") {
+    box.innerHTML = `<strong>${escapeHtml(selection.label || "观察转移")}</strong><span>${Number(selection.event_count || 0).toLocaleString()} events · ${escapeHtml(selection.evidence_level || "aggregate_observation")}</span><code>${escapeHtml(selection.source_artifact || "")}</code>`;
+    return;
+  }
+  const item = selection.species || selection;
+  box.innerHTML = `<strong>${escapeHtml(transitionLabel(item))}</strong><code>${escapeHtml(item.smiles)}</code><span>入流 ${Number(item.incoming).toLocaleString()} · 出流 ${Number(item.outgoing).toLocaleString()} · 总通量 ${Number(item.total).toLocaleString()}</span>`;
+}
+
+function renderTransitionEdgeTable(data) {
+  const table = q("transitionEdgeTable");
+  const thead = table.querySelector("thead");
+  const tbody = table.querySelector("tbody");
+  const edges = data?.edges || [];
+  thead.innerHTML = "<tr><th>#</th><th>来源</th><th>目标</th><th>事件数</th></tr>";
+  tbody.innerHTML = edges
+    .map((edge, index) => `
+      <tr data-transition-edge="${index}">
+        <td>${index + 1}</td>
+        <td><strong>${escapeHtml(edge.source_formula)}</strong><code title="${escapeHtml(edge.source)}">${escapeHtml(shortText(edge.source, 42))}</code></td>
+        <td><strong>${escapeHtml(edge.target_formula)}</strong><code title="${escapeHtml(edge.target)}">${escapeHtml(shortText(edge.target, 42))}</code></td>
+        <td><strong>${Number(edge.count).toLocaleString()}</strong></td>
+      </tr>
+    `)
+    .join("");
+  q("btnTransitionExport").disabled = !edges.length;
+}
+
+function transitionSpeciesByLabel(label) {
+  return (state.transition.data?.species || []).find((item) => item.smiles === label) || null;
+}
+
+function renderTransitionHeatmap(data) {
+  const host = q("transitionChart");
+  if (transitionCy) {
+    transitionCy.destroy();
+    transitionCy = null;
+  }
+  if (!window.echarts) return false;
+  const chart = window.echarts.getInstanceByDom(host) || window.echarts.init(host);
+  const labels = data.labels || [];
+  const matrix = data.matrix || [];
+  const minCount = Math.max(0, Number(data.query?.min_count || 0));
+  const points = [];
+  let maxValue = 1;
+  matrix.forEach((row, y) => row.forEach((count, x) => {
+    const numeric = Number(count) || 0;
+    if (numeric > maxValue) maxValue = numeric;
+    if (numeric >= minCount && numeric > 0) points.push([x, y, numeric, Math.log10(numeric + 1)]);
+  }));
+  const maxLog = Math.log10(maxValue + 1);
+  chart.setOption({
+    animation: false,
+    grid: { left: 76, right: 30, top: 26, bottom: 72 },
+    tooltip: {
+      position: "top",
+      formatter: (params) => {
+        const [x, y, _logCount, count] = params.data || [];
+        const source = transitionSpeciesByLabel(labels[y]) || {};
+        const target = transitionSpeciesByLabel(labels[x]) || {};
+        return `<strong>${escapeHtml(source.formula || "?")} → ${escapeHtml(target.formula || "?")}</strong><br/>${Number(count).toLocaleString()} events`;
+      },
+    },
+    xAxis: {
+      type: "category",
+      data: labels,
+      name: "目标物种",
+      axisLabel: { interval: 0, rotate: 55, formatter: (label) => transitionSpeciesByLabel(label)?.formula || "?" },
+      splitArea: { show: true },
+    },
+    yAxis: {
+      type: "category",
+      data: labels,
+      inverse: true,
+      name: "来源物种",
+      axisLabel: { formatter: (label) => transitionSpeciesByLabel(label)?.formula || "?" },
+      splitArea: { show: true },
+    },
+    visualMap: {
+      min: 0,
+      max: maxLog,
+      calculable: true,
+      orient: "horizontal",
+      left: "center",
+      bottom: 6,
+      text: ["高", "低"],
+      formatter: (value) => Math.max(1, Math.round((10 ** value) - 1)).toLocaleString(),
+      inRange: { color: ["#f0eee8", "#4ca587", "#d86f2c"] },
+    },
+    series: [{
+      type: "heatmap",
+      data: points.map((item) => [item[0], item[1], item[3], item[2]]),
+      encode: { x: 0, y: 1, value: 2 },
+      label: { show: labels.length <= 24, formatter: (params) => Number(params.data?.[3] || 0) || "" },
+      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: "rgba(0,0,0,0.25)" } },
+    }],
+  }, true);
+  chart.off("click");
+  chart.on("click", (params) => {
+    const [x, y, _logCount, count] = params.data || [];
+    const edge = {
+      kind: "edge",
+      source: labels[y],
+      target: labels[x],
+      source_formula: transitionSpeciesByLabel(labels[y])?.formula || "?",
+      target_formula: transitionSpeciesByLabel(labels[x])?.formula || "?",
+      count: Number(count) || 0,
+    };
+    state.transition.selected = edge;
+    renderTransitionSelection(edge);
+  });
+  return true;
+}
+
+function renderTransitionNetwork(data) {
+  const host = q("transitionChart");
+  if (!window.cytoscape) return false;
+  if (transitionCy) {
+    transitionCy.destroy();
+    transitionCy = null;
+  }
+  const network = data.network || {};
+  const species = network.species || [];
+  const reactions = network.reactions || [];
+  const graphEdges = network.edges || [];
+  const maxCount = Math.max(1, ...reactions.map((item) => Number(item.event_count) || 0));
+  const elements = [
+    ...species.map((item) => ({
+      group: "nodes",
+      data: { id: item.id, kind: "species", label: item.formula || "?", species: item },
+    })),
+    ...reactions.map((item) => ({
+      group: "nodes",
+      data: { id: item.id, kind: "reaction", label: item.label || "observed transition", reaction: item, event_count: item.event_count || 0 },
+    })),
+    ...graphEdges.map((edge) => ({
+      group: "edges",
+      data: { id: edge.id, source: edge.source, target: edge.target, kind: edge.kind, event_count: edge.event_count },
+    })),
+  ];
+  transitionCy = window.cytoscape({
+    container: host,
+    elements,
+    layout: { name: "cose", animate: false, padding: 32, nodeRepulsion: 9000, idealEdgeLength: 110 },
+    minZoom: 0.2,
+    maxZoom: 3,
+    wheelSensitivity: 0.18,
+    style: [
+      {
+        selector: "node[kind = 'species']",
+        style: {
+          "background-color": "#177e89",
+          "label": "data(label)",
+          "color": "#17333a",
+          "font-size": "11px",
+          "text-valign": "center",
+          "text-halign": "center",
+          "text-wrap": "wrap",
+          "text-max-width": "74px",
+          "width": "mapData(total, 0, 1, 26, 26)",
+          "height": "mapData(total, 0, 1, 26, 26)",
+          "border-width": 1.5,
+          "border-color": "#0e5962",
+        },
+      },
+      {
+        selector: "node[kind = 'reaction']",
+        style: {
+          "background-color": "#d66853",
+          "label": "data(label)",
+          "color": "#5a2116",
+          "font-size": "9px",
+          "text-wrap": "wrap",
+          "text-max-width": "92px",
+          "shape": "round-rectangle",
+          "width": 32,
+          "height": 22,
+          "border-width": 1,
+          "border-color": "#9e3f2b",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          "curve-style": "bezier",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "#8d8173",
+          "line-color": "#8d8173",
+          "width": "mapData(event_count, 0, 1, 1, 1)",
+          opacity: 0.62,
+        },
+      },
+      { selector: ":selected", style: { "border-width": 3, "border-color": "#f08c46", "line-color": "#f08c46", "target-arrow-color": "#f08c46" } },
+    ],
+  });
+  // Keep the graph readable for sparse tables while preserving data-driven sizing.
+  transitionCy.nodes("[kind = 'species']").forEach((node) => {
+    const total = Number(node.data("species")?.total || 0);
+    node.style({ width: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28), height: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28) });
+  });
+  transitionCy.on("tap", (event) => {
+    if (event.target !== transitionCy) return;
+    transitionCy.elements().style("opacity", 1);
+    renderTransitionSelection();
+  });
+  transitionCy.nodes().on("tap", (event) => {
+    const node = event.target;
+    const neighborhood = node.closedNeighborhood();
+    transitionCy.elements().style("opacity", 0.16);
+    neighborhood.style("opacity", 1);
+    const item = event.target.data();
+    if (item.kind === "reaction") {
+      state.transition.selected = { kind: "reaction", ...item.reaction };
+    } else {
+      state.transition.selected = { kind: "species", species: item.species || {} };
+    }
+    renderTransitionSelection(state.transition.selected);
+  });
+  return true;
+}
+
+async function renderTransitionChart() {
+  const data = state.transition.data;
+  if (!data) return;
+  const loaded = await ensureECharts();
+  if (!loaded) {
+    q("transitionChart").innerHTML = '<div class="context-storyboard-empty">ECharts 加载失败，仍可使用下方通道排行。</div>';
+    return;
+  }
+  if (state.transition.mode === "network") {
+    const loadedCy = await ensureCytoscape();
+    if (!loadedCy) {
+      q("transitionChart").innerHTML = '<div class="context-storyboard-empty">Cytoscape.js 加载失败，仍可使用矩阵和下方通道排行。</div>';
+      return;
+    }
+    renderTransitionNetwork(data);
+  } else renderTransitionHeatmap(data);
+}
+
+function setTransitionMode(mode) {
+  state.transition.mode = mode === "network" ? "network" : "heatmap";
+  const heatmap = state.transition.mode === "heatmap";
+  q("btnTransitionHeatmap").classList.toggle("is-selected", heatmap);
+  q("btnTransitionHeatmap").setAttribute("aria-pressed", heatmap ? "true" : "false");
+  q("btnTransitionNetwork").classList.toggle("is-selected", !heatmap);
+  q("btnTransitionNetwork").setAttribute("aria-pressed", heatmap ? "false" : "true");
+  renderTransitionChart();
+}
+
+async function runTransitionTable() {
+  q("btnTransitionLoad").disabled = true;
+  q("transitionSourceLabel").textContent = "正在解析转移矩阵";
+  q("transitionResultPanel").classList.remove("hidden");
+  try {
+    const data = await fetchJson("/api/transition_table", {
+      table: value("qTransitionTable") || globalTableFile() || state.ui.dataset?.artifacts?.table?.path || "",
+      max_species: value("qTransitionMaxSpecies") || 40,
+      min_count: value("qTransitionMinCount") || 1,
+      top_edges: value("qTransitionTopEdges") || 40,
+    });
+    state.transition.data = data;
+    state.transition.selected = null;
+    q("transitionSourceLabel").textContent = data.query?.table || "transition table";
+    renderTransitionStats(data);
+    renderTransitionSelection();
+    renderTransitionEdgeTable(data);
+    await renderTransitionChart();
+  } finally {
+    q("btnTransitionLoad").disabled = false;
+  }
+}
+
+function exportTransitionEdges() {
+  const edges = state.transition.data?.edges || [];
+  if (!edges.length) return;
+  const cols = ["source_formula", "source_smiles", "target_formula", "target_smiles", "count"];
+  const lines = [cols.join(",")];
+  edges.forEach((edge) => lines.push([
+    edge.source_formula,
+    edge.source,
+    edge.target_formula,
+    edge.target,
+    edge.count,
+  ].map(csvEscape).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "rng_transition_edges.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function runWithToast(fn, moduleKey = null) {
   try {
     document.body.style.cursor = "progress";
@@ -4967,6 +5703,36 @@ function bindEvents() {
   q("btnContextExtractManual").addEventListener("click", () => runWithToast(() => runContextExtract("manual"), "context_extract"));
   q("btnPlot").addEventListener("click", () => runWithToast(runPlot, "plot"));
   q("btnCarbonPlot").addEventListener("click", () => runWithToast(runCarbonPlot));
+  q("btnTransitionLoad").addEventListener("click", () => runWithToast(runTransitionTable));
+  q("btnTransitionHeatmap").addEventListener("click", () => setTransitionMode("heatmap"));
+  q("btnTransitionNetwork").addEventListener("click", () => setTransitionMode("network"));
+  q("btnTransitionExport").addEventListener("click", exportTransitionEdges);
+  q("btnBrowseDatasetFolder").addEventListener("click", () => runWithToast(browseDatasetFolder));
+  q("btnImportDatasetFolder").addEventListener("click", () => runWithToast(importDatasetFolder));
+  q("datasetCandidateSelect").addEventListener("change", () => {
+    state.ui.datasetBase = value("datasetCandidateSelect");
+    runWithToast(() => refreshDatasetStatus());
+  });
+  q("workspaceNav").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-workspace-module]");
+    if (!(button instanceof HTMLButtonElement)) return;
+    setWorkspaceModule(button.dataset.workspaceModule || "species");
+  });
+  ["datasetFolder", "reacFile", "sharedSpeciesFile", "sharedTrajectoryFile", "sharedRouteFile", "sharedTableFile"].forEach((id) => {
+    q(id).addEventListener("change", () => {
+      if (id === "datasetFolder") state.ui.datasetBase = "";
+      refreshDatasetStatus({ silent: true }).catch(() => {});
+    });
+  });
+  q("transitionEdgeTable").addEventListener("click", (event) => {
+    const row = event.target.closest("tr[data-transition-edge]");
+    if (!row) return;
+    const index = Number.parseInt(row.dataset.transitionEdge || "", 10);
+    const edge = state.transition.data?.edges?.[index];
+    if (!edge) return;
+    state.transition.selected = { kind: "edge", ...edge };
+    renderTransitionSelection(state.transition.selected);
+  });
 
   document.querySelectorAll(".viewer-show-h").forEach((input) => {
     input.addEventListener("change", () => {
@@ -5407,6 +6173,12 @@ function bindEvents() {
         !!q("qCarbonCompareLogY").checked
       );
     }
+    const transitionHost = q("transitionChart");
+    if (transitionHost && window.echarts) {
+      const transitionChart = window.echarts.getInstanceByDom(transitionHost);
+      if (transitionChart) transitionChart.resize();
+    }
+    if (transitionCy) transitionCy.resize();
     drawContextFrameCanvas();
   });
   syncContextTrajectoryAtomScopeControl();
@@ -5414,6 +6186,7 @@ function bindEvents() {
 }
 
 async function init() {
+  buildWorkspaceShell();
   bindEvents();
   let health = null;
   try {
@@ -5424,30 +6197,32 @@ async function init() {
   const rdkitAvailable = Boolean(health?.rdkit?.available);
   initializeResultWorkbench({
     status: "ready",
-    hint: "绘图可直接用 species 数据源；网络检索再填写 reactionabcd",
+    hint: "先导入 RNG 输出文件夹；检索、事件证据和观察网络会自动复用对应文件",
     rdkit_available: rdkitAvailable,
     viewer_note: rdkitAvailable ? "SMILES 结构渲染可用" : "RDKit 不可用，结构渲染将显示错误占位图",
   });
+  const initialModule = new URLSearchParams(window.location.search).get("module");
+  setWorkspaceModule(initialModule || "species", { focus: false });
   setPlotMeta({ status: "ready", hint: "使用 Plot 面板查询后在此显示曲线" });
   setPlotProgress("Idle", 0, "等待开始", false);
   setIntermediateProgress("Idle", 0, "等待开始", false);
-  setContextProgress("Idle", 0, "等待开始", false);
+  setContextExtractProgress("Idle", 0, "等待开始", false);
   resetContextTrajectoryViewer();
   setCarbonPlotMeta({ status: "ready", hint: "使用 Carbon Plot 面板后在此显示绘图参数" });
   setCarbonPlotSummary({ status: "ready", hint: "绘图后在此显示 summary JSON" });
   renderCarbonPlotHighlights(null);
   setCarbonPlotProgress("Idle", 0, "等待开始", false);
-  await drawPlot([], [], "x", "count");
+  drawPlotCanvas([], [], "x", "count");
   resetPlotInteractive();
   renderCarbonPlot("");
   drawContextFrameCanvas();
   resetCarbonInteractive();
-  openQueryModule("general");
   setGeneralQueryMode(DEFAULT_GENERAL_QUERY_MODE);
   syncCarbonLayoutFields();
   syncUnifiedPlotMode();
   syncPlotSpeciesSourceMode();
   syncCarbonSpeciesSourceMode();
+  refreshDatasetStatus({ silent: true }).catch(() => {});
 }
 
 init();

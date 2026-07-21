@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RNG Query Web</title>
+  <title>reacnet-scope</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -11,15 +11,43 @@
   <main class="shell">
     <header class="hero">
       <div>
-        <h1>RNG Query Studio</h1>
-        <p>ReacNetGenerator 路径检索 + SMILES 结构可视化</p>
+        <h1>reacnet-scope</h1>
+        <p>ReacNetGenerator 输出后处理 · 物种、反应与网络分析</p>
       </div>
       <div class="endpoint">API: <code id="apiRoot">/api</code></div>
     </header>
 
+    <section class="dataset-import card" id="datasetImportCard">
+      <div class="dataset-import-head">
+        <div class="dataset-import-title">
+          <span class="workspace-kicker">数据源</span>
+          <h2>RNG 输出文件夹</h2>
+        </div>
+        <div class="dataset-current">
+          <strong id="datasetName">未选择 RNG 输出</strong>
+          <span id="datasetImportHint" class="dataset-import-hint">未导入</span>
+        </div>
+        <div id="datasetStatus" class="dataset-status" aria-label="RNG 输出文件状态"></div>
+      </div>
+      <div class="dataset-import-grid">
+        <div class="field dataset-folder-field">
+          <label for="datasetFolder">文件夹</label>
+          <input id="datasetFolder" type="text" placeholder="选择包含 .reactionabcd / .species / .route / .table 的文件夹" autocomplete="off" />
+        </div>
+        <div class="field hidden" id="datasetCandidateField">
+          <label for="datasetCandidateSelect">运行组</label>
+          <select id="datasetCandidateSelect"></select>
+        </div>
+        <div class="dataset-import-actions">
+          <button id="btnBrowseDatasetFolder" class="ghost" type="button">浏览</button>
+          <button id="btnImportDatasetFolder" type="button">导入</button>
+        </div>
+      </div>
+    </section>
+
     <section class="global-config card">
       <div class="field wide">
-        <label for="reacFile">Reaction Network(.reactionabcd，可选)</label>
+        <label for="reacFile">Reaction(.reactionabcd，可选)</label>
         <input id="reacFile" type="text" placeholder="仅网络检索/WithFlux需要；Plot/Carbon 使用 species 输入可不填" />
         <div class="field-note">用于“按分子式/质量/路径/公式反应检索”与中间体的 flux 富集。仅绘图时可留空。</div>
       </div>
@@ -31,7 +59,7 @@
 
     <section class="shared-datasource card" id="globalDatasourceCard">
       <div class="card-head">
-        <h2>共享数据源</h2>
+        <h2>手动文件路径</h2>
       </div>
       <div class="row row-global-datasource">
         <div class="field">
@@ -40,14 +68,18 @@
         </div>
         <div class="field">
           <label for="sharedTrajectoryFile">Shared Trajectory 文件(可选)</label>
-          <input id="sharedTrajectoryFile" type="text" placeholder="支持 .lammpstrj；事件可视化默认使用这里" />
+          <input id="sharedTrajectoryFile" type="text" placeholder="支持 .lammpstrj；事件证据默认使用这里" />
         </div>
         <div class="field">
           <label for="sharedRouteFile">Shared Route 文件(可选)</label>
           <input id="sharedRouteFile" type="text" placeholder="支持 .route；需要自动解析事件 atom ids 时默认使用这里" />
         </div>
+        <div class="field">
+          <label for="sharedTableFile">Shared Table 文件(可选)</label>
+          <input id="sharedTableFile" type="text" placeholder="支持 .lammpstrj.table；反应网络默认使用这里" />
+        </div>
       </div>
-      <div class="field-note">未填写模块覆盖项时，中间体检索、反应事件可视化、单文件时间曲线、单文件 Carbon 图都会默认使用这里的路径。多文件对比仍在各模块内单独填写。</div>
+      <div class="field-note">未填写模块覆盖项时，中间体筛选、事件证据、单文件时间曲线、单文件 Carbon 图都会默认使用这里的路径。多文件对比仍在各模块内单独填写。</div>
     </section>
 
     <section class="query-result-workbench">
@@ -55,12 +87,12 @@
         <section class="query-module-shell">
           <details class="query-module-group" data-query-module-group="general" open>
             <summary class="query-module-summary">
-              <strong>通用检索</strong>
+              <strong>物种身份检索</strong>
               <span>分子式 / 质量数</span>
             </summary>
             <div class="query-module-body">
               <article class="card query-card" id="card-general">
-                <h2>通用检索条件</h2>
+                <h2>物种身份条件</h2>
                 <div class="general-query-pane">
                   <div class="query-subtitle">按分子式查 SMILES</div>
                   <div class="row">
@@ -113,7 +145,7 @@
 
               <article class="card module-result-card hidden" id="generalResultCard">
                 <div class="card-head">
-                  <h2 id="generalResultTitle">通用检索结果</h2>
+                  <h2 id="generalResultTitle">物种身份结果</h2>
                   <button id="btnExportGeneral" class="ghost" disabled>导出结果 CSV</button>
                 </div>
                 <pre id="generalMetaBox" class="meta"></pre>
@@ -414,12 +446,12 @@
 
           <details class="query-module-group" data-query-module-group="context">
             <summary class="query-module-summary">
-              <strong>反应事件可视化</strong>
-              <span>Step 1 定位事件 -> Step 2 提取并打开子轨迹</span>
+              <strong>反应事件证据</strong>
+              <span>定位事件 -> 提取子轨迹</span>
             </summary>
             <div class="query-module-body">
               <article class="card query-card" id="card-context-datasource">
-                <h2>Step 0. 本模块覆盖数据源(可选)</h2>
+                <h2>事件证据数据源覆盖(可选)</h2>
                 <div class="row row-context-datasource">
                   <div class="field">
                     <label for="qContextSpeciesFile">Species 覆盖(可选)</label>
@@ -434,7 +466,7 @@
                     <input id="qContextRouteFile" type="text" placeholder="留空则使用顶部共享 Route；若共享也为空，再由 trajectory/species 推导" />
                   </div>
                 </div>
-                <div class="field-note">这里是“反应事件可视化”模块的局部覆盖项。主流程默认使用 <code>.species + .route + .lammpstrj</code> 三件套：<code>.species</code> 给离散时间轴，<code>.route</code> 给反应核原子变化，<code>.lammpstrj</code> 用于切局部子轨迹和生成关键帧故事板。</div>
+                <div class="field-note">事件证据主流程默认使用 <code>.species + .route + .lammpstrj</code>：时间轴、反应核原子变化、局部子轨迹。</div>
               </article>
 
               <details class="option-fold plot-option-group context-legacy-flow">
@@ -1226,53 +1258,59 @@
       </section>
     </section>
 
-    <section class="card usage-guide">
-      <h2>使用说明</h2>
-      <div class="guide-grid">
-        <article>
-          <h3>快速开始</h3>
-          <ol>
-            <li>如果要做网络检索/flux富集，先确认顶部 <code>reactionabcd 文件</code> 与 <code>min_tp</code>。</li>
-            <li>在任一检索卡片输入条件并点击“查询”。</li>
-            <li>结果表会自动生成结构列表；鼠标悬停在 SMILES 上可快速预览。</li>
-            <li>在 <code>时间演化绘图</code> 选择 <code>Species</code> 或 <code>Carbon</code> 模式后绘图。</li>
-            <li>Carbon 模式可从 <code>.species</code> 直接出图并在同窗口勾选曲线对比。</li>
-          </ol>
-        </article>
-        <article>
-          <h3>常用模块</h3>
-          <ul>
-            <li><code>按分子式查 SMILES</code>：查同分子式下的全部/Top 物种。</li>
-            <li><code>按质量数查 MD 物种</code>：按 nominal/exact 质量筛选候选物种。</li>
-            <li><code>按 SMILES / 分子式查后续路径</code>：看某物种的消耗/生成通道。</li>
-            <li><code>Species 中间体筛选</code>：按先升后降 + 丰度 + FWHM 自动筛候选。</li>
-            <li><code>按公式级反应检索</code>：支持仅填反应物、仅填产物或双侧同时填写。</li>
-            <li><code>事件轨迹提取</code>：先定位物种/反应事件，再按事件窗口或手工帧范围提取 <code>lammpstrj</code> 子轨迹，用于在 OVITO / VMD 中检查动态过程。</li>
-            <li><code>按公式级反应检索</code>中的<code>Top占比</code>可直接算检索结果的占比。</li>
-          </ul>
-        </article>
-        <article>
-          <h3>输入格式示例</h3>
-          <ul>
-            <li>分子式：<code>C6H4</code>、<code>C6H4O2</code></li>
-            <li>SMILES：<code>[H][O][H]</code></li>
-            <li>多项输入：使用 <code>+</code>、<code>,</code> 或换行分隔。</li>
-            <li>Plot 目标支持：<code>label::query</code>，如 <code>oBenzyne::C6H4</code>。</li>
-            <li>多文件对比：<code>system@replicate::/abs/path.species</code> 或 <code>system@replicate::/abs/path.reactionabcd</code>（每行一个）。</li>
-          </ul>
-        </article>
-        <article>
-          <h3>占比说明</h3>
-          <ul>
-            <li><code>Top占比</code>基于当前反应检索结果计算，无需额外 CSV。</li>
-            <li><code>ShareMetric</code>可选 <code>net_tp</code> / <code>tp</code> / <code>reverse_tp</code>。</li>
-            <li><code>ShareAbs</code>用于按绝对值统计（适合净通量正负并存场景）。</li>
-            <li><code>Positive only</code>只统计大于 0 的指标值。</li>
-            <li>绘图模块会优先使用你填写的 <code>.species/.reactionabcd</code> 数据源，不强依赖顶部 <code>reactionabcd</code>。</li>
-          </ul>
-        </article>
-      </div>
+    <section id="transitionMatrixSection" class="transition-layout">
+      <article class="card query-card transition-controls">
+        <h2>观察反应网络（Table）</h2>
+        <div class="field">
+          <label for="qTransitionTable">RNG Table(.lammpstrj.table)</label>
+          <input id="qTransitionTable" type="text" placeholder="留空使用顶部导入的 Table" />
+        </div>
+        <div class="row transition-parameter-row">
+          <div class="field mini">
+            <label for="qTransitionMaxSpecies">显示物种数</label>
+            <input id="qTransitionMaxSpecies" type="number" min="5" max="100" value="40" />
+          </div>
+          <div class="field mini">
+            <label for="qTransitionMinCount">最小观察次数</label>
+            <input id="qTransitionMinCount" type="number" min="1" value="1" />
+          </div>
+          <div class="field mini">
+            <label for="qTransitionTopEdges">强通道数</label>
+            <input id="qTransitionTopEdges" type="number" min="5" max="200" value="40" />
+          </div>
+        </div>
+        <button id="btnTransitionLoad">加载网络</button>
+      </article>
+
+      <section id="transitionResultPanel" class="card plot-panel transition-panel hidden">
+        <div class="card-head transition-head">
+          <div>
+            <h2>观察网络图谱</h2>
+            <span id="transitionSourceLabel" class="viewer-note">等待加载</span>
+          </div>
+          <div class="segmented-control" role="group" aria-label="观察网络显示模式">
+            <button id="btnTransitionHeatmap" type="button" class="is-selected" aria-pressed="true">矩阵</button>
+            <button id="btnTransitionNetwork" type="button" aria-pressed="false">强观察通道</button>
+          </div>
+        </div>
+        <div id="transitionStats" class="stat-chips"></div>
+        <div id="transitionSelection" class="transition-selection" aria-live="polite">点击物种或观察转移查看证据</div>
+        <div id="transitionChart" class="transition-chart" role="img" aria-label="ReacNetGenerator 观察反应网络"></div>
+        <div class="transition-ranking">
+          <div class="card-head">
+            <h3>主转移通道</h3>
+            <button id="btnTransitionExport" class="ghost" type="button" disabled>导出 CSV</button>
+          </div>
+          <div class="table-wrap table-wrap-compact">
+            <table id="transitionEdgeTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </section>
+
   </main>
 
   <script src="/static/app.js"></script>

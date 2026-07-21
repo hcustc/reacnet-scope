@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "reacnet-scope"
 version = "0.1.0"
-description = "CLI + web toolkit for querying ReacNetGenerator outputs and aligning MD species/pathways with mass-spectrometry interpretation."
+description = "Interactive post-processing and analysis software for ReacNetGenerator species, reaction events, and reaction networks."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -28,10 +28,19 @@ plot = [
   "matplotlib>=3.8",
   "scipy>=1.11",
 ]
+web = [
+    "dash[diskcache]>=4,<5",
+    "dash-ag-grid>=35,<36",
+    "dash-bootstrap-components>=2,<3",
+    "dash-cytoscape>=1,<2",
+    "matplotlib>=3.8",
+    "scipy>=1.11",
+]
 
 [project.scripts]
 reacnet-scope = "scripts.rng_query_cli:main"
 reacnet-scope-web = "scripts.webapp.server:main"
+reacnet-scope-web-dash = "scripts.webapp_dash.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rng_tools", "scripts"]

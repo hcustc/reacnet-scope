@@ -69,6 +69,8 @@ from rng_tools.network import (  # noqa: E402
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
+from rng_tools.io import load_transition_table  # noqa: E402
+from rng_tools.observation_network import build_observation_network  # noqa: E402
 from rng_tools.formula import formula_exact_mass, formula_nominal_mass  # noqa: E402
 from rng_tools.reaction import canonical_smiles  # noqa: E402
 from rng_tools.carbon_plot import (  # noqa: E402
@@ -132,7 +134,28 @@ def detect_default_reaction_file() -> Path:
     return candidates[0]
 
 
+def detect_default_transition_table() -> Path:
+    """Find the bundled RP3 transition matrix when no table is supplied."""
+
+    env_path = os.getenv("RNG_TRANSITION_TABLE", "").strip()
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.extend(
+        [
+            TOOL_ROOT / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+            PROJECT_ROOT / "reacnet-scope" / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+            Path.cwd() / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 DEFAULT_REACTION_FILE = detect_default_reaction_file()
+DEFAULT_TRANSITION_TABLE = detect_default_transition_table()
 
 FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 SPECIES_TS_PREFIX_RE = re.compile(r"^Timestep\s+(\d+):")
@@ -641,6 +664,149 @@ def derive_route_path(source_path: str) -> str:
         if candidate.lower().endswith(".route") and os.path.exists(candidate):
             return candidate
     return deduped[0] if deduped else path
+
+
+def _dataset_base_path(path_text: str) -> str:
+    """Return the shared RNG output stem for a known artifact path."""
+
+    path = (path_text or "").strip()
+    if not path:
+        return ""
+    for suffix in (".reactionabcd", ".species", ".route", ".table", ".json", ".html", ".svg"):
+        if path.lower().endswith(suffix):
+            return path[: -len(suffix)]
+    if path.lower().endswith(".lammpstrj"):
+        return path
+    return path
+
+
+def _dataset_file_descriptor(path_text: str, *, source: str) -> dict[str, Any]:
+    path = (path_text or "").strip()
+    exists = bool(path) and os.path.isfile(path)
+    return {
+        "path": path,
+        "source": source,
+        "exists": exists,
+        "size_bytes": os.path.getsize(path) if exists else None,
+    }
+
+
+def _scan_rng_dataset_directory(
+    directory_text: str,
+    *,
+    preferred_base: str = "",
+) -> tuple[str, dict[str, str], list[dict[str, Any]]]:
+    """Find the most complete ReacNetGenerator output set in one directory."""
+
+    directory = Path(directory_text).expanduser().resolve()
+    if not directory.is_dir():
+        raise FileNotFoundError(f"dataset folder not found: {directory}")
+    preferred = (preferred_base or "").strip()
+    preferred_resolved = str(Path(preferred).expanduser().resolve()) if preferred else ""
+
+    groups: dict[str, dict[str, Path]] = defaultdict(dict)
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        kind = ""
+        if name.endswith(".reactionabcd"):
+            kind = "reaction"
+        elif name.endswith(".species"):
+            kind = "species"
+        elif name.endswith(".route"):
+            kind = "route"
+        elif name.endswith(".table"):
+            kind = "table"
+        elif name.endswith(".lammpstrj"):
+            kind = "trajectory"
+        if kind:
+            groups[_dataset_base_path(str(path))][kind] = path
+
+    candidates: list[dict[str, Any]] = []
+    for base, files in groups.items():
+        candidates.append(
+            {
+                "base": base,
+                "label": Path(base).name,
+                "kinds": sorted(files),
+                "score": len(files),
+                "mtime": max((item.stat().st_mtime for item in files.values()), default=0.0),
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item["score"]), -float(item["mtime"]), str(item["label"])))
+    if not candidates:
+        return "", {}, []
+    chosen = next(
+        (
+            item
+            for item in candidates
+            if preferred and str(item["base"]) in {preferred, preferred_resolved}
+        ),
+        candidates[0],
+    )
+    for item in candidates:
+        item["selected"] = str(item["base"]) == str(chosen["base"])
+    selected = {key: str(value) for key, value in groups[str(chosen["base"])].items()}
+    visible_candidates = candidates[:12]
+    if chosen not in visible_candidates:
+        visible_candidates = [chosen, *visible_candidates[:11]]
+    return str(chosen["base"]), selected, visible_candidates
+
+
+def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]:
+    """Resolve a compact, shared view of a ReacNetGenerator output set."""
+
+    explicit = {
+        "reaction": (params.get("reac", [""])[0] or "").strip(),
+        "species": (params.get("species_file", [""])[0] or "").strip(),
+        "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
+        "route": (params.get("route_file", [""])[0] or "").strip(),
+        "table": (params.get("table_file", [""])[0] or "").strip(),
+    }
+    folder = (params.get("dataset_dir", [""])[0] or "").strip()
+    folder_base = ""
+    folder_files: dict[str, str] = {}
+    candidates: list[dict[str, Any]] = []
+    if folder:
+        preferred_base = (params.get("dataset_base", [""])[0] or "").strip()
+        folder_base, folder_files, candidates = _scan_rng_dataset_directory(folder, preferred_base=preferred_base)
+    seed = next((value for value in explicit.values() if value), folder_base)
+    base = _dataset_base_path(seed)
+    inferred = {
+        "reaction": f"{base}.reactionabcd" if base else "",
+        "species": f"{base}.species" if base else "",
+        "trajectory": base,
+        "route": f"{base}.route" if base else "",
+        "table": f"{base}.table" if base else "",
+    }
+    artifacts: dict[str, dict[str, Any]] = {}
+    for key in ("reaction", "species", "trajectory", "route", "table"):
+        selected = explicit[key] or folder_files.get(key, "") or inferred[key]
+        source = "explicit" if explicit[key] else ("folder" if folder_files.get(key) else "derived")
+        artifacts[key] = _dataset_file_descriptor(selected, source=source)
+
+    capabilities = {
+        "species": artifacts["reaction"]["exists"],
+        "intermediate": artifacts["species"]["exists"],
+        "reaction": artifacts["reaction"]["exists"],
+        "events": artifacts["species"]["exists"],
+        "evolution": artifacts["species"]["exists"],
+        "transition": artifacts["table"]["exists"],
+    }
+    return {
+        "ok": True,
+        "dataset": {
+            "base": base,
+            "label": Path(base).name if base else "未选择数据集",
+            "folder": folder,
+            "selected_base": folder_base or base,
+            "candidates": candidates,
+            "artifacts": artifacts,
+            "capabilities": capabilities,
+            "ready_count": sum(1 for item in artifacts.values() if item["exists"]),
+        },
+    }
 
 
 def resolve_start_smiles(net: ReactionNetwork, start_query: str) -> str | None:
@@ -3768,6 +3934,45 @@ def open_path_with_system(path: str, mode: str = "default") -> dict[str, Any]:
     }
 
 
+def _applescript_string(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def pick_folder_with_system(initial_dir: str = "") -> dict[str, Any]:
+    """Open a native folder picker and return a local absolute folder path."""
+
+    if sys.platform != "darwin":
+        raise RuntimeError("native folder picker is currently supported on macOS only")
+
+    script: list[str] = []
+    initial = Path(initial_dir).expanduser() if initial_dir else None
+    if initial and initial.is_dir():
+        script.append(f"set defaultFolder to POSIX file {_applescript_string(str(initial.resolve()))}")
+        script.append('set pickedFolder to choose folder with prompt "Select ReacNetGenerator output folder" default location defaultFolder')
+    else:
+        script.append('set pickedFolder to choose folder with prompt "Select ReacNetGenerator output folder"')
+    script.append("POSIX path of pickedFolder")
+
+    cmd: list[str] = ["osascript"]
+    for line in script:
+        cmd.extend(["-e", line])
+    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        if "-128" in message or "User canceled" in message:
+            return {"ok": True, "path": "", "canceled": True}
+        raise RuntimeError(message or f"folder picker failed with return code {completed.returncode}")
+
+    path_text = (completed.stdout or "").strip()
+    if not path_text:
+        return {"ok": True, "path": "", "canceled": True}
+    return {
+        "ok": True,
+        "path": str(Path(path_text).expanduser().resolve()),
+        "canceled": False,
+    }
+
+
 def _resolve_reaction_query_text(params: dict[str, list[str]]) -> str:
     reaction_smiles = (params.get("reaction_smiles", [""])[0] or "").strip()
     reaction_formulas = (params.get("reaction_formulas", [""])[0] or "").strip()
@@ -5391,6 +5596,108 @@ def downsample_summary_payload(obj: Any, max_points: int) -> Any:
     if isinstance(obj, list):
         return [downsample_summary_payload(item, max_points) for item in obj]
     return obj
+
+
+def _transition_species_summary(smiles: str, index: int, incoming: int, outgoing: int) -> dict[str, Any]:
+    formula = smiles_formula_cached(smiles)
+    return {
+        "index": int(index),
+        "smiles": smiles,
+        "formula": formula or "?",
+        "incoming": int(incoming),
+        "outgoing": int(outgoing),
+        "total": int(incoming + outgoing),
+    }
+
+
+def build_transition_table_payload(params: dict[str, list[str]]) -> dict[str, Any]:
+    """Build a compact visualization payload for RNG transition matrices."""
+
+    raw_path = (params.get("table", params.get("transition_table", [str(DEFAULT_TRANSITION_TABLE)]))[0] or "").strip()
+    table_path = Path(raw_path).expanduser() if raw_path else DEFAULT_TRANSITION_TABLE
+    if not table_path.exists() and not raw_path:
+        table_path = DEFAULT_TRANSITION_TABLE
+    parsed = load_transition_table(table_path)
+    labels = list(parsed["labels"])
+    matrix = parsed["matrix"]
+    min_count = max(0, int_param(params, "min_count", 1))
+    max_species = max(0, int_param(params, "max_species", 60))
+    top_edges_limit = max(1, min(500, int_param(params, "top_edges", 40)))
+
+    incoming = [sum(int(row[index]) for row in matrix) for index in range(len(labels))]
+    outgoing = [sum(int(value) for value in matrix[index]) for index in range(len(labels))]
+    ranking = sorted(
+        range(len(labels)),
+        key=lambda index: (-incoming[index] - outgoing[index], -incoming[index], labels[index]),
+    )
+    if max_species:
+        selected = ranking[: min(max_species, len(ranking))]
+    else:
+        selected = ranking
+    selected_set = set(selected)
+    selected = [index for index in ranking if index in selected_set]
+    # Keep the displayed matrix in rank order, which makes dominant species
+    # visible at the upper-left instead of preserving arbitrary file order.
+    submatrix = [[int(matrix[row][col]) for col in selected] for row in selected]
+    species = [
+        _transition_species_summary(labels[index], index, incoming[index], outgoing[index])
+        for index in selected
+    ]
+    for rank, item in enumerate(species, 1):
+        item["rank"] = rank
+
+    edges: list[dict[str, Any]] = []
+    for row_index in selected:
+        for col_index in selected:
+            count = int(matrix[row_index][col_index])
+            if count < min_count:
+                continue
+            edges.append(
+                {
+                    "source_index": int(row_index),
+                    "target_index": int(col_index),
+                    "source": labels[row_index],
+                    "target": labels[col_index],
+                    "source_formula": smiles_formula_cached(labels[row_index]) or "?",
+                    "target_formula": smiles_formula_cached(labels[col_index]) or "?",
+                    "count": count,
+                }
+            )
+    edges.sort(key=lambda edge: (-int(edge["count"]), edge["source"], edge["target"]))
+
+    total_events = int(sum(sum(int(value) for value in row) for row in matrix))
+    nonzero_events = int(sum(1 for row in matrix for value in row if int(value) >= min_count))
+    observation_network = build_observation_network(
+        parsed,
+        table_path=table_path,
+        min_count=min_count,
+        max_species=max_species,
+        top_edges=top_edges_limit,
+        formula_resolver=smiles_formula_cached,
+    )
+    return {
+        "ok": True,
+        "mode": "transition_table",
+        "query": {
+            "table": str(table_path.resolve()),
+            "min_count": min_count,
+            "max_species": max_species,
+            "top_edges": top_edges_limit,
+        },
+        "meta": {
+            "n_species_total": len(labels),
+            "n_species_displayed": len(selected),
+            "n_edges_displayed": min(len(edges), top_edges_limit),
+            "total_events": total_events,
+            "nonzero_events": nonzero_events,
+            "density": round(nonzero_events / max(1, len(labels) ** 2), 6),
+        },
+        "labels": [labels[index] for index in selected],
+        "matrix": submatrix,
+        "species": species,
+        "edges": edges[:top_edges_limit],
+        "network": observation_network,
+    }
 
 
 def build_species_plot_payload(
@@ -8388,6 +8695,13 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
+    def _api_pick_folder(self, params: dict[str, list[str]]) -> None:
+        initial_dir = (params.get("initial_dir", [""])[0] or "").strip()
+        try:
+            self._send_json(pick_folder_with_system(initial_dir))
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
     def _api_plot(self, params: dict[str, list[str]]) -> None:
         try:
             self._send_json(build_species_plot_payload(params))
@@ -8395,6 +8709,22 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
         except FileNotFoundError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=404)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _api_transition_table(self, params: dict[str, list[str]]) -> None:
+        try:
+            self._send_json(build_transition_table_payload(params))
+        except ValueError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+        except FileNotFoundError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=404)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _api_dataset_status(self, params: dict[str, list[str]]) -> None:
+        try:
+            self._send_json(build_dataset_status_payload(params))
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
@@ -8594,8 +8924,17 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/open_path":
             self._api_open_path(params)
             return
+        if path == "/api/pick_folder":
+            self._api_pick_folder(params)
+            return
         if path == "/api/plot":
             self._api_plot(params)
+            return
+        if path == "/api/transition_table":
+            self._api_transition_table(params)
+            return
+        if path == "/api/dataset_status":
+            self._api_dataset_status(params)
             return
         if path == "/api/evolution_plot":
             self._api_evolution_plot(params)

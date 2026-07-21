@@ -1,0 +1,82 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ReacNet Scope
+        - generic [ref=e7]: ·
+        - generic [ref=e8]: Dash WebUI V1
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - generic [ref=e11]: "目录:"
+          - generic [ref=e12]: /Volumes/T3000/rng_data_2500K
+        - generic [ref=e13]:
+          - generic [ref=e14]: "运行组:"
+          - generic [ref=e15]: 2CP_O2_1ER.lammpstrj
+        - generic [ref=e16]: 就绪 5/5
+      - button "管理数据" [ref=e17] [cursor=pointer]
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - button "物种检索" [ref=e20] [cursor=pointer]
+        - button "转化关系" [ref=e22] [cursor=pointer]
+        - button "反应式检索" [ref=e24] [cursor=pointer]
+        - button "中间体筛选" [ref=e26] [cursor=pointer]
+        - button "时间演化" [ref=e28] [cursor=pointer]
+        - button "碳数演化" [ref=e30] [cursor=pointer]
+        - button "事件证据" [ref=e32] [cursor=pointer]
+        - button "观察网络" [ref=e34] [cursor=pointer]
+      - generic [ref=e37]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: 类型
+          - generic [ref=e42]:
+            - textbox
+            - button "自动" [ref=e43] [cursor=pointer]
+          - generic [ref=e49]: 查询内容
+          - textbox "例如 H2O / [H][O] / 17.00274" [ref=e51]: "32"
+          - generic [ref=e52]: 质量容差
+          - spinbutton [ref=e54]: "0.5"
+          - button "查询" [active] [ref=e55] [cursor=pointer]
+          - button "导出 CSV" [ref=e56] [cursor=pointer]
+        - generic [ref=e58]:
+          - generic [ref=e113]: 找到 2 条匹配物种
+          - generic [ref=e63]:
+            - generic [ref=e64]: No Rows To Show
+            - grid:
+              - rowgroup [ref=e65]:
+                - row [ref=e114]:
+                  - columnheader "分子式" [ref=e115]
+                  - columnheader "SMILES" [ref=e119]
+                  - columnheader "精确质量" [ref=e123]
+                  - columnheader "标称质量" [ref=e127]
+                  - columnheader "TP(反应物)" [ref=e131]
+                  - columnheader "TP(产物)" [ref=e135]
+                  - columnheader "总通量" [ref=e139]
+                  - columnheader "消耗反应" [ref=e143]
+                  - columnheader "生成反应" [ref=e147]
+              - rowgroup [ref=e66]:
+                - row [ref=e151]:
+                  - gridcell "O2" [ref=e152]
+                  - gridcell "[O]=[O]" [ref=e153]
+                  - gridcell "31.989829" [ref=e154]
+                  - gridcell "32" [ref=e155]
+                  - gridcell "29642" [ref=e156]
+                  - gridcell "26160" [ref=e157]
+                  - gridcell "55802" [ref=e158]
+                  - gridcell "1567" [ref=e159]
+                  - gridcell "1094" [ref=e160]
+                - row [ref=e161]:
+                  - gridcell "CH4O" [ref=e162]
+                  - gridcell "[H][O][C]([H])([H])[H]" [ref=e163]
+                  - gridcell "32.026215" [ref=e164]
+                  - gridcell "32" [ref=e165]
+                  - gridcell "740" [ref=e166]
+                  - gridcell "740" [ref=e167]
+                  - gridcell "1480" [ref=e168]
+                  - gridcell "29" [ref=e169]
+                  - gridcell "17" [ref=e170]
+              - rowgroup
+              - rowgroup
+              - rowgroup
+      - generic [ref=e67]:
+        - heading "当前选中物种" [level=6] [ref=e68]
+        - generic [ref=e69]: 未选择物种
+  - contentinfo

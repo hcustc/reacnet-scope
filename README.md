@@ -1,9 +1,14 @@
 # reacnet-scope
 
-`reacnet-scope` 是一个面向 ReacNetGenerator 输出（`.reactionabcd` / species CSV）的轻量查询与可视化工具集，提供：
+`ReacNet Scope` 是面向 ReacNetGenerator 输出结果的交互式后处理与分析软件，主要用于解析和管理反应分子动力学模拟中生成的物种、反应事件与反应网络数据，并提供物种检索、反应路径追踪、中间体筛选、时间演化分析及网络可视化等功能，从而提升 ReacNetGenerator 结果的可查询性、可解释性和应用效率，并为复杂反应机理分析及实验质谱结果解释提供辅助支持。
 
-- Web 前端：SMILES/分子式/质量数反应检索、结构渲染、时间曲线绘图、中间体候选筛选
+当前支持的主要输出包括 `.reactionabcd`、`.species`、`.route` 和 `.lammpstrj.table`：
+
+- Web 前端：分子式/SMILES/质量数检索、结构渲染、时间曲线绘图、中间体候选筛选
+- Web 前端：事件证据定位、子轨迹提取，以及最新 ReacNetGenerator `.lammpstrj.table` 观察网络的矩阵、强通道网络和主通道排行
 - CLI：批量检索、路径导出、TOP-N 统计、曲线绘制
+
+它的核心定位是反应 MD 后处理与 ReacNetGenerator 输出解析；质谱实验解释是下游对接场景，而不是把本项目做成峰检测、色谱处理或通用质谱软件。网络数据协议和交互设计正在按 ReaxTools、NOCTIS、Cytoscape.js 等项目落地；GasRMDKit、ReNView、SCINE Heron 和 RMG-Py 目前作为后续扩展参考，不代表已经完全实现对应功能。
 
 ## Description
 
@@ -16,7 +21,7 @@ It parses ReacNetGenerator outputs and provides integrated query, filtering, and
 - Carbon-number evolution plotting from tidy species tables for parent decay,
   fragment growth, molecular growth, and oxidation tracking.
 - Intermediate candidate mining using abundance, rise-fall behavior, and lifetime criteria.
-- SMILES structure rendering and pathway auditing in a lightweight web UI.
+- SMILES structure rendering, event evidence inspection, and pathway auditing in a lightweight web UI.
 
 The project includes both CLI and web interfaces so the same core logic can be used for scripted batch analysis and interactive exploration.
 
@@ -88,6 +93,28 @@ uv sync
 uv sync --extra plot
 ```
 
+## `.lammpstrj.table` 观察网络可视化
+
+ReacNetGenerator 新版输出的 `*.lammpstrj.table` 是一个带 SMILES 行列标签的物种转移矩阵，单元格表示来源物种到目标物种的观察事件数。Web 端的 `观察网络` 模块：
+
+- 默认复用顶部导入文件夹中检测到的 Table，也可在 `RNG Table(.lammpstrj.table)` 输入框指定其他文件；
+- `矩阵` 视图按事件数对数着色，点击单元格可查看完整 SMILES 与原始事件数；
+- `强通道` 视图显示高事件数有向边，节点大小对应总通量；
+- 可按最小事件数和显示物种数裁剪结果，并导出主转移通道 CSV。
+
+后端 API 也提供结构化结果：`GET /api/transition_table?table=/path/to/file.table`。
+
+### 观察网络的数据边界
+
+`*.lammpstrj.table` 只有聚合的 Species → Species 观察次数，没有原始事件 ID、原子重叠配对或转移原子明细。因此 API 会明确标注：
+
+- `schema_version: observation-network/v1`
+- `model: species_reaction_bipartite`
+- `evidence_level: aggregate_observation`
+- `audit.status: not_available`
+
+每个非零矩阵单元会被表示为一个 `observed_transition` Reaction 节点，并通过 `reactant_of` / `produces` 连接两个 Species 节点。这是对聚合观察的可追溯表示，不等同于 ReaxTools 的原始反应事件；接入 `.route` 或更完整的 ReactionABCD 事件证据后，可在同一协议中替换为真实 Reaction 节点。网络视图使用 Cytoscape.js，矩阵视图仍使用 ECharts。
+
 ## Carbon-Number Evolution Plotter
 
 `rng_tools.carbon_plot` 提供了一个可复用的碳数演化绘图模块，核心接口包括：
@@ -145,7 +172,7 @@ Web 端也已接入新面板：
 
 ### Web 输入规范（统一）
 
-- 顶部 `Reaction Network(.reactionabcd，可选)`：仅用于网络检索类模块（分子式/质量/路径/公式反应）和中间体 `with_flux=true` 富集。
+- 顶部 `Reaction(.reactionabcd，可选)`：仅用于网络检索类模块（分子式/质量/路径/公式反应）和中间体 `with_flux=true` 富集。
 - `Species Time-Series / Carbon-Number Evolution` 绘图：优先使用模块内的 species 输入，不强依赖顶部 `reactionabcd`。
 - 单文件输入（`Species 文件`）支持两种后缀：
   - `.species`：直接读取

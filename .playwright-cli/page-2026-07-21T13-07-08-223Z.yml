@@ -1,0 +1,80 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ReacNet Scope
+        - generic [ref=e7]: ·
+        - generic [ref=e8]: Dash WebUI V1
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - generic [ref=e11]: "目录:"
+          - generic [ref=e12]: 未选择
+        - generic [ref=e13]:
+          - generic [ref=e14]: "运行组:"
+          - generic [ref=e15]: 未选择
+        - generic [ref=e16]: 未加载数据
+      - button "管理数据" [ref=e17] [cursor=pointer]
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - button "物种检索" [ref=e20] [cursor=pointer]
+        - button "转化关系" [ref=e22] [cursor=pointer]
+        - button "反应式检索" [ref=e24] [cursor=pointer]
+        - button "中间体筛选" [ref=e26] [cursor=pointer]
+        - button "时间演化" [ref=e28] [cursor=pointer]
+        - button "碳数演化" [ref=e30] [cursor=pointer]
+        - button "事件证据" [ref=e32] [cursor=pointer]
+        - button "观察网络" [ref=e34] [cursor=pointer]
+      - generic [ref=e37]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: 类型
+          - generic [ref=e42]:
+            - textbox
+            - button "自动" [ref=e43] [cursor=pointer]
+          - generic [ref=e49]: 查询内容
+          - textbox "例如 H2O / [H][O] / 17.00274" [ref=e51]
+          - generic [ref=e52]: 质量容差
+          - spinbutton [ref=e54]: "0.5"
+          - button "查询" [ref=e55] [cursor=pointer]
+          - button "导出 CSV" [ref=e56] [cursor=pointer]
+        - generic [ref=e63]:
+          - generic [ref=e64]: No Rows To Show
+          - grid:
+            - rowgroup [ref=e65]:
+              - row
+            - rowgroup [ref=e66]
+            - rowgroup
+            - rowgroup
+            - rowgroup
+            - generic: No Rows To Show
+      - generic [ref=e67]:
+        - heading "当前选中物种" [level=6] [ref=e68]
+        - generic [ref=e69]: 未选择物种
+  - contentinfo
+  - dialog [ref=e73]:
+    - generic [ref=e74]:
+      - generic [ref=e75]:
+        - generic [ref=e76]: 管理数据
+        - button "Close" [ref=e77] [cursor=pointer]
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - generic [ref=e81]: 数据目录
+            - textbox "输入或选择数据目录" [ref=e82]: /Volumes/T3000/rng_data_2500K
+          - button "选择文件夹" [ref=e84] [cursor=pointer]
+        - generic [ref=e86]:
+          - generic [ref=e87]: 运行组 (base)
+          - generic [ref=e88]:
+            - textbox
+            - button "留空使用默认" [ref=e89] [cursor=pointer]
+        - generic [ref=e106]: 扫描完成 — 2CP_O2_1ER.lammpstrj，就绪 5/5
+        - separator [ref=e94]
+        - generic [ref=e107]:
+          - generic [ref=e108]: "Reaction: /Volumes/T3000/rng_data_2500K/2CP_O2_1ER.lammpstrj.reactionabcd"
+          - generic [ref=e109]: "Species: /Volumes/T3000/rng_data_2500K/2CP_O2_1ER.lammpstrj.species"
+          - generic [ref=e110]: "Trajectory: /Volumes/T3000/rng_data_2500K/2CP_O2_1ER.lammpstrj"
+          - generic [ref=e111]: "Route: /Volumes/T3000/rng_data_2500K/2CP_O2_1ER.lammpstrj.route"
+          - generic [ref=e112]: "Table: /Volumes/T3000/rng_data_2500K/2CP_O2_1ER.lammpstrj.table"
+      - generic [ref=e102]:
+        - button "扫描" [active] [ref=e103] [cursor=pointer]
+        - button "应用" [ref=e104] [cursor=pointer]
+        - button "关闭" [ref=e105] [cursor=pointer]
