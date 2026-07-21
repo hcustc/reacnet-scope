@@ -70,6 +70,7 @@ from rng_tools.network import (  # noqa: E402
     smiles_to_formula_fast,
 )
 from rng_tools.io import load_transition_table  # noqa: E402
+from rng_tools.observation_network import build_observation_network  # noqa: E402
 from rng_tools.formula import formula_exact_mass, formula_nominal_mass  # noqa: E402
 from rng_tools.reaction import canonical_smiles  # noqa: E402
 from rng_tools.carbon_plot import (  # noqa: E402
@@ -690,6 +691,69 @@ def _dataset_file_descriptor(path_text: str, *, source: str) -> dict[str, Any]:
     }
 
 
+def _scan_rng_dataset_directory(
+    directory_text: str,
+    *,
+    preferred_base: str = "",
+) -> tuple[str, dict[str, str], list[dict[str, Any]]]:
+    """Find the most complete ReacNetGenerator output set in one directory."""
+
+    directory = Path(directory_text).expanduser().resolve()
+    if not directory.is_dir():
+        raise FileNotFoundError(f"dataset folder not found: {directory}")
+    preferred = (preferred_base or "").strip()
+    preferred_resolved = str(Path(preferred).expanduser().resolve()) if preferred else ""
+
+    groups: dict[str, dict[str, Path]] = defaultdict(dict)
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        kind = ""
+        if name.endswith(".reactionabcd"):
+            kind = "reaction"
+        elif name.endswith(".species"):
+            kind = "species"
+        elif name.endswith(".route"):
+            kind = "route"
+        elif name.endswith(".table"):
+            kind = "table"
+        elif name.endswith(".lammpstrj"):
+            kind = "trajectory"
+        if kind:
+            groups[_dataset_base_path(str(path))][kind] = path
+
+    candidates: list[dict[str, Any]] = []
+    for base, files in groups.items():
+        candidates.append(
+            {
+                "base": base,
+                "label": Path(base).name,
+                "kinds": sorted(files),
+                "score": len(files),
+                "mtime": max((item.stat().st_mtime for item in files.values()), default=0.0),
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item["score"]), -float(item["mtime"]), str(item["label"])))
+    if not candidates:
+        return "", {}, []
+    chosen = next(
+        (
+            item
+            for item in candidates
+            if preferred and str(item["base"]) in {preferred, preferred_resolved}
+        ),
+        candidates[0],
+    )
+    for item in candidates:
+        item["selected"] = str(item["base"]) == str(chosen["base"])
+    selected = {key: str(value) for key, value in groups[str(chosen["base"])].items()}
+    visible_candidates = candidates[:12]
+    if chosen not in visible_candidates:
+        visible_candidates = [chosen, *visible_candidates[:11]]
+    return str(chosen["base"]), selected, visible_candidates
+
+
 def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]:
     """Resolve a compact, shared view of a ReacNetGenerator output set."""
 
@@ -700,7 +764,14 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "route": (params.get("route_file", [""])[0] or "").strip(),
         "table": (params.get("table_file", [""])[0] or "").strip(),
     }
-    seed = next((value for value in explicit.values() if value), "")
+    folder = (params.get("dataset_dir", [""])[0] or "").strip()
+    folder_base = ""
+    folder_files: dict[str, str] = {}
+    candidates: list[dict[str, Any]] = []
+    if folder:
+        preferred_base = (params.get("dataset_base", [""])[0] or "").strip()
+        folder_base, folder_files, candidates = _scan_rng_dataset_directory(folder, preferred_base=preferred_base)
+    seed = next((value for value in explicit.values() if value), folder_base)
     base = _dataset_base_path(seed)
     inferred = {
         "reaction": f"{base}.reactionabcd" if base else "",
@@ -711,8 +782,9 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     }
     artifacts: dict[str, dict[str, Any]] = {}
     for key in ("reaction", "species", "trajectory", "route", "table"):
-        selected = explicit[key] or inferred[key]
-        artifacts[key] = _dataset_file_descriptor(selected, source="explicit" if explicit[key] else "derived")
+        selected = explicit[key] or folder_files.get(key, "") or inferred[key]
+        source = "explicit" if explicit[key] else ("folder" if folder_files.get(key) else "derived")
+        artifacts[key] = _dataset_file_descriptor(selected, source=source)
 
     capabilities = {
         "species": artifacts["reaction"]["exists"],
@@ -727,6 +799,9 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "dataset": {
             "base": base,
             "label": Path(base).name if base else "未选择数据集",
+            "folder": folder,
+            "selected_base": folder_base or base,
+            "candidates": candidates,
             "artifacts": artifacts,
             "capabilities": capabilities,
             "ready_count": sum(1 for item in artifacts.values() if item["exists"]),
@@ -3859,6 +3934,45 @@ def open_path_with_system(path: str, mode: str = "default") -> dict[str, Any]:
     }
 
 
+def _applescript_string(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def pick_folder_with_system(initial_dir: str = "") -> dict[str, Any]:
+    """Open a native folder picker and return a local absolute folder path."""
+
+    if sys.platform != "darwin":
+        raise RuntimeError("native folder picker is currently supported on macOS only")
+
+    script: list[str] = []
+    initial = Path(initial_dir).expanduser() if initial_dir else None
+    if initial and initial.is_dir():
+        script.append(f"set defaultFolder to POSIX file {_applescript_string(str(initial.resolve()))}")
+        script.append('set pickedFolder to choose folder with prompt "Select ReacNetGenerator output folder" default location defaultFolder')
+    else:
+        script.append('set pickedFolder to choose folder with prompt "Select ReacNetGenerator output folder"')
+    script.append("POSIX path of pickedFolder")
+
+    cmd: list[str] = ["osascript"]
+    for line in script:
+        cmd.extend(["-e", line])
+    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        if "-128" in message or "User canceled" in message:
+            return {"ok": True, "path": "", "canceled": True}
+        raise RuntimeError(message or f"folder picker failed with return code {completed.returncode}")
+
+    path_text = (completed.stdout or "").strip()
+    if not path_text:
+        return {"ok": True, "path": "", "canceled": True}
+    return {
+        "ok": True,
+        "path": str(Path(path_text).expanduser().resolve()),
+        "canceled": False,
+    }
+
+
 def _resolve_reaction_query_text(params: dict[str, list[str]]) -> str:
     reaction_smiles = (params.get("reaction_smiles", [""])[0] or "").strip()
     reaction_formulas = (params.get("reaction_formulas", [""])[0] or "").strip()
@@ -5553,6 +5667,14 @@ def build_transition_table_payload(params: dict[str, list[str]]) -> dict[str, An
 
     total_events = int(sum(sum(int(value) for value in row) for row in matrix))
     nonzero_events = int(sum(1 for row in matrix for value in row if int(value) >= min_count))
+    observation_network = build_observation_network(
+        parsed,
+        table_path=table_path,
+        min_count=min_count,
+        max_species=max_species,
+        top_edges=top_edges_limit,
+        formula_resolver=smiles_formula_cached,
+    )
     return {
         "ok": True,
         "mode": "transition_table",
@@ -5574,6 +5696,7 @@ def build_transition_table_payload(params: dict[str, list[str]]) -> dict[str, An
         "matrix": submatrix,
         "species": species,
         "edges": edges[:top_edges_limit],
+        "network": observation_network,
     }
 
 
@@ -8572,6 +8695,13 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
+    def _api_pick_folder(self, params: dict[str, list[str]]) -> None:
+        initial_dir = (params.get("initial_dir", [""])[0] or "").strip()
+        try:
+            self._send_json(pick_folder_with_system(initial_dir))
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+
     def _api_plot(self, params: dict[str, list[str]]) -> None:
         try:
             self._send_json(build_species_plot_payload(params))
@@ -8793,6 +8923,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/open_path":
             self._api_open_path(params)
+            return
+        if path == "/api/pick_folder":
+            self._api_pick_folder(params)
             return
         if path == "/api/plot":
             self._api_plot(params)

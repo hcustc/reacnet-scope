@@ -19,6 +19,7 @@ __all__ = [
     # io
     "load_table",
     "load_transition_table",
+    "build_observation_network",
     # carbon plot
     "parse_formula_to_atom_counts",
     "aggregate_counts_by_carbon_number",
@@ -45,6 +46,7 @@ from .carbon_plot import (
     summarize_carbon_evolution,
     plot_carbon_number_evolution,
 )
+from .observation_network import build_observation_network
 
 _REACTION_EXPORTS = [
     "smiles_to_formula",

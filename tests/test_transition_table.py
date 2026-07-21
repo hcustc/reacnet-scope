@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from rng_tools.io import load_transition_table
-from scripts.webapp.server import build_dataset_status_payload, build_transition_table_payload
+from scripts.webapp.server import build_dataset_status_payload, build_transition_table_payload, pick_folder_with_system
 
 
 class TransitionTableTests(unittest.TestCase):
@@ -43,6 +44,16 @@ class TransitionTableTests(unittest.TestCase):
         self.assertEqual(payload["edges"][0]["count"], 8)
         self.assertEqual(payload["edges"][0]["source_formula"], "H")
         self.assertEqual(payload["edges"][0]["target_formula"], "H2")
+        network = payload["network"]
+        self.assertEqual(network["schema_version"], "observation-network/v1")
+        self.assertEqual(network["model"], "species_reaction_bipartite")
+        self.assertEqual(network["source"]["evidence_level"], "aggregate_observation")
+        self.assertEqual(network["audit"]["status"], "not_available")
+        self.assertEqual(len(network["reactions"]), len(payload["edges"]))
+        self.assertTrue(all(edge["kind"] in {"reactant_of", "produces"} for edge in network["edges"]))
+        self.assertIn("carbon_flux", network["weights"])
+        self.assertIn("net_event_count", network["observed_transitions"][0])
+        self.assertIsNone(network["observed_transitions"][0]["atom_transfer_count"])
 
     def test_rejects_non_square_matrix(self) -> None:
         self.path.write_text("[H] [O]\n[H] 0 1\n", encoding="utf-8")
@@ -67,6 +78,91 @@ class TransitionTableTests(unittest.TestCase):
         finally:
             for item in (reaction_path, species_path, route_path, table_path):
                 item.unlink(missing_ok=True)
+
+    def test_dataset_status_selects_most_complete_folder_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            complete_base = root / "run.lammpstrj"
+            for suffix in ("", ".reactionabcd", ".species", ".route", ".table"):
+                Path(f"{complete_base}{suffix}").write_text("fixture", encoding="utf-8")
+            Path(f"{root / 'partial.lammpstrj'}.species").write_text("fixture", encoding="utf-8")
+
+            payload = build_dataset_status_payload({"dataset_dir": [directory]})
+            dataset = payload["dataset"]
+            self.assertEqual(dataset["label"], "run.lammpstrj")
+            self.assertEqual(dataset["ready_count"], 5)
+            self.assertEqual(dataset["artifacts"]["table"]["source"], "folder")
+            self.assertTrue(all(item["exists"] for item in dataset["artifacts"].values()))
+
+    def test_dataset_status_can_select_a_specific_folder_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            complete_base = root / "run.lammpstrj"
+            partial_base = root / "partial.lammpstrj"
+            for suffix in ("", ".reactionabcd", ".species", ".route", ".table"):
+                Path(f"{complete_base}{suffix}").write_text("fixture", encoding="utf-8")
+            Path(f"{partial_base}.species").write_text("fixture", encoding="utf-8")
+
+            payload = build_dataset_status_payload(
+                {
+                    "dataset_dir": [directory],
+                    "dataset_base": [str(partial_base)],
+                }
+            )
+            dataset = payload["dataset"]
+            self.assertEqual(dataset["label"], "partial.lammpstrj")
+            self.assertEqual(dataset["ready_count"], 1)
+            self.assertEqual(dataset["artifacts"]["species"]["source"], "folder")
+            self.assertTrue(dataset["artifacts"]["species"]["exists"])
+            self.assertFalse(dataset["artifacts"]["reaction"]["exists"])
+            self.assertEqual(sum(1 for item in dataset["candidates"] if item["selected"]), 1)
+
+    def test_dataset_status_keeps_selected_group_in_candidate_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected_base = root / "zz_selected.lammpstrj"
+            Path(f"{selected_base}.species").write_text("fixture", encoding="utf-8")
+            for index in range(13):
+                base = root / f"complete_{index:02d}.lammpstrj"
+                for suffix in ("", ".reactionabcd", ".species", ".route", ".table"):
+                    Path(f"{base}{suffix}").write_text("fixture", encoding="utf-8")
+
+            payload = build_dataset_status_payload(
+                {
+                    "dataset_dir": [directory],
+                    "dataset_base": [str(selected_base)],
+                }
+            )
+            dataset = payload["dataset"]
+            self.assertEqual(dataset["label"], "zz_selected.lammpstrj")
+            selected_base_resolved = str(selected_base.resolve())
+            self.assertTrue(
+                any(item["selected"] and item["base"] == selected_base_resolved for item in dataset["candidates"])
+            )
+
+    def test_pick_folder_with_system_returns_selected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            completed = Mock(returncode=0, stdout=f"{directory}\n", stderr="")
+            with patch("scripts.webapp.server.sys.platform", "darwin"), patch(
+                "scripts.webapp.server.subprocess.run",
+                return_value=completed,
+            ) as run_mock:
+                payload = pick_folder_with_system(directory)
+
+            self.assertFalse(payload["canceled"])
+            self.assertEqual(payload["path"], str(Path(directory).resolve()))
+            self.assertEqual(run_mock.call_args.args[0][0], "osascript")
+
+    def test_pick_folder_with_system_handles_cancel(self) -> None:
+        completed = Mock(returncode=1, stdout="", stderr="User canceled. (-128)")
+        with patch("scripts.webapp.server.sys.platform", "darwin"), patch(
+            "scripts.webapp.server.subprocess.run",
+            return_value=completed,
+        ):
+            payload = pick_folder_with_system("")
+
+        self.assertTrue(payload["canceled"])
+        self.assertEqual(payload["path"], "")
 
 
 if __name__ == "__main__":

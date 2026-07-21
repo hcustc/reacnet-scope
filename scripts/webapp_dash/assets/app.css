@@ -1,0 +1,431 @@
+/* ReacNet Scope Dash WebUI V1 — three-column workbench layout. */
+
+:root {
+    --rs-topbar-height: 56px;
+    --rs-nav-width: 220px;
+    --rs-detail-width: 300px;
+    --rs-gap: 12px;
+    --rs-border: #e3e6ea;
+    --rs-bg: #f6f7f9;
+    --rs-card: #ffffff;
+    --rs-muted: #6b7280;
+    --rs-accent: #2a6cf6;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--rs-bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: #1f2937;
+}
+
+#react-root,
+._dash-app-content {
+    height: 100vh;
+}
+
+.rs-root {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    overflow-x: hidden;
+    width: 100%;
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────── */
+
+.rs-topbar {
+    height: var(--rs-topbar-height);
+    background: var(--rs-card);
+    border-bottom: 1px solid var(--rs-border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    flex: 0 0 auto;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.rs-topbar .rs-brand {
+    font-weight: 700;
+    font-size: 16px;
+    color: #111827;
+    white-space: nowrap;
+}
+
+.rs-topbar .rs-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.rs-topbar .rs-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: var(--rs-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.rs-topbar .rs-meta-item strong {
+    color: #1f2937;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rs-topbar .rs-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    background: #eef2ff;
+    color: #4338ca;
+    border: 1px solid #e0e7ff;
+}
+
+.rs-topbar .rs-badge.rs-bad {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fee2e2;
+}
+
+/* ── Body grid (nav | main | detail) ─────────────────────────────── */
+
+.rs-body {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: var(--rs-nav-width) minmax(0, 1fr) var(--rs-detail-width);
+    gap: var(--rs-gap);
+    padding: var(--rs-gap);
+    min-height: 0;
+    min-width: 0;
+}
+
+.rs-body > * {
+    min-width: 0;
+    min-height: 0;
+}
+
+/* ── Left navigation ─────────────────────────────────────────────── */
+
+.rs-nav {
+    background: var(--rs-card);
+    border: 1px solid var(--rs-border);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+}
+
+.rs-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #374151;
+    border: none;
+    background: transparent;
+    width: 100%;
+    text-align: left;
+    transition: background 0.12s ease;
+}
+
+.rs-nav-item:hover {
+    background: #f3f4f6;
+}
+
+.rs-nav-item.active {
+    background: #eef2ff;
+    color: #4338ca;
+    font-weight: 600;
+}
+
+/* ── Main area ───────────────────────────────────────────────────── */
+
+.rs-main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--rs-gap);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.rs-card {
+    background: var(--rs-card);
+    border: 1px solid var(--rs-border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    min-width: 0;
+}
+
+.rs-card.rs-flex-fill {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.rs-card.rs-flex-fill > .card-body,
+.rs-card.rs-flex-fill > .card-body.rs-flex-fill {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+}
+
+.rs-card.rs-flex-fill > .card-body > .dash-loading,
+.rs-card.rs-flex-fill > .card-body > div:not([id$="-alert"]) {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+}
+
+.rs-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin: 0 0 8px 0;
+}
+
+.rs-query-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: end;
+}
+
+.rs-query-row > * {
+    flex: 0 0 auto;
+}
+
+.rs-query-row .rs-grow {
+    flex: 1 1 220px;
+    min-width: 160px;
+}
+
+.rs-subquery-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: end;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #edf0f3;
+    color: #4b5563;
+    font-size: 12px;
+}
+
+.rs-subquery-row .rs-grow {
+    flex: 1 1 180px;
+    min-width: 140px;
+}
+
+.rs-page {
+    display: none;
+    flex-direction: column;
+    gap: var(--rs-gap);
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+}
+
+.rs-page.active {
+    display: flex;
+}
+
+.rs-grid-wrap {
+    flex: 1 1 auto;
+    min-height: 280px;
+    min-width: 0;
+    overflow: hidden;
+    height: 100%;
+}
+
+.rs-grid-wrap .dash-table-container,
+.rs-grid-wrap .dash-spreadsheet-container,
+.rs-grid-wrap .dash-spreadsheet-inner {
+    width: 100%;
+    height: 100%;
+}
+
+.rs-grid-wrap .dash-spreadsheet-container {
+    border: 1px solid var(--rs-border);
+    border-radius: 6px;
+}
+
+.rs-chart {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+}
+
+.rs-plot-frame {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid var(--rs-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.rs-stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.rs-stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #f9fafb;
+    color: #4b5563;
+    font-size: 12px;
+}
+
+.rs-stat-chip strong {
+    color: #111827;
+    font-weight: 600;
+}
+
+/* ── Right detail panel ──────────────────────────────────────────── */
+
+.rs-detail {
+    background: var(--rs-card);
+    border: 1px solid var(--rs-border);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+}
+
+.rs-detail h6 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.rs-detail dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 10px;
+    font-size: 12px;
+}
+
+.rs-detail dt {
+    color: var(--rs-muted);
+}
+
+.rs-detail dd {
+    margin: 0;
+    color: #1f2937;
+    word-break: break-all;
+}
+
+.rs-detail .rs-svg-wrap {
+    background: #fafbfc;
+    border: 1px solid var(--rs-border);
+    border-radius: 6px;
+    padding: 6px;
+    text-align: center;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.rs-detail .rs-svg-wrap svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.rs-detail .rs-quick-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.rs-empty {
+    color: var(--rs-muted);
+    font-size: 13px;
+    padding: 12px;
+    text-align: center;
+}
+
+/* ── Cytoscape ───────────────────────────────────────────────────── */
+
+.rs-cytoscape {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    background: #fafbfc;
+    border: 1px solid var(--rs-border);
+    border-radius: 6px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+
+@media (max-width: 1100px) {
+    .rs-body {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+    }
+    .rs-nav {
+        flex-direction: row;
+        flex-wrap: wrap;
+        overflow-x: auto;
+    }
+    .rs-nav-item {
+        width: auto;
+    }
+    .rs-detail {
+        display: none;
+    }
+    .rs-detail.rs-offcanvas-visible {
+        display: flex;
+    }
+}
+
+@media (max-width: 768px) {
+    .rs-topbar {
+        flex-wrap: wrap;
+        height: auto;
+        padding: 8px 12px;
+    }
+    .rs-topbar .rs-meta {
+        order: 3;
+        flex-basis: 100%;
+    }
+}

@@ -13,13 +13,26 @@ const RESULT_MODULES = [
 const DEFAULT_RESULT_MODULE = "species";
 const WORKBENCH_STACK_BREAKPOINT = 980;
 const DEFAULT_GENERAL_QUERY_MODE = "formula";
+const ARTIFACT_LABELS = {
+  reaction: "Reaction",
+  species: "Species",
+  trajectory: "Trajectory",
+  route: "Route",
+  table: "Table",
+};
+const ARTIFACT_SUFFIX_LABELS = {
+  reaction: ".reactionabcd",
+  species: ".species",
+  trajectory: ".lammpstrj",
+  route: ".route",
+  table: ".table",
+};
 const WORKSPACE_MODULES = [
-  { key: "dataset", label: "数据集", hint: "文件与可用性" },
-  { key: "species", label: "物种分析", hint: "公式、质量、中间体" },
-  { key: "reaction", label: "反应路径", hint: "路径与公式反应" },
-  { key: "events", label: "事件轨迹", hint: "定位与提取" },
-  { key: "evolution", label: "时间演化", hint: "Species 与 Carbon" },
-  { key: "transition", label: "转移网络", hint: "Matrix 与 Network" },
+  { key: "species", label: "物种身份", hint: "公式、质量、中间体", artifacts: ["reaction", "species"] },
+  { key: "reaction", label: "路径搜索", hint: "ReactionABCD 网络", artifacts: ["reaction"] },
+  { key: "events", label: "事件证据", hint: "Route + Trajectory", artifacts: ["species", "route", "trajectory"] },
+  { key: "evolution", label: "时间演化", hint: "Species / Carbon", artifacts: ["species"] },
+  { key: "transition", label: "观察网络", hint: "Table 强通道", artifacts: ["table"] },
 ];
 const VIEWER_CONTEXTS = {
   general: {
@@ -70,8 +83,9 @@ const state = {
   },
   ui: {
     generalQueryMode: DEFAULT_GENERAL_QUERY_MODE,
-    workspace: "dataset",
+    workspace: "species",
     dataset: null,
+    datasetBase: "",
   },
   plot: {
     taskId: "",
@@ -148,7 +162,7 @@ function value(id) {
 }
 
 function globalReac() {
-  return value("reacFile");
+  return value("reacFile") || state.ui.dataset?.artifacts?.reaction?.path || "";
 }
 
 function globalMinTp() {
@@ -157,19 +171,56 @@ function globalMinTp() {
 }
 
 function globalSpeciesFile() {
-  return value("sharedSpeciesFile");
+  return value("sharedSpeciesFile") || state.ui.dataset?.artifacts?.species?.path || "";
 }
 
 function globalTrajectoryFile() {
-  return value("sharedTrajectoryFile");
+  return value("sharedTrajectoryFile") || state.ui.dataset?.artifacts?.trajectory?.path || "";
 }
 
 function globalRouteFile() {
-  return value("sharedRouteFile");
+  return value("sharedRouteFile") || state.ui.dataset?.artifacts?.route?.path || "";
 }
 
 function globalTableFile() {
-  return value("sharedTableFile");
+  return value("sharedTableFile") || state.ui.dataset?.artifacts?.table?.path || "";
+}
+
+function artifactLabel(kind) {
+  return ARTIFACT_LABELS[kind] || kind;
+}
+
+function artifactReady(dataset, kind) {
+  return !!dataset?.artifacts?.[kind]?.exists;
+}
+
+function moduleReadiness(moduleDef, dataset = state.ui.dataset) {
+  const required = moduleDef?.artifacts || [];
+  if (!required.length) return { required, ready: true, readyCount: 0, missing: [] };
+  const missing = required.filter((kind) => !artifactReady(dataset, kind));
+  return {
+    required,
+    ready: missing.length === 0,
+    readyCount: required.length - missing.length,
+    missing,
+  };
+}
+
+function missingArtifactMessage(kind) {
+  const label = artifactLabel(kind);
+  const suffix = ARTIFACT_SUFFIX_LABELS[kind] || "";
+  return `需要 ${label}${suffix ? ` (${suffix})` : ""}：请先在顶部导入 RNG 输出文件夹，或展开“手动文件覆盖”填写对应路径。`;
+}
+
+function ensureArtifactPath(kind, pathText) {
+  if (String(pathText || "").trim()) return;
+  throw new Error(missingArtifactMessage(kind));
+}
+
+function ensureAnyDataSource(options, message) {
+  const hasSource = (options || []).some((item) => String(item || "").trim());
+  if (hasSource) return;
+  throw new Error(message);
 }
 
 function effectiveSpeciesFile(overrideId = "") {
@@ -1206,7 +1257,7 @@ function workspaceLabel(key) {
 }
 
 function setWorkspaceModule(key, { focus = true } = {}) {
-  const next = WORKSPACE_MODULES.some((item) => item.key === key) ? key : "dataset";
+  const next = WORKSPACE_MODULES.some((item) => item.key === key) ? key : "species";
   state.ui.workspace = next;
   document.querySelectorAll("[data-workspace-module]").forEach((button) => {
     const active = button.dataset.workspaceModule === next;
@@ -1232,12 +1283,59 @@ function setWorkspaceModule(key, { focus = true } = {}) {
 
 function datasetRequestParams() {
   return {
-    reac: globalReac(),
-    species_file: globalSpeciesFile(),
-    trajectory_file: globalTrajectoryFile(),
-    route_file: globalRouteFile(),
-    table_file: globalTableFile(),
+    dataset_dir: value("datasetFolder"),
+    dataset_base: state.ui.datasetBase,
+    reac: value("reacFile"),
+    species_file: value("sharedSpeciesFile"),
+    trajectory_file: value("sharedTrajectoryFile"),
+    route_file: value("sharedRouteFile"),
+    table_file: value("sharedTableFile"),
   };
+}
+
+function artifactSourceLabel(source) {
+  const key = String(source || "");
+  if (key === "explicit") return "手动";
+  if (key === "folder") return "文件夹";
+  if (key === "derived") return "推导";
+  return key || "-";
+}
+
+function renderDatasetCandidates(dataset) {
+  const field = q("datasetCandidateField");
+  const select = q("datasetCandidateSelect");
+  if (!(field instanceof HTMLElement) || !(select instanceof HTMLSelectElement)) return;
+  const candidates = Array.isArray(dataset?.candidates) ? dataset.candidates : [];
+  field.classList.toggle("hidden", candidates.length <= 1);
+  if (candidates.length <= 1) {
+    select.innerHTML = "";
+    return;
+  }
+  select.innerHTML = candidates
+    .map((item) => {
+      const kinds = (item.kinds || []).map((kind) => artifactLabel(kind)).join(", ");
+      const selected = item.selected ? " selected" : "";
+      return `<option value="${escapeHtml(item.base || "")}"${selected}>${escapeHtml(item.label || item.base || "run")} · ${Number(item.score || 0)}/5 · ${escapeHtml(kinds)}</option>`;
+    })
+    .join("");
+}
+
+function renderWorkspaceReadiness(dataset) {
+  document.querySelectorAll("[data-workspace-module]").forEach((button) => {
+    const key = button.dataset.workspaceModule || "species";
+    const moduleDef = WORKSPACE_MODULES.find((item) => item.key === key);
+    const readiness = moduleReadiness(moduleDef, dataset);
+    const status = readiness.ready ? "ready" : (readiness.readyCount > 0 ? "partial" : "missing");
+    button.classList.toggle("is-ready", status === "ready");
+    button.classList.toggle("is-partial", status === "partial");
+    button.classList.toggle("is-missing", status === "missing");
+    const badge = button.querySelector(".workspace-nav-status");
+    if (badge) {
+      badge.textContent = `${readiness.readyCount}/${readiness.required.length}`;
+    }
+    const missing = readiness.missing.map((kind) => artifactLabel(kind)).join(", ");
+    button.title = missing ? `缺少 ${missing}` : "";
+  });
 }
 
 function renderDatasetStatus(dataset) {
@@ -1245,11 +1343,32 @@ function renderDatasetStatus(dataset) {
   const name = q("datasetName");
   if (!status || !name) return;
   const safe = dataset || {};
-  name.textContent = safe.label || "未选择数据集";
-  const labels = { reaction: "Reaction", species: "Species", trajectory: "Trajectory", route: "Route", table: "Table" };
-  status.innerHTML = Object.entries(safe.artifacts || {})
-    .map(([key, item]) => `<span class="dataset-chip ${item.exists ? "is-ready" : "is-missing"}" title="${escapeHtml(item.path || "未提供")}"><strong>${labels[key] || key}</strong>${item.exists ? "可用" : "缺失"}</span>`)
+  name.textContent = safe.label || "未选择 RNG 输出";
+  const importHint = q("datasetImportHint");
+  if (importHint) {
+    importHint.classList.remove("is-error");
+    if (safe.folder && safe.label) {
+      const candidateCount = Array.isArray(safe.candidates) ? safe.candidates.length : 0;
+      importHint.textContent = candidateCount > 1
+        ? `就绪 ${safe.ready_count || 0}/5 · ${candidateCount} 组`
+        : `就绪 ${safe.ready_count || 0}/5`;
+    } else {
+      importHint.textContent = "未导入";
+    }
+  }
+  status.innerHTML = Object.entries(ARTIFACT_LABELS)
+    .map(([key]) => {
+      const item = safe.artifacts?.[key] || {};
+      const exists = !!item.exists;
+      const mark = exists ? "✓" : "–";
+      const title = exists
+        ? `${artifactLabel(key)} · ${artifactSourceLabel(item.source)} · ${item.path || ""}`
+        : `${artifactLabel(key)} 缺失`;
+      return `<span class="dataset-chip ${exists ? "is-ready" : "is-missing"}" title="${escapeHtml(title)}"><strong>${artifactLabel(key)}</strong><span>${mark}</span></span>`;
+    })
     .join("");
+  renderDatasetCandidates(safe);
+  renderWorkspaceReadiness(safe);
   document.querySelectorAll("[data-requires-artifact]").forEach((element) => {
     const required = String(element.dataset.requiresArtifact || "").split(",").filter(Boolean);
     const missing = required.filter((key) => !safe.artifacts?.[key]?.exists);
@@ -1263,8 +1382,59 @@ async function refreshDatasetStatus({ silent = false } = {}) {
   if (!silent && status) status.innerHTML = '<span class="dataset-chip">检查文件...</span>';
   const data = await fetchJson("/api/dataset_status", datasetRequestParams());
   state.ui.dataset = data.dataset || null;
+  state.ui.datasetBase = state.ui.dataset?.selected_base || state.ui.datasetBase || "";
   renderDatasetStatus(state.ui.dataset);
   return data.dataset;
+}
+
+async function browseDatasetFolder() {
+  const browseBtn = q("btnBrowseDatasetFolder");
+  const hint = q("datasetImportHint");
+  if (browseBtn instanceof HTMLButtonElement) browseBtn.disabled = true;
+  if (hint) {
+    hint.classList.remove("is-error");
+    hint.textContent = "选择文件夹...";
+  }
+  try {
+    const data = await fetchJson("/api/pick_folder", { initial_dir: value("datasetFolder") });
+    if (data.canceled || !data.path) {
+      if (hint) hint.textContent = state.ui.dataset?.label ? `就绪 ${state.ui.dataset.ready_count || 0}/5` : "未导入";
+      return;
+    }
+    q("datasetFolder").value = data.path;
+    state.ui.datasetBase = "";
+    await refreshDatasetStatus();
+  } catch (err) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = String(err);
+    }
+  } finally {
+    if (browseBtn instanceof HTMLButtonElement) browseBtn.disabled = false;
+  }
+}
+
+async function importDatasetFolder() {
+  const hint = q("datasetImportHint");
+  const folder = value("datasetFolder");
+  if (!folder) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = "请先填写 RNG 输出文件夹路径。";
+    }
+    throw new Error("请先填写 RNG 输出文件夹路径");
+  }
+  if (state.ui.dataset?.folder !== folder) {
+    state.ui.datasetBase = "";
+  }
+  const dataset = await refreshDatasetStatus();
+  if (!dataset?.ready_count) {
+    if (hint) {
+      hint.classList.add("is-error");
+      hint.textContent = "该文件夹中没有可识别的 ReacNetGenerator 输出文件。";
+    }
+    throw new Error("该文件夹中没有可识别的 ReacNetGenerator 输出文件");
+  }
 }
 
 function openReactionTool(toolKey) {
@@ -1447,6 +1617,7 @@ function syncUnifiedPlotMode() {
 
 function buildWorkspaceShell() {
   const shell = document.querySelector("main.shell");
+  const datasetImport = q("datasetImportCard");
   const globalConfig = document.querySelector(".global-config");
   const source = q("globalDatasourceCard");
   const query = document.querySelector(".query-result-workbench");
@@ -1454,8 +1625,7 @@ function buildWorkspaceShell() {
   const plotSpecies = q("plotSectionSpecies");
   const plotCarbon = q("plotSectionCarbon");
   const transition = q("transitionMatrixSection");
-  const guide = document.querySelector(".usage-guide");
-  if (!shell || !globalConfig || !source || !query || !plotSwitch || !plotSpecies || !plotCarbon || !transition || !guide) return;
+  if (!shell || !datasetImport || !globalConfig || !source || !query || !plotSwitch || !plotSpecies || !plotCarbon || !transition) return;
   if (q("workspaceShell")) return;
 
   const workspace = document.createElement("section");
@@ -1468,22 +1638,15 @@ function buildWorkspaceShell() {
         <strong>分析工作台</strong>
       </div>
       <nav id="workspaceNav" class="workspace-nav-list"></nav>
-      <div class="workspace-dataset-summary">
-        <span class="workspace-kicker">当前数据集</span>
-        <strong id="datasetName">未选择数据集</strong>
-        <div id="datasetStatus" class="dataset-status"></div>
-      </div>
     </aside>
     <section class="workspace-main">
       <header class="workspace-header">
         <div>
           <span class="workspace-kicker">分析模块</span>
-          <h2 id="workspaceTitle">数据集</h2>
-          <p id="workspaceHint">文件与可用性</p>
+          <h2 id="workspaceTitle">物种身份</h2>
+          <p id="workspaceHint">公式、质量、中间体</p>
         </div>
-        <button id="btnRefreshDataset" class="ghost workspace-refresh" type="button">检查数据集</button>
       </header>
-      <div id="workspace-dataset" class="workspace-panel"></div>
       <div id="workspace-species" class="workspace-panel hidden"></div>
       <div id="workspace-reaction" class="workspace-panel hidden"></div>
       <div id="workspace-events" class="workspace-panel hidden"></div>
@@ -1491,17 +1654,19 @@ function buildWorkspaceShell() {
       <div id="workspace-transition" class="workspace-panel hidden"></div>
     </section>
   `;
-  shell.insertBefore(workspace, guide);
+  shell.insertBefore(workspace, query);
   const panels = {
-    dataset: q("workspace-dataset"),
     species: q("workspace-species"),
     reaction: q("workspace-reaction"),
     events: q("workspace-events"),
     evolution: q("workspace-evolution"),
     transition: q("workspace-transition"),
   };
-  panels.dataset.append(globalConfig, source);
-  panels.dataset.append(guide);
+  const manualOverrides = document.createElement("details");
+  manualOverrides.className = "manual-overrides";
+  manualOverrides.innerHTML = "<summary>手动文件覆盖</summary><div class=\"manual-overrides-body\"></div>";
+  manualOverrides.querySelector(".manual-overrides-body").append(globalConfig, source);
+  datasetImport.append(manualOverrides);
   panels.species.append(query);
   panels.evolution.append(plotSwitch, plotSpecies, plotCarbon);
   panels.transition.append(transition);
@@ -1520,7 +1685,7 @@ function buildWorkspaceShell() {
   const nav = q("workspaceNav");
   nav.innerHTML = WORKSPACE_MODULES.map((item) => `
     <button type="button" class="workspace-nav-item" data-workspace-module="${item.key}">
-      <strong>${escapeHtml(item.label)}</strong>
+      <strong>${escapeHtml(item.label)}<span class="workspace-nav-status">-</span></strong>
       <span>${escapeHtml(item.hint)}</span>
     </button>
   `).join("");
@@ -4048,6 +4213,8 @@ const PLOT_COLORS = [
 let plotChart = null;
 let carbonPlotChart = null;
 let echartsLoadPromise = null;
+let cytoscapeLoadPromise = null;
+let transitionCy = null;
 
 function loadExternalScript(src) {
   return new Promise((resolve, reject) => {
@@ -4089,6 +4256,27 @@ async function ensureECharts() {
     return false;
   })();
   return echartsLoadPromise;
+}
+
+async function ensureCytoscape() {
+  if (window.cytoscape) return true;
+  if (cytoscapeLoadPromise) return cytoscapeLoadPromise;
+  cytoscapeLoadPromise = (async () => {
+    const cdns = [
+      "https://cdn.jsdelivr.net/npm/cytoscape@3.31.2/dist/cytoscape.umd.js",
+      "https://unpkg.com/cytoscape@3.31.2/dist/cytoscape.umd.js",
+    ];
+    for (const src of cdns) {
+      try {
+        await loadExternalScript(src);
+        if (window.cytoscape) return true;
+      } catch (err) {
+        // Try the alternate CDN endpoint.
+      }
+    }
+    return false;
+  })();
+  return cytoscapeLoadPromise;
 }
 
 function renderPlotLegend(curves) {
@@ -4445,9 +4633,11 @@ function exportCarbonPlotSvg() {
 async function runSpecies() {
   openQueryModule("general");
   setGeneralQueryMode("formula");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("species", { meta: { status: "running", module: resultModuleLabel("species") }, rows: [] });
   const data = await fetchJson("/api/species", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     formula: value("qFormula"),
     top: value("qSpeciesTop") || 20,
@@ -4459,9 +4649,11 @@ async function runSpecies() {
 async function runMass() {
   openQueryModule("general");
   setGeneralQueryMode("mass");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("mass", { meta: { status: "running", module: resultModuleLabel("mass") }, rows: [] });
   const data = await fetchJson("/api/species_mass", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     mass: value("qMass"),
     mode: q("qMassMode").value,
@@ -4475,9 +4667,11 @@ async function runMass() {
 async function runNext() {
   openQueryModule("reaction");
   openReactionTool("next");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("next", { meta: { status: "running", module: resultModuleLabel("next") }, rows: [] });
   const data = await fetchJson("/api/next", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     start: value("qSmiles"),
     role: q("qRole").value,
@@ -4490,11 +4684,15 @@ async function runNext() {
 
 async function runIntermediate() {
   openQueryModule("intermediate");
+  const reac = globalReac();
+  const speciesFile = effectiveSpeciesFile("qInterSpeciesFile");
+  ensureArtifactPath("species", speciesFile);
+  if (q("qInterWithFlux").checked) ensureArtifactPath("reaction", reac);
   setResultData("intermediate", { meta: { status: "starting", module: resultModuleLabel("intermediate") }, rows: [] });
   const params = {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
-    species_file: effectiveSpeciesFile("qInterSpeciesFile"),
+    species_file: speciesFile,
     kind: q("qInterKind").value,
     top: value("qInterTop") || 120,
     abundance_threshold: value("qInterAbundance") || 5,
@@ -4538,9 +4736,11 @@ async function runIntermediate() {
 async function runRxnFormula() {
   openQueryModule("reaction");
   openReactionTool("rxn");
+  const reac = globalReac();
+  ensureArtifactPath("reaction", reac);
   setResultData("rxn", { meta: { status: "running", module: resultModuleLabel("rxn") }, rows: [] });
   const data = await fetchJson("/api/rxn_formula", {
-    reac: globalReac(),
+    reac,
     min_tp: globalMinTp(),
     reactants: value("qReactants"),
     products: value("qProducts"),
@@ -4736,6 +4936,10 @@ async function runContextLocateTask({ moduleKey, params, setProgress, taskKey, s
 }
 
 async function runContextLocateSpecies() {
+  ensureAnyDataSource(
+    [effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Species 文件，或可推导 Species 的 Reaction 文件：请先导入 RNG 输出文件夹，或在手动文件覆盖中填写路径。"
+  );
   clearContextSelectedEvent();
   resetContextExtractPayload({ clearRows: true, status: "idle" });
   return runContextLocateTask({
@@ -4747,6 +4951,14 @@ async function runContextLocateSpecies() {
 }
 
 async function runContextLocateReaction() {
+  ensureAnyDataSource(
+    [effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Species 文件，或可推导 Species 的 Reaction 文件：请先导入 RNG 输出文件夹，或在手动文件覆盖中填写路径。"
+  );
+  ensureAnyDataSource(
+    [effectiveRouteFile("qContextRouteFile"), effectiveTrajectoryFile("qContextTrajectoryFile"), effectiveSpeciesFile("qContextSpeciesFile"), globalReac()],
+    "需要 Route 文件，或可推导 Route 的 Species/Trajectory/Reaction 路径。"
+  );
   clearContextSelectedEvent();
   resetContextExtractPayload({ clearRows: true, status: "idle" });
   return runContextLocateTask({
@@ -4942,16 +5154,21 @@ function loadContextRowForExtraction(row, config = {}) {
 
 async function runPlot() {
   resetPlotInteractive();
+  const speciesFilesText = value("qPlotSpeciesFiles");
+  const speciesFile = speciesFilesText ? "" : effectiveSpeciesFile("qPlotSpeciesFile");
+  ensureAnyDataSource(
+    [speciesFilesText, speciesFile, globalReac()],
+    "需要 Species 数据源：填写多文件列表、导入包含 Species 的数据集，或提供可推导 Species 的 Reaction 文件。"
+  );
   setResultData("plot", { meta: { status: "starting", module: resultModuleLabel("plot") }, rows: [] });
   setPlotProgress("Queued", 0, "等待后台开始读取 species 文件", true);
   setPlotMeta({ status: "starting", mode: "species" });
 
   const targets = parseTargetsForPlot(value("qPlotTarget"));
-  const speciesFilesText = value("qPlotSpeciesFiles");
   const params = {
     reac: globalReac(),
     min_tp: globalMinTp(),
-    species_file: speciesFilesText ? "" : effectiveSpeciesFile("qPlotSpeciesFile"),
+    species_file: speciesFile,
     species_files: speciesFilesText,
     target: targets,
     formula_mode: q("qPlotFormulaMode").value,
@@ -5039,9 +5256,14 @@ async function runCarbonPlot() {
   q("btnCarbonPlotExportSvg").disabled = true;
 
   const speciesFilesText = value("qCarbonSpeciesFiles");
+  const speciesFile = speciesFilesText ? "" : effectiveSpeciesFile("qCarbonSpeciesFile");
+  ensureAnyDataSource(
+    [value("qCarbonData"), speciesFilesText, speciesFile, globalReac()],
+    "需要 Carbon 数据源：填写 tidy CSV/Excel、多文件列表、Species 文件，或提供可推导 Species 的 Reaction 文件。"
+  );
   const params = {
     reac: globalReac(),
-    species_file: speciesFilesText ? "" : effectiveSpeciesFile("qCarbonSpeciesFile"),
+    species_file: speciesFile,
     species_files: speciesFilesText,
     data: value("qCarbonData"),
     x_axis: q("qCarbonXAxis").value,
@@ -5125,7 +5347,7 @@ function renderTransitionStats(data) {
   const meta = data?.meta || {};
   const stats = [
     ["物种", `${meta.n_species_displayed || 0}/${meta.n_species_total || 0}`],
-    ["事件", Number(meta.total_events || 0).toLocaleString()],
+    ["观察次数", Number(meta.total_events || 0).toLocaleString()],
     ["非零通道", Number(meta.nonzero_events || 0).toLocaleString()],
     ["矩阵密度", `${(Number(meta.density || 0) * 100).toFixed(2)}%`],
   ];
@@ -5138,7 +5360,7 @@ function renderTransitionSelection(selection = null) {
   const box = q("transitionSelection");
   const data = state.transition.data;
   if (!data) {
-    box.textContent = "点击矩阵单元或网络节点查看通量详情";
+    box.textContent = "点击物种或观察转移查看证据";
     return;
   }
   if (!selection) {
@@ -5152,6 +5374,10 @@ function renderTransitionSelection(selection = null) {
   }
   if (selection.kind === "edge") {
     box.innerHTML = `<strong>${escapeHtml(`${selection.source_formula} → ${selection.target_formula}`)}</strong><code>${escapeHtml(selection.source)}</code><span class="transition-arrow">→</span><code>${escapeHtml(selection.target)}</code><span>${Number(selection.count).toLocaleString()} events</span>`;
+    return;
+  }
+  if (selection.kind === "reaction") {
+    box.innerHTML = `<strong>${escapeHtml(selection.label || "观察转移")}</strong><span>${Number(selection.event_count || 0).toLocaleString()} events · ${escapeHtml(selection.evidence_level || "aggregate_observation")}</span><code>${escapeHtml(selection.source_artifact || "")}</code>`;
     return;
   }
   const item = selection.species || selection;
@@ -5183,6 +5409,10 @@ function transitionSpeciesByLabel(label) {
 
 function renderTransitionHeatmap(data) {
   const host = q("transitionChart");
+  if (transitionCy) {
+    transitionCy.destroy();
+    transitionCy = null;
+  }
   if (!window.echarts) return false;
   const chart = window.echarts.getInstanceByDom(host) || window.echarts.init(host);
   const labels = data.labels || [];
@@ -5261,54 +5491,105 @@ function renderTransitionHeatmap(data) {
 
 function renderTransitionNetwork(data) {
   const host = q("transitionChart");
-  if (!window.echarts) return false;
-  const chart = window.echarts.getInstanceByDom(host) || window.echarts.init(host);
-  const edges = data.edges || [];
-  const connected = new Set(edges.flatMap((edge) => [edge.source, edge.target]));
-  const nodes = (data.species || [])
-    .filter((item) => connected.has(item.smiles))
-    .map((item) => ({
-      id: item.smiles,
-      name: item.smiles,
-      value: item.total,
-      symbolSize: 14 + Math.min(34, Math.sqrt(Math.max(0, item.total)) * 0.55),
-      label: { formatter: item.formula },
-      species: item,
-    }));
-  const maxEdge = Math.max(1, ...edges.map((edge) => Number(edge.count) || 0));
-  chart.setOption({
-    animationDurationUpdate: 350,
-    tooltip: {
-      formatter: (params) => {
-        if (params.dataType === "edge") return `${escapeHtml(params.data.source_formula)} → ${escapeHtml(params.data.target_formula)}<br/>${Number(params.data.count).toLocaleString()} events`;
-        const item = params.data?.species || {};
-        return `<strong>${escapeHtml(item.formula || "?")}</strong><br/>总通量 ${Number(item.total || 0).toLocaleString()}`;
+  if (!window.cytoscape) return false;
+  if (transitionCy) {
+    transitionCy.destroy();
+    transitionCy = null;
+  }
+  const network = data.network || {};
+  const species = network.species || [];
+  const reactions = network.reactions || [];
+  const graphEdges = network.edges || [];
+  const maxCount = Math.max(1, ...reactions.map((item) => Number(item.event_count) || 0));
+  const elements = [
+    ...species.map((item) => ({
+      group: "nodes",
+      data: { id: item.id, kind: "species", label: item.formula || "?", species: item },
+    })),
+    ...reactions.map((item) => ({
+      group: "nodes",
+      data: { id: item.id, kind: "reaction", label: item.label || "observed transition", reaction: item, event_count: item.event_count || 0 },
+    })),
+    ...graphEdges.map((edge) => ({
+      group: "edges",
+      data: { id: edge.id, source: edge.source, target: edge.target, kind: edge.kind, event_count: edge.event_count },
+    })),
+  ];
+  transitionCy = window.cytoscape({
+    container: host,
+    elements,
+    layout: { name: "cose", animate: false, padding: 32, nodeRepulsion: 9000, idealEdgeLength: 110 },
+    minZoom: 0.2,
+    maxZoom: 3,
+    wheelSensitivity: 0.18,
+    style: [
+      {
+        selector: "node[kind = 'species']",
+        style: {
+          "background-color": "#177e89",
+          "label": "data(label)",
+          "color": "#17333a",
+          "font-size": "11px",
+          "text-valign": "center",
+          "text-halign": "center",
+          "text-wrap": "wrap",
+          "text-max-width": "74px",
+          "width": "mapData(total, 0, 1, 26, 26)",
+          "height": "mapData(total, 0, 1, 26, 26)",
+          "border-width": 1.5,
+          "border-color": "#0e5962",
+        },
       },
-    },
-    series: [{
-      type: "graph",
-      layout: "force",
-      roam: true,
-      draggable: true,
-      force: { repulsion: 230, edgeLength: [55, 190], gravity: 0.08 },
-      data: nodes,
-      links: edges.map((edge) => ({
-        ...edge,
-        lineStyle: { width: 0.8 + 5 * Math.sqrt(Number(edge.count) / maxEdge), curveness: 0.08, opacity: 0.55 },
-      })),
-      edgeSymbol: ["none", "arrow"],
-      edgeSymbolSize: [0, 7],
-      label: { show: true, position: "right" },
-      lineStyle: { color: "source" },
-      emphasis: { focus: "adjacency", lineStyle: { opacity: 0.95 } },
-    }],
-  }, true);
-  chart.off("click");
-  chart.on("click", (params) => {
-    if (params.dataType === "edge") {
-      state.transition.selected = { kind: "edge", ...params.data };
+      {
+        selector: "node[kind = 'reaction']",
+        style: {
+          "background-color": "#d66853",
+          "label": "data(label)",
+          "color": "#5a2116",
+          "font-size": "9px",
+          "text-wrap": "wrap",
+          "text-max-width": "92px",
+          "shape": "round-rectangle",
+          "width": 32,
+          "height": 22,
+          "border-width": 1,
+          "border-color": "#9e3f2b",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          "curve-style": "bezier",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "#8d8173",
+          "line-color": "#8d8173",
+          "width": "mapData(event_count, 0, 1, 1, 1)",
+          opacity: 0.62,
+        },
+      },
+      { selector: ":selected", style: { "border-width": 3, "border-color": "#f08c46", "line-color": "#f08c46", "target-arrow-color": "#f08c46" } },
+    ],
+  });
+  // Keep the graph readable for sparse tables while preserving data-driven sizing.
+  transitionCy.nodes("[kind = 'species']").forEach((node) => {
+    const total = Number(node.data("species")?.total || 0);
+    node.style({ width: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28), height: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28) });
+  });
+  transitionCy.on("tap", (event) => {
+    if (event.target !== transitionCy) return;
+    transitionCy.elements().style("opacity", 1);
+    renderTransitionSelection();
+  });
+  transitionCy.nodes().on("tap", (event) => {
+    const node = event.target;
+    const neighborhood = node.closedNeighborhood();
+    transitionCy.elements().style("opacity", 0.16);
+    neighborhood.style("opacity", 1);
+    const item = event.target.data();
+    if (item.kind === "reaction") {
+      state.transition.selected = { kind: "reaction", ...item.reaction };
     } else {
-      state.transition.selected = { kind: "species", species: params.data?.species || {} };
+      state.transition.selected = { kind: "species", species: item.species || {} };
     }
     renderTransitionSelection(state.transition.selected);
   });
@@ -5323,8 +5604,14 @@ async function renderTransitionChart() {
     q("transitionChart").innerHTML = '<div class="context-storyboard-empty">ECharts 加载失败，仍可使用下方通道排行。</div>';
     return;
   }
-  if (state.transition.mode === "network") renderTransitionNetwork(data);
-  else renderTransitionHeatmap(data);
+  if (state.transition.mode === "network") {
+    const loadedCy = await ensureCytoscape();
+    if (!loadedCy) {
+      q("transitionChart").innerHTML = '<div class="context-storyboard-empty">Cytoscape.js 加载失败，仍可使用矩阵和下方通道排行。</div>';
+      return;
+    }
+    renderTransitionNetwork(data);
+  } else renderTransitionHeatmap(data);
 }
 
 function setTransitionMode(mode) {
@@ -5420,14 +5707,22 @@ function bindEvents() {
   q("btnTransitionHeatmap").addEventListener("click", () => setTransitionMode("heatmap"));
   q("btnTransitionNetwork").addEventListener("click", () => setTransitionMode("network"));
   q("btnTransitionExport").addEventListener("click", exportTransitionEdges);
-  q("btnRefreshDataset").addEventListener("click", () => runWithToast(() => refreshDatasetStatus()));
+  q("btnBrowseDatasetFolder").addEventListener("click", () => runWithToast(browseDatasetFolder));
+  q("btnImportDatasetFolder").addEventListener("click", () => runWithToast(importDatasetFolder));
+  q("datasetCandidateSelect").addEventListener("change", () => {
+    state.ui.datasetBase = value("datasetCandidateSelect");
+    runWithToast(() => refreshDatasetStatus());
+  });
   q("workspaceNav").addEventListener("click", (event) => {
     const button = event.target.closest("[data-workspace-module]");
     if (!(button instanceof HTMLButtonElement)) return;
-    setWorkspaceModule(button.dataset.workspaceModule || "dataset");
+    setWorkspaceModule(button.dataset.workspaceModule || "species");
   });
-  ["reacFile", "sharedSpeciesFile", "sharedTrajectoryFile", "sharedRouteFile", "sharedTableFile"].forEach((id) => {
-    q(id).addEventListener("change", () => refreshDatasetStatus({ silent: true }).catch(() => {}));
+  ["datasetFolder", "reacFile", "sharedSpeciesFile", "sharedTrajectoryFile", "sharedRouteFile", "sharedTableFile"].forEach((id) => {
+    q(id).addEventListener("change", () => {
+      if (id === "datasetFolder") state.ui.datasetBase = "";
+      refreshDatasetStatus({ silent: true }).catch(() => {});
+    });
   });
   q("transitionEdgeTable").addEventListener("click", (event) => {
     const row = event.target.closest("tr[data-transition-edge]");
@@ -5883,6 +6178,7 @@ function bindEvents() {
       const transitionChart = window.echarts.getInstanceByDom(transitionHost);
       if (transitionChart) transitionChart.resize();
     }
+    if (transitionCy) transitionCy.resize();
     drawContextFrameCanvas();
   });
   syncContextTrajectoryAtomScopeControl();
@@ -5901,12 +6197,12 @@ async function init() {
   const rdkitAvailable = Boolean(health?.rdkit?.available);
   initializeResultWorkbench({
     status: "ready",
-    hint: "绘图可直接用 species 数据源；网络检索再填写 reactionabcd",
+    hint: "先导入 RNG 输出文件夹；检索、事件证据和观察网络会自动复用对应文件",
     rdkit_available: rdkitAvailable,
     viewer_note: rdkitAvailable ? "SMILES 结构渲染可用" : "RDKit 不可用，结构渲染将显示错误占位图",
   });
   const initialModule = new URLSearchParams(window.location.search).get("module");
-  setWorkspaceModule(initialModule || "dataset", { focus: false });
+  setWorkspaceModule(initialModule || "species", { focus: false });
   setPlotMeta({ status: "ready", hint: "使用 Plot 面板查询后在此显示曲线" });
   setPlotProgress("Idle", 0, "等待开始", false);
   setIntermediateProgress("Idle", 0, "等待开始", false);
