@@ -1,0 +1,120 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ReacNet Scope
+        - generic [ref=e7]: ·
+        - generic [ref=e8]: Dash WebUI V1
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - generic [ref=e11]: "目录:"
+          - generic [ref=e12]: /Volumes/T3000/rng_data_2500K
+        - generic [ref=e13]:
+          - generic [ref=e14]: "运行组:"
+          - generic [ref=e15]: 2CP_O2_1ER.lammpstrj
+        - generic [ref=e16]: 就绪 5/5
+      - button "管理数据" [ref=e17] [cursor=pointer]
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - button "物种检索" [ref=e20] [cursor=pointer]
+        - button "转化关系" [ref=e22] [cursor=pointer]
+        - button "反应式检索" [ref=e24] [cursor=pointer]
+        - button "中间体筛选" [ref=e26] [cursor=pointer]
+        - button "时间演化" [ref=e28] [cursor=pointer]
+        - button "碳数演化" [ref=e30] [cursor=pointer]
+        - button "事件证据" [ref=e32] [cursor=pointer]
+        - button "观察网络" [ref=e34] [cursor=pointer]
+      - generic [ref=e37]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: 类型
+          - generic [ref=e42]:
+            - textbox
+            - button "自动" [ref=e43] [cursor=pointer]
+          - generic [ref=e49]: 查询内容
+          - textbox "例如 H2O / [H][O] / 17.00274" [ref=e51]: "32"
+          - generic [ref=e52]: 质量容差
+          - spinbutton [ref=e54]: "0.5"
+          - button "查询" [active] [ref=e55] [cursor=pointer]
+          - button "导出 CSV" [ref=e56] [cursor=pointer]
+        - generic [ref=e58]:
+          - generic [ref=e114]: 找到 2 条匹配物种
+          - generic [ref=e66]:
+            - table:
+              - rowgroup:
+                - row "分子式 SMILES 精确质量 标称质量 TP(反应物) TP(产物) 总通量 消耗反应 生成反应":
+                  - columnheader [ref=e115]
+                  - columnheader "分子式" [ref=e116]
+                  - columnheader "SMILES" [ref=e123]
+                  - columnheader "精确质量" [ref=e130]
+                  - columnheader "标称质量" [ref=e137]
+                  - columnheader "TP(反应物)" [ref=e144]
+                  - columnheader "TP(产物)" [ref=e151]
+                  - columnheader "总通量" [ref=e158]
+                  - columnheader "消耗反应" [ref=e165]
+                  - columnheader "生成反应" [ref=e172]
+                - row "Aa Aa Aa Aa Aa Aa Aa Aa Aa":
+                  - columnheader [ref=e179]
+                  - columnheader [ref=e180]:
+                    - generic [ref=e181]:
+                      - textbox "filter data..." [ref=e182]
+                      - button "Aa" [ref=e183] [cursor=pointer]
+                  - columnheader [ref=e184]:
+                    - generic [ref=e185]:
+                      - textbox "filter data..." [ref=e186]
+                      - button "Aa" [ref=e187] [cursor=pointer]
+                  - columnheader [ref=e188]:
+                    - generic [ref=e189]:
+                      - textbox "filter data..." [ref=e190]
+                      - button "Aa" [ref=e191] [cursor=pointer]
+                  - columnheader [ref=e192]:
+                    - generic [ref=e193]:
+                      - textbox "filter data..." [ref=e194]
+                      - button "Aa" [ref=e195] [cursor=pointer]
+                  - columnheader [ref=e196]:
+                    - generic [ref=e197]:
+                      - textbox "filter data..." [ref=e198]
+                      - button "Aa" [ref=e199] [cursor=pointer]
+                  - columnheader [ref=e200]:
+                    - generic [ref=e201]:
+                      - textbox "filter data..." [ref=e202]
+                      - button "Aa" [ref=e203] [cursor=pointer]
+                  - columnheader [ref=e204]:
+                    - generic [ref=e205]:
+                      - textbox "filter data..." [ref=e206]
+                      - button "Aa" [ref=e207] [cursor=pointer]
+                  - columnheader [ref=e208]:
+                    - generic [ref=e209]:
+                      - textbox "filter data..." [ref=e210]
+                      - button "Aa" [ref=e211] [cursor=pointer]
+                  - columnheader [ref=e212]:
+                    - generic [ref=e213]:
+                      - textbox "filter data..." [ref=e214]
+                      - button "Aa" [ref=e215] [cursor=pointer]
+                - row "O2 [O]=[O] 31.989829 32 29642 26160 55802 1567 1094":
+                  - cell [ref=e216]:
+                    - radio [ref=e217]
+                  - cell "O2" [ref=e218]
+                  - cell "[O]=[O]" [ref=e219]
+                  - cell "31.989829" [ref=e220]
+                  - cell "32" [ref=e221]
+                  - cell "29642" [ref=e222]
+                  - cell "26160" [ref=e223]
+                  - cell "55802" [ref=e224]
+                  - cell "1567" [ref=e225]
+                  - cell "1094" [ref=e226]
+                - row "CH4O [H][O][C]([H])([H])[H] 32.026215 32 740 740 1480 29 17":
+                  - cell [ref=e227]:
+                    - radio [ref=e228]
+                  - cell "CH4O" [ref=e229]
+                  - cell "[H][O][C]([H])([H])[H]" [ref=e230]
+                  - cell "32.026215" [ref=e231]
+                  - cell "32" [ref=e232]
+                  - cell "740" [ref=e233]
+                  - cell "740" [ref=e234]
+                  - cell "1480" [ref=e235]
+                  - cell "29" [ref=e236]
+                  - cell "17" [ref=e237]
+      - generic [ref=e68]:
+        - heading "当前选中物种" [level=6] [ref=e69]
+        - generic [ref=e70]: 未选择物种
+  - contentinfo
