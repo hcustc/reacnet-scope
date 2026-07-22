@@ -34,7 +34,7 @@ from scripts.webapp_dash import services as svc  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-PAGE_IDS = ["species", "transitions", "reactions", "intermediate", "evolution", "carbon", "events", "network"]
+PAGE_IDS = ["species", "transitions", "reactions", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
 PAGE_LABELS = {
     "species": "物种检索",
     "transitions": "转化关系",
@@ -44,6 +44,20 @@ PAGE_LABELS = {
     "carbon": "碳数演化",
     "events": "事件证据",
     "network": "观察网络",
+    "literature": "文献验证",
+    "batch-compare": "批量对比",
+}
+PAGE_DESCRIPTIONS = {
+    "species": "按分子式、SMILES 或精确质量定位物种，并查看结构与通量。",
+    "transitions": "围绕已选物种查看生成、消耗及净通量关系。",
+    "reactions": "按反应物和产物组合检索反应，比较正反向通量。",
+    "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
+    "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
+    "carbon": "聚合不同碳数区间，观察体系碳骨架的演化过程。",
+    "events": "定位物种和反应事件，并抽取对应的轨迹证据。",
+    "network": "从观测表构建可交互的全局物种-反应网络。",
+    "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
+    "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
 }
 DEFAULT_PAGE = "species"
 
@@ -58,31 +72,45 @@ def _topbar() -> dbc.Container:
         [
             html.Div(
                 [
-                    html.Span("ReacNet Scope", className="rs-brand"),
-                    html.Span("·", style={"color": "#9ca3af"}),
-                    html.Span("Dash WebUI V1", style={"color": "#6b7280", "fontSize": 12}),
+                    html.Span("RS", className="rs-brand-mark", **{"aria-hidden": "true"}),
+                    html.Div(
+                        [
+                            html.Span("ReacNet Scope", className="rs-brand"),
+                            html.Span("反应网络分析工作台", className="rs-brand-subtitle"),
+                        ],
+                        className="rs-brand-copy",
+                    ),
                 ],
-                className="d-flex align-items-center gap-2",
+                className="rs-brand-lockup",
             ),
             html.Div(
                 [
                     html.Div(
-                        [html.Span("目录: "), html.Span(id="topbar-folder", children="未选择")],
-                        className="rs-meta-item",
+                        [
+                            html.Span("当前数据集", className="rs-meta-label"),
+                            html.Div(
+                                [
+                                    html.Span(id="topbar-rungroup", children="未选择", className="rs-meta-value"),
+                                    html.Span(id="topbar-status", className="rs-badge rs-bad", children="未加载数据"),
+                                ],
+                                className="rs-meta-value-row",
+                            ),
+                        ],
+                        className="rs-meta-primary",
                     ),
                     html.Div(
-                        [html.Span("运行组: "), html.Span(id="topbar-rungroup", children="未选择")],
-                        className="rs-meta-item",
+                        [html.Span("目录", className="rs-meta-label"), html.Span(id="topbar-folder", children="未选择")],
+                        className="rs-meta-path",
                     ),
-                    html.Span(id="topbar-status", className="rs-badge rs-bad", children="未加载数据"),
                 ],
                 className="rs-meta",
             ),
             dbc.Button(
                 "管理数据",
                 id="open-data-modal",
-                color="primary",
+                color="secondary",
                 size="sm",
+                outline=True,
                 className="ms-auto",
             ),
         ],
@@ -92,41 +120,87 @@ def _topbar() -> dbc.Container:
 
 
 def _nav() -> html.Div:
-    items = [
-        html.Button(
-            [html.Span(label)],
-            id=f"nav-{pid}",
-            className=f"rs-nav-item{(' active' if pid == DEFAULT_PAGE else '')}",
-            n_clicks=0,
-        )
-        for pid, label in PAGE_LABELS.items()
+    groups = [
+        ("检索与筛选", ["species", "transitions", "reactions", "intermediate"]),
+        ("动力学分析", ["evolution", "carbon", "events", "network"]),
+        ("验证与对比", ["literature", "batch-compare"]),
     ]
-    return html.Div(items, className="rs-nav")
+    children: list[Any] = []
+    for group_label, page_ids in groups:
+        children.append(html.Div(group_label, className="rs-nav-group-label"))
+        children.extend(
+            html.Button(
+                [html.Span(PAGE_LABELS[pid])],
+                id=f"nav-{pid}",
+                className=f"rs-nav-item{(' active' if pid == DEFAULT_PAGE else '')}",
+                n_clicks=0,
+                title=PAGE_DESCRIPTIONS[pid],
+            )
+            for pid in page_ids
+        )
+    children.append(
+        html.Div(
+            [
+                html.Span("10", className="rs-nav-count"),
+                html.Span("个分析工具"),
+            ],
+            className="rs-nav-footer",
+        )
+    )
+    return html.Nav(children, className="rs-nav", **{"aria-label": "分析功能"})
+
+
+def _page_header() -> html.Div:
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div("分析工作台", className="rs-page-eyebrow"),
+                    html.H1(PAGE_LABELS[DEFAULT_PAGE], id="page-title"),
+                    html.P(PAGE_DESCRIPTIONS[DEFAULT_PAGE], id="page-description"),
+                ]
+            ),
+            html.Div("需要导入数据", id="page-data-status", className="rs-page-status is-blocked"),
+        ],
+        className="rs-page-header",
+    )
 
 
 def _detail_panel() -> html.Div:
     return html.Div(
         [
-            html.H6("当前选中物种"),
-            html.Div(id="detail-empty", className="rs-empty", children="未选择物种"),
+            html.Div(
+                [
+                    html.Div([html.H6("选中物种详情"), html.Span("结构与网络统计", className="rs-detail-kicker")]),
+                    dbc.Button("定位该物种事件", id="species-to-event-btn", color="secondary", size="sm", outline=True, disabled=True),
+                ],
+                className="rs-detail-header",
+            ),
+            html.Div(
+                id="detail-empty",
+                className="rs-empty",
+                children="从检索结果中选择物种以查看结构和轨迹",
+            ),
             html.Div(id="detail-body", style={"display": "none"}, children=[]),
         ],
         className="rs-detail",
         id="detail-panel",
+        style={"display": "none"},
     )
 
 
-def _grid(grid_id: str) -> dash_table.DataTable:
+def _grid(grid_id: str, *, row_selectable: str = "single") -> dash_table.DataTable:
     return dash_table.DataTable(
         id=grid_id,
         columns=[],
         data=[],
         selected_rows=[],
-        row_selectable="single",
+        row_selectable=row_selectable,
         sort_action="native",
-        filter_action="native",
+        filter_action="none",
         page_action="none",
-        style_table={"height": "100%", "overflow": "auto"},
+        css=[],
+        style_table={"maxHeight": "560px", "overflowY": "auto", "overflowX": "auto"},
         style_cell={
             "fontSize": 12,
             "fontFamily": "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -144,7 +218,11 @@ def _grid(grid_id: str) -> dash_table.DataTable:
         },
         style_data={"borderBottom": "1px solid #eef1f5"},
         style_data_conditional=[
-            {"if": {"state": "selected"}, "backgroundColor": "#eef2ff", "border": "1px solid #c7d2fe"},
+            {
+                "if": {"state": "selected"},
+                "backgroundColor": "#eef2ff",
+                "borderLeft": "3px solid #3b82f6",
+            },
             {"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfe"},
         ],
         tooltip_data=[],
@@ -159,40 +237,139 @@ def _species_page() -> html.Div:
                 [
                     html.Div(
                         [
-                            dbc.Label("类型", className="mb-0", style={"fontSize": 12}),
-                            dcc.Dropdown(
-                                id="species-query-kind",
-                                options=[
-                                    {"label": "自动", "value": "auto"},
-                                    {"label": "分子式", "value": "formula"},
-                                    {"label": "SMILES", "value": "smiles"},
-                                    {"label": "质量数", "value": "mass"},
+                            html.Div(
+                                [
+                                    html.Label("类型", className="rs-grid-label"),
+                                    dcc.RadioItems(
+                                        id="species-query-kind",
+                                        value="auto",
+                                        options=[
+                                            {"label": "自动", "value": "auto"},
+                                            {"label": "分子式", "value": "formula"},
+                                            {"label": "SMILES", "value": "smiles"},
+                                            {"label": "质量数", "value": "mass"},
+                                        ],
+                                        inline=True,
+                                        className="rs-segmented",
+                                        labelStyle={
+                                            "display": "inline-flex",
+                                            "alignItems": "center",
+                                            "justifyContent": "center",
+                                            "padding": "5px 14px",
+                                            "fontSize": "13px",
+                                            "border": "1px solid #d1d5db",
+                                            "cursor": "pointer",
+                                        },
+                                    ),
                                 ],
-                                value="auto",
-                                clearable=False,
-                                style={"width": 120},
                             ),
-                            dbc.Label("查询内容", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(
-                                id="species-query",
-                                value="",
-                                placeholder="例如 H2O / [H][O] / 17.00274",
-                                className="rs-grow",
-                                debounce=True,
-                                type="text",
+                            html.Div(
+                                [
+                                    html.Label("查询内容", className="rs-grid-label"),
+                                    dcc.Input(
+                                        id="species-query",
+                                        value="",
+                                        placeholder="例如 H2O / [H][O] / 17.00274",
+                                        debounce=True,
+                                        type="text",
+                                        style={"width": "100%"},
+                                    ),
+                                ],
                             ),
-                            dbc.Label("质量容差", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(
-                                id="species-mass-tol",
-                                value="0.5",
-                                type="number",
-                                style={"width": 90},
+                            html.Div(
+                                [
+                                    html.Label("质量容差", className="rs-grid-label"),
+                                    dcc.Input(
+                                        id="species-mass-tol",
+                                        value="0.5",
+                                        type="number",
+                                        style={"width": "100%"},
+                                    ),
+                                ],
                             ),
-                            dbc.Button("查询", id="species-search-btn", color="primary", size="sm"),
-                            dbc.Button("导出 CSV", id="species-csv-btn", color="secondary", size="sm", outline=True),
+                            html.Div(
+                                [
+                                    html.Label("质量模式", className="rs-grid-label"),
+                                    dcc.Dropdown(
+                                        id="species-mass-mode",
+                                        options=[{"label": "精确质量", "value": "exact"}, {"label": "名义质量", "value": "nominal"}],
+                                        value="exact",
+                                        clearable=False,
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("结果上限", className="rs-grid-label"),
+                                    dcc.Input(id="species-top", value="50", type="number", min=1, style={"width": "100%"}),
+                                ],
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("\u00A0", className="rs-grid-label"),
+                                    html.Div(
+                                        [
+                                            dbc.Button("查询", id="species-search-btn", color="primary", size="sm"),
+                                            dbc.Button(
+                                                "导出 CSV",
+                                                id="species-csv-btn",
+                                                color="secondary",
+                                                size="sm",
+                                                outline=True,
+                                                className="ms-1",
+                                            ),
+                                        ],
+                                        className="d-flex",
+                                    ),
+                                ],
+                            ),
                             dcc.Download(id="species-csv-download"),
                         ],
-                        className="rs-query-row",
+                        className="rs-query-grid",
+                    ),
+                ],
+                className="p-2",
+            )
+        ],
+        className="rs-card",
+        id="species-query-card",
+    )
+
+    grid_card = dbc.Card(
+        [
+            dbc.CardBody(
+                [
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Div("开始分析", className="rs-empty-eyebrow"),
+                                    html.H5("导入反应网络数据", className="rs-empty-title"),
+                                    html.P(
+                                        "选择包含 reactionabcd 文件的数据目录后，即可按分子式、SMILES 或质量数检索物种。",
+                                        className="rs-empty-copy",
+                                    ),
+                                ],
+                                id="species-empty-copy",
+                            ),
+                            dbc.Button("管理数据", id="species-open-data-modal", color="primary", size="sm"),
+                        ],
+                        id="species-empty-state",
+                        className="rs-empty-state",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(id="species-alert", className="rs-result-summary"),
+                            dcc.Loading(
+                                html.Div(
+                                    _grid("species-grid", row_selectable="multi"),
+                                    className="rs-grid-wrap",
+                                ),
+                                type="circle",
+                            ),
+                        ],
+                        id="species-results",
+                        style={"display": "none"},
                     ),
                 ],
                 className="p-2",
@@ -201,26 +378,7 @@ def _species_page() -> html.Div:
         className="rs-card",
     )
 
-    grid_card = dbc.Card(
-        [
-            dbc.CardBody(
-                [
-                    html.Div(id="species-alert"),
-                    dcc.Loading(
-                        html.Div(
-                            _grid("species-grid"),
-                            className="rs-grid-wrap",
-                        ),
-                        type="circle",
-                    ),
-                ],
-                className="p-2 rs-flex-fill",
-            )
-        ],
-        className="rs-card rs-flex-fill",
-    )
-
-    return html.Div([query_card, grid_card], className="rs-page active", id="page-species")
+    return html.Div([query_card, grid_card, _detail_panel()], className="rs-page active", id="page-species")
 
 
 def _transitions_page() -> html.Div:
@@ -250,6 +408,10 @@ def _transitions_page() -> html.Div:
                                 clearable=False,
                                 style={"width": 160},
                             ),
+                            dbc.Label("Top", className="mb-0", style={"fontSize": 12}),
+                            dcc.Input(id="transitions-top", value="30", type="number", min=1, style={"width": 72}),
+                            dbc.Checkbox(id="transitions-net-positive", value=False, className="me-1"),
+                            dbc.Label("仅正净通量", html_for="transitions-net-positive", className="mb-0"),
                             dbc.Button("查询", id="transitions-search-btn", color="primary", size="sm"),
                             dbc.Button("导出 CSV", id="transitions-csv-btn", color="secondary", size="sm", outline=True),
                             dcc.Download(id="transitions-csv-download"),
@@ -274,6 +436,22 @@ def _transitions_page() -> html.Div:
                             className="rs-grid-wrap",
                         ),
                         type="circle",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(id="transitions-selected-summary"),
+                            dbc.Button(
+                                "定位反应事件",
+                                id="transitions-to-event-btn",
+                                color="secondary",
+                                size="sm",
+                                outline=True,
+                                disabled=True,
+                            ),
+                        ],
+                        id="transitions-selection-card",
+                        className="rs-selection-actions",
+                        style={"display": "none"},
                     ),
                 ],
                 className="p-2 rs-flex-fill",
@@ -306,6 +484,7 @@ def _reactions_page() -> html.Div:
                         dbc.Label("Top", className="mb-0", style={"fontSize": 12}),
                         dcc.Input(id="rxn-top", value="50", type="number", style={"width": 76}),
                         dbc.Button("查询", id="rxn-search-btn", color="primary", size="sm"),
+                        dbc.Button("送入事件证据", id="rxn-to-event-btn", color="secondary", size="sm", outline=True),
                         dbc.Button("导出 CSV", id="rxn-csv-btn", color="secondary", size="sm", outline=True),
                         dcc.Download(id="rxn-csv-download"),
                     ],
@@ -419,11 +598,12 @@ def _evolution_page() -> html.Div:
                     html.Div(
                         [
                             dbc.Label("目标物种/分子式", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(
+                            dcc.Textarea(
                                 id="evolution-targets",
                                 value="",
-                                placeholder="从物种检索自动继承，多个用逗号分隔",
-                                className="rs-grow",
+                                placeholder="从物种检索自动继承；每行一个目标，支持 label::query",
+                                className="rs-grow rs-multiline-input",
+                                style={"minHeight": 66, "height": 66},
                             ),
                             dbc.Label("X 轴", className="mb-0", style={"fontSize": 12}),
                             dcc.Dropdown(
@@ -444,6 +624,75 @@ def _evolution_page() -> html.Div:
                             dcc.Download(id="evolution-csv-download"),
                         ],
                         className="rs-query-row",
+                    ),
+                    dbc.Accordion(
+                        [
+                            dbc.AccordionItem(
+                                html.Div(
+                                    [
+                                        dbc.Label("单个 Species 文件", className="mb-0"),
+                                        dcc.Input(id="evolution-species-file", placeholder="留空使用当前数据集", className="rs-grow"),
+                                        dbc.Label("多文件列表", className="mb-0"),
+                                        dcc.Textarea(
+                                            id="evolution-species-files",
+                                            placeholder="2500K@seed1::/path/run1.species\n3000K@seed1::/path/run2.reactionabcd",
+                                            className="rs-grow",
+                                            style={"minHeight": 58},
+                                        ),
+                                    ],
+                                    className="rs-query-row",
+                                ),
+                                title="数据源",
+                            ),
+                            dbc.AccordionItem(
+                                html.Div(
+                                    [
+                                        dbc.Label("公式模式", className="mb-0"),
+                                        dcc.Dropdown(
+                                            id="evolution-formula-mode",
+                                            options=[
+                                                {"label": "合并同分子式", "value": "sum"},
+                                                {"label": "拆分 SMILES", "value": "split"},
+                                                {"label": "同时显示", "value": "both"},
+                                            ],
+                                            value="sum",
+                                            clearable=False,
+                                            style={"width": 150},
+                                        ),
+                                        dbc.Label("每式 SMILES 上限", className="mb-0"),
+                                        dcc.Input(id="evolution-max-smiles", value="0", type="number", min=0, style={"width": 88}),
+                                        dbc.Label("归一化", className="mb-0"),
+                                        dcc.Dropdown(
+                                            id="evolution-normalize",
+                                            options=[{"label": "无", "value": "none"}, {"label": "初始值", "value": "initial"}, {"label": "最大值", "value": "max"}],
+                                            value="none",
+                                            clearable=False,
+                                            style={"width": 110},
+                                        ),
+                                        dbc.Label("时间对齐", className="mb-0"),
+                                        dcc.Dropdown(
+                                            id="evolution-time-align",
+                                            options=[{"label": "原始时间", "value": "raw"}, {"label": "截断交集", "value": "truncate"}, {"label": "相对起点", "value": "relative"}],
+                                            value="raw",
+                                            clearable=False,
+                                            style={"width": 130},
+                                        ),
+                                        dbc.Label("Timestep(ps)", className="mb-0"),
+                                        dcc.Input(id="evolution-timestep", value="0.0001", type="number", min=0, style={"width": 110}),
+                                        dbc.Label("下采样", className="mb-0"),
+                                        dcc.Input(id="evolution-downsample", value="1800", type="number", min=0, style={"width": 88}),
+                                        dbc.Label("最大曲线", className="mb-0"),
+                                        dcc.Input(id="evolution-max-curves", value="30", type="number", min=1, style={"width": 80}),
+                                        dbc.Label("曲线筛选", className="mb-0"),
+                                        dcc.Input(id="evolution-curve-filter", placeholder="按名称筛选", style={"width": 150}),
+                                    ],
+                                    className="rs-query-row",
+                                ),
+                                title="曲线与对比设置",
+                            ),
+                        ],
+                        start_collapsed=True,
+                        className="rs-advanced",
                     ),
                 ],
                 className="p-2",
@@ -529,6 +778,60 @@ def _carbon_page() -> html.Div:
                     ],
                     className="rs-subquery-row",
                 ),
+                dbc.Accordion(
+                    [
+                        dbc.AccordionItem(
+                            html.Div(
+                                [
+                                    dbc.Label("Tidy CSV / Excel", className="mb-0"),
+                                    dcc.Input(id="carbon-data-path", placeholder="留空则由 Species 文件构建", className="rs-grow"),
+                                    dbc.Label("单个 Species 文件", className="mb-0"),
+                                    dcc.Input(id="carbon-species-file", placeholder="留空使用当前数据集", className="rs-grow"),
+                                    dbc.Label("多文件列表", className="mb-0"),
+                                    dcc.Textarea(
+                                        id="carbon-species-files",
+                                        placeholder="2500K@seed1::/path/run1.species\n3000K@seed1::/path/run2.reactionabcd",
+                                        className="rs-grow",
+                                        style={"minHeight": 58},
+                                    ),
+                                ],
+                                className="rs-query-row",
+                            ),
+                            title="数据源",
+                        ),
+                        dbc.AccordionItem(
+                            html.Div(
+                                [
+                                    dbc.Label("主题", className="mb-0"),
+                                    dcc.Dropdown(id="carbon-theme", options=[{"label": "浅色", "value": "light"}, {"label": "深色", "value": "dark"}], value="light", clearable=False, style={"width": 100}),
+                                    dbc.Label("配色", className="mb-0"),
+                                    dcc.Dropdown(id="carbon-palette", options=[{"label": "Viridis", "value": "viridis"}, {"label": "Plasma", "value": "plasma"}, {"label": "Tab20", "value": "tab20"}], value="viridis", clearable=False, style={"width": 110}),
+                                    dbc.Label("时间对齐", className="mb-0"),
+                                    dcc.Dropdown(id="carbon-time-align", options=[{"label": "原始时间", "value": "raw"}, {"label": "截断交集", "value": "truncate"}, {"label": "相对起点", "value": "relative"}], value="raw", clearable=False, style={"width": 130}),
+                                    dbc.Label("系统显示", className="mb-0"),
+                                    dcc.Dropdown(id="carbon-system-mode", options=[{"label": "自动", "value": ""}, {"label": "叠加", "value": "overlay"}, {"label": "分面", "value": "facet"}], value="", clearable=False, style={"width": 100}),
+                                    dbc.Label("图例", className="mb-0"),
+                                    dcc.Dropdown(id="carbon-legend-mode", options=[{"label": "紧凑", "value": "compact"}, {"label": "详细", "value": "detailed"}], value="compact", clearable=False, style={"width": 100}),
+                                    dbc.Label("SavGol 阶数", className="mb-0"),
+                                    dcc.Input(id="carbon-smooth-polyorder", value="2", type="number", min=1, style={"width": 70}),
+                                    dbc.Label("子图区域", className="mb-0"),
+                                    dcc.Input(id="carbon-layout-regions", placeholder="panel1:1-4; panel2:5-15", className="rs-grow"),
+                                    dbc.Label("宽 / 高", className="mb-0"),
+                                    dcc.Input(id="carbon-fig-width", value="11.5", type="number", min=4, style={"width": 72}),
+                                    dcc.Input(id="carbon-fig-height", value="8", type="number", min=4, style={"width": 72}),
+                                    dbc.Label("公式清单", className="mb-0"),
+                                    dcc.Input(id="carbon-max-formula", value="30", type="number", min=5, style={"width": 72}),
+                                    dbc.Checkbox(id="carbon-show-uncertainty", value=True, className="me-1"),
+                                    dbc.Label("显示不确定性", html_for="carbon-show-uncertainty", className="mb-0"),
+                                ],
+                                className="rs-query-row",
+                            ),
+                            title="比较与渲染设置",
+                        ),
+                    ],
+                    start_collapsed=True,
+                    className="rs-advanced",
+                ),
                 html.Div(
                     [
                         dbc.Label("Parent C", className="mb-0", style={"fontSize": 12}),
@@ -588,92 +891,229 @@ def _carbon_page() -> html.Div:
 
 
 def _events_page() -> html.Div:
-    species_card = dbc.Card(
+    workflow_card = dbc.Card(
         dbc.CardBody(
             [
-                html.H6("物种事件", className="rs-card-title"),
                 html.Div(
                     [
-                        dbc.Label("目标", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-species-target", value="", placeholder="SMILES 或分子式", className="rs-grow"),
-                        dbc.Label("匹配", className="mb-0", style={"fontSize": 12}),
-                        dcc.Dropdown(
-                            id="event-match-mode",
-                            options=[
-                                {"label": "auto", "value": "auto"},
-                                {"label": "SMILES", "value": "smiles"},
-                                {"label": "Formula", "value": "formula"},
-                            ],
-                            value="auto",
-                            clearable=False,
-                            style={"width": 110},
-                        ),
-                        dbc.Label("事件", className="mb-0", style={"fontSize": 12}),
-                        dcc.Dropdown(
-                            id="event-mode",
-                            options=[
-                                {"label": "出现", "value": "appear"},
-                                {"label": "消失", "value": "disappear"},
-                                {"label": "生成", "value": "production"},
-                                {"label": "消耗", "value": "consumption"},
-                                {"label": "峰值", "value": "peak"},
-                                {"label": "非零", "value": "nonzero"},
-                            ],
-                            value="appear",
-                            clearable=False,
-                            style={"width": 110},
-                        ),
-                        dbc.Label("Before", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-before", value="3", type="number", style={"width": 76}),
-                        dbc.Label("After", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-after", value="3", type="number", style={"width": 76}),
-                        dbc.Label("Max", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-max", value="12", type="number", style={"width": 72}),
-                        dbc.Button("定位", id="event-species-btn", color="primary", size="sm"),
+                        html.Div("Step 1", className="rs-step-kicker"),
+                        html.H6("定位可核查的事件", className="rs-card-title mb-0"),
                     ],
-                    className="rs-query-row",
+                    className="rs-step-heading",
+                ),
+                dbc.Tabs(
+                    [
+                        dbc.Tab(
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            dbc.Label("反应式", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-reaction-text", value="", placeholder="A + B -> C + D", className="rs-grow"),
+                                            dbc.Label("展示前 / 后帧", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-rxn-before", value="5", type="number", min=0, style={"width": 72}),
+                                            dcc.Input(id="event-rxn-after", value="5", type="number", min=0, style={"width": 72}),
+                                            dbc.Label("候选上限", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-rxn-max", value="12", type="number", min=1, style={"width": 72}),
+                                            dbc.Button("定位反应事件", id="event-rxn-btn", color="primary", size="sm"),
+                                        ],
+                                        className="rs-query-row",
+                                    ),
+                                    html.P("默认入口：使用 .route 定位原子级反应过程，再用轨迹窗口核查。", className="rs-step-note"),
+                                ],
+                                className="pt-2",
+                            ),
+                            label="按反应定位",
+                            tab_id="event-reaction-tab",
+                        ),
+                        dbc.Tab(
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            dbc.Label("目标", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-species-target", value="", placeholder="SMILES 或分子式", className="rs-grow"),
+                                            dbc.Label("匹配", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Dropdown(
+                                                id="event-match-mode",
+                                                options=[
+                                                    {"label": "自动", "value": "auto"},
+                                                    {"label": "SMILES", "value": "smiles"},
+                                                    {"label": "分子式", "value": "formula"},
+                                                ],
+                                                value="auto",
+                                                clearable=False,
+                                                style={"width": 110},
+                                            ),
+                                            dbc.Label("事件", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Dropdown(
+                                                id="event-mode",
+                                                options=[
+                                                    {"label": "出现", "value": "appear"},
+                                                    {"label": "消失", "value": "disappear"},
+                                                    {"label": "生成", "value": "production"},
+                                                    {"label": "消耗", "value": "consumption"},
+                                                    {"label": "峰值", "value": "peak"},
+                                                    {"label": "非零", "value": "nonzero"},
+                                                ],
+                                                value="appear",
+                                                clearable=False,
+                                                style={"width": 110},
+                                            ),
+                                            dbc.Label("窗口前 / 后帧", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-before", value="3", type="number", min=0, style={"width": 72}),
+                                            dcc.Input(id="event-after", value="3", type="number", min=0, style={"width": 72}),
+                                            dbc.Label("事件上限", className="mb-0", style={"fontSize": 12}),
+                                            dcc.Input(id="event-max", value="12", type="number", min=1, style={"width": 72}),
+                                            dbc.Button("定位物种事件", id="event-species-btn", color="primary", size="sm"),
+                                        ],
+                                        className="rs-query-row",
+                                    ),
+                                    html.P("用于追踪特定物种的出现、消失和丰度变化，也可进入同一局部轨迹查看器。", className="rs-step-note"),
+                                ],
+                                className="pt-2",
+                            ),
+                            label="按物种定位",
+                            tab_id="event-species-tab",
+                        ),
+                    ],
+                    active_tab="event-reaction-tab",
+                    className="rs-event-tabs",
                 ),
             ],
             className="p-2",
         ),
         className="rs-card",
     )
-    reaction_card = dbc.Card(
+    source_card = dbc.Card(
         dbc.CardBody(
-            [
-                html.H6("反应事件", className="rs-card-title"),
-                html.Div(
-                    [
-                        dbc.Label("反应式", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-reaction-text", value="", placeholder="A + B -> C + D", className="rs-grow"),
-                        dbc.Label("Before", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-rxn-before", value="5", type="number", style={"width": 76}),
-                        dbc.Label("After", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-rxn-after", value="5", type="number", style={"width": 76}),
-                        dbc.Label("Max", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-rxn-max", value="12", type="number", style={"width": 72}),
-                        dbc.Button("定位", id="event-rxn-btn", color="primary", size="sm"),
-                        dbc.Label("event_id", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="event-extract-id", value="", placeholder="从结果表选择或粘贴", style={"width": 180}),
-                        dbc.Button("抽取轨迹", id="event-extract-btn", color="success", size="sm"),
-                        dbc.Button("导出 CSV", id="event-csv-btn", color="secondary", size="sm", outline=True),
-                        dcc.Download(id="event-csv-download"),
-                    ],
-                    className="rs-query-row",
-                ),
-            ],
+            dbc.Accordion(
+                [
+                    dbc.AccordionItem(
+                        html.Div(
+                            [
+                                dbc.Label("Species 覆盖", className="mb-0"),
+                                dcc.Input(id="event-species-file", placeholder="留空使用当前数据集", className="rs-grow"),
+                                dbc.Label("Trajectory 覆盖", className="mb-0"),
+                                dcc.Input(id="event-trajectory-file", placeholder=".lammpstrj 路径（可选）", className="rs-grow"),
+                                dbc.Label("Route 覆盖", className="mb-0"),
+                                dcc.Input(id="event-route-file", placeholder=".route 路径（可选）", className="rs-grow"),
+                                dbc.Label("类型-元素映射", className="mb-0"),
+                                dcc.Input(id="event-type-element-map", placeholder="例如 1:C,2:H,3:O", style={"width": 180}),
+                                dbc.Checkbox(id="event-include-route", value=True, className="me-1"),
+                                dbc.Label("保留 Route 追踪", html_for="event-include-route", className="mb-0"),
+                                dbc.Label("原子范围", className="mb-0"),
+                                dcc.Dropdown(
+                                    id="event-atom-scope",
+                                    options=[{"label": "事件相关原子", "value": "event"}, {"label": "全部原子", "value": "all"}],
+                                    value="event",
+                                    clearable=False,
+                                    style={"width": 130},
+                                ),
+                            ],
+                            className="rs-query-row",
+                        ),
+                        title="数据源与轨迹设置（可选）",
+                    )
+                ],
+                start_collapsed=True,
+                className="rs-advanced",
+            ),
             className="p-2",
         ),
         className="rs-card",
     )
     grid_card = dbc.Card(
         dbc.CardBody(
-            [html.Div(id="event-alert"), dcc.Loading(html.Div(_grid("event-grid"), className="rs-grid-wrap"), type="circle")],
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div("Step 1 结果", className="rs-step-kicker"),
+                                html.H6("选择一个事件进入轨迹核查", className="rs-card-title mb-0"),
+                            ],
+                            className="rs-step-heading",
+                        ),
+                        html.Div(
+                            [
+                                dbc.Button("去重分析", id="event-dedup-btn", color="warning", size="sm", outline=True),
+                                dbc.Button("导出 CSV", id="event-csv-btn", color="secondary", size="sm", outline=True),
+                                dcc.Download(id="event-csv-download"),
+                            ],
+                            className="d-flex gap-2",
+                        ),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                html.Div(id="event-alert"),
+                dcc.Loading(html.Div(_grid("event-grid"), className="rs-grid-wrap"), type="circle"),
+            ],
             className="p-2 rs-flex-fill",
         ),
         className="rs-card rs-flex-fill",
     )
-    return html.Div([species_card, reaction_card, grid_card], className="rs-page", id="page-events")
+    selection_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [html.Div("Step 2", className="rs-step-kicker"), html.H6("提取局部反应上下文", className="rs-card-title mb-0")],
+                            className="rs-step-heading",
+                        ),
+                        dbc.Button("提取并可视化", id="event-extract-btn", color="success", size="sm"),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                html.Div(id="event-selected-summary", className="rs-event-selected-summary"),
+                dcc.Input(id="event-extract-id", value="", type="text", readOnly=True, style={"display": "none"}),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+        id="event-selection-card",
+        style={"display": "none"},
+    )
+    viewer_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [html.Div("Step 3", className="rs-step-kicker"), html.H6("局部轨迹与关键帧", className="rs-card-title mb-0")],
+                            className="rs-step-heading",
+                        ),
+                        html.Div(id="event-viewer-paths", className="rs-viewer-paths"),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                html.Div(id="event-viewer-summary", className="rs-event-selected-summary"),
+                html.Div(
+                    [
+                        dbc.Label("显示范围", className="mb-0", style={"fontSize": 12}),
+                        dcc.RadioItems(
+                            id="event-view-scope",
+                            options=[{"label": "完整上下文", "value": "context"}, {"label": "仅反应核", "value": "core"}],
+                            value="context",
+                            inline=True,
+                            className="rs-compact-radio",
+                        ),
+                        html.Span(id="event-frame-label", className="rs-frame-label"),
+                    ],
+                    className="rs-query-row rs-viewer-controls",
+                ),
+                dcc.Slider(id="event-frame-slider", min=0, max=0, value=0, step=1, marks={}, className="mb-3"),
+                dcc.Loading(dcc.Graph(id="event-trajectory-3d", className="rs-event-3d"), type="circle"),
+                html.Div([html.Div("关键帧故事板", className="rs-storyboard-title"), html.Div(id="event-storyboard", className="rs-storyboard")]),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+        id="event-viewer-card",
+        style={"display": "none"},
+    )
+    return html.Div([workflow_card, source_card, grid_card, selection_card, viewer_card], className="rs-page", id="page-events")
 
 
 def _network_page() -> html.Div:
@@ -796,6 +1236,145 @@ def _network_page() -> html.Div:
     return html.Div([query_card, cyto_card], className="rs-page", id="page-network")
 
 
+def _literature_page() -> html.Div:
+    input_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("文献反应式验证", className="rs-card-title"),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                dbc.Label("文献反应式", className="mb-0", style={"fontSize": 12}),
+                                dcc.Textarea(
+                                    id="literature-reactions-input",
+                                    placeholder="每行一个反应式，例如:\nC6H5ClO -> C6H4O + Cl\nC6H4O -> C5H4 + CO",
+                                    rows=6,
+                                    style={"width": "100%", "fontFamily": "monospace", "fontSize": 12},
+                                ),
+                            ],
+                            className="rs-grow",
+                        ),
+                    ],
+                    className="rs-query-row",
+                ),
+                html.Div(
+                    [
+                        dbc.Label("验证模式", className="mb-0", style={"fontSize": 12}),
+                        dcc.Dropdown(
+                            id="literature-verify-mode",
+                            options=[
+                                {"label": "物种级别", "value": "species"},
+                            ],
+                            value="species",
+                            clearable=False,
+                            style={"width": 150},
+                        ),
+                        dbc.Button("验证", id="literature-verify-btn", color="primary", size="sm"),
+                        dbc.Button("导出 CSV", id="literature-csv-btn", color="secondary", size="sm", outline=True),
+                        dcc.Download(id="literature-csv-download"),
+                    ],
+                    className="rs-query-row",
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+    )
+    matrix_card = dbc.Card(
+        dbc.CardBody(
+            [html.Div(id="literature-alert"), dcc.Loading(html.Div(_grid("literature-grid"), className="rs-grid-wrap"), type="circle")],
+            className="p-2 rs-flex-fill",
+        ),
+        className="rs-card rs-flex-fill",
+    )
+    summary_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("验证摘要", className="rs-card-title"),
+                html.Div(id="literature-summary"),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+        id="literature-summary-card",
+        style={"display": "none"},
+    )
+    return html.Div([input_card, matrix_card, summary_card], className="rs-page", id="page-literature")
+
+
+def _batch_compare_page() -> html.Div:
+    condition_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("条件组选择", className="rs-card-title"),
+                html.Div(
+                    [
+                        dbc.Label("数据根目录", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="batch-root-dir", placeholder="扫描多条件模拟目录", className="rs-grow"),
+                        dbc.Button("扫描", id="batch-scan-btn", color="primary", size="sm"),
+                    ],
+                    className="rs-query-row",
+                ),
+                html.Div(id="batch-conditions-status", className="small text-muted mb-2"),
+                html.Div(
+                    [
+                        dbc.Label("条件组", className="mb-0", style={"fontSize": 12}),
+                        dcc.Dropdown(
+                            id="batch-condition-selector",
+                            multi=True,
+                            placeholder="选择要对比的条件组",
+                            options=[],
+                            className="rs-grow",
+                        ),
+                    ],
+                    className="rs-query-row",
+                ),
+                html.Div(
+                    [
+                        dbc.Label("最小检出率", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="batch-min-detection", value="0.0", type="number", min=0, max=1, step=0.1, style={"width": 80}),
+                        dbc.Label("Top N", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="batch-top-n", value="50", type="number", min=1, max=500, style={"width": 80}),
+                        dbc.Button("对比", id="batch-compare-btn", color="primary", size="sm"),
+                        dbc.Button("导出 CSV", id="batch-csv-btn", color="secondary", size="sm", outline=True),
+                        dcc.Download(id="batch-csv-download"),
+                    ],
+                    className="rs-query-row",
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+    )
+    matrix_card = dbc.Card(
+        dbc.CardBody(
+            [html.Div(id="batch-alert"), dcc.Loading(html.Div(_grid("batch-matrix-grid"), className="rs-grid-wrap"), type="circle")],
+            className="p-2 rs-flex-fill",
+        ),
+        className="rs-card rs-flex-fill",
+    )
+    detail_card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("反应详情", className="rs-card-title"),
+                dcc.Loading(
+                    [
+                        dcc.Graph(id="batch-reaction-chart", className="rs-chart"),
+                        html.Div(id="batch-reaction-stats"),
+                    ],
+                    type="circle",
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+        id="batch-detail-card",
+        style={"display": "none"},
+    )
+    return html.Div([condition_card, matrix_card, detail_card], className="rs-page", id="page-batch-compare")
+
+
 def _data_modal() -> dbc.Modal:
     return dbc.Modal(
         [
@@ -866,6 +1445,7 @@ def build_layout() -> html.Div:
                     _nav(),
                     html.Div(
                         [
+                            _page_header(),
                             _species_page(),
                             _transitions_page(),
                             _reactions_page(),
@@ -874,12 +1454,14 @@ def build_layout() -> html.Div:
                             _carbon_page(),
                             _events_page(),
                             _network_page(),
+                            _literature_page(),
+                            _batch_compare_page(),
                         ],
                         className="rs-main",
                     ),
-                    _detail_panel(),
                 ],
                 className="rs-body",
+                id="app-body",
             ),
             _data_modal(),
             dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
@@ -891,7 +1473,12 @@ def build_layout() -> html.Div:
             dcc.Store(id="evolution-payload-store", storage_type="memory", data=None),
             dcc.Store(id="carbon-payload-store", storage_type="memory", data=None),
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
+            dcc.Store(id="event-selected-store", storage_type="memory", data=None),
+            dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
             dcc.Store(id="network-store", storage_type="memory", data=None),
+            dcc.Store(id="literature-grid-store", storage_type="memory", data={"rows": []}),
+            dcc.Store(id="batch-conditions-store", storage_type="memory", data=None),
+            dcc.Store(id="batch-matrix-grid-store", storage_type="memory", data={"rows": []}),
         ],
         className="rs-root",
     )

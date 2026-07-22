@@ -27,6 +27,29 @@ __all__ = [
     "parse_carbon_range_specs",
     "summarize_carbon_evolution",
     "plot_carbon_number_evolution",
+    # recrossing
+    "AtomTransition",
+    "RecrossingAtomHistory",
+    "RecrossedAtomEvent",
+    "DeduplicatedReactionEvent",
+    "RecrossingAnalyzer",
+    "convert_route_hits_to_transitions",
+    "dedup_events_to_rows",
+    "classify_event",
+    # mechanism_verify
+    "EvidenceLevel",
+    "MechanismReaction",
+    "MechanismEvidence",
+    "EvidenceMatrixResult",
+    "MechanismVerifier",
+    "parse_literature_reaction_text",
+    # batch_compare
+    "SimulationCondition",
+    "ConditionGroup",
+    "ReactionComparison",
+    "ReplicateStatistic",
+    "BatchComparator",
+    "reaction_key_to_display",
 ]
 
 from .formula import (
@@ -47,6 +70,32 @@ from .carbon_plot import (
     plot_carbon_number_evolution,
 )
 from .observation_network import build_observation_network
+from .recrossing import (
+    AtomTransition,
+    RecrossingAtomHistory,
+    RecrossedAtomEvent,
+    DeduplicatedReactionEvent,
+    RecrossingAnalyzer,
+    convert_route_hits_to_transitions,
+    dedup_events_to_rows,
+    classify_event,
+)
+from .mechanism_verify import (
+    EvidenceLevel,
+    MechanismReaction,
+    MechanismEvidence,
+    EvidenceMatrixResult,
+    MechanismVerifier,
+    parse_literature_reaction_text,
+)
+from .batch_compare import (
+    SimulationCondition,
+    ConditionGroup,
+    ReactionComparison,
+    ReplicateStatistic,
+    BatchComparator,
+    reaction_key_to_display,
+)
 
 _REACTION_EXPORTS = [
     "smiles_to_formula",

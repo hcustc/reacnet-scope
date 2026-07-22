@@ -82,6 +82,7 @@ from rng_tools.carbon_plot import (  # noqa: E402
 
 
 ROUTE_TRANSITION_INDEX_SCHEMA_VERSION = 1
+TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION = 1
 
 
 def _bootstrap_local_site_packages() -> None:
@@ -851,13 +852,35 @@ def downsample_series(x_vals: list[float], y_map: dict[str, list[float]], max_po
     return x2, y2
 
 
+_SPECIES_TOTALS_CACHE_LOCK = threading.Lock()
+_SPECIES_TOTALS_CACHE: OrderedDict[tuple[str, int, int], dict[str, int]] = OrderedDict()
+_SPECIES_TOTALS_CACHE_MAX_ENTRIES = 8
+
+
 def collect_species_totals(
     species_file: str,
     *,
     progress_callback: Any = None,
 ) -> dict[str, int]:
+    path = os.path.abspath(species_file)
+    stat = os.stat(path)
+    cache_key = (path, stat.st_mtime_ns, stat.st_size)
+    with _SPECIES_TOTALS_CACHE_LOCK:
+        cached = _SPECIES_TOTALS_CACHE.get(cache_key)
+        if cached is not None:
+            _SPECIES_TOTALS_CACHE.move_to_end(cache_key)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "progress": 1.0,
+                        "message": f"Using cached species catalog: {os.path.basename(path)}",
+                        "timesteps": None,
+                    }
+                )
+            return cached
+
     totals: dict[str, int] = {}
-    file_size = max(os.path.getsize(species_file), 1)
+    file_size = max(stat.st_size, 1)
     bytes_read = 0
     last_emit = 0.0
     timesteps = 0
@@ -866,12 +889,12 @@ def collect_species_totals(
         progress_callback(
             {
                 "progress": 0.0,
-                "message": f"Scanning species catalog: {os.path.basename(species_file)}",
+                "message": f"Scanning species catalog: {os.path.basename(path)}",
                 "timesteps": 0,
             }
         )
 
-    with open(species_file, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             bytes_read += len(line)
             parsed = parse_species_timestep_line(line)
@@ -895,6 +918,11 @@ def collect_species_totals(
                 )
                 last_emit = now
 
+    with _SPECIES_TOTALS_CACHE_LOCK:
+        _SPECIES_TOTALS_CACHE[cache_key] = totals
+        _SPECIES_TOTALS_CACHE.move_to_end(cache_key)
+        while len(_SPECIES_TOTALS_CACHE) > _SPECIES_TOTALS_CACHE_MAX_ENTRIES:
+            _SPECIES_TOTALS_CACHE.popitem(last=False)
     return totals
 
 
@@ -3686,6 +3714,29 @@ def route_index_cache_root() -> Path:
     return root
 
 
+def trajectory_index_cache_root(trajectory_file: str) -> Path:
+    """Return the durable cache directory for a trajectory frame index.
+
+    The default sits beside the simulation data so a large dataset does not
+    consume the workstation system disk. ``REACNET_SCOPE_CACHE_DIR`` can point
+    to a shared high-capacity cache volume when desired.
+    """
+    configured = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    root = Path(configured).expanduser() if configured else Path(trajectory_file).resolve().parent / ".reacnet_scope_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def trajectory_frame_index_path(trajectory_file: str, *, mtime: float, size: int) -> Path:
+    abs_path = os.path.abspath(trajectory_file)
+    mtime_ns = int(round(float(mtime) * 1_000_000_000))
+    digest = hashlib.sha1(
+        f"trajectory-frame-index|v{TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION}|{abs_path}|{mtime_ns}|{int(size)}".encode("utf-8")
+    ).hexdigest()[:16]
+    stem = _safe_name_fragment(Path(abs_path).stem, "trajectory")
+    return trajectory_index_cache_root(abs_path) / f"{stem}.{digest}.trajectory-index.json"
+
+
 def route_transition_index_path(route_file: str, *, mtime: float, size: int) -> Path:
     abs_path = os.path.abspath(route_file)
     mtime_ns = int(round(float(mtime) * 1_000_000_000))
@@ -4363,6 +4414,7 @@ def build_reaction_event_locate_payload(
     before_frames = max(0, int_param(params, "before_frames", 5))
     after_frames = max(0, int_param(params, "after_frames", 5))
     max_events = max(1, min(int_param(params, "max_events", 12), 200))
+    defer_trajectory_verification = bool_param(params, "defer_trajectory_verification", False)
     type_element_map = parse_type_element_map_specs((params.get("type_element_map", [""])[0] or "").strip())
     reaction_query = _prepare_reaction_query(reaction_text)
 
@@ -4438,7 +4490,7 @@ def build_reaction_event_locate_payload(
     trajectory_frames: list[int] = []
     trajectory_index_state = "missing"
     trajectory_index_path = ""
-    if files["trajectory_exists"]:
+    if files["trajectory_exists"] and not defer_trajectory_verification:
         trajectory_index = TRAJECTORY_INDEX_STORE.get(
             files["trajectory_file"],
             progress_callback=progress_callback,
@@ -4448,6 +4500,8 @@ def build_reaction_event_locate_payload(
         trajectory_frames = [int(frame) for frame in trajectory_index.frames]
         trajectory_index_state = "cached_or_built"
         trajectory_index_path = os.path.abspath(files["trajectory_file"])
+    elif files["trajectory_exists"]:
+        trajectory_index_state = "deferred_until_extraction"
 
     time_groups = _group_reaction_hits_by_time(raw_hits, merge_gap=max(1, step))
     candidate_rows = _build_reaction_event_rows(
@@ -4458,7 +4512,7 @@ def build_reaction_event_locate_payload(
         before_frames=before_frames,
         after_frames=after_frames,
         trajectory_file=str(files["trajectory_file"]),
-        trajectory_exists=bool(files["trajectory_exists"]),
+        trajectory_exists=bool(files["trajectory_exists"]) and not defer_trajectory_verification,
         type_element_map=type_element_map,
         progress_callback=progress_callback,
         progress_start=0.68,
@@ -4508,6 +4562,8 @@ def build_reaction_event_locate_payload(
         message = "Route candidates were found, but none passed the net-reaction consistency checks"
     else:
         message = "No reaction-event candidate survived route/species validation"
+    if defer_trajectory_verification:
+        message = f"{message}; trajectory verification is deferred until an event is selected"
     report(
         1.0,
         "completed",
@@ -4528,6 +4584,7 @@ def build_reaction_event_locate_payload(
             "before_frames": before_frames,
             "after_frames": after_frames,
             "max_events": max_events,
+            "defer_trajectory_verification": defer_trajectory_verification,
             "type_element_map": ";".join(f"{key}:{value}" for key, value in sorted(type_element_map.items(), key=lambda item: int(item[0]))),
         },
         "meta": {
@@ -4547,6 +4604,7 @@ def build_reaction_event_locate_payload(
             "trajectory_index_state": trajectory_index_state,
             "trajectory_index_path": trajectory_index_path,
             "trajectory_index_frames": len(trajectory_frames),
+            "trajectory_verification_deferred": defer_trajectory_verification,
             "temporal_groups": len(time_groups),
             "provisional_candidate_rows": len(candidate_rows),
             "candidate_rows": len(candidate_process_rows),
@@ -7716,6 +7774,22 @@ class TrajectoryIndexStore:
                     )
                 return cached
 
+        persisted = self._load_persisted(path, mtime=mtime, size=size)
+        if persisted is not None:
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "progress": max(0.0, min(progress_start + progress_span, 1.0)),
+                        "phase": "cached_trajectory_index_disk",
+                        "message": f"Using persistent trajectory index: {os.path.basename(path)}",
+                        "n_index_frames": len(persisted.frames),
+                        "index_path": str(trajectory_frame_index_path(path, mtime=mtime, size=size)),
+                    }
+                )
+            with self._lock:
+                self._cache[path] = persisted
+            return persisted
+
         fresh = self._scan_index(
             path,
             mtime=mtime,
@@ -7724,9 +7798,66 @@ class TrajectoryIndexStore:
             progress_start=progress_start,
             progress_span=progress_span,
         )
+        self._persist(fresh)
         with self._lock:
             self._cache[path] = fresh
         return fresh
+
+    def _load_persisted(self, trajectory_file: str, *, mtime: float, size: int) -> TrajectoryFrameIndex | None:
+        index_path = trajectory_frame_index_path(trajectory_file, mtime=mtime, size=size)
+        if not index_path.exists():
+            return None
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            expected_mtime_ns = int(round(float(mtime) * 1_000_000_000))
+            if (
+                int(payload.get("schema_version", 0)) != TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION
+                or str(payload.get("trajectory_file", "")) != os.path.abspath(trajectory_file)
+                or int(payload.get("trajectory_mtime_ns", -1)) != expected_mtime_ns
+                or int(payload.get("trajectory_size", -1)) != int(size)
+            ):
+                return None
+            offsets: dict[int, tuple[int, int]] = {}
+            for item in payload.get("frame_offsets") or []:
+                frame, start, end = int(item[0]), int(item[1]), int(item[2])
+                if end > start:
+                    offsets[frame] = (start, end)
+            frames = [int(frame) for frame in payload.get("frames") or []]
+            if not frames or not offsets:
+                return None
+            return TrajectoryFrameIndex(
+                trajectory_file=os.path.abspath(trajectory_file),
+                mtime=mtime,
+                size=size,
+                frames=frames,
+                frame_offsets=offsets,
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, IndexError):
+            return None
+
+    def _persist(self, index: TrajectoryFrameIndex) -> None:
+        index_path = trajectory_frame_index_path(index.trajectory_file, mtime=index.mtime, size=index.size)
+        payload = {
+            "schema_version": TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION,
+            "trajectory_file": os.path.abspath(index.trajectory_file),
+            "trajectory_mtime_ns": int(round(float(index.mtime) * 1_000_000_000)),
+            "trajectory_size": int(index.size),
+            "frames": [int(frame) for frame in index.frames],
+            "frame_offsets": [
+                [int(frame), int(start), int(end)]
+                for frame, (start, end) in sorted(index.frame_offsets.items())
+            ],
+        }
+        tmp_path = index_path.with_suffix(index_path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            os.replace(tmp_path, index_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def _scan_index(
         self,

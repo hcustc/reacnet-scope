@@ -26,3 +26,6 @@ ref_data/
 .DS_Store
 .idea/
 .vscode/
+
+# Playwright test logs
+.playwright-cli/
