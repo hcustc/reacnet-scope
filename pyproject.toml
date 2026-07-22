@@ -41,6 +41,7 @@ web = [
 reacnet-scope = "scripts.rng_query_cli:main"
 reacnet-scope-web = "scripts.webapp.server:main"
 reacnet-scope-web-dash = "scripts.webapp_dash.app:main"
+reacnet-scope-build-trajectory-index = "scripts.build_trajectory_index:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rng_tools", "scripts"]
