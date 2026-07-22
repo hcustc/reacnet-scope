@@ -8310,11 +8310,18 @@ _LEGACY_TRAJECTORY_INDEX_STORE = _LegacyTrajectoryIndexStore()
 # Runtime boundary: all web request paths below resolve these names to the
 # extracted preparation package.  Builders are only called by offline CLI
 # entry points; online code uses ``open_required`` and read-only queries.
-RouteTransitionIndexStore = PreparedRouteIndexStore
-TrajectoryIndexStore = PreparedTrajectoryIndexStore
-TrajectoryFrameIndex = PreparedTrajectoryFrameIndex
-ROUTE_TRANSITION_INDEX_STORE = PREPARED_ROUTE_INDEX_STORE
-TRAJECTORY_INDEX_STORE = PREPARED_TRAJECTORY_INDEX_STORE
+if _HAS_PREPARED_INDEXES:
+    RouteTransitionIndexStore = PreparedRouteIndexStore      # type: ignore[name-defined]
+    TrajectoryIndexStore = PreparedTrajectoryIndexStore      # type: ignore[name-defined]
+    TrajectoryFrameIndex = PreparedTrajectoryFrameIndex      # type: ignore[name-defined]
+    ROUTE_TRANSITION_INDEX_STORE = PREPARED_ROUTE_INDEX_STORE  # type: ignore[name-defined]
+    TRAJECTORY_INDEX_STORE = PREPARED_TRAJECTORY_INDEX_STORE  # type: ignore[name-defined]
+else:  # pragma: no cover - CI / source-only deployments
+    RouteTransitionIndexStore = _LegacyRouteTransitionIndexStore  # type: ignore[assignment]
+    TrajectoryIndexStore = _LegacyRouteTransitionIndexStore       # type: ignore[assignment]
+    TrajectoryFrameIndex = _LegacyRouteTransitionIndexStore       # type: ignore[assignment]
+    ROUTE_TRANSITION_INDEX_STORE = _LEGACY_ROUTE_TRANSITION_INDEX_STORE
+    TRAJECTORY_INDEX_STORE = _LEGACY_ROUTE_TRANSITION_INDEX_STORE
 
 
 def route_transition_index_path(

@@ -186,8 +186,10 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_reports_unmounted_path(self):
+        """Path inside allowed roots that does not exist → '目录不存在'."""
+        bad = str(Path.home() / "nonexistent_mount_xyz")
         with self.assertRaisesRegex(DirBrowserError, "目录不存在"):
-            list_directory("/media/huangchen/T3000_nonexistent")
+            list_directory(bad)
 
     def test_reports_not_a_directory(self):
         import rng_tools.dir_browser as _db
