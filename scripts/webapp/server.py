@@ -79,21 +79,32 @@ from rng_tools.carbon_plot import (  # noqa: E402
     plot_carbon_number_evolution,
     species_file_to_tidy_table,
 )
-from reacnet_scope.indexes import (  # noqa: E402
-    IndexInvalidError,
-    IndexNotReadyError,
-    IndexStaleError,
-    ROUTE_INDEX_STORE as PREPARED_ROUTE_INDEX_STORE,
-    TRAJECTORY_INDEX_STORE as PREPARED_TRAJECTORY_INDEX_STORE,
-    RouteIndexStore as PreparedRouteIndexStore,
-    TrajectoryFrameIndex as PreparedTrajectoryFrameIndex,
-    TrajectoryIndexStore as PreparedTrajectoryIndexStore,
-    dataset_id_for_source,
-    resolve_dataset_paths,
-    route_index_path as prepared_route_index_path,
-    trajectory_index_path as prepared_trajectory_index_path,
-)
-from reacnet_scope.rng_events import event_output_status  # noqa: E402
+try:  # noqa: E402
+    from reacnet_scope.indexes import (
+        ROUTE_INDEX_STORE as PREPARED_ROUTE_INDEX_STORE,
+        TRAJECTORY_INDEX_STORE as PREPARED_TRAJECTORY_INDEX_STORE,
+        RouteIndexStore as PreparedRouteIndexStore,
+        TrajectoryFrameIndex as PreparedTrajectoryFrameIndex,
+        TrajectoryIndexStore as PreparedTrajectoryIndexStore,
+        resolve_dataset_paths,
+        route_index_path as prepared_route_index_path,
+        trajectory_index_path as prepared_trajectory_index_path,
+    )
+    from reacnet_scope.rng_events import event_output_status
+
+    _HAS_PREPARED_INDEXES = True
+except ModuleNotFoundError:  # pragma: no cover - fallback for source-only deployments
+    _HAS_PREPARED_INDEXES = False
+
+    def event_output_status(reactionevent_file: str, molecules_file: str) -> dict[str, Any]:
+        reactionevent_exists = bool(reactionevent_file and Path(reactionevent_file).is_file())
+        molecules_exists = bool(molecules_file and Path(molecules_file).is_file())
+        return {
+            "ready": bool(reactionevent_exists and molecules_exists),
+            "state": "ready" if reactionevent_exists and molecules_exists else "missing",
+            "reactionevent_exists": reactionevent_exists,
+            "molecules_exists": molecules_exists,
+        }
 
 
 ROUTE_TRANSITION_INDEX_SCHEMA_VERSION = 2
@@ -824,7 +835,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     manifest_payload: dict[str, Any] = {}
     manifest_path = ""
     configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-    if base and configured_cache:
+    if base and configured_cache and _HAS_PREPARED_INDEXES:
         candidate = resolve_dataset_paths(Path(base).parent, Path(base).name).manifest
         manifest_path = str(candidate)
         if candidate.is_file():
@@ -3662,8 +3673,15 @@ def trajectory_index_cache_root(trajectory_file: str) -> Path:
 
 
 def trajectory_frame_index_path(trajectory_file: str, *, mtime: float, size: int) -> Path:
-    del mtime, size
-    return prepared_trajectory_index_path(trajectory_file)
+    if _HAS_PREPARED_INDEXES:
+        return prepared_trajectory_index_path(trajectory_file)
+    abs_path = os.path.abspath(trajectory_file)
+    mtime_ns = int(round(float(mtime) * 1_000_000_000))
+    digest = hashlib.sha1(
+        f"trajectory-frame-index|v{TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION}|{abs_path}|{mtime_ns}|{int(size)}".encode("utf-8")
+    ).hexdigest()[:16]
+    stem = _safe_name_fragment(Path(abs_path).stem, "trajectory")
+    return trajectory_index_cache_root(abs_path) / f"{stem}.{digest}.trajectory-index.json"
 
 
 def trajectory_frame_index_building_path(trajectory_file: str, *, mtime: float, size: int) -> Path:
@@ -3672,8 +3690,15 @@ def trajectory_frame_index_building_path(trajectory_file: str, *, mtime: float, 
 
 
 def route_transition_index_path(route_file: str, *, mtime: float, size: int) -> Path:
-    del mtime, size
-    return prepared_route_index_path(route_file)
+    if _HAS_PREPARED_INDEXES:
+        return prepared_route_index_path(route_file)
+    abs_path = os.path.abspath(route_file)
+    mtime_ns = int(round(float(mtime) * 1_000_000_000))
+    digest = hashlib.sha1(
+        f"route-transition-index|v{ROUTE_TRANSITION_INDEX_SCHEMA_VERSION}|{abs_path}|{mtime_ns}|{int(size)}".encode("utf-8")
+    ).hexdigest()[:16]
+    stem = _safe_name_fragment(Path(abs_path).stem, "route")
+    return route_index_cache_root() / f"{stem}.{digest}.sqlite3"
 
 
 def write_context_trajectory_tempfile(text: str, filename: str) -> str:
