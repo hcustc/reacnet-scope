@@ -60,6 +60,19 @@ class TransitionTableTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must have 2 data rows"):
             load_transition_table(self.path)
 
+    def test_reorders_labeled_rows_without_quadratic_label_lookups(self) -> None:
+        self.path.write_text(
+            "[H] [O] [C]\n"
+            "[C] 1 2 3\n"
+            "\n"
+            "[H] 4 5 6\n"
+            "[O] 7 8 9\n",
+            encoding="utf-8",
+        )
+        parsed = load_transition_table(self.path)
+        self.assertEqual(parsed["labels"], ["[H]", "[O]", "[C]"])
+        self.assertEqual(parsed["matrix"], [[4, 5, 6], [7, 8, 9], [1, 2, 3]])
+
     def test_dataset_status_derives_related_rng_artifacts(self) -> None:
         root = self.path.with_suffix("")
         reaction_path = Path(f"{root}.reactionabcd")
@@ -83,14 +96,14 @@ class TransitionTableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             complete_base = root / "run.lammpstrj"
-            for suffix in ("", ".reactionabcd", ".species", ".route", ".table"):
+            for suffix in ("", ".reactionabcd", ".species", ".route", ".table", ".reactionevent.csv", ".molecules.csv"):
                 Path(f"{complete_base}{suffix}").write_text("fixture", encoding="utf-8")
             Path(f"{root / 'partial.lammpstrj'}.species").write_text("fixture", encoding="utf-8")
 
             payload = build_dataset_status_payload({"dataset_dir": [directory]})
             dataset = payload["dataset"]
             self.assertEqual(dataset["label"], "run.lammpstrj")
-            self.assertEqual(dataset["ready_count"], 5)
+            self.assertEqual(dataset["ready_count"], 7)
             self.assertEqual(dataset["artifacts"]["table"]["source"], "folder")
             self.assertTrue(all(item["exists"] for item in dataset["artifacts"].values()))
 

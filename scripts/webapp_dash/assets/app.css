@@ -1008,6 +1008,17 @@ html, body {
 .rs-evidence-confirmed   { background-color: #dcfce7; color: #166534; }
 .rs-evidence-transient   { background-color: #ffedd5; color: #9a3412; }
 
+.rs-preparation-card {
+  background: #fbfcfe;
+}
+
+.rs-command-line code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #334155;
+}
+
 /* ── Batch comparison heatmap ────────────────────────────────────── */
 
 .rs-heatmap-high   { background-color: #166534; color: white; }

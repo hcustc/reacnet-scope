@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
 import traceback
+from bisect import bisect_left
 from pathlib import Path
 from collections import Counter
 from typing import Any
@@ -27,15 +29,20 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from rng_tools.network import ReactionNetwork, parse_reactionabcd  # noqa: E402
+from reacnet_scope.indexes import (  # noqa: E402
+    IndexBuildInProgressError,
+    IndexNotReadyError,
+    clear_index,
+    resolve_dataset_paths,
+    TRAJECTORY_INDEX_STORE,
+)
+from reacnet_scope.rng_events import RngEventDataError, query_rng_events  # noqa: E402
 from scripts.webapp.server import (  # noqa: E402
     STORE,
     build_dataset_status_payload,
     build_carbon_plot_payload,
     build_intermediate_candidates_payload,
-    build_reaction_event_extract_payload,
-    build_reaction_event_locate_payload,
     build_species_plot_payload,
-    build_structure_context_payload,
     build_transition_table_payload,
     collect_next_reactions,
     derive_species_path,
@@ -43,7 +50,6 @@ from scripts.webapp.server import (  # noqa: E402
     looks_like_formula,
     match_formula_reaction,
     net_flux,
-    pick_folder_with_system,
     reaction_formula_str,
     reaction_mass_fields,
     reaction_smiles_str,
@@ -51,6 +57,7 @@ from scripts.webapp.server import (  # noqa: E402
     smiles_formula_cached,
     smiles_to_svg,
     split_terms,
+    parse_lammpstrj_frame_block,
 )
 
 
@@ -104,12 +111,156 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
         raise ServiceError(f"扫描数据目录失败: {exc}") from exc
 
 
-def pick_folder_macos(initial_dir: str = "") -> dict[str, Any]:
-    """Open the native macOS folder picker.  Returns ``{ok, path, canceled}``."""
+# ---------------------------------------------------------------------------
+# Directory browser for remote server file system navigation
+# ---------------------------------------------------------------------------
+
+
+def _get_allowed_roots() -> list[Path]:
+    """Return the list of allowed browsing root directories.
+
+    The default set covers common data mount points.  Set the environment
+    variable ``REACNET_SCOPE_ALLOWED_ROOTS`` to a colon-separated list
+    of paths to override the defaults.
+
+    Only directories that actually exist are returned.
+    """
+    env_override = os.environ.get("REACNET_SCOPE_ALLOWED_ROOTS", "")
+    if env_override:
+        roots = [Path(p).expanduser().resolve() for p in env_override.split(":") if p.strip()]
+        return [r for r in roots if r.exists() and r.is_dir()]
+
+    home = Path.home()
+    username = home.name
+    candidates: list[Path] = [
+        home,
+        Path(f"/media/{username}"),
+        Path("/mnt"),
+        Path("/data"),
+    ]
+    return [c for c in candidates if c.exists() and c.is_dir()]
+
+
+ALLOWED_ROOTS: list[Path] = _get_allowed_roots()
+
+
+def validate_browse_path(path_str: str) -> Path:
+    """Normalise *path_str* and verify it lies inside an allowed root.
+
+    The path is expanded (``~`` → home), resolved (symlinks followed), and
+    checked for containment within :data:`ALLOWED_ROOTS`.  Raises
+    :class:`ServiceError` when the path escapes the allowed tree.
+    """
+    raw = (path_str or "").strip()
+    if not raw:
+        raise ServiceError("路径不能为空", reason="empty_path")
+
     try:
-        return pick_folder_with_system(initial_dir)
-    except RuntimeError as exc:
-        raise ServiceError(str(exc), reason="picker_unavailable") from exc
+        resolved = Path(raw).expanduser().resolve()
+    except (RuntimeError, OSError) as exc:
+        raise ServiceError(f"无法解析路径: {raw}", reason="invalid_path") from exc
+
+    existing_roots = [r for r in ALLOWED_ROOTS if r.exists()]
+    if not existing_roots:
+        raise ServiceError("没有可用的允许根目录", reason="no_roots")
+
+    within = any(resolved.is_relative_to(root) for root in existing_roots)
+    if not within:
+        root_list = ", ".join(str(r) for r in existing_roots)
+        raise ServiceError(
+            f"路径超出允许范围。允许的根目录: {root_list}",
+            reason="path_out_of_bounds",
+        )
+    return resolved
+
+
+def list_directory(path_str: str) -> dict[str, Any]:
+    """Enumerate subdirectories in *path_str* for the directory browser.
+
+    Returns a dict with keys ``current_path``, ``parent_path``,
+    ``can_go_up``, and ``subdirs`` (each a ``{name, path, accessible}``
+    dict).  Directories are sorted case-insensitively.  Hidden entries,
+    macOS metadata folders, and Windows system directories are skipped.
+    """
+    path = validate_browse_path(path_str)
+
+    if not path.exists():
+        raise ServiceError(f"目录不存在: {path}", reason="not_found")
+    if not path.is_dir():
+        raise ServiceError(f"路径不是目录: {path}", reason="not_directory")
+    if not os.access(path, os.R_OK):
+        raise ServiceError(f"没有读取权限: {path}", reason="permission_denied")
+
+    # Determine whether the parent is still within an allowed root.
+    parent_path = path.parent
+    can_go_up = False
+    try:
+        validate_browse_path(str(parent_path))
+        can_go_up = True
+    except ServiceError:
+        pass
+
+    # Names that are always hidden from the directory listing.
+    _SKIP_EXACT = {
+        ".Spotlight-V100",
+        ".Trashes",
+        ".TemporaryItems",
+        "System Volume Information",
+    }
+
+    subdirs: list[dict[str, Any]] = []
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                name = entry.name
+
+                # Hidden entries (start with ".")
+                if name.startswith("."):
+                    if name.startswith("._"):       # macOS AppleDouble
+                        continue
+                    if name in _SKIP_EXACT:
+                        continue
+                    if name.startswith(".Trash"):    # .Trash, .Trash-*, …
+                        continue
+                    continue  # all other dotfiles
+
+                # Non-dot macOS / Windows metadata
+                if name in _SKIP_EXACT:
+                    continue
+
+                # Per-entry error isolation: a single vanished or
+                # inaccessible entry must not break the whole listing.
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    accessible = os.access(entry.path, os.R_OK)
+                except (FileNotFoundError, OSError):
+                    # Entry disappeared mid-scan — skip silently.
+                    continue
+
+                subdirs.append(
+                    {
+                        "name": name,
+                        "path": str(entry.path),
+                        "accessible": accessible,
+                    }
+                )
+    except PermissionError as exc:
+        raise ServiceError(
+            f"没有读取权限: {path}", reason="permission_denied"
+        ) from exc
+    except OSError as exc:
+        raise ServiceError(f"读取目录失败: {exc}", reason="read_error") from exc
+
+    # Stable, case-insensitive sort.
+    subdirs.sort(key=lambda d: d["name"].casefold())
+
+    return {
+        "current_path": str(path),
+        "parent_path": str(parent_path) if can_go_up else None,
+        "can_go_up": can_go_up,
+        "subdirs": subdirs,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +273,7 @@ def artifacts_from_status(status: dict[str, Any]) -> dict[str, str]:
     dataset = status.get("dataset", {}) if status else {}
     artifacts = dataset.get("artifacts", {}) or {}
     out: dict[str, str] = {}
-    for key in ("reaction", "species", "trajectory", "route", "table"):
+    for key in ("reaction", "species", "trajectory", "route", "table", "reactionevent", "molecules"):
         item = artifacts.get(key, {}) or {}
         path_text = item.get("path") or ""
         if path_text:
@@ -144,6 +295,83 @@ def dataset_capabilities(status: dict[str, Any]) -> dict[str, bool]:
     dataset = status.get("dataset", {}) if status else {}
     caps = dataset.get("capabilities", {}) or {}
     return {key: bool(caps.get(key)) for key in ("species", "intermediate", "reaction", "events", "evolution", "transition")}
+
+
+def dataset_readiness(status: dict[str, Any]) -> dict[str, Any]:
+    dataset = status.get("dataset", {}) if status else {}
+    return dict(dataset.get("readiness", {}) or {})
+
+
+def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]:
+    """Return the read-only preparation view for one selected dataset."""
+    status = scan_dataset(folder, base=base)
+    dataset = status.get("dataset", {}) or {}
+    artifacts = artifacts_from_status(status)
+    readiness = dataset_readiness(status)
+    selected_base = str(dataset.get("selected_base") or dataset.get("base") or "")
+    paths = (
+        resolve_dataset_paths(Path(selected_base).parent, Path(selected_base).name)
+        if selected_base
+        else None
+    )
+    dataset_id = paths.dataset_id if paths else ""
+    manifest = dataset.get("manifest", {}) or {}
+    events = dict(readiness.get("event_search") or {"state": "missing"})
+    trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
+    index_bytes = int(trajectory.get("index_size", 0) or 0)
+    timestamps = [
+        value
+        for value in (
+            trajectory.get("updated_at_epoch"),
+        )
+        if value is not None
+    ]
+    cache_dir = str(paths.cache_dir) if paths else ""
+    for item in (events, trajectory):
+        if item.get("cache_dir"):
+            cache_dir = str(item["cache_dir"])
+            break
+    if not cache_dir and manifest.get("path"):
+        cache_dir = str(Path(str(manifest["path"])).parent)
+    trajectory_source = artifacts.get("trajectory", "")
+    command_prefix = ""
+    if selected_base:
+        command_prefix = (
+            f"uv run reacnet-scope-prepare {shlex.quote(str(Path(selected_base).parent))} "
+            f"--base {shlex.quote(Path(selected_base).name)}"
+        )
+    return {
+        "dataset_id": dataset_id,
+        "base": selected_base,
+        "manifest_path": str(manifest.get("path") or ""),
+        "manifest_found": bool(manifest.get("found")),
+        "cache_dir": cache_dir,
+        "index_bytes": index_bytes,
+        "last_updated_epoch": max(timestamps) if timestamps else None,
+        "basic": dict(readiness.get("basic_analysis") or {"state": "missing"}),
+        "events": events,
+        "trajectory": trajectory,
+        "rng_event_command": "--reaction-event --show-molecule-time",
+        "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
+    }
+
+
+def clear_dataset_index(folder: str, *, base: str = "", kind: str) -> dict[str, Any]:
+    """Safely clear one index through the shared preparation-layer API."""
+    status = scan_dataset(folder, base=base)
+    artifacts = artifacts_from_status(status)
+    normalized_kind = str(kind or "").strip().lower()
+    source = artifacts.get("route", "") if normalized_kind == "route" else artifacts.get("trajectory", "")
+    if normalized_kind not in {"route", "trajectory"}:
+        raise ServiceError("无效索引类型", reason="invalid_index_kind")
+    if not source or not Path(source).is_file():
+        raise ServiceError("当前数据集缺少对应源文件", reason="missing_source")
+    try:
+        return clear_index(source, kind=normalized_kind)
+    except IndexBuildInProgressError as exc:
+        raise ServiceError("索引正在由离线准备程序构建；请先停止该程序后再清理。", reason="index_building") from exc
+    except Exception as exc:
+        raise ServiceError(f"清理索引失败: {exc}", reason="clear_failed") from exc
 
 
 def candidates_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
@@ -754,299 +982,123 @@ def build_intermediate_candidates(
         raise ServiceError(f"筛选中间体候选失败: {exc}") from exc
 
 
-def locate_species_events(
-    artifacts: dict[str, str],
-    target: str,
-    *,
-    species_file: str = "",
-    trajectory_file: str = "",
-    route_file: str = "",
-    match_mode: str = "auto",
-    event_mode: str = "appear",
-    before_frames: int = 3,
-    after_frames: int = 3,
-    max_events: int = 12,
-    include_route_trace: bool = True,
-    trajectory_atom_scope: str = "event",
-    type_element_map: str = "",
-) -> dict[str, Any]:
-    """Mirror legacy structure-context event location without inline viewer."""
-    reac_path = (artifacts.get("reaction") or "").strip()
-    species_path = (species_file or artifacts.get("species") or "").strip()
-    trajectory_path = (trajectory_file or artifacts.get("trajectory") or "").strip()
-    route_path = (route_file or artifacts.get("route") or "").strip()
-    if not target.strip():
-        raise ServiceError("请输入目标物种或分子式", reason="missing_target")
-    params = {
-        "reac": [reac_path or ""],
-        "species_file": [species_path],
-        "trajectory_file": [trajectory_path],
-        "route_file": [route_path],
-        "target": [target.strip()],
-        "match_mode": [match_mode if match_mode in {"auto", "smiles", "formula"} else "auto"],
-        "event_mode": [event_mode if event_mode in {"appear", "disappear", "production", "consumption", "peak", "nonzero"} else "appear"],
-        "before_frames": [str(max(0, int(before_frames)))],
-        "after_frames": [str(max(0, int(after_frames)))],
-        "max_events": [str(max(1, int(max_events)))],
-        "include_route_trace": ["1" if include_route_trace else "0"],
-        "include_trajectory": ["0"],
-        "inline_viewer": ["0"],
-        "trajectory_atom_scope": [trajectory_atom_scope if trajectory_atom_scope in {"all", "event"} else "event"],
-        "type_element_map": [(type_element_map or "").strip()],
-    }
-    try:
-        return build_structure_context_payload(params)
-    except FileNotFoundError as exc:
-        raise ServiceError(str(exc), reason="missing_file") from exc
-    except ValueError as exc:
-        raise ServiceError(str(exc), reason="bad_request") from exc
-    except Exception as exc:
-        raise ServiceError(f"定位物种事件失败: {exc}") from exc
-
-
-def locate_reaction_events(
+def locate_rng_events(
     artifacts: dict[str, str],
     reaction_text: str,
     *,
-    species_file: str = "",
-    trajectory_file: str = "",
-    route_file: str = "",
-    type_element_map: str = "",
-    before_frames: int = 5,
-    after_frames: int = 5,
-    max_events: int = 12,
-    defer_trajectory_verification: bool = True,
+    max_events: int = 100,
 ) -> dict[str, Any]:
-    """Mirror legacy ``/api/reaction_event_locate``."""
-    reac_path = (artifacts.get("reaction") or "").strip()
-    species_path = (species_file or artifacts.get("species") or "").strip()
-    trajectory_path = (trajectory_file or artifacts.get("trajectory") or "").strip()
-    route_path = (route_file or artifacts.get("route") or "").strip()
-    if not reaction_text.strip():
-        raise ServiceError("请输入反应式", reason="missing_reaction_query")
-    params = {
-        "reac": [reac_path or ""],
-        "species_file": [species_path],
-        "trajectory_file": [trajectory_path],
-        "route_file": [route_path],
-        "reaction_smiles": [reaction_text.strip()],
-        "before_frames": [str(max(0, int(before_frames)))],
-        "after_frames": [str(max(0, int(after_frames)))],
-        "max_events": [str(max(1, int(max_events)))],
-        "defer_trajectory_verification": ["1" if defer_trajectory_verification else "0"],
-        "type_element_map": [(type_element_map or "").strip()],
-    }
-    try:
-        return build_reaction_event_locate_payload(params)
-    except FileNotFoundError as exc:
-        raise ServiceError(str(exc), reason="missing_file") from exc
-    except ValueError as exc:
-        raise ServiceError(str(exc), reason="bad_request") from exc
-    except Exception as exc:
-        raise ServiceError(f"定位反应事件失败: {exc}") from exc
-
-
-def extract_reaction_event(
-    artifacts: dict[str, str],
-    reaction_text: str,
-    event_id: str,
-    *,
-    species_file: str = "",
-    trajectory_file: str = "",
-    route_file: str = "",
-    type_element_map: str = "",
-    before_frames: int = 5,
-    after_frames: int = 5,
-    max_events: int = 200,
-    inline_viewer: bool = False,
-) -> dict[str, Any]:
-    """Mirror legacy ``/api/reaction_event_extract`` for a selected event_id."""
-    reac_path = (artifacts.get("reaction") or "").strip()
-    species_path = (species_file or artifacts.get("species") or "").strip()
-    trajectory_path = (trajectory_file or artifacts.get("trajectory") or "").strip()
-    route_path = (route_file or artifacts.get("route") or "").strip()
-    if not reaction_text.strip():
-        raise ServiceError("请输入反应式", reason="missing_reaction_query")
-    if not event_id.strip():
-        raise ServiceError("请输入或选择 event_id", reason="missing_event_id")
-    params = {
-        "reac": [reac_path or ""],
-        "species_file": [species_path],
-        "trajectory_file": [trajectory_path],
-        "route_file": [route_path],
-        "reaction_smiles": [reaction_text.strip()],
-        "event_id": [event_id.strip()],
-        "before_frames": [str(max(0, int(before_frames)))],
-        "after_frames": [str(max(0, int(after_frames)))],
-        "max_events": [str(max(1, int(max_events)))],
-        "type_element_map": [(type_element_map or "").strip()],
-        "inline_viewer": ["1" if inline_viewer else "0"],
-    }
-    try:
-        return build_reaction_event_extract_payload(params)
-    except FileNotFoundError as exc:
-        raise ServiceError(str(exc), reason="missing_file") from exc
-    except ValueError as exc:
-        raise ServiceError(str(exc), reason="bad_request") from exc
-    except Exception as exc:
-        raise ServiceError(f"抽取反应事件轨迹失败: {exc}") from exc
-
-
-def extract_species_event(
-    artifacts: dict[str, str],
-    target: str,
-    anchor_frame: int,
-    *,
-    species_file: str = "",
-    trajectory_file: str = "",
-    route_file: str = "",
-    match_mode: str = "auto",
-    event_mode: str = "appear",
-    before_frames: int = 3,
-    after_frames: int = 3,
-    include_route_trace: bool = True,
-    trajectory_atom_scope: str = "event",
-    type_element_map: str = "",
-) -> dict[str, Any]:
-    """Extract a visualizable local trajectory for a selected species event."""
-    target_text = (target or "").strip()
-    if not target_text:
-        raise ServiceError("缺少物种事件目标", reason="missing_target")
-    try:
-        frame_value = int(anchor_frame)
-    except (TypeError, ValueError) as exc:
-        raise ServiceError("选中事件缺少有效锚定帧", reason="missing_anchor_frame") from exc
-
-    params = {
-        "reac": [(artifacts.get("reaction") or "").strip()],
-        "species_file": [(species_file or artifacts.get("species") or "").strip()],
-        "trajectory_file": [(trajectory_file or artifacts.get("trajectory") or "").strip()],
-        "route_file": [(route_file or artifacts.get("route") or "").strip()],
-        "target": [target_text],
-        "match_mode": [match_mode if match_mode in {"auto", "smiles", "formula"} else "auto"],
-        "event_mode": [event_mode if event_mode in {"appear", "disappear", "production", "consumption", "peak", "nonzero"} else "appear"],
-        "anchor_frame": [str(frame_value)],
-        "before_frames": [str(max(0, int(before_frames)))],
-        "after_frames": [str(max(0, int(after_frames)))],
-        "max_events": ["1"],
-        "include_route_trace": ["1" if include_route_trace else "0"],
-        "include_trajectory": ["1"],
-        "inline_viewer": ["1"],
-        "trajectory_atom_scope": [trajectory_atom_scope if trajectory_atom_scope in {"all", "event"} else "event"],
-        "type_element_map": [(type_element_map or "").strip()],
-    }
-    try:
-        return build_structure_context_payload(params)
-    except FileNotFoundError as exc:
-        raise ServiceError(str(exc), reason="missing_file") from exc
-    except ValueError as exc:
-        raise ServiceError(str(exc), reason="bad_request") from exc
-    except Exception as exc:
-        raise ServiceError(f"抽取物种事件轨迹失败: {exc}") from exc
-
-
-def build_event_visualization(payload: dict[str, Any]) -> dict[str, Any]:
-    """Convert a small extracted LAMMPS trajectory into Dash-safe frame data.
-
-    The legacy endpoint can return the local trajectory text for compact event
-    windows.  Dash stores only parsed atoms and coordinates, never the raw
-    trajectory string, to keep the browser-side workflow responsive.
-    """
-    from scripts.webapp.server import parse_lammpstrj_frame_block
-
-    trajectory_text = str(payload.get("trajectory_text") or payload.get("trajectory_preview_text") or "").strip()
-    if not trajectory_text:
+    """Query RNG-authored event records without reading Route or trajectory."""
+    reactionevent_file = (artifacts.get("reactionevent") or "").strip()
+    molecules_file = (artifacts.get("molecules") or "").strip()
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
         raise ServiceError(
-            "未收到可内嵌的局部轨迹。请缩小事件窗口或降低上下文原子范围后重试。",
-            reason="trajectory_preview_unavailable",
+            "缺少 .reactionevent.csv；请在 ReacNetGenerator 中启用 --reaction-event",
+            reason="missing_reactionevent",
         )
+    if not molecules_file or not Path(molecules_file).is_file():
+        raise ServiceError(
+            "缺少 .molecules.csv；请在 ReacNetGenerator 中启用 --show-molecule-time",
+            reason="missing_molecules",
+        )
+    try:
+        return query_rng_events(
+            reactionevent_file,
+            molecules_file,
+            reaction_text,
+            max_events=max_events,
+        )
+    except (OSError, ValueError, RngEventDataError) as exc:
+        raise ServiceError(str(exc), reason="rng_event_data_error") from exc
 
-    atom_groups = payload.get("atom_groups") or {}
-    core_ids = {int(value) for value in atom_groups.get("core_atom_ids", []) if str(value).strip()}
-    reactant_ids = {int(value) for value in atom_groups.get("reactant_atom_ids", []) if str(value).strip()}
-    product_ids = {int(value) for value in atom_groups.get("product_atom_ids", []) if str(value).strip()}
-    context_ids = {int(value) for value in atom_groups.get("context_atom_ids", []) if str(value).strip()}
 
-    def atom_group(atom_id: int) -> str:
-        if atom_id in core_ids:
-            return "core"
-        if atom_id in reactant_ids and atom_id in product_ids:
-            return "shared"
-        if atom_id in reactant_ids:
-            return "reactant"
-        if atom_id in product_ids:
-            return "product"
-        if atom_id in context_ids:
-            return "context"
-        return "context"
+def build_rng_event_visualization(
+    artifacts: dict[str, str],
+    event_row: dict[str, Any],
+    *,
+    before_frames: int = 3,
+    after_frames: int = 3,
+) -> dict[str, Any]:
+    """Read only indexed trajectory frames for one RNG-authored event."""
+    trajectory_file = (artifacts.get("trajectory") or "").strip()
+    if not trajectory_file or not Path(trajectory_file).is_file():
+        raise ServiceError("缺少原始轨迹文件", reason="missing_trajectory")
+    atom_ids = sorted({int(value) for value in (event_row.get("atom_id_list") or [])})
+    if not atom_ids:
+        raise ServiceError(
+            "该复杂事件无法由 molecules 时间线唯一关联原子；不会回退扫描 Route",
+            reason="unresolved_event_atoms",
+        )
+    try:
+        index = TRAJECTORY_INDEX_STORE.open_required(trajectory_file)
+    except IndexNotReadyError as exc:
+        raise ServiceError(str(exc), reason="index_not_ready") from exc
+    available = index.frames
+    if not available:
+        raise ServiceError("轨迹帧索引不包含任何帧", reason="empty_trajectory_index")
 
+    before_timestep = int(event_row.get("before_timestep"))
+    after_timestep = int(event_row.get("after_timestep"))
+
+    def nearest_index(value: int) -> int:
+        pos = bisect_left(available, value)
+        choices = [idx for idx in (pos - 1, pos) if 0 <= idx < len(available)]
+        return min(choices, key=lambda idx: abs(available[idx] - value))
+
+    left = nearest_index(before_timestep)
+    right = nearest_index(after_timestep)
+    if left > right:
+        left, right = right, left
+    start = max(0, left - max(0, int(before_frames)))
+    stop = min(len(available), right + max(0, int(after_frames)) + 1)
+    selected_frames = available[start:stop]
+    offsets = index.offsets_for(selected_frames)
+    wanted = set(atom_ids)
     frames: list[dict[str, Any]] = []
-    for block in re.split(r"(?=ITEM: TIMESTEP)", trajectory_text):
-        if not block.strip().startswith("ITEM: TIMESTEP"):
-            continue
-        parsed = parse_lammpstrj_frame_block(block.encode("utf-8"))
-        frame_number = parsed.get("frame")
-        if frame_number is None:
-            continue
-        atoms = []
-        for atom_id, atom in sorted((parsed.get("atoms") or {}).items()):
-            aid = int(atom_id)
-            atoms.append(
+    with open(trajectory_file, "rb") as source:
+        for frame in selected_frames:
+            byte_range = offsets.get(frame)
+            if byte_range is None:
+                continue
+            source.seek(int(byte_range[0]))
+            parsed = parse_lammpstrj_frame_block(
+                source.read(int(byte_range[1]) - int(byte_range[0])),
+                atom_ids=wanted,
+            )
+            atoms = [
                 {
-                    "id": aid,
+                    "id": int(atom_id),
                     "x": round(float(atom.get("x", 0.0)), 7),
                     "y": round(float(atom.get("y", 0.0)), 7),
                     "z": round(float(atom.get("z", 0.0)), 7),
                     "element": str(atom.get("element") or ""),
                     "type": str(atom.get("type") or ""),
-                    "group": atom_group(aid),
+                    "group": "core",
                 }
-            )
-        if atoms:
-            frames.append({"frame": int(frame_number), "box": parsed.get("box") or [], "atoms": atoms})
-
+                for atom_id, atom in sorted((parsed.get("atoms") or {}).items())
+            ]
+            if atoms:
+                frames.append({"frame": int(frame), "box": parsed.get("box") or [], "atoms": atoms})
     if not frames:
-        raise ServiceError("局部轨迹中没有可显示的原子坐标", reason="no_coordinates")
+        raise ServiceError("选中事件的参与原子未出现在轨迹窗口中", reason="no_coordinates")
 
-    frames.sort(key=lambda item: int(item["frame"]))
-    available_frames = [int(item["frame"]) for item in frames]
-    requested_storyboard = [int(value) for value in (payload.get("storyboard_frames") or []) if int(value) in set(available_frames)]
-    if not requested_storyboard:
-        anchor = None
-        selected_event = payload.get("selected_event") or {}
-        for value in (selected_event.get("anchor_frame"), payload.get("anchor_frame")):
-            try:
-                anchor = int(value)
-                break
-            except (TypeError, ValueError):
-                continue
-        anchor_index = min(range(len(available_frames)), key=lambda idx: abs(available_frames[idx] - anchor)) if anchor is not None else len(available_frames) // 2
-        requested_storyboard = [
-            available_frames[0],
-            available_frames[max(0, anchor_index - 1)],
-            available_frames[anchor_index],
-            available_frames[min(len(available_frames) - 1, anchor_index + 1)],
-            available_frames[-1],
-        ]
-    storyboard_frames = list(dict.fromkeys(requested_storyboard))
-    labels = {int(item.get("frame")): str(item.get("label") or "") for item in (payload.get("snapshot_items") or [])}
+    storyboard = list(dict.fromkeys([frames[0]["frame"], available[left], available[right], frames[-1]["frame"]]))
+    labels = {
+        str(available[left]): "反应前",
+        str(available[right]): "反应后",
+    }
     return {
-        "event_id": str((payload.get("meta") or {}).get("event_id") or (payload.get("selected_event") or {}).get("event_id") or ""),
+        "event_id": str(event_row.get("event_id") or ""),
         "frames": frames,
-        "atom_groups": {
-            "core": sorted(core_ids),
-            "reactant": sorted(reactant_ids),
-            "product": sorted(product_ids),
-            "context": sorted(context_ids),
+        "atom_groups": {"core": atom_ids, "reactant": atom_ids, "product": atom_ids, "context": atom_ids},
+        "storyboard_frames": storyboard,
+        "storyboard_labels": {str(frame): labels.get(str(frame), f"Frame {frame}") for frame in storyboard},
+        "meta": {
+            "status": "rng_event",
+            "verification_status": str(event_row.get("association_status") or "matched"),
+            "reaction_smiles": str(event_row.get("reaction_smiles") or ""),
         },
-        "storyboard_frames": storyboard_frames,
-        "storyboard_labels": {str(frame): labels.get(frame) or f"Frame {frame}" for frame in storyboard_frames},
-        "meta": payload.get("meta") or {},
-        "paths": {
-            "trajectory": payload.get("trajectory_saved_path") or "",
-            "vmd": payload.get("vmd_script_saved_path") or "",
-            "type_map": payload.get("type_map_saved_path") or "",
-        },
+        "paths": {"trajectory": trajectory_file, "vmd": "", "type_map": ""},
     }
 
 
@@ -1150,106 +1202,6 @@ def build_observation_elements(
 
 
 # ---------------------------------------------------------------------------
-# Recrossing analysis
-# ---------------------------------------------------------------------------
-
-
-def analyze_event_recrossing(
-    artifacts: dict[str, str],
-    reaction_text: str,
-    *,
-    recrossing_threshold: int = 10,
-    net_event_min_lifetime: int = 50,
-) -> dict[str, Any]:
-    """Run recrossing analysis on atom-level route transitions for a reaction.
-
-    Queries the route transition index to get atom-level transitions,
-    then runs :class:`~rng_tools.recrossing.RecrossingAnalyzer` to detect
-    bond oscillations and produce deduplicated reaction events.
-    """
-    from rng_tools.recrossing import (
-        RecrossingAnalyzer,
-        convert_route_hits_to_transitions,
-        dedup_events_to_rows,
-    )
-    from scripts.webapp.server import ROUTE_TRANSITION_INDEX_STORE, _prepare_reaction_query
-
-    route_file = (artifacts.get("route") or "").strip()
-    if not route_file or not os.path.isfile(route_file):
-        raise ServiceError("需要 .route 文件才能进行去重分析", reason="missing_route")
-
-    if not reaction_text.strip():
-        raise ServiceError("请提供反应式", reason="missing_input")
-
-    # Build a reaction query compatible with RouteTransitionIndexStore
-    try:
-        reaction_query = _prepare_reaction_query(reaction_text)
-    except Exception as exc:
-        raise ServiceError(f"无法解析反应式: {exc}", reason="parse_error")
-
-    # Query the route index
-    result = ROUTE_TRANSITION_INDEX_STORE.query_reaction_hits(
-        route_file,
-        reaction_query,
-    )
-    hits = result.get("hits", [])
-
-    if not hits:
-        raise ServiceError("在 route 文件中未找到该反应的原子转移记录", reason="no_hits")
-
-    # Convert hits to AtomTransition objects
-    transitions = convert_route_hits_to_transitions(hits)
-
-    # Run recrossing analysis
-    analyzer = RecrossingAnalyzer(
-        recrossing_threshold_frames=int(recrossing_threshold),
-        net_event_min_lifetime=int(net_event_min_lifetime),
-    )
-
-    # Build a reaction signature from the query
-    reactant_str = " + ".join(sorted(reaction_query.get("reactant_token_set", [])))
-    product_str = " + ".join(sorted(reaction_query.get("product_token_set", [])))
-    reaction_signature = f"{reactant_str}->{product_str}"
-
-    dedup_events, stats = analyzer.analyze(transitions, reaction_signature)
-
-    rows = dedup_events_to_rows(dedup_events)
-
-    return {
-        "ok": True,
-        "rows": rows,
-        "events": [
-            {
-                "event_id": e.event_id,
-                "reaction_signature": e.reaction_signature,
-                "atom_ids": sorted(e.atom_ids),
-                "atom_count": len(e.atom_ids),
-                "start_frame": e.start_frame,
-                "end_frame": e.end_frame,
-                "lifetime": e.lifetime,
-                "recrossing_count": e.recrossing_count,
-                "is_net_event": e.is_net_event,
-                "confidence": e.confidence,
-            }
-            for e in dedup_events
-        ],
-        "stats": stats,
-        "meta": {
-            "status": "ok",
-            "message": (
-                f"去重完成: {stats['total_deduplicated_events']} 个事件, "
-                f"{stats['net_deduplicated_events']} 个净事件, "
-                f"回穿率 {stats['recrossing_rate']}"
-            ),
-            "reaction_text": reaction_text,
-            "reaction_signature": reaction_signature,
-            "total_raw_transitions": len(transitions),
-            "scanned_atoms": result.get("scanned_atoms", 0),
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Literature mechanism verification
 # ---------------------------------------------------------------------------
 
@@ -1279,7 +1231,7 @@ def verify_literature_mechanism(
         raise ServiceError("需要 .reactionabcd 文件", reason="missing_reac")
 
     # Load or reuse the ReactionNetwork
-    network = STORE.get(reac_path)
+    network = STORE.get(reac_path, 1)
 
     verifier = MechanismVerifier(network)
 
@@ -1311,126 +1263,11 @@ def verify_literature_mechanism(
 
 
 # ---------------------------------------------------------------------------
-# Atom trajectory visualization
-# ---------------------------------------------------------------------------
-
-
-def build_atom_trajectory_visualization(
-    artifacts: dict[str, str],
-    event_id: str,
-    reaction_text: str,
-    *,
-    atom_ids: list[int] | None = None,
-    before_frames: int = 5,
-    after_frames: int = 5,
-) -> dict[str, Any]:
-    """Build atom-level trajectory data for visualization.
-
-    Extracts atom species timelines from the route file and trajectory
-    data for the specified event.
-    """
-    from scripts.webapp.server import ROUTE_TRANSITION_INDEX_STORE, _prepare_reaction_query
-
-    route_file = (artifacts.get("route") or "").strip()
-
-    if not route_file or not os.path.isfile(route_file):
-        raise ServiceError("需要 .route 文件", reason="missing_route")
-
-    if not event_id.strip():
-        raise ServiceError("请提供 event_id", reason="missing_event_id")
-
-    # Parse event_id to extract anchor frame and atom IDs
-    # event_id format: rxevt_{anchor_frame}_{hash}
-    parts = event_id.split("_")
-    if len(parts) < 2:
-        raise ServiceError("无效的 event_id 格式", reason="bad_event_id")
-
-    try:
-        anchor_frame = int(parts[1])
-    except (ValueError, IndexError):
-        anchor_frame = 0
-
-    # Query all transitions for the given atom_ids in the frame window
-    start_window = max(0, anchor_frame - before_frames)
-    end_window = anchor_frame + after_frames
-
-    try:
-        reaction_query = _prepare_reaction_query(reaction_text)
-    except Exception:
-        reaction_query = None
-
-    # Query route hits
-    if reaction_query:
-        result = ROUTE_TRANSITION_INDEX_STORE.query_reaction_hits(
-            route_file, reaction_query,
-        )
-        hits = result.get("hits", [])
-    else:
-        hits = []
-
-    # Filter hits by atom_ids if specified
-    if atom_ids:
-        atom_set = set(atom_ids)
-        hits = [h for h in hits if int(h.get("atom_id", 0)) in atom_set]
-
-    # Filter by frame window
-    window_hits = [
-        h for h in hits
-        if start_window <= int(h.get("start_frame", 0)) <= end_window
-        or start_window <= int(h.get("end_frame", 0)) <= end_window
-    ]
-
-    # Build atom timeline
-    atom_timelines: dict[int, list[dict[str, Any]]] = {}
-    for h in window_hits:
-        aid = int(h["atom_id"])
-        if aid not in atom_timelines:
-            atom_timelines[aid] = []
-        atom_timelines[aid].append(
-            {
-                "frame": int(h["start_frame"]),
-                "end_frame": int(h["end_frame"]),
-                "from_label": str(h.get("from_label", "")),
-                "to_label": str(h.get("to_label", "")),
-                "direction": str(h.get("direction", "")),
-            }
-        )
-
-    atoms = [
-        {
-            "atom_id": aid,
-            "transitions": sorted(timeline, key=lambda x: x["frame"]),
-            "n_transitions": len(timeline),
-        }
-        for aid, timeline in atom_timelines.items()
-    ]
-
-    return {
-        "ok": True,
-        "event_id": event_id,
-        "anchor_frame": anchor_frame,
-        "frames": sorted(set(
-            int(h["start_frame"]) for h in window_hits
-        ).union(int(h["end_frame"]) for h in window_hits)),
-        "atoms": atoms,
-        "n_atoms": len(atoms),
-        "n_transitions": len(window_hits),
-        "reaction_text": reaction_text,
-        "meta": {
-            "status": "ok",
-            "message": f"提取了 {len(atoms)} 个原子的轨迹数据",
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Batch comparison
 # ---------------------------------------------------------------------------
 
 
-def scan_batch_conditions(
-    root_dir: str,
-) -> dict[str, Any]:
+def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
     """Scan a directory tree for simulation conditions."""
     from rng_tools.batch_compare import BatchComparator
 
@@ -1443,12 +1280,13 @@ def scan_batch_conditions(
 
     comparator = BatchComparator()
     conditions = comparator.scan_directory_tree(root)
-
     if not conditions:
-        raise ServiceError(f"未在 {root} 下找到包含 .reactionabcd 的子目录", reason="no_conditions")
+        raise ServiceError(
+            f"未在 {root} 下找到包含 .reactionabcd 的子目录",
+            reason="no_conditions",
+        )
 
     groups = comparator.auto_group_conditions(conditions)
-
     condition_rows = [
         {
             "index": i + 1,
@@ -1462,7 +1300,6 @@ def scan_batch_conditions(
         }
         for i, c in enumerate(conditions)
     ]
-
     group_rows = [
         {
             "group_name": g.group_name,
@@ -1496,39 +1333,29 @@ def run_batch_comparison(
     top_n: int = 50,
 ) -> dict[str, Any]:
     """Run cross-condition comparison for selected conditions."""
-    from rng_tools.batch_compare import BatchComparator, reaction_key_to_display
+    from rng_tools.batch_compare import BatchComparator
 
     if not condition_folders:
         raise ServiceError("请选择至少一个条件组", reason="no_conditions")
-
     if len(condition_folders) != len(condition_names):
         raise ServiceError("条件名称与目录数量不匹配", reason="mismatch")
 
     comparator = BatchComparator()
-
     for folder, name in zip(condition_folders, condition_names):
-        reac_path = os.path.join(folder, f"{os.path.basename(folder)}.reactionabcd")
-        if not os.path.isfile(reac_path):
-            # Try to find any .reactionabcd file
-            candidates = [
-                f for f in os.listdir(folder)
-                if f.endswith(".reactionabcd")
-            ] if os.path.isdir(folder) else []
-            if candidates:
-                reac_path = os.path.join(folder, candidates[0])
-            else:
-                continue
-
-        if not os.path.isfile(reac_path):
+        folder_path = os.path.abspath(folder)
+        if not os.path.isdir(folder_path):
             continue
-
+        candidates = [
+            f for f in os.listdir(folder_path) if f.endswith(".reactionabcd")
+        ]
+        if not candidates:
+            continue
+        reac_path = os.path.join(folder_path, candidates[0])
         try:
             reactions = parse_reactionabcd(reac_path, min_tp=1)
         except Exception:
             continue
-
-        network = ReactionNetwork(reactions)
-        comparator.add_condition(name, network)
+        comparator.add_condition(name, ReactionNetwork(reactions))
 
     if not comparator._conditions:
         raise ServiceError("未能加载任何条件的反应网络", reason="no_networks")
@@ -1537,13 +1364,10 @@ def run_batch_comparison(
         min_detection_rate=float(min_detection_rate),
         top_n=int(top_n),
     )
-
     if not results:
         raise ServiceError("未找到符合条件的共同反应", reason="no_results")
 
     rows, cond_names = comparator.build_comparison_matrix(results)
-
-    # Build columns definition for DataTable
     base_columns = [
         {"field": "index", "headerName": "#", "width": 50},
         {"field": "reaction_smiles", "headerName": "反应式", "flex": 2, "minWidth": 200},
@@ -1553,7 +1377,6 @@ def run_batch_comparison(
         {"field": f"tp_{cn}", "headerName": f"{cn} (tp)", "width": 100}
         for cn in cond_names
     ]
-
     return {
         "ok": True,
         "rows": rows,
@@ -1568,19 +1391,19 @@ def run_batch_comparison(
     }
 
 
-# ---------------------------------------------------------------------------
-# Public re-exports for tests
-# ---------------------------------------------------------------------------
-
-
 __all__ = [
+    "ALLOWED_ROOTS",
     "ServiceError",
+    "list_directory",
     "scan_dataset",
-    "pick_folder_macos",
+    "validate_browse_path",
     "artifacts_from_status",
     "dataset_label",
     "dataset_ready_count",
     "dataset_capabilities",
+    "dataset_readiness",
+    "dataset_preparation_status",
+    "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
     "search_species",
@@ -1594,16 +1417,11 @@ __all__ = [
     "build_carbon_evolution",
     "carbon_plot_to_csv",
     "build_intermediate_candidates",
-    "locate_species_events",
-    "locate_reaction_events",
-    "extract_reaction_event",
-    "extract_species_event",
-    "build_event_visualization",
+    "locate_rng_events",
+    "build_rng_event_visualization",
     "rows_to_csv",
     "build_observation_elements",
-    "analyze_event_recrossing",
     "verify_literature_mechanism",
-    "build_atom_trajectory_visualization",
     "scan_batch_conditions",
     "run_batch_comparison",
 ]

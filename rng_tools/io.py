@@ -55,39 +55,43 @@ def load_transition_table(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(path)
 
-    lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
-    if not lines:
-        raise ValueError(f"Transition table is empty: {path}")
-
-    header = lines[0].split()
-    if not header:
-        raise ValueError(f"Transition table has no species header: {path}")
-
-    labels = list(header)
-    n = len(labels)
-    rows: list[str] = []
-    values: list[list[int]] = []
-    for line_no, line in enumerate(lines[1:], 2):
-        tokens = line.split()
-        if len(tokens) == n:
-            # Header-only row labels are uncommon, but accepting this makes
-            # the parser compatible with matrix exports that omit the first
-            # column and rely on header order.
-            row_label = labels[len(rows)] if len(rows) < n else f"row_{len(rows) + 1}"
-            count_tokens = tokens
-        elif len(tokens) == n + 1:
-            row_label = tokens[0]
-            count_tokens = tokens[1:]
+    # Stream rows rather than materializing the whole text first.  Production
+    # transition tables can be large, and the matrix itself is already the
+    # unavoidable in-memory representation returned by this function.
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for header_line_no, raw_line in enumerate(fh, 1):
+            header = raw_line.split()
+            if header:
+                break
         else:
-            raise ValueError(
-                f"Invalid transition-table row {line_no}: expected {n} or {n + 1} fields, got {len(tokens)}"
-            )
-        try:
-            row_values = [int(float(token)) for token in count_tokens]
-        except ValueError as exc:
-            raise ValueError(f"Invalid count in transition-table row {line_no}") from exc
-        rows.append(row_label)
-        values.append(row_values)
+            raise ValueError(f"Transition table is empty: {path}")
+
+        labels = list(header)
+        n = len(labels)
+        rows: list[str] = []
+        values: list[list[int]] = []
+        for line_no, raw_line in enumerate(fh, header_line_no + 1):
+            tokens = raw_line.split()
+            if not tokens:
+                continue
+            if len(tokens) == n:
+                # Header-only row labels are uncommon, but accepting this
+                # makes the parser compatible with exports that omit them.
+                row_label = labels[len(rows)] if len(rows) < n else f"row_{len(rows) + 1}"
+                count_tokens = tokens
+            elif len(tokens) == n + 1:
+                row_label = tokens[0]
+                count_tokens = tokens[1:]
+            else:
+                raise ValueError(
+                    f"Invalid transition-table row {line_no}: expected {n} or {n + 1} fields, got {len(tokens)}"
+                )
+            try:
+                row_values = [int(float(token)) for token in count_tokens]
+            except ValueError as exc:
+                raise ValueError(f"Invalid count in transition-table row {line_no}") from exc
+            rows.append(row_label)
+            values.append(row_values)
 
     if len(values) != n:
         raise ValueError(f"Transition table must have {n} data rows, got {len(values)}")
@@ -97,9 +101,10 @@ def load_transition_table(path: Path) -> dict[str, Any]:
     # diagnosing malformed or hand-edited files.
     row_labels = rows
     if row_labels != labels:
-        if sorted(row_labels) != sorted(labels):
+        if len(set(row_labels)) != n or set(row_labels) != set(labels):
             raise ValueError("Transition-table row labels do not match the header species labels")
-        reorder = [row_labels.index(label) for label in labels]
+        row_positions = {label: index for index, label in enumerate(row_labels)}
+        reorder = [row_positions[label] for label in labels]
         values = [values[index] for index in reorder]
         row_labels = labels
 

@@ -10,7 +10,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,7 @@ import dash_cytoscape as cyto
 import plotly.graph_objects as go
 from dash import Input, Output, State, dash_table, dcc, html, no_update
 from dash.exceptions import PreventUpdate
+from flask import jsonify
 
 # Ensure project root is importable when run via ``python -m`` or directly.
 _TOOL_ROOT = Path(__file__).resolve().parents[2]
@@ -54,12 +58,13 @@ PAGE_DESCRIPTIONS = {
     "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "聚合不同碳数区间，观察体系碳骨架的演化过程。",
-    "events": "定位物种和反应事件，并抽取对应的轨迹证据。",
+    "events": "检索 ReacNetGenerator 事件输出，并按参与原子查看局部轨迹。",
     "network": "从观测表构建可交互的全局物种-反应网络。",
     "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
     "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
 }
 DEFAULT_PAGE = "species"
+_PROCESS_STARTED_AT = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -901,124 +906,24 @@ def _events_page() -> html.Div:
                     ],
                     className="rs-step-heading",
                 ),
-                dbc.Tabs(
+                html.Div(
                     [
-                        dbc.Tab(
-                            html.Div(
-                                [
-                                    html.Div(
-                                        [
-                                            dbc.Label("反应式", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-reaction-text", value="", placeholder="A + B -> C + D", className="rs-grow"),
-                                            dbc.Label("展示前 / 后帧", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-rxn-before", value="5", type="number", min=0, style={"width": 72}),
-                                            dcc.Input(id="event-rxn-after", value="5", type="number", min=0, style={"width": 72}),
-                                            dbc.Label("候选上限", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-rxn-max", value="12", type="number", min=1, style={"width": 72}),
-                                            dbc.Button("定位反应事件", id="event-rxn-btn", color="primary", size="sm"),
-                                        ],
-                                        className="rs-query-row",
-                                    ),
-                                    html.P("默认入口：使用 .route 定位原子级反应过程，再用轨迹窗口核查。", className="rs-step-note"),
-                                ],
-                                className="pt-2",
-                            ),
-                            label="按反应定位",
-                            tab_id="event-reaction-tab",
-                        ),
-                        dbc.Tab(
-                            html.Div(
-                                [
-                                    html.Div(
-                                        [
-                                            dbc.Label("目标", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-species-target", value="", placeholder="SMILES 或分子式", className="rs-grow"),
-                                            dbc.Label("匹配", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Dropdown(
-                                                id="event-match-mode",
-                                                options=[
-                                                    {"label": "自动", "value": "auto"},
-                                                    {"label": "SMILES", "value": "smiles"},
-                                                    {"label": "分子式", "value": "formula"},
-                                                ],
-                                                value="auto",
-                                                clearable=False,
-                                                style={"width": 110},
-                                            ),
-                                            dbc.Label("事件", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Dropdown(
-                                                id="event-mode",
-                                                options=[
-                                                    {"label": "出现", "value": "appear"},
-                                                    {"label": "消失", "value": "disappear"},
-                                                    {"label": "生成", "value": "production"},
-                                                    {"label": "消耗", "value": "consumption"},
-                                                    {"label": "峰值", "value": "peak"},
-                                                    {"label": "非零", "value": "nonzero"},
-                                                ],
-                                                value="appear",
-                                                clearable=False,
-                                                style={"width": 110},
-                                            ),
-                                            dbc.Label("窗口前 / 后帧", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-before", value="3", type="number", min=0, style={"width": 72}),
-                                            dcc.Input(id="event-after", value="3", type="number", min=0, style={"width": 72}),
-                                            dbc.Label("事件上限", className="mb-0", style={"fontSize": 12}),
-                                            dcc.Input(id="event-max", value="12", type="number", min=1, style={"width": 72}),
-                                            dbc.Button("定位物种事件", id="event-species-btn", color="primary", size="sm"),
-                                        ],
-                                        className="rs-query-row",
-                                    ),
-                                    html.P("用于追踪特定物种的出现、消失和丰度变化，也可进入同一局部轨迹查看器。", className="rs-step-note"),
-                                ],
-                                className="pt-2",
-                            ),
-                            label="按物种定位",
-                            tab_id="event-species-tab",
-                        ),
+                        dbc.Label("反应式", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="event-reaction-text", value="", placeholder="A + B -> C + D", className="rs-grow"),
+                        dbc.Label("轨迹前 / 后帧", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="event-rxn-before", value="3", type="number", min=0, style={"width": 72}),
+                        dcc.Input(id="event-rxn-after", value="3", type="number", min=0, style={"width": 72}),
+                        dbc.Label("结果上限", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="event-rxn-max", value="100", type="number", min=1, style={"width": 82}),
+                        dbc.Button("查询 RNG 事件", id="event-rxn-btn", color="primary", size="sm"),
                     ],
-                    active_tab="event-reaction-tab",
-                    className="rs-event-tabs",
+                    className="rs-query-row mt-2",
+                ),
+                html.P(
+                    "直接查询 .reactionevent.csv；使用 .molecules.csv 关联真实 timestep、参与原子与键，不扫描 Route。",
+                    className="rs-step-note",
                 ),
             ],
-            className="p-2",
-        ),
-        className="rs-card",
-    )
-    source_card = dbc.Card(
-        dbc.CardBody(
-            dbc.Accordion(
-                [
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                dbc.Label("Species 覆盖", className="mb-0"),
-                                dcc.Input(id="event-species-file", placeholder="留空使用当前数据集", className="rs-grow"),
-                                dbc.Label("Trajectory 覆盖", className="mb-0"),
-                                dcc.Input(id="event-trajectory-file", placeholder=".lammpstrj 路径（可选）", className="rs-grow"),
-                                dbc.Label("Route 覆盖", className="mb-0"),
-                                dcc.Input(id="event-route-file", placeholder=".route 路径（可选）", className="rs-grow"),
-                                dbc.Label("类型-元素映射", className="mb-0"),
-                                dcc.Input(id="event-type-element-map", placeholder="例如 1:C,2:H,3:O", style={"width": 180}),
-                                dbc.Checkbox(id="event-include-route", value=True, className="me-1"),
-                                dbc.Label("保留 Route 追踪", html_for="event-include-route", className="mb-0"),
-                                dbc.Label("原子范围", className="mb-0"),
-                                dcc.Dropdown(
-                                    id="event-atom-scope",
-                                    options=[{"label": "事件相关原子", "value": "event"}, {"label": "全部原子", "value": "all"}],
-                                    value="event",
-                                    clearable=False,
-                                    style={"width": 130},
-                                ),
-                            ],
-                            className="rs-query-row",
-                        ),
-                        title="数据源与轨迹设置（可选）",
-                    )
-                ],
-                start_collapsed=True,
-                className="rs-advanced",
-            ),
             className="p-2",
         ),
         className="rs-card",
@@ -1037,7 +942,6 @@ def _events_page() -> html.Div:
                         ),
                         html.Div(
                             [
-                                dbc.Button("去重分析", id="event-dedup-btn", color="warning", size="sm", outline=True),
                                 dbc.Button("导出 CSV", id="event-csv-btn", color="secondary", size="sm", outline=True),
                                 dcc.Download(id="event-csv-download"),
                             ],
@@ -1113,7 +1017,7 @@ def _events_page() -> html.Div:
         id="event-viewer-card",
         style={"display": "none"},
     )
-    return html.Div([workflow_card, source_card, grid_card, selection_card, viewer_card], className="rs-page", id="page-events")
+    return html.Div([workflow_card, grid_card, selection_card, viewer_card], className="rs-page", id="page-events")
 
 
 def _network_page() -> html.Div:
@@ -1391,7 +1295,7 @@ def _data_modal() -> dbc.Modal:
                                 width=True,
                             ),
                             dbc.Col(
-                                dbc.Button("选择文件夹", id="data-pick-btn", color="secondary", size="sm"),
+                                dbc.Button("浏览服务器目录", id="data-pick-btn", color="secondary", size="sm"),
                                 width="auto",
                                 className="align-self-end",
                             ),
@@ -1418,6 +1322,55 @@ def _data_modal() -> dbc.Modal:
                     html.Div(id="data-scan-status"),
                     html.Hr(),
                     html.Div(id="data-artifacts", className="small text-muted"),
+                    html.Hr(),
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.Div(
+                                    [
+                                        html.Div("数据准备状态", className="rs-card-title"),
+                                        html.Div(
+                                            [
+                                                html.Span("只读", className="rs-page-status is-independent"),
+                                                dbc.Button("刷新", id="data-prep-refresh-btn", color="secondary", size="sm", outline=True),
+                                            ],
+                                            className="d-flex align-items-center gap-2",
+                                        ),
+                                    ],
+                                    className="d-flex justify-content-between align-items-center mb-2",
+                                ),
+                                html.Div(id="data-prep-status", className="small"),
+                                html.Div(
+                                    [
+                                        html.Div("ReacNetGenerator 事件输出参数", className="small text-muted mt-2"),
+                                        html.Div(
+                                            [
+                                                html.Code(id="data-rng-event-command", className="small flex-grow-1"),
+                                                dcc.Clipboard(id="data-rng-event-copy", title="复制 RNG 事件输出参数"),
+                                            ],
+                                            className="d-flex align-items-start gap-2 rs-command-line",
+                                        ),
+                                        html.Div("轨迹准备命令", className="small text-muted mt-2"),
+                                        html.Div(
+                                            [
+                                                html.Code(id="data-prep-trajectory-command", className="small flex-grow-1"),
+                                                dcc.Clipboard(id="data-prep-trajectory-copy", title="复制轨迹准备命令"),
+                                            ],
+                                            className="d-flex align-items-start gap-2 rs-command-line",
+                                        ),
+                                    ]
+                                ),
+                                html.Div(id="data-prep-clear-alert", className="mt-2"),
+                                html.Div(
+                                    [
+                                        dbc.Button("清理轨迹索引", id="data-clear-trajectory-btn", color="danger", size="sm", outline=True),
+                                    ],
+                                    className="d-flex gap-2 mt-2",
+                                ),
+                            ]
+                        ),
+                        className="rs-card rs-preparation-card",
+                    ),
                 ]
             ),
             dbc.ModalFooter(
@@ -1429,6 +1382,75 @@ def _data_modal() -> dbc.Modal:
             ),
         ],
         id="data-modal",
+        is_open=False,
+        size="lg",
+        backdrop="static",
+    )
+
+
+def _index_clear_confirm_modal() -> dbc.Modal:
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("确认清理索引")),
+            dbc.ModalBody(id="data-clear-confirm-text"),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("取消", id="data-clear-cancel-btn", color="secondary", size="sm", outline=True),
+                    dbc.Button("确认清理", id="data-clear-confirm-btn", color="danger", size="sm"),
+                ]
+            ),
+        ],
+        id="data-clear-confirm-modal",
+        is_open=False,
+        backdrop="static",
+    )
+
+
+def _dir_browser_modal() -> dbc.Modal:
+    """Directory browser modal for remote server file-system navigation."""
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("浏览服务器目录")),
+            dbc.ModalBody(
+                html.Div(
+                    id="dir-browser-body",
+                    children=[
+                        # This input must exist in the initial layout.  Dash's
+                        # renderer will not schedule the open callback when an
+                        # explicit callback input is entirely absent.
+                        dbc.Button(
+                            "⬑ 返回上一级",
+                            id="dir-browser-back-btn",
+                            color="secondary",
+                            size="sm",
+                            outline=True,
+                            disabled=True,
+                            className="mb-2",
+                        ),
+                        html.Div("正在加载…", className="text-center text-muted py-4"),
+                    ],
+                )
+            ),
+            dbc.ModalFooter(
+                [
+                    dbc.Button(
+                        "选择当前目录",
+                        id="dir-browser-select-btn",
+                        color="primary",
+                        size="sm",
+                        className="me-auto",
+                    ),
+                    dbc.Button(
+                        "取消",
+                        id="dir-browser-cancel-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                    ),
+                ]
+            ),
+        ],
+        id="dir-browser-modal",
         is_open=False,
         size="lg",
         backdrop="static",
@@ -1464,6 +1486,9 @@ def build_layout() -> html.Div:
                 id="app-body",
             ),
             _data_modal(),
+            _index_clear_confirm_modal(),
+            _dir_browser_modal(),
+            dcc.Store(id="dir-browser-path", storage_type="memory", data=""),
             dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
             dcc.Store(id="page-store", storage_type="session", data={"page": DEFAULT_PAGE}),
             dcc.Store(id="species-grid-store", storage_type="memory", data={"rows": []}),
@@ -1473,6 +1498,8 @@ def build_layout() -> html.Div:
             dcc.Store(id="evolution-payload-store", storage_type="memory", data=None),
             dcc.Store(id="carbon-payload-store", storage_type="memory", data=None),
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
+            dcc.Store(id="data-clear-kind-store", storage_type="memory", data={}),
+            dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
             dcc.Store(id="network-store", storage_type="memory", data=None),
@@ -1495,6 +1522,38 @@ def create_app() -> dash.Dash:
     )
     app.layout = build_layout()
     cb.register_callbacks(app)
+
+    @app.server.get("/api/health")
+    def _health():
+        cache_text = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+        cache_path = Path(cache_text).expanduser() if cache_text else None
+        cache_ready = bool(
+            cache_path
+            and cache_path.exists()
+            and cache_path.is_dir()
+            and os.access(cache_path, os.W_OK)
+        )
+        try:
+            app_version = version("reacnet-scope")
+        except PackageNotFoundError:
+            app_version = "development"
+        warnings: list[str] = []
+        if not cache_text:
+            warnings.append("REACNET_SCOPE_CACHE_DIR is not configured")
+        elif not cache_ready:
+            warnings.append("configured cache directory is not writable")
+        return jsonify(
+            {
+                "ok": True,
+                "service": "reacnet-scope-web-dash",
+                "version": app_version,
+                "uptime_seconds": round(time.time() - _PROCESS_STARTED_AT, 3),
+                "cache_dir": str(cache_path) if cache_path else "",
+                "cache_ready": cache_ready,
+                "allowed_roots": [str(path) for path in svc.ALLOWED_ROOTS],
+                "warnings": warnings,
+            }
+        )
     return app
 
 

@@ -79,10 +79,25 @@ from rng_tools.carbon_plot import (  # noqa: E402
     plot_carbon_number_evolution,
     species_file_to_tidy_table,
 )
+from reacnet_scope.indexes import (  # noqa: E402
+    IndexInvalidError,
+    IndexNotReadyError,
+    IndexStaleError,
+    ROUTE_INDEX_STORE as PREPARED_ROUTE_INDEX_STORE,
+    TRAJECTORY_INDEX_STORE as PREPARED_TRAJECTORY_INDEX_STORE,
+    RouteIndexStore as PreparedRouteIndexStore,
+    TrajectoryFrameIndex as PreparedTrajectoryFrameIndex,
+    TrajectoryIndexStore as PreparedTrajectoryIndexStore,
+    dataset_id_for_source,
+    resolve_dataset_paths,
+    route_index_path as prepared_route_index_path,
+    trajectory_index_path as prepared_trajectory_index_path,
+)
+from reacnet_scope.rng_events import event_output_status  # noqa: E402
 
 
-ROUTE_TRANSITION_INDEX_SCHEMA_VERSION = 1
-TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION = 1
+ROUTE_TRANSITION_INDEX_SCHEMA_VERSION = 2
+TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION = 2
 
 
 def _bootstrap_local_site_packages() -> None:
@@ -673,7 +688,10 @@ def _dataset_base_path(path_text: str) -> str:
     path = (path_text or "").strip()
     if not path:
         return ""
-    for suffix in (".reactionabcd", ".species", ".route", ".table", ".json", ".html", ".svg"):
+    for suffix in (
+        ".reactionevent.csv", ".molecules.csv", ".reactionabcd",
+        ".species", ".route", ".table", ".json", ".html", ".svg",
+    ):
         if path.lower().endswith(suffix):
             return path[: -len(suffix)]
     if path.lower().endswith(".lammpstrj"):
@@ -713,6 +731,10 @@ def _scan_rng_dataset_directory(
         kind = ""
         if name.endswith(".reactionabcd"):
             kind = "reaction"
+        elif name.endswith(".reactionevent.csv"):
+            kind = "reactionevent"
+        elif name.endswith(".molecules.csv"):
+            kind = "molecules"
         elif name.endswith(".species"):
             kind = "species"
         elif name.endswith(".route"):
@@ -764,6 +786,8 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
         "route": (params.get("route_file", [""])[0] or "").strip(),
         "table": (params.get("table_file", [""])[0] or "").strip(),
+        "reactionevent": (params.get("reactionevent_file", [""])[0] or "").strip(),
+        "molecules": (params.get("molecules_file", [""])[0] or "").strip(),
     }
     folder = (params.get("dataset_dir", [""])[0] or "").strip()
     folder_base = ""
@@ -780,9 +804,11 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "trajectory": base,
         "route": f"{base}.route" if base else "",
         "table": f"{base}.table" if base else "",
+        "reactionevent": f"{base}.reactionevent.csv" if base else "",
+        "molecules": f"{base}.molecules.csv" if base else "",
     }
     artifacts: dict[str, dict[str, Any]] = {}
-    for key in ("reaction", "species", "trajectory", "route", "table"):
+    for key in ("reaction", "species", "trajectory", "route", "table", "reactionevent", "molecules"):
         selected = explicit[key] or folder_files.get(key, "") or inferred[key]
         source = "explicit" if explicit[key] else ("folder" if folder_files.get(key) else "derived")
         artifacts[key] = _dataset_file_descriptor(selected, source=source)
@@ -791,9 +817,52 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "species": artifacts["reaction"]["exists"],
         "intermediate": artifacts["species"]["exists"],
         "reaction": artifacts["reaction"]["exists"],
-        "events": artifacts["species"]["exists"],
+        "events": bool(artifacts["reactionevent"]["exists"] and artifacts["molecules"]["exists"]),
         "evolution": artifacts["species"]["exists"],
         "transition": artifacts["table"]["exists"],
+    }
+    manifest_payload: dict[str, Any] = {}
+    manifest_path = ""
+    configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    if base and configured_cache:
+        candidate = resolve_dataset_paths(Path(base).parent, Path(base).name).manifest
+        manifest_path = str(candidate)
+        if candidate.is_file():
+            try:
+                manifest_payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                manifest_payload = {}
+
+    route_index_status: dict[str, Any] = {"state": "missing"}
+    if artifacts["route"]["exists"]:
+        try:
+            route_index_status = ROUTE_TRANSITION_INDEX_STORE.status(artifacts["route"]["path"])
+        except Exception as exc:
+            route_index_status = {"state": "invalid", "message": str(exc)}
+    trajectory_index_status: dict[str, Any] = {"state": "missing"}
+    if artifacts["trajectory"]["exists"]:
+        try:
+            trajectory_index_status = TRAJECTORY_INDEX_STORE.status(artifacts["trajectory"]["path"])
+        except Exception as exc:
+            trajectory_index_status = {"state": "invalid", "message": str(exc)}
+
+    rng_event_status = event_output_status(
+        artifacts["reactionevent"]["path"],
+        artifacts["molecules"]["path"],
+    )
+
+    readiness = {
+        "basic_analysis": {
+            "ready": bool(artifacts["reaction"]["exists"] and artifacts["species"]["exists"]),
+            "state": "ready" if artifacts["reaction"]["exists"] and artifacts["species"]["exists"] else "missing",
+        },
+        "event_search": {
+            **rng_event_status,
+        },
+        "trajectory_evidence": {
+            "ready": trajectory_index_status.get("state") == "ready",
+            **trajectory_index_status,
+        },
     }
     return {
         "ok": True,
@@ -806,6 +875,12 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
             "artifacts": artifacts,
             "capabilities": capabilities,
             "ready_count": sum(1 for item in artifacts.values() if item["exists"]),
+            "readiness": readiness,
+            "manifest": {
+                "path": manifest_path,
+                "found": bool(manifest_payload),
+                "dataset_id": str(manifest_payload.get("dataset_id", "")),
+            },
         },
     }
 
@@ -1284,12 +1359,7 @@ def collect_trajectory_timestep_index(
     *,
     progress_callback: Any = None,
 ) -> list[int]:
-    index = TRAJECTORY_INDEX_STORE.get(
-        trajectory_file,
-        progress_callback=progress_callback,
-        progress_start=0.02,
-        progress_span=0.40,
-    )
+    index = TRAJECTORY_INDEX_STORE.open_required(trajectory_file)
     return list(index.frames)
 
 
@@ -3162,89 +3232,6 @@ def extract_lammpstrj_subset(
             "preview_bytes": preview_bytes,
         }
 
-    def scan_selected_ranges_without_full_index(
-        selected: list[int],
-    ) -> tuple[list[tuple[int, int, int]], int, int]:
-        selected_set = set(selected)
-        max_selected = max(selected)
-        file_size = max(os.path.getsize(trajectory_file), 1)
-        bytes_read = 0
-        last_emit = 0.0
-        scanned_frames = 0
-        ranges: list[tuple[int, int, int]] = []
-        current_frame: int | None = None
-        current_start: int | None = None
-        emit(0.72, "scanning_trajectory", f"Scanning trajectory until frame {max_selected} (no global index)")
-        with open(trajectory_file, "rb") as fh:
-            while True:
-                block_start = fh.tell()
-                line = fh.readline()
-                if not line:
-                    break
-                bytes_read += len(line)
-                if not line.startswith(b"ITEM: TIMESTEP"):
-                    now = time.monotonic()
-                    frac = bytes_read / file_size
-                    if frac >= 0.99 or (now - last_emit) >= 1.0:
-                        emit(
-                            0.72 + 0.16 * min(frac, 1.0),
-                            "scanning_trajectory",
-                            f"Scanning trajectory for selected frames: {frac * 100:.1f}%",
-                            n_scanned_frames=scanned_frames,
-                        )
-                        last_emit = now
-                    continue
-
-                timestep_line = fh.readline()
-                if not timestep_line:
-                    break
-                bytes_read += len(timestep_line)
-
-                if current_frame is not None and current_start is not None and block_start > current_start:
-                    if current_frame in selected_set:
-                        ranges.append((current_frame, current_start, block_start))
-                    if current_frame >= max_selected:
-                        current_frame = None
-                        current_start = None
-                        break
-
-                next_frame: int | None = None
-                try:
-                    next_frame = int(timestep_line.strip().split()[0])
-                    scanned_frames += 1
-                except Exception:
-                    next_frame = None
-                current_frame = next_frame
-                current_start = block_start
-
-                now = time.monotonic()
-                frac = bytes_read / file_size
-                if frac >= 0.99 or (now - last_emit) >= 1.0:
-                    emit(
-                        0.72 + 0.16 * min(frac, 1.0),
-                        "scanning_trajectory",
-                        f"Scanning trajectory for selected frames: {frac * 100:.1f}%",
-                        n_scanned_frames=scanned_frames,
-                        frame=current_frame,
-                    )
-                    last_emit = now
-
-        if current_frame is not None and current_start is not None:
-            end_pos = os.path.getsize(trajectory_file)
-            if current_frame in selected_set and end_pos > current_start:
-                ranges.append((current_frame, current_start, end_pos))
-
-        found_frames = {frame for frame, _start, _end in ranges}
-        missing = sum(1 for frame in selected if frame not in found_frames)
-        emit(
-            0.88,
-            "scanning_trajectory",
-            f"Selected-frame scan ready: {len(found_frames)}/{len(selected)} frames",
-            n_scanned_frames=scanned_frames,
-            n_missing_frames=missing,
-        )
-        return ranges, missing, scanned_frames
-
     selected = sorted({int(frame) for frame in selected_frames})
     if not selected:
         return {
@@ -3257,36 +3244,20 @@ def extract_lammpstrj_subset(
             "index_frames": 0,
         }
 
-    cached_index = TRAJECTORY_INDEX_STORE.peek(trajectory_file)
-    if cached_index is not None:
-        emit(0.72, "cached_trajectory_index", f"Using cached trajectory index: {os.path.basename(trajectory_file)}")
-        ranges: list[tuple[int, int, int]] = []
-        missing = 0
-        for frame in selected:
-            block = cached_index.frame_offsets.get(frame)
-            if block is None:
-                missing += 1
-                continue
-            start, end = int(block[0]), int(block[1])
-            if end <= start:
-                missing += 1
-                continue
-            ranges.append((frame, start, end))
-        return copy_ranges(
-            ranges,
-            missing,
-            extract_mode="indexed_seek_copy",
-            index_frames=len(cached_index.frames),
-            progress_start=0.90,
-            progress_span=0.08,
-        )
-
-    ranges, missing, scanned_frames = scan_selected_ranges_without_full_index(selected)
+    required_index = TRAJECTORY_INDEX_STORE.open_required(trajectory_file)
+    emit(0.72, "cached_trajectory_index", f"Using prepared trajectory index: {os.path.basename(trajectory_file)}")
+    offsets = required_index.offsets_for(selected)
+    ranges = [
+        (frame, int(offsets[frame][0]), int(offsets[frame][1]))
+        for frame in selected
+        if frame in offsets and int(offsets[frame][1]) > int(offsets[frame][0])
+    ]
+    missing = len(selected) - len(ranges)
     return copy_ranges(
         ranges,
         missing,
-        extract_mode="range_scan_copy",
-        index_frames=scanned_frames,
+        extract_mode="indexed_seek_copy",
+        index_frames=len(offsets),
         progress_start=0.90,
         progress_span=0.08,
     )
@@ -3315,82 +3286,28 @@ def read_trajectory_requested_frame_blocks(
         payload.update(extra)
         progress_callback(payload)
 
-    cached_index = TRAJECTORY_INDEX_STORE.peek(trajectory_file)
-    if cached_index is not None:
-        blocks: dict[int, bytes] = {}
-        emit(progress_start, f"Reading {len(requested)} anchor frame(s) from cached trajectory index")
-        with open(trajectory_file, "rb") as fh:
-            for idx, frame in enumerate(requested, 1):
-                block = cached_index.frame_offsets.get(frame)
-                if block is None:
-                    continue
-                start, end = int(block[0]), int(block[1])
-                if end <= start:
-                    continue
-                fh.seek(start)
-                blocks[frame] = fh.read(end - start)
-                emit(
-                    progress_start + progress_span * min(idx / max(len(requested), 1), 1.0),
-                    f"Reading anchor frame {frame} ({idx}/{len(requested)})",
-                    frame=frame,
-                )
-        return blocks
-
-    file_size = max(os.path.getsize(trajectory_file), 1)
-    bytes_read = 0
-    last_emit = 0.0
-    max_requested = max(requested)
-    requested_set = set(requested)
+    required_index = TRAJECTORY_INDEX_STORE.open_required(trajectory_file)
+    offsets = required_index.offsets_for(requested)
     blocks: dict[int, bytes] = {}
-    current_frame: int | None = None
-    current_block: bytearray | None = None
-
-    emit(progress_start, f"Scanning trajectory for {len(requested)} anchor frame(s)")
+    emit(progress_start, f"Reading {len(requested)} anchor frame(s) from prepared trajectory index")
     with open(trajectory_file, "rb") as fh:
-        while True:
-            line = fh.readline()
-            if not line:
-                break
-            bytes_read += len(line)
-            if line.startswith(b"ITEM: TIMESTEP"):
-                if current_frame in requested_set and current_block is not None:
-                    blocks[int(current_frame)] = bytes(current_block)
-                    if len(blocks) >= len(requested_set):
-                        break
-                timestep_line = fh.readline()
-                if not timestep_line:
-                    break
-                bytes_read += len(timestep_line)
-                try:
-                    current_frame = int(timestep_line.strip().split()[0])
-                except Exception:
-                    current_frame = None
-                current_block = None
-                if current_frame is not None and current_frame in requested_set:
-                    current_block = bytearray()
-                    current_block.extend(line)
-                    current_block.extend(timestep_line)
-                if current_frame is not None and current_frame > max_requested and len(blocks) >= len(requested_set):
-                    break
-            elif current_frame in requested_set and current_block is not None:
-                current_block.extend(line)
-            now = time.monotonic()
-            frac = bytes_read / file_size
-            if frac >= 0.99 or (now - last_emit) >= 1.0:
-                emit(
-                    progress_start + progress_span * min(frac, 1.0),
-                    f"Scanning trajectory for anchor frames: {frac * 100:.1f}%",
-                    n_found_frames=len(blocks),
-                    frame=current_frame,
-                )
-                last_emit = now
-            if current_frame is not None and current_frame > max_requested and len(blocks) >= len(requested_set):
-                break
-    if current_frame in requested_set and current_block is not None and current_frame not in blocks:
-        blocks[int(current_frame)] = bytes(current_block)
+        for idx, frame in enumerate(requested, 1):
+            block = offsets.get(frame)
+            if block is None:
+                continue
+            start, end = int(block[0]), int(block[1])
+            if end <= start:
+                continue
+            fh.seek(start)
+            blocks[frame] = fh.read(end - start)
+            emit(
+                progress_start + progress_span * min(idx / max(len(requested), 1), 1.0),
+                f"Reading anchor frame {frame} ({idx}/{len(requested)})",
+                frame=frame,
+            )
     emit(
         progress_start + progress_span,
-        f"Anchor-frame scan ready: {len(blocks)}/{len(requested)} frame(s)",
+        f"Anchor-frame read ready: {len(blocks)}/{len(requested)} frame(s)",
         n_found_frames=len(blocks),
     )
     return blocks
@@ -3709,8 +3626,25 @@ def context_tempfile_path(filename: str) -> Path:
 
 
 def route_index_cache_root() -> Path:
-    root = Path(tempfile.gettempdir()) / "reacnet_scope_route_index"
-    root.mkdir(parents=True, exist_ok=True)
+    """Return the durable directory used by route SQLite indexes.
+
+    Production deployments should always set ``REACNET_SCOPE_CACHE_DIR`` to
+    an NVMe-backed writable mount.  The user cache fallback is persistent
+    across service restarts; ``/tmp`` is only used when that location cannot
+    be created (for example in a restricted test sandbox).
+    """
+    configured = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    if configured:
+        base = Path(configured).expanduser()
+    else:
+        xdg_cache = os.environ.get("XDG_CACHE_HOME", "").strip()
+        base = Path(xdg_cache).expanduser() / "reacnet_scope" if xdg_cache else Path.home() / ".cache" / "reacnet_scope"
+    root = base / "route"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        root = Path(tempfile.gettempdir()) / "reacnet_scope_cache" / "route"
+        root.mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -3728,23 +3662,18 @@ def trajectory_index_cache_root(trajectory_file: str) -> Path:
 
 
 def trajectory_frame_index_path(trajectory_file: str, *, mtime: float, size: int) -> Path:
-    abs_path = os.path.abspath(trajectory_file)
-    mtime_ns = int(round(float(mtime) * 1_000_000_000))
-    digest = hashlib.sha1(
-        f"trajectory-frame-index|v{TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION}|{abs_path}|{mtime_ns}|{int(size)}".encode("utf-8")
-    ).hexdigest()[:16]
-    stem = _safe_name_fragment(Path(abs_path).stem, "trajectory")
-    return trajectory_index_cache_root(abs_path) / f"{stem}.{digest}.trajectory-index.json"
+    del mtime, size
+    return prepared_trajectory_index_path(trajectory_file)
+
+
+def trajectory_frame_index_building_path(trajectory_file: str, *, mtime: float, size: int) -> Path:
+    index_path = trajectory_frame_index_path(trajectory_file, mtime=mtime, size=size)
+    return Path(f"{index_path}.building")
 
 
 def route_transition_index_path(route_file: str, *, mtime: float, size: int) -> Path:
-    abs_path = os.path.abspath(route_file)
-    mtime_ns = int(round(float(mtime) * 1_000_000_000))
-    digest = hashlib.sha1(
-        f"route-transition-index|v{ROUTE_TRANSITION_INDEX_SCHEMA_VERSION}|{abs_path}|{mtime_ns}|{int(size)}".encode("utf-8")
-    ).hexdigest()[:16]
-    stem = _safe_name_fragment(Path(abs_path).stem, "route")
-    return route_index_cache_root() / f"{stem}.{digest}.sqlite3"
+    del mtime, size
+    return prepared_route_index_path(route_file)
 
 
 def write_context_trajectory_tempfile(text: str, filename: str) -> str:
@@ -4491,12 +4420,7 @@ def build_reaction_event_locate_payload(
     trajectory_index_state = "missing"
     trajectory_index_path = ""
     if files["trajectory_exists"] and not defer_trajectory_verification:
-        trajectory_index = TRAJECTORY_INDEX_STORE.get(
-            files["trajectory_file"],
-            progress_callback=progress_callback,
-            progress_start=0.58,
-            progress_span=0.10,
-        )
+        trajectory_index = TRAJECTORY_INDEX_STORE.open_required(files["trajectory_file"])
         trajectory_frames = [int(frame) for frame in trajectory_index.frames]
         trajectory_index_state = "cached_or_built"
         trajectory_index_path = os.path.abspath(files["trajectory_file"])
@@ -5406,8 +5330,6 @@ def build_structure_context_payload(
             trajectory_index_frames = int(extract_result.get("index_frames", 0) or 0)
             trajectory_preview_frames = int(extract_result.get("preview_blocks", 0) or 0)
             trajectory_preview_bytes = int(extract_result.get("preview_bytes", 0) or 0)
-            if trajectory_extract_mode == "range_scan_copy" and not trajectory_note:
-                trajectory_note = "trajectory extracted via range scan (no full-file index build)"
             if trajectory_atom_scope == "event":
                 if use_manual_atom_ids:
                     if not trajectory_note:
@@ -6924,9 +6846,10 @@ class SpeciesFrameIndex:
 
 
 class NetworkStore:
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 8) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[tuple[str, int], tuple[float, ReactionNetwork]] = {}
+        self._cache: OrderedDict[tuple[str, int], tuple[float, ReactionNetwork]] = OrderedDict()
+        self._max_entries = max(2, int(max_entries))
 
     def get(self, reac_file: str, min_tp: int) -> ReactionNetwork:
         path = os.path.abspath(reac_file)
@@ -6938,6 +6861,7 @@ class NetworkStore:
         with self._lock:
             cached = self._cache.get(key)
             if cached and cached[0] == mtime:
+                self._cache.move_to_end(key)
                 return cached[1]
 
             reactions = parse_reactionabcd(path, min_tp=min_tp)
@@ -6945,6 +6869,9 @@ class NetworkStore:
                 raise RuntimeError(f"no reactions loaded from: {path}")
             net = ReactionNetwork(reactions)
             self._cache[key] = (mtime, net)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
             return net
 
 
@@ -6952,9 +6879,10 @@ STORE = NetworkStore()
 
 
 class SpeciesSummaryStore:
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 4) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[str, tuple[float, SpeciesTimelineSummary]] = {}
+        self._cache: OrderedDict[str, tuple[float, SpeciesTimelineSummary]] = OrderedDict()
+        self._max_entries = max(2, int(max_entries))
 
     def get(self, species_file: str, progress_callback: Any = None) -> SpeciesTimelineSummary:
         path = os.path.abspath(species_file)
@@ -6964,6 +6892,7 @@ class SpeciesSummaryStore:
         with self._lock:
             cached = self._cache.get(path)
             if cached and cached[0] == mtime:
+                self._cache.move_to_end(path)
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -6975,6 +6904,9 @@ class SpeciesSummaryStore:
                 return cached[1]
             summary = build_species_timeline_summary(path, progress_callback=progress_callback)
             self._cache[path] = (mtime, summary)
+            self._cache.move_to_end(path)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
             return summary
 
 
@@ -6982,9 +6914,10 @@ SPECIES_STORE = SpeciesSummaryStore()
 
 
 class SpeciesFrameIndexStore:
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 8) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[str, SpeciesFrameIndex] = {}
+        self._cache: OrderedDict[str, SpeciesFrameIndex] = OrderedDict()
+        self._max_entries = max(2, int(max_entries))
 
     def get(
         self,
@@ -7002,6 +6935,7 @@ class SpeciesFrameIndexStore:
         with self._lock:
             cached = self._cache.get(path)
             if cached and cached.mtime == mtime and cached.size == size:
+                self._cache.move_to_end(path)
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -7022,6 +6956,9 @@ class SpeciesFrameIndexStore:
         )
         with self._lock:
             self._cache[path] = fresh
+            self._cache.move_to_end(path)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
         return fresh
 
     def _scan_index(
@@ -7148,17 +7085,75 @@ class SpeciesTokenSnapshotStore:
 SPECIES_TOKEN_SNAPSHOT_STORE = SpeciesTokenSnapshotStore()
 
 
-class RouteTransitionIndexStore:
-    def __init__(self) -> None:
+class _LegacyRouteTransitionIndexStore:
+    def __init__(self, max_entries: int = 16) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[tuple[str, float, int], dict[str, Any]] = {}
+        self._cache: OrderedDict[tuple[str, float, int], dict[str, Any]] = OrderedDict()
         self._build_locks: dict[tuple[str, float, int], threading.Lock] = {}
+        self._max_entries = max(4, int(max_entries))
+
+    def _remember(self, key: tuple[str, float, int], value: dict[str, Any]) -> None:
+        with self._lock:
+            self._cache[key] = dict(value)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_entries:
+                stale_key, _ = self._cache.popitem(last=False)
+                self._build_locks.pop(stale_key, None)
 
     def _route_signature(self, route_file: str) -> tuple[str, float, int]:
         path = os.path.abspath(route_file)
         if not os.path.exists(path):
             raise FileNotFoundError(f"route file not found: {path}")
         return path, os.path.getmtime(path), os.path.getsize(path)
+
+    def status(self, route_file: str) -> dict[str, Any]:
+        """Return persistent-index state without starting a build."""
+        path, mtime, size = self._route_signature(route_file)
+        index_path = route_transition_index_path(path, mtime=mtime, size=size)
+        building_path = index_path.with_suffix(index_path.suffix + ".building")
+        active_path = index_path if index_path.exists() else building_path
+        meta: dict[str, Any] = {}
+        if active_path.exists():
+            try:
+                meta = self._read_meta(active_path)
+            except (OSError, sqlite3.Error):
+                meta = {}
+        source_offset = int(meta.get("source_offset", 0) or 0)
+        if index_path.exists():
+            state = "ready"
+            source_offset = int(size)
+        elif building_path.exists():
+            state = "building"
+        else:
+            state = "missing"
+        return {
+            "state": state,
+            "route_file": path,
+            "route_size": int(size),
+            "index_path": str(index_path),
+            "building_path": str(building_path),
+            "index_size": int(active_path.stat().st_size) if active_path.exists() else 0,
+            "source_offset": source_offset,
+            "progress": min(max(source_offset / max(int(size), 1), 0.0), 1.0),
+            "scanned_atoms": int(meta.get("scanned_atoms", 0) or 0),
+            "indexed_transitions": int(meta.get("indexed_transitions", 0) or 0),
+            "cache_dir": str(index_path.parent),
+        }
+
+    def clear(self, route_file: str) -> list[str]:
+        """Remove the current file-version index and resumable checkpoint."""
+        path, mtime, size = self._route_signature(route_file)
+        key = (path, mtime, size)
+        index_path = route_transition_index_path(path, mtime=mtime, size=size)
+        targets = [index_path, index_path.with_suffix(index_path.suffix + ".building")]
+        removed: list[str] = []
+        with self._lock:
+            self._cache.pop(key, None)
+        for target in targets:
+            if target.exists():
+                target.unlink()
+                removed.append(str(target))
+        return removed
 
     def _emit(
         self,
@@ -7209,8 +7204,14 @@ class RouteTransitionIndexStore:
             ("scanned_atoms", str(int(scanned_atoms))),
             ("indexed_transitions", str(int(indexed_transitions))),
             ("built_at_epoch", str(int(time.time()))),
+            ("build_state", "ready"),
+            ("source_offset", str(int(size))),
         ]
-        conn.executemany("INSERT INTO meta(key, value) VALUES(?, ?)", rows)
+        conn.executemany(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rows,
+        )
 
     def _connect_for_build(self, target: Path) -> sqlite3.Connection:
         conn = sqlite3.connect(str(target))
@@ -7219,10 +7220,10 @@ class RouteTransitionIndexStore:
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA cache_size=-20000")
         conn.execute("PRAGMA locking_mode=EXCLUSIVE")
-        conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute(
             """
-            CREATE TABLE transitions(
+            CREATE TABLE IF NOT EXISTS transitions(
                 atom_id INTEGER NOT NULL,
                 start_frame INTEGER NOT NULL,
                 end_frame INTEGER NOT NULL,
@@ -7238,10 +7239,40 @@ class RouteTransitionIndexStore:
         return conn
 
     def _create_indexes(self, conn: sqlite3.Connection) -> None:
-        conn.execute("CREATE INDEX idx_transitions_atom ON transitions(atom_id)")
-        conn.execute("CREATE INDEX idx_transitions_start_end ON transitions(start_frame, end_frame)")
-        conn.execute("CREATE INDEX idx_transitions_canonical ON transitions(from_canonical, to_canonical)")
-        conn.execute("CREATE INDEX idx_transitions_formula ON transitions(from_formula, to_formula)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transitions_atom ON transitions(atom_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transitions_start_end ON transitions(start_frame, end_frame)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transitions_canonical ON transitions(from_canonical, to_canonical)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transitions_formula ON transitions(from_formula, to_formula)")
+
+    def _checkpoint_route_build(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        route_file: str,
+        mtime: float,
+        size: int,
+        source_offset: int,
+        scanned_atoms: int,
+        indexed_transitions: int,
+    ) -> None:
+        """Commit inserted rows and the matching source offset atomically."""
+        rows = [
+            ("schema_version", str(int(ROUTE_TRANSITION_INDEX_SCHEMA_VERSION))),
+            ("route_file", os.path.abspath(route_file)),
+            ("route_mtime_ns", str(int(round(float(mtime) * 1_000_000_000)))),
+            ("route_size", str(int(size))),
+            ("build_state", "building"),
+            ("source_offset", str(int(source_offset))),
+            ("scanned_atoms", str(int(scanned_atoms))),
+            ("indexed_transitions", str(int(indexed_transitions))),
+            ("updated_at_epoch", str(int(time.time()))),
+        ]
+        conn.executemany(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rows,
+        )
+        conn.commit()
 
     def _build_index(
         self,
@@ -7254,12 +7285,7 @@ class RouteTransitionIndexStore:
         progress_span: float = 1.0,
     ) -> dict[str, Any]:
         index_path = route_transition_index_path(route_file, mtime=mtime, size=size)
-        tmp_path = index_path.with_suffix(index_path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        building_path = index_path.with_suffix(index_path.suffix + ".building")
 
         file_size = max(int(size), 1)
         bytes_read = 0
@@ -7268,19 +7294,64 @@ class RouteTransitionIndexStore:
         indexed_transitions = 0
         batch: list[tuple[Any, ...]] = []
         batch_size = 5000
+        checkpoint_bytes = 256 * 1024 * 1024
+        last_checkpoint_offset = 0
+        resumed = False
+
+        conn = self._connect_for_build(building_path)
+        existing_meta = {
+            str(key): str(value)
+            for key, value in conn.execute("SELECT key, value FROM meta").fetchall()
+        }
+        expected_mtime_ns = int(round(float(mtime) * 1_000_000_000))
+        compatible = bool(existing_meta) and (
+            int(existing_meta.get("schema_version", 0) or 0) == ROUTE_TRANSITION_INDEX_SCHEMA_VERSION
+            and existing_meta.get("route_file", "") == os.path.abspath(route_file)
+            and int(existing_meta.get("route_mtime_ns", -1) or -1) == expected_mtime_ns
+            and int(existing_meta.get("route_size", -1) or -1) == int(size)
+            and existing_meta.get("build_state", "") == "building"
+        )
+        if existing_meta and not compatible:
+            conn.close()
+            building_path.unlink(missing_ok=True)
+            conn = self._connect_for_build(building_path)
+            existing_meta = {}
+        if compatible:
+            bytes_read = max(0, min(int(existing_meta.get("source_offset", 0) or 0), int(size)))
+            scanned_atoms = int(existing_meta.get("scanned_atoms", 0) or 0)
+            indexed_transitions = int(existing_meta.get("indexed_transitions", 0) or 0)
+            last_checkpoint_offset = bytes_read
+            resumed = bytes_read > 0
+        else:
+            self._checkpoint_route_build(
+                conn,
+                route_file=route_file,
+                mtime=mtime,
+                size=size,
+                source_offset=0,
+                scanned_atoms=0,
+                indexed_transitions=0,
+            )
 
         self._emit(
             progress_callback,
-            progress=progress_start,
+            progress=progress_start + progress_span * min((bytes_read / file_size) * 0.85, 0.85),
             phase="indexing_route",
-            message=f"Building route transition index: {os.path.basename(route_file)}",
+            message=(
+                f"Resuming route transition index at {bytes_read / file_size * 100:.1f}%: {os.path.basename(route_file)}"
+                if resumed
+                else f"Building route transition index: {os.path.basename(route_file)}"
+            ),
+            source_offset=bytes_read,
+            resumed=resumed,
         )
-        conn = self._connect_for_build(tmp_path)
         try:
-            with open(route_file, encoding="utf-8", errors="ignore") as fh:
+            with open(route_file, "rb") as fh:
+                fh.seek(bytes_read)
                 for raw_line in fh:
                     bytes_read += len(raw_line)
-                    m = ROUTE_LINE_RE.match(raw_line.strip())
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    m = ROUTE_LINE_RE.match(line)
                     if not m:
                         continue
                     scanned_atoms += 1
@@ -7327,6 +7398,30 @@ class RouteTransitionIndexStore:
                             batch,
                         )
                         batch.clear()
+                    if bytes_read - last_checkpoint_offset >= checkpoint_bytes:
+                        if batch:
+                            conn.executemany(
+                                """
+                                INSERT INTO transitions(
+                                    atom_id, start_frame, end_frame,
+                                    from_label, to_label,
+                                    from_canonical, to_canonical,
+                                    from_formula, to_formula
+                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                batch,
+                            )
+                            batch.clear()
+                        self._checkpoint_route_build(
+                            conn,
+                            route_file=route_file,
+                            mtime=mtime,
+                            size=size,
+                            source_offset=bytes_read,
+                            scanned_atoms=scanned_atoms,
+                            indexed_transitions=indexed_transitions,
+                        )
+                        last_checkpoint_offset = bytes_read
                     frac = bytes_read / file_size
                     now = time.monotonic()
                     if frac >= 0.99 or (now - last_emit) >= 1.0:
@@ -7337,6 +7432,8 @@ class RouteTransitionIndexStore:
                             message=f"Building route index: {frac * 100:.1f}%",
                             scanned_atoms=scanned_atoms,
                             indexed_transitions=indexed_transitions,
+                            source_offset=bytes_read,
+                            resumed=resumed,
                         )
                         last_emit = now
             if batch:
@@ -7351,6 +7448,15 @@ class RouteTransitionIndexStore:
                     """,
                     batch,
                 )
+            self._checkpoint_route_build(
+                conn,
+                route_file=route_file,
+                mtime=mtime,
+                size=size,
+                source_offset=bytes_read,
+                scanned_atoms=scanned_atoms,
+                indexed_transitions=indexed_transitions,
+            )
             self._emit(
                 progress_callback,
                 progress=progress_start + progress_span * 0.88,
@@ -7371,10 +7477,8 @@ class RouteTransitionIndexStore:
             conn.commit()
         except Exception:
             conn.close()
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+            # Keep the checkpointed .building database so the next process
+            # can continue instead of rescanning a multi-gigabyte route file.
             raise
         finally:
             try:
@@ -7382,7 +7486,7 @@ class RouteTransitionIndexStore:
             except Exception:
                 pass
 
-        os.replace(tmp_path, index_path)
+        os.replace(building_path, index_path)
         meta = {
             "index_path": str(index_path),
             "route_file": os.path.abspath(route_file),
@@ -7391,6 +7495,7 @@ class RouteTransitionIndexStore:
             "scanned_atoms": int(scanned_atoms),
             "indexed_transitions": int(indexed_transitions),
             "index_state": "built",
+            "resumed": resumed,
         }
         self._emit(
             progress_callback,
@@ -7416,6 +7521,7 @@ class RouteTransitionIndexStore:
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None and os.path.exists(cached["index_path"]):
+                self._cache.move_to_end(key)
                 self._emit(
                     progress_callback,
                     progress=progress_start + progress_span,
@@ -7432,6 +7538,7 @@ class RouteTransitionIndexStore:
             with self._lock:
                 cached = self._cache.get(key)
                 if cached is not None and os.path.exists(cached["index_path"]):
+                    self._cache.move_to_end(key)
                     self._emit(
                         progress_callback,
                         progress=progress_start + progress_span,
@@ -7455,8 +7562,7 @@ class RouteTransitionIndexStore:
                     "indexed_transitions": int(meta_rows.get("indexed_transitions", 0) or 0),
                     "index_state": "cached_disk",
                 }
-                with self._lock:
-                    self._cache[key] = dict(meta)
+                self._remember(key, meta)
                 self._emit(
                     progress_callback,
                     progress=progress_start + progress_span,
@@ -7474,8 +7580,7 @@ class RouteTransitionIndexStore:
                 progress_start=progress_start,
                 progress_span=progress_span,
             )
-            with self._lock:
-                self._cache[key] = dict(fresh)
+            self._remember(key, fresh)
             return fresh
 
     def query_reaction_hits(
@@ -7571,7 +7676,7 @@ class RouteTransitionIndexStore:
         }
 
 
-ROUTE_TRANSITION_INDEX_STORE = RouteTransitionIndexStore()
+_LEGACY_ROUTE_TRANSITION_INDEX_STORE = _LegacyRouteTransitionIndexStore()
 
 
 class RouteAnalysisStore:
@@ -7729,10 +7834,69 @@ class ReactionEventLocateStore:
 REACTION_EVENT_LOCATE_STORE = ReactionEventLocateStore()
 
 
-class TrajectoryIndexStore:
-    def __init__(self) -> None:
+class ReactionEventExtractStore:
+    """Bounded cache for repeatedly viewed local event trajectories."""
+
+    def __init__(self, max_entries: int = 16) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[str, TrajectoryFrameIndex] = {}
+        self._cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
+        self._max_entries = max(4, int(max_entries))
+
+    def _build_key(self, params: dict[str, list[str]]) -> tuple[Any, ...]:
+        locate_key = REACTION_EVENT_LOCATE_STORE._build_key(params)
+        return (
+            locate_key,
+            (params.get("event_id", [""])[0] or "").strip(),
+            bool_param(params, "inline_viewer", False),
+        )
+
+    def get(
+        self,
+        params: dict[str, list[str]],
+        *,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        key = self._build_key(params)
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "progress": 1.0,
+                            "phase": "cached_reaction_event_extract",
+                            "message": "Using cached local event trajectory",
+                        }
+                    )
+                return cached
+        fresh = build_reaction_event_extract_payload(
+            params,
+            progress_callback=progress_callback,
+        )
+        with self._lock:
+            self._cache[key] = fresh
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+        return fresh
+
+
+REACTION_EVENT_EXTRACT_STORE = ReactionEventExtractStore()
+
+
+class _LegacyTrajectoryIndexStore:
+    def __init__(self, max_entries: int = 4) -> None:
+        self._lock = threading.Lock()
+        self._cache: OrderedDict[str, TrajectoryFrameIndex] = OrderedDict()
+        self._max_entries = max(2, int(max_entries))
+
+    def _remember(self, path: str, index: TrajectoryFrameIndex) -> None:
+        with self._lock:
+            self._cache[path] = index
+            self._cache.move_to_end(path)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
 
     def peek(self, trajectory_file: str) -> TrajectoryFrameIndex | None:
         path = os.path.abspath(trajectory_file)
@@ -7743,8 +7907,64 @@ class TrajectoryIndexStore:
         with self._lock:
             cached = self._cache.get(path)
             if cached and cached.mtime == mtime and cached.size == size:
+                self._cache.move_to_end(path)
                 return cached
         return None
+
+    def status(self, trajectory_file: str) -> dict[str, Any]:
+        """Return persistent frame-index state without scanning the source."""
+        path = os.path.abspath(trajectory_file)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"trajectory file not found: {path}")
+        mtime = os.path.getmtime(path)
+        size = os.path.getsize(path)
+        index_path = trajectory_frame_index_path(path, mtime=mtime, size=size)
+        building_path = trajectory_frame_index_building_path(path, mtime=mtime, size=size)
+        active_path = index_path if index_path.exists() else building_path
+        payload: dict[str, Any] = {}
+        if active_path.exists():
+            try:
+                payload = json.loads(active_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = {}
+        source_offset = int(payload.get("source_offset", 0) or 0)
+        if index_path.exists():
+            state = "ready"
+            source_offset = int(size)
+        elif building_path.exists():
+            state = "building"
+        else:
+            state = "missing"
+        return {
+            "state": state,
+            "trajectory_file": path,
+            "trajectory_size": int(size),
+            "index_path": str(index_path),
+            "building_path": str(building_path),
+            "index_size": int(active_path.stat().st_size) if active_path.exists() else 0,
+            "source_offset": source_offset,
+            "progress": min(max(source_offset / max(int(size), 1), 0.0), 1.0),
+            "frames": len(payload.get("frames") or []),
+            "cache_dir": str(index_path.parent),
+        }
+
+    def clear(self, trajectory_file: str) -> list[str]:
+        """Remove the current file-version frame index and checkpoint."""
+        path = os.path.abspath(trajectory_file)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"trajectory file not found: {path}")
+        mtime = os.path.getmtime(path)
+        size = os.path.getsize(path)
+        index_path = trajectory_frame_index_path(path, mtime=mtime, size=size)
+        targets = [index_path, trajectory_frame_index_building_path(path, mtime=mtime, size=size)]
+        removed: list[str] = []
+        with self._lock:
+            self._cache.pop(path, None)
+        for target in targets:
+            if target.exists():
+                target.unlink()
+                removed.append(str(target))
+        return removed
 
     def get(
         self,
@@ -7763,6 +7983,7 @@ class TrajectoryIndexStore:
         with self._lock:
             cached = self._cache.get(path)
             if cached and cached.mtime == mtime and cached.size == size:
+                self._cache.move_to_end(path)
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -7786,8 +8007,7 @@ class TrajectoryIndexStore:
                         "index_path": str(trajectory_frame_index_path(path, mtime=mtime, size=size)),
                     }
                 )
-            with self._lock:
-                self._cache[path] = persisted
+            self._remember(path, persisted)
             return persisted
 
         fresh = self._scan_index(
@@ -7799,8 +8019,8 @@ class TrajectoryIndexStore:
             progress_span=progress_span,
         )
         self._persist(fresh)
-        with self._lock:
-            self._cache[path] = fresh
+        trajectory_frame_index_building_path(path, mtime=mtime, size=size).unlink(missing_ok=True)
+        self._remember(path, fresh)
         return fresh
 
     def _load_persisted(self, trajectory_file: str, *, mtime: float, size: int) -> TrajectoryFrameIndex | None:
@@ -7859,6 +8079,81 @@ class TrajectoryIndexStore:
                 except OSError:
                     pass
 
+    def _load_build_checkpoint(
+        self,
+        trajectory_file: str,
+        *,
+        mtime: float,
+        size: int,
+    ) -> tuple[int, list[int], dict[int, tuple[int, int]]]:
+        building_path = trajectory_frame_index_building_path(
+            trajectory_file,
+            mtime=mtime,
+            size=size,
+        )
+        if not building_path.exists():
+            return 0, [], {}
+        try:
+            payload = json.loads(building_path.read_text(encoding="utf-8"))
+            expected_mtime_ns = int(round(float(mtime) * 1_000_000_000))
+            if (
+                int(payload.get("schema_version", 0)) != TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION
+                or str(payload.get("trajectory_file", "")) != os.path.abspath(trajectory_file)
+                or int(payload.get("trajectory_mtime_ns", -1)) != expected_mtime_ns
+                or int(payload.get("trajectory_size", -1)) != int(size)
+                or str(payload.get("build_state", "")) != "building"
+            ):
+                building_path.unlink(missing_ok=True)
+                return 0, [], {}
+            offsets: dict[int, tuple[int, int]] = {}
+            for item in payload.get("frame_offsets") or []:
+                frame, start, end = int(item[0]), int(item[1]), int(item[2])
+                if end > start:
+                    offsets[frame] = (start, end)
+            frames = [int(frame) for frame in payload.get("frames") or [] if int(frame) in offsets]
+            source_offset = max(0, min(int(payload.get("source_offset", 0) or 0), int(size)))
+            return source_offset, frames, offsets
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, IndexError):
+            return 0, [], {}
+
+    def _persist_build_checkpoint(
+        self,
+        trajectory_file: str,
+        *,
+        mtime: float,
+        size: int,
+        source_offset: int,
+        frames: list[int],
+        frame_offsets: dict[int, tuple[int, int]],
+    ) -> None:
+        building_path = trajectory_frame_index_building_path(
+            trajectory_file,
+            mtime=mtime,
+            size=size,
+        )
+        payload = {
+            "schema_version": TRAJECTORY_FRAME_INDEX_SCHEMA_VERSION,
+            "build_state": "building",
+            "trajectory_file": os.path.abspath(trajectory_file),
+            "trajectory_mtime_ns": int(round(float(mtime) * 1_000_000_000)),
+            "trajectory_size": int(size),
+            "source_offset": int(source_offset),
+            "updated_at_epoch": int(time.time()),
+            "frames": [int(frame) for frame in frames],
+            "frame_offsets": [
+                [int(frame), int(start), int(end)]
+                for frame, (start, end) in sorted(frame_offsets.items())
+            ],
+        }
+        tmp_path = building_path.with_suffix(
+            building_path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            os.replace(tmp_path, building_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     def _scan_index(
         self,
         trajectory_file: str,
@@ -7870,10 +8165,15 @@ class TrajectoryIndexStore:
         progress_span: float = 1.0,
     ) -> TrajectoryFrameIndex:
         file_size = max(size, 1)
-        bytes_read = 0
+        bytes_read, frames, frame_offsets = self._load_build_checkpoint(
+            trajectory_file,
+            mtime=mtime,
+            size=size,
+        )
+        resumed = bytes_read > 0
+        last_checkpoint_offset = bytes_read
+        checkpoint_bytes = 1024 * 1024 * 1024
         last_emit = 0.0
-        frames: list[int] = []
-        frame_offsets: dict[int, tuple[int, int]] = {}
         current_frame: int | None = None
         current_start: int | None = None
 
@@ -7888,8 +8188,18 @@ class TrajectoryIndexStore:
             payload.update(extra)
             progress_callback(payload)
 
-        emit(progress_start, f"Indexing trajectory frames: {os.path.basename(trajectory_file)}")
+        emit(
+            progress_start + progress_span * min(bytes_read / file_size, 1.0),
+            (
+                f"Resuming trajectory frame index at {bytes_read / file_size * 100:.1f}%: {os.path.basename(trajectory_file)}"
+                if resumed
+                else f"Indexing trajectory frames: {os.path.basename(trajectory_file)}"
+            ),
+            resumed=resumed,
+            source_offset=bytes_read,
+        )
         with open(trajectory_file, "rb") as fh:
+            fh.seek(bytes_read)
             while True:
                 block_start = fh.tell()
                 line = fh.readline()
@@ -7915,13 +8225,28 @@ class TrajectoryIndexStore:
 
                 if current_frame is not None and current_start is not None and block_start > current_start:
                     frame_offsets[current_frame] = (current_start, block_start)
+                    if not frames or frames[-1] != current_frame:
+                        frames.append(current_frame)
 
                 try:
                     current_frame = int(timestep_line.strip().split()[0])
-                    frames.append(current_frame)
                 except Exception:
                     current_frame = None
                 current_start = block_start
+
+                if (
+                    current_start is not None
+                    and current_start - last_checkpoint_offset >= checkpoint_bytes
+                ):
+                    self._persist_build_checkpoint(
+                        trajectory_file,
+                        mtime=mtime,
+                        size=size,
+                        source_offset=current_start,
+                        frames=frames,
+                        frame_offsets=frame_offsets,
+                    )
+                    last_checkpoint_offset = current_start
 
                 now = time.monotonic()
                 frac = bytes_read / file_size
@@ -7931,11 +8256,15 @@ class TrajectoryIndexStore:
                         f"Indexing trajectory: {frac * 100:.1f}%",
                         n_index_frames=len(frames),
                         frame=current_frame,
+                        resumed=resumed,
+                        source_offset=bytes_read,
                     )
                     last_emit = now
 
         if current_frame is not None and current_start is not None and size > current_start:
             frame_offsets[current_frame] = (current_start, size)
+            if not frames or frames[-1] != current_frame:
+                frames.append(current_frame)
 
         emit(
             progress_start + progress_span,
@@ -7951,7 +8280,36 @@ class TrajectoryIndexStore:
         )
 
 
-TRAJECTORY_INDEX_STORE = TrajectoryIndexStore()
+_LEGACY_TRAJECTORY_INDEX_STORE = _LegacyTrajectoryIndexStore()
+
+# Runtime boundary: all web request paths below resolve these names to the
+# extracted preparation package.  Builders are only called by offline CLI
+# entry points; online code uses ``open_required`` and read-only queries.
+RouteTransitionIndexStore = PreparedRouteIndexStore
+TrajectoryIndexStore = PreparedTrajectoryIndexStore
+TrajectoryFrameIndex = PreparedTrajectoryFrameIndex
+ROUTE_TRANSITION_INDEX_STORE = PREPARED_ROUTE_INDEX_STORE
+TRAJECTORY_INDEX_STORE = PREPARED_TRAJECTORY_INDEX_STORE
+
+
+def route_transition_index_path(
+    route_file: str,
+    *,
+    mtime: float | None = None,
+    size: int | None = None,
+) -> Path:
+    del mtime, size
+    return prepared_route_index_path(route_file)
+
+
+def trajectory_frame_index_path(
+    trajectory_file: str,
+    *,
+    mtime: float | None = None,
+    size: int | None = None,
+) -> Path:
+    del mtime, size
+    return prepared_trajectory_index_path(trajectory_file)
 
 
 class AsyncTaskStore:
@@ -7974,6 +8332,7 @@ class AsyncTaskStore:
             "query": query,
             "created_at": now,
             "updated_at": now,
+            "cancel_requested": False,
         }
         with self._lock:
             self._prune_locked(now)
@@ -8007,6 +8366,34 @@ class AsyncTaskStore:
             phase="error",
             message=error,
             error=error,
+        )
+
+    def request_cancel(self, task_id: str) -> bool:
+        now = time.time()
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.get("status") in {"completed", "error", "canceled"}:
+                return False
+            task["cancel_requested"] = True
+            task["status"] = "canceling"
+            task["phase"] = "canceling"
+            task["message"] = "Cancellation requested"
+            task["updated_at"] = now
+            return True
+
+    def is_cancel_requested(self, task_id: str) -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            return bool(task and task.get("cancel_requested"))
+
+    def canceled(self, task_id: str, message: str = "Canceled") -> None:
+        self.update(
+            task_id,
+            status="canceled",
+            phase="canceled",
+            message=message,
+            error=None,
+            result=None,
         )
 
     def get(self, task_id: str) -> dict[str, Any] | None:

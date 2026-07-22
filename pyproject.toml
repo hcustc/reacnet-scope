@@ -41,10 +41,13 @@ web = [
 reacnet-scope = "scripts.rng_query_cli:main"
 reacnet-scope-web = "scripts.webapp.server:main"
 reacnet-scope-web-dash = "scripts.webapp_dash.app:main"
+reacnet-scope-prepare = "reacnet_scope.prepare:main"
 reacnet-scope-build-trajectory-index = "scripts.build_trajectory_index:main"
+reacnet-scope-build-route-index = "scripts.build_route_index:main"
+reacnet-scope-cache = "scripts.manage_cache:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rng_tools", "scripts"]
+packages = ["reacnet_scope", "rng_tools", "scripts"]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -57,7 +60,10 @@ include = [
   "/run_rng_query.sh",
   "/run_rng_query_web.sh",
   "/examples",
+  "/docs",
+  "/deploy",
   "/rng_tools",
+  "/reacnet_scope",
   "/scripts",
 ]
 

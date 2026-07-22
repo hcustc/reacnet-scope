@@ -8,10 +8,11 @@ re-implements analysis logic.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, callback, ctx, html, no_update
+from dash import ALL, Input, Output, State, callback, ctx, html, no_update
 from dash.exceptions import PreventUpdate
 
 from scripts.webapp_dash import services as svc
@@ -37,7 +38,7 @@ PAGE_DESCRIPTIONS = {
     "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "聚合不同碳数区间，观察体系碳骨架的演化过程。",
-    "events": "定位物种和反应事件，并抽取对应的轨迹证据。",
+    "events": "检索 ReacNetGenerator 事件输出，并按参与原子查看局部轨迹。",
     "network": "从观测表构建可交互的全局物种-反应网络。",
     "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
     "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
@@ -49,7 +50,7 @@ PAGE_DATA_REQUIREMENTS = {
     "intermediate": ("species", ".species"),
     "evolution": ("species", ".species"),
     "carbon": ("species", ".species"),
-    "events": ("route", ".route"),
+    "events": ("reactionevent", ".reactionevent.csv + .molecules.csv"),
     "network": ("table", ".lammpstrj.table"),
     "literature": ("reaction", "reactionabcd"),
 }
@@ -62,6 +63,7 @@ def initial_store() -> dict[str, Any]:
         "label": "未选择",
         "ready_count": 0,
         "capabilities": {},
+        "readiness": {},
         "artifacts": {},
         "selected_smiles": "",
         "selected_formula": "",
@@ -75,6 +77,71 @@ _EVENT_GROUP_STYLE = {
     "shared": ("前后共有原子", "#7c3aed"),
     "context": ("局部上下文", "#94a3b8"),
 }
+
+
+def _format_bytes(value: Any) -> str:
+    size = float(max(0, int(value or 0)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024.0 or unit == "TiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TiB"
+
+
+def _preparation_state_text(item: dict[str, Any]) -> tuple[str, str]:
+    state = str(item.get("state") or "missing")
+    labels = {
+        "ready": ("就绪", "success"),
+        "building": (f"构建中 {float(item.get('progress', 0.0) or 0.0) * 100:.0f}%", "warning"),
+        "stale": ("已失效", "warning"),
+        "invalid": ("无效", "danger"),
+        "missing": ("未准备", "secondary"),
+    }
+    return labels.get(state, (state, "secondary"))
+
+
+def _render_preparation_status(payload: dict[str, Any]) -> Any:
+    rows: list[Any] = []
+    entries = [
+        ("基础分析", payload.get("basic") or {}),
+        ("RNG 事件输出", payload.get("events") or {}),
+        ("轨迹帧索引", payload.get("trajectory") or {}),
+    ]
+    for label, item in entries:
+        text, color = _preparation_state_text(item)
+        detail = ""
+        if label == "RNG 事件输出" and item.get("source_size"):
+            detail = _format_bytes(item.get("source_size"))
+        elif label == "轨迹帧索引" and item.get("trajectory_size"):
+            detail = f"{_format_bytes(item.get('source_offset'))} / {_format_bytes(item.get('trajectory_size'))}"
+        if item.get("state") == "ready":
+            records = item.get("frames") if label == "轨迹帧索引" else None
+            if records is not None:
+                detail = f"{int(records):,} 条记录 · {_format_bytes(item.get('index_size'))}"
+        if item.get("message"):
+            detail = str(item["message"])
+        rows.append(
+            html.Div(
+                [
+                    html.Span(label, className="text-muted"),
+                    dbc.Badge(text, color=color, pill=True),
+                    html.Span(detail, className="small text-muted ms-2"),
+                ],
+                className="d-flex align-items-center gap-2 py-1 flex-wrap",
+            )
+        )
+    updated = payload.get("last_updated_epoch")
+    updated_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(updated)) if updated else "-"
+    rows.extend(
+        [
+            html.Div([html.Span("缓存目录", className="text-muted me-2"), html.Code(payload.get("cache_dir") or "未配置")], className="small mt-2 text-break"),
+            html.Div(
+                f"数据集 ID: {payload.get('dataset_id') or '-'} · 索引占用: {_format_bytes(payload.get('index_bytes'))} · 最后更新: {updated_text}",
+                className="small text-muted mt-1",
+            ),
+        ]
+    )
+    return html.Div(rows)
 
 
 def _event_frame_figure(viewer: dict[str, Any], frame_index: int, scope: str, *, compact: bool = False):
@@ -132,15 +199,11 @@ def _event_frame_figure(viewer: dict[str, Any], frame_index: int, scope: str, *,
 
 def _event_selection_summary(selected: dict[str, Any]) -> Any:
     row = selected.get("row") or {}
-    kind = selected.get("kind") or ""
-    is_candidate = row.get("event_class") == "相关候选"
-    label = "反应事件" if kind == "reaction" else "物种事件"
-    anchor = row.get("anchor_frame", "-")
-    details = [f"{label}", f"锚定帧 {anchor}"]
+    details = ["RNG 事件", f"{row.get('before_timestep', '-')} → {row.get('after_timestep', '-')}"]
     if row.get("event_id"):
         details.append(str(row["event_id"]))
-    if is_candidate:
-        details.append("相关候选：提取后请人工核查")
+    if row.get("association_status") != "matched":
+        details.append("原子关联不确定")
     return html.Div(
         [
             html.Span("已选", className="rs-selection-label"),
@@ -240,6 +303,13 @@ def register_callbacks(app: Any) -> None:
         page_id = (page_store or {}).get("page") or "species"
         if page_id == "batch-compare":
             return "独立目录分析", "rs-page-status is-independent"
+        if page_id == "events":
+            event_ready = bool((((app_store or {}).get("readiness") or {}).get("event_search") or {}).get("ready"))
+            return (
+                ("RNG 事件输出已就绪", "rs-page-status is-ready")
+                if event_ready
+                else ("需要 reactionevent.csv + molecules.csv", "rs-page-status is-blocked")
+            )
         artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(page_id, ("", ""))
         artifacts = (app_store or {}).get("artifacts") or {}
         if artifact_key and artifacts.get(artifact_key):
@@ -252,20 +322,19 @@ def register_callbacks(app: Any) -> None:
         Output("inter-search-btn", "disabled"),
         Output("evolution-search-btn", "disabled"),
         Output("carbon-search-btn", "disabled"),
-        Output("event-species-btn", "disabled"),
         Output("event-rxn-btn", "disabled"),
         Output("event-extract-btn", "disabled"),
-        Output("event-dedup-btn", "disabled"),
         Output("network-search-btn", "disabled"),
         Output("literature-verify-btn", "disabled"),
         Input("app-store", "data"),
     )
     def _update_data_dependent_actions(app_store):
         artifacts = (app_store or {}).get("artifacts") or {}
+        readiness = (app_store or {}).get("readiness") or {}
         no_reaction = not bool(artifacts.get("reaction"))
         no_species = not bool(artifacts.get("species"))
-        no_events = not any(artifacts.get(key) for key in ("route", "trajectory", "species"))
-        no_route = not bool(artifacts.get("route"))
+        no_reaction_events = not bool((readiness.get("event_search") or {}).get("ready"))
+        no_trajectory = not bool((readiness.get("trajectory_evidence") or {}).get("ready"))
         no_table = not bool(artifacts.get("table"))
         return (
             no_reaction,
@@ -273,10 +342,8 @@ def register_callbacks(app: Any) -> None:
             no_species,
             no_species,
             no_species,
-            no_events,
-            no_events,
-            no_route,
-            no_route,
+            no_reaction_events,
+            no_trajectory,
             no_table,
             no_reaction,
         )
@@ -336,36 +403,206 @@ def register_callbacks(app: Any) -> None:
 
         candidates = svc.candidates_from_status(status)
         options = [
-            {"label": f"{c.get('label') or c.get('base')} ({c.get('score', 0)}/5)", "value": c.get("base", "")}
+            {"label": f"{c.get('label') or c.get('base')} ({c.get('score', 0)}/7)", "value": c.get("base", "")}
             for c in candidates
         ]
         artifact_html = _render_artifacts(svc.artifacts_from_status(status))
         ready = svc.dataset_ready_count(status)
         label = svc.dataset_label(status)
-        scan_msg = f"扫描完成 — {label}，就绪 {ready}/5"
+        scan_msg = f"扫描完成 — {label}，就绪 {ready}/7"
         return (no_update, options, scan_msg, artifact_html)
 
     @app.callback(
+        Output("data-prep-status", "children"),
+        Output("data-rng-event-command", "children"),
+        Output("data-prep-trajectory-command", "children"),
+        Output("data-rng-event-copy", "content"),
+        Output("data-prep-trajectory-copy", "content"),
+        Output("data-clear-trajectory-btn", "disabled"),
+        Output("data-prep-refresh", "disabled"),
+        Input("data-modal", "is_open"),
+        Input("data-scan-btn", "n_clicks"),
+        Input("data-prep-refresh-btn", "n_clicks"),
+        Input("data-prep-refresh", "n_intervals"),
+        Input("data-rungroup", "value"),
+        State("data-folder-input", "value"),
+        State("app-store", "data"),
+    )
+    def _refresh_preparation_status(is_open, _scan_clicks, _refresh_clicks, _tick, selected_base, folder_text, app_store):
+        if not is_open:
+            return "", "", "", "", "", True, True
+        store = app_store or {}
+        folder = (folder_text or store.get("folder") or "").strip()
+        base = (selected_base or store.get("base") or "").strip()
+        if not folder:
+            return "请选择数据目录后查看准备状态。", "", "", "", "", True, False
+        try:
+            payload = svc.dataset_preparation_status(folder, base=base)
+        except svc.ServiceError as exc:
+            return str(exc.message), "", "", "", "", True, False
+        except Exception as exc:
+            return f"读取准备状态失败: {exc}", "", "", "", "", True, False
+
+        trajectory = payload.get("trajectory") or {}
+        trajectory_disabled = str(trajectory.get("state") or "missing") in {"missing", "building"}
+        return (
+            _render_preparation_status(payload),
+            payload.get("rng_event_command") or "",
+            payload.get("trajectory_command") or "",
+            payload.get("rng_event_command") or "",
+            payload.get("trajectory_command") or "",
+            trajectory_disabled,
+            False,
+        )
+
+    @app.callback(
+        Output("data-clear-confirm-modal", "is_open"),
+        Output("data-clear-confirm-text", "children"),
+        Output("data-clear-kind-store", "data"),
+        Output("data-prep-clear-alert", "children"),
+        Input("data-clear-trajectory-btn", "n_clicks"),
+        Input("data-clear-cancel-btn", "n_clicks"),
+        State("data-folder-input", "value"),
+        State("data-rungroup", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _confirm_index_clear(trajectory_clicks, cancel_clicks, folder_text, selected_base, app_store):
+        if ctx.triggered_id == "data-clear-cancel-btn":
+            return False, no_update, {}, None
+        kind = "trajectory"
+        store = app_store or {}
+        folder = (folder_text or store.get("folder") or "").strip()
+        base = (selected_base or store.get("base") or "").strip()
+        try:
+            payload = svc.dataset_preparation_status(folder, base=base)
+        except Exception as exc:
+            return False, no_update, {}, dbc.Alert(f"无法读取索引状态: {exc}", color="danger", className="py-2")
+        item = payload.get(kind) or {}
+        if str(item.get("state") or "") == "building":
+            return (
+                False,
+                no_update,
+                {},
+                dbc.Alert("索引正在由离线准备程序构建；请先停止该程序后再清理。", color="warning", className="py-2"),
+            )
+        size = _format_bytes(item.get("index_size"))
+        label = "轨迹帧"
+        message = html.Div(
+            [
+                html.P(f"将清理当前数据集的 {label} 索引，预计释放 {size}。"),
+                html.P("不会删除 .route、轨迹或任何 ReacNetGenerator 输出文件。", className="text-muted mb-0"),
+            ]
+        )
+        return True, message, {"kind": kind, "folder": folder, "base": base}, None
+
+    @app.callback(
+        Output("data-clear-confirm-modal", "is_open", allow_duplicate=True),
+        Output("data-prep-clear-alert", "children", allow_duplicate=True),
+        Input("data-clear-confirm-btn", "n_clicks"),
+        State("data-clear-kind-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _clear_confirmed_index(n_clicks, clear_request):
+        if n_clicks is None:
+            raise PreventUpdate
+        request = clear_request or {}
+        try:
+            result = svc.clear_dataset_index(
+                str(request.get("folder") or ""),
+                base=str(request.get("base") or ""),
+                kind=str(request.get("kind") or ""),
+            )
+        except svc.ServiceError as exc:
+            return False, dbc.Alert(str(exc.message), color="danger", className="py-2")
+        return (
+            False,
+            dbc.Alert(
+                f"已清理 {len(result.get('removed') or [])} 个索引文件，释放 {_format_bytes(result.get('released_bytes'))}。",
+                color="success",
+                className="py-2",
+            ),
+        )
+
+    # ── Directory browser (remote server file-system navigation) ──────
+
+    @app.callback(
+        Output("dir-browser-modal", "is_open"),
+        Output("dir-browser-body", "children"),
+        Output("dir-browser-path", "data"),
         Output("data-folder-input", "value", allow_duplicate=True),
         Input("data-pick-btn", "n_clicks"),
+        Input({"type": "dir-browser-entry", "path": ALL}, "n_clicks"),
+        Input("dir-browser-back-btn", "n_clicks"),
+        Input("dir-browser-select-btn", "n_clicks"),
+        Input("dir-browser-cancel-btn", "n_clicks"),
+        State("dir-browser-path", "data"),
         State("data-folder-input", "value"),
         prevent_initial_call=True,
     )
-    def _pick_folder(n_clicks, current_folder):
-        if n_clicks is None:
+    def _handle_dir_browser(pick_clicks, _entry_clicks, back_clicks, select_clicks, cancel_clicks, current_path, folder_input):
+        """Consolidated state machine for the directory browser modal.
+
+        Dispatches on ``ctx.triggered_id``: open, navigate to subdirectory,
+        go up, select current, or cancel.  A guard filters out spurious
+        firings caused by pattern-matching component replacements.
+        """
+        triggered_id = ctx.triggered_id
+        if triggered_id is None:
             raise PreventUpdate
-        try:
-            result = svc.pick_folder_macos(current_folder or "")
-        except svc.ServiceError as exc:
-            return no_update
-        except Exception:
-            return no_update
-        if result.get("canceled"):
-            return no_update
-        path = result.get("path") or ""
-        if path and path != current_folder:
-            return path
-        return no_update
+
+        # --- CANCEL ---------------------------------------------------
+        if triggered_id == "dir-browser-cancel-btn":
+            return False, no_update, no_update, no_update
+
+        # --- OPEN -----------------------------------------------------
+        if triggered_id == "data-pick-btn":
+            initial = (folder_input or "").strip()
+            start_path = _resolve_initial_browse_path(initial)
+            return _build_dir_browser_response(start_path)
+
+        # --- NAVIGATE TO SUBDIR ---------------------------------------
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "dir-browser-entry":
+            # Guard against spurious callback invocations caused by
+            # Dash re-creating pattern-matching components after a
+            # body update (n_clicks resets to None in that case).
+            triggered_value = (ctx.triggered or [{}])[0].get("value")
+            if not triggered_value:
+                raise PreventUpdate
+            target = triggered_id["path"]
+            return _build_dir_browser_response(target)
+
+        # --- GO UP ----------------------------------------------------
+        if triggered_id == "dir-browser-back-btn":
+            stored = (current_path or "").strip()
+            if not stored:
+                raise PreventUpdate
+            try:
+                cur = svc.validate_browse_path(stored)
+                parent = str(cur.parent)
+                svc.validate_browse_path(parent)
+                return _build_dir_browser_response(parent)
+            except svc.ServiceError:
+                return _build_dir_browser_response(
+                    stored, error="已在允许的根目录边界，无法继续返回上一级。"
+                )
+
+        # --- SELECT CURRENT DIR ---------------------------------------
+        if triggered_id == "dir-browser-select-btn":
+            stored = (current_path or "").strip()
+            if not stored:
+                raise PreventUpdate
+            # Store content is browser-side state, so validate it again
+            # before applying it to the dataset form.
+            try:
+                selected = svc.validate_browse_path(stored)
+                if not selected.is_dir():
+                    raise svc.ServiceError("路径不是目录", reason="not_directory")
+            except svc.ServiceError:
+                return _build_dir_browser_response(stored)
+            return False, no_update, no_update, str(selected)
+
+        raise PreventUpdate
 
     @app.callback(
         Output("app-store", "data"),
@@ -387,7 +624,7 @@ def register_callbacks(app: Any) -> None:
         base = (selected_base or "").strip()
         if not folder:
             return (
-                {**store, "folder": "", "base": "", "label": "未选择", "ready_count": 0, "artifacts": {}, "capabilities": {}},
+                {**store, "folder": "", "base": "", "label": "未选择", "ready_count": 0, "artifacts": {}, "capabilities": {}, "readiness": {}},
                 "未选择",
                 "未选择",
                 "未加载数据",
@@ -397,7 +634,7 @@ def register_callbacks(app: Any) -> None:
             status = svc.scan_dataset(folder, base=base)
         except Exception:
             return (
-                {**store, "folder": folder, "base": base, "label": folder, "ready_count": 0, "artifacts": {}, "capabilities": {}},
+                {**store, "folder": folder, "base": base, "label": folder, "ready_count": 0, "artifacts": {}, "capabilities": {}, "readiness": {}},
                 folder,
                 base or folder,
                 "加载失败",
@@ -406,6 +643,7 @@ def register_callbacks(app: Any) -> None:
         dataset = status.get("dataset", {}) or {}
         artifacts = svc.artifacts_from_status(status)
         capabilities = svc.dataset_capabilities(status)
+        readiness = svc.dataset_readiness(status)
         ready = svc.dataset_ready_count(status)
         label = svc.dataset_label(status)
         selected_base_new = dataset.get("selected_base") or base
@@ -416,6 +654,7 @@ def register_callbacks(app: Any) -> None:
             "label": label,
             "ready_count": ready,
             "capabilities": capabilities,
+            "readiness": readiness,
             "artifacts": artifacts,
         }
         status_class = "rs-badge" if ready >= 3 else ("rs-badge rs-bad" if ready <= 1 else "rs-badge")
@@ -423,7 +662,11 @@ def register_callbacks(app: Any) -> None:
             new_store,
             folder,
             label,
-            f"就绪 {ready}/5",
+            "基础 {} · 事件 {} · 轨迹 {}".format(
+                "就绪" if (readiness.get("basic_analysis") or {}).get("ready") else "未就绪",
+                "就绪" if (readiness.get("event_search") or {}).get("ready") else "未就绪",
+                "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
+            ),
             status_class,
         )
 
@@ -655,18 +898,6 @@ def register_callbacks(app: Any) -> None:
             evolution_targets,
             smiles,
         )
-
-    @app.callback(
-        Output("event-species-target", "value"),
-        Input("species-to-event-btn", "n_clicks"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _send_species_to_event(n_clicks, store):
-        if n_clicks is None:
-            raise PreventUpdate
-        store = store or {}
-        return store.get("selected_smiles") or store.get("selected_formula") or ""
 
     # ── Transitions ─────────────────────────────────────────────────
 
@@ -1180,146 +1411,54 @@ def register_callbacks(app: Any) -> None:
     # ── Event evidence ──────────────────────────────────────────────
 
     @app.callback(
-        Output("event-grid", "data"),
-        Output("event-grid", "columns"),
-        Output("event-alert", "children"),
-        Output("event-grid-store", "data"),
-        Input("event-species-btn", "n_clicks"),
-        State("event-species-target", "value"),
-        State("event-match-mode", "value"),
-        State("event-mode", "value"),
-        State("event-before", "value"),
-        State("event-after", "value"),
-        State("event-max", "value"),
-        State("event-species-file", "value"),
-        State("event-trajectory-file", "value"),
-        State("event-route-file", "value"),
-        State("event-include-route", "value"),
-        State("event-atom-scope", "value"),
-        State("event-type-element-map", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _locate_species_events(
-        n_clicks,
-        target,
-        match_mode,
-        event_mode,
-        before,
-        after,
-        max_events,
-        species_file,
-        trajectory_file,
-        route_file,
-        include_route,
-        atom_scope,
-        type_element_map,
-        store,
-    ):
-        if n_clicks is None:
-            raise PreventUpdate
-        artifacts = (store or {}).get("artifacts", {}) or {}
-        config = {
-            "target": target or "",
-            "match_mode": match_mode or "auto",
-            "event_mode": event_mode or "appear",
-            "before_frames": int(before or 3),
-            "after_frames": int(after or 3),
-            "species_file": species_file or "",
-            "trajectory_file": trajectory_file or "",
-            "route_file": route_file or "",
-            "include_route_trace": bool(include_route),
-            "trajectory_atom_scope": atom_scope or "event",
-            "type_element_map": type_element_map or "",
-        }
-        try:
-            request = {key: value for key, value in config.items() if key != "target"}
-            payload = svc.locate_species_events(artifacts, config["target"], max_events=int(max_events or 12), **request)
-        except svc.ServiceError as exc:
-            return [], _event_columns(), str(exc.message), {"rows": [], "kind": "species", "config": config}
-        rows = [{**row, "event_class": "物种事件"} for row in (payload.get("rows") or [])]
-        message = (payload.get("meta") or {}).get("message") or f"找到 {len(rows)} 个物种事件"
-        return rows, _event_columns(rows), message, {"rows": rows, "meta": payload.get("meta", {}), "kind": "species", "config": config}
-
-    @app.callback(
         Output("event-grid", "data", allow_duplicate=True),
         Output("event-grid", "columns", allow_duplicate=True),
         Output("event-alert", "children", allow_duplicate=True),
         Output("event-grid-store", "data", allow_duplicate=True),
         Input("event-rxn-btn", "n_clicks"),
-        Input("transitions-to-event-btn", "n_clicks"),
         State("event-reaction-text", "value"),
         State("event-rxn-before", "value"),
         State("event-rxn-after", "value"),
         State("event-rxn-max", "value"),
-        State("event-species-file", "value"),
-        State("event-trajectory-file", "value"),
-        State("event-route-file", "value"),
-        State("event-type-element-map", "value"),
         State("app-store", "data"),
-        State("transitions-grid", "selected_rows"),
-        State("transitions-grid", "data"),
         prevent_initial_call=True,
     )
     def _locate_reaction_events(
         rxn_clicks,
-        transition_clicks,
         reaction_text,
         before,
         after,
         max_events,
-        species_file,
-        trajectory_file,
-        route_file,
-        type_element_map,
         store,
-        transition_selected_rows,
-        transition_rows,
     ):
-        if ctx.triggered_id == "transitions-to-event-btn":
-            if not transition_selected_rows:
-                raise PreventUpdate
-            transition_rows = transition_rows or []
-            index = int(transition_selected_rows[0])
-            if index < 0 or index >= len(transition_rows):
-                raise PreventUpdate
-            reaction_text = str((transition_rows[index] or {}).get("reaction_smiles") or "")
-            n_clicks = transition_clicks
-        else:
-            n_clicks = rxn_clicks
-        if n_clicks is None:
+        if rxn_clicks is None:
             raise PreventUpdate
         artifacts = (store or {}).get("artifacts", {}) or {}
         config = {
             "reaction_text": reaction_text or "",
-            "before_frames": int(before or 5),
-            "after_frames": int(after or 5),
-            "max_events": int(max_events or 12),
-            "species_file": species_file or "",
-            "trajectory_file": trajectory_file or "",
-            "route_file": route_file or "",
-            "type_element_map": type_element_map or "",
+            "before_frames": int(before or 3),
+            "after_frames": int(after or 3),
+            "max_events": int(max_events or 100),
         }
         try:
-            request = {key: value for key, value in config.items() if key != "reaction_text"}
-            payload = svc.locate_reaction_events(artifacts, config["reaction_text"], **request)
+            payload = svc.locate_rng_events(
+                artifacts,
+                config["reaction_text"],
+                max_events=config["max_events"],
+            )
         except svc.ServiceError as exc:
-            return [], _event_columns(), str(exc.message), {"rows": [], "kind": "reaction", "config": config}
-        verified = [{**row, "event_class": "已验证"} for row in (payload.get("rows") or [])]
-        candidates = [{**row, "event_class": "相关候选"} for row in (payload.get("candidate_rows") or [])]
-        rows = [*verified, *candidates]
+            empty = {"rows": [], "kind": "rng_event", "config": config}
+            return [], _event_columns(), str(exc.message), empty
+        rows = payload.get("rows") or []
         meta = payload.get("meta") or {}
-        discarded = len(payload.get("discarded_rows") or [])
-        message = meta.get("message") or f"已验证 {len(verified)} 个；相关候选 {len(candidates)} 个；已丢弃 {discarded} 个"
-        return rows, _event_columns(rows), message, {
+        message = meta.get("message") or f"从 RNG 输出中找到 {len(rows)} 条事件"
+        workflow = {
             "rows": rows,
             "meta": meta,
-            "kind": "reaction",
+            "kind": "rng_event",
             "config": config,
-            "verified_rows": verified,
-            "candidate_rows": candidates,
-            "discarded_rows": payload.get("discarded_rows") or [],
         }
+        return rows, _event_columns(rows), message, workflow
 
     @app.callback(
         Output("event-grid", "selected_rows"),
@@ -1331,7 +1470,7 @@ def register_callbacks(app: Any) -> None:
         prevent_initial_call=True,
     )
     def _reset_event_workspace(_workflow):
-        """A new locate/dedup run invalidates the former selection and viewer."""
+        """A new RNG event query invalidates the former selection and viewer."""
         return [], None, {"display": "none"}, None, {"display": "none"}
 
     @app.callback(
@@ -1353,7 +1492,7 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         workflow = grid_store or {}
         kind = workflow.get("kind") or ""
-        if kind not in {"reaction", "species"}:
+        if kind != "rng_event":
             raise PreventUpdate
         selected = {"row": table_rows[row_idx] or {}, "kind": kind, "config": workflow.get("config") or {}}
         event_id = str(selected["row"].get("event_id") or "")
@@ -1384,39 +1523,15 @@ def register_callbacks(app: Any) -> None:
         kind = selected.get("kind") or ""
         artifacts = (store or {}).get("artifacts", {}) or {}
         try:
-            if kind == "reaction":
-                payload = svc.extract_reaction_event(
+            if kind == "rng_event":
+                viewer = svc.build_rng_event_visualization(
                     artifacts,
-                    config.get("reaction_text") or row.get("reaction_smiles") or "",
-                    str(row.get("event_id") or ""),
-                    species_file=config.get("species_file") or "",
-                    trajectory_file=config.get("trajectory_file") or "",
-                    route_file=config.get("route_file") or "",
-                    type_element_map=config.get("type_element_map") or "",
-                    before_frames=int(config.get("before_frames") or 5),
-                    after_frames=int(config.get("after_frames") or 5),
-                    max_events=int(config.get("max_events") or 12),
-                    inline_viewer=True,
-                )
-            elif kind == "species":
-                payload = svc.extract_species_event(
-                    artifacts,
-                    config.get("target") or "",
-                    int(row.get("anchor_frame")),
-                    species_file=config.get("species_file") or "",
-                    trajectory_file=config.get("trajectory_file") or "",
-                    route_file=config.get("route_file") or "",
-                    match_mode=config.get("match_mode") or "auto",
-                    event_mode=config.get("event_mode") or "appear",
+                    row,
                     before_frames=int(config.get("before_frames") or 3),
                     after_frames=int(config.get("after_frames") or 3),
-                    include_route_trace=bool(config.get("include_route_trace")),
-                    trajectory_atom_scope=config.get("trajectory_atom_scope") or "event",
-                    type_element_map=config.get("type_element_map") or "",
                 )
             else:
                 raise svc.ServiceError("请先从定位结果中选择一个事件", reason="missing_selection")
-            viewer = svc.build_event_visualization(payload)
         except (svc.ServiceError, TypeError, ValueError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
             return None, {"display": "none"}, [], [], 0, 0, 0, {}, [], message
@@ -1448,7 +1563,7 @@ def register_callbacks(app: Any) -> None:
             ],
             className="rs-stat-row",
         )
-        path_items = [f"局部轨迹: {paths.get('trajectory') or '-'}", f"VMD: {paths.get('vmd') or '-'}"]
+        path_items = [f"轨迹: {paths.get('trajectory') or '-'}"]
         if paths.get("type_map"):
             path_items.append(f"类型映射: {paths['type_map']}")
         return viewer, {"display": "block"}, summary, " · ".join(path_items), 0, len(frames) - 1, anchor_index, marks, storyboard, "局部轨迹已提取，可在下方逐帧核查反应上下文。"
@@ -1526,33 +1641,6 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None:
             raise PreventUpdate
         return {"type": "png", "action": "download", "filename": "observation_network"}
-
-    # ── Event dedup analysis ────────────────────────────────────────
-
-    @app.callback(
-        Output("event-grid", "data", allow_duplicate=True),
-        Output("event-grid", "columns", allow_duplicate=True),
-        Output("event-alert", "children", allow_duplicate=True),
-        Output("event-grid-store", "data", allow_duplicate=True),
-        Input("event-dedup-btn", "n_clicks"),
-        State("event-reaction-text", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _run_event_dedup(n_clicks, reaction_text, store):
-        if n_clicks is None:
-            raise PreventUpdate
-        artifacts = (store or {}).get("artifacts", {}) or {}
-        try:
-            payload = svc.analyze_event_recrossing(
-                artifacts,
-                reaction_text or "",
-            )
-        except svc.ServiceError as exc:
-            return [], _event_columns(), str(exc.message), {"rows": []}
-        rows = payload.get("rows") or []
-        message = (payload.get("meta") or {}).get("message") or None
-        return rows, _event_columns(rows), message, {"rows": rows, "meta": payload.get("meta", {}), "kind": "dedup"}
 
     # ── Literature mechanism verification ────────────────────────────
 
@@ -1815,6 +1903,162 @@ def register_callbacks(app: Any) -> None:
         return (folder or "", options, scan_msg, artifact_html)
 
 
+# ── Directory browser helpers ───────────────────────────────────────
+
+
+def _resolve_initial_browse_path(folder_input: str) -> str:
+    """Determine the starting path for the directory browser.
+
+    If *folder_input* is a valid, existing directory within the allowed
+    roots, use it.  Otherwise fall back to the first allowed root.
+    """
+    from pathlib import Path
+
+    candidate = folder_input.strip()
+    if candidate:
+        try:
+            resolved = svc.validate_browse_path(candidate)
+            if resolved.is_dir():
+                return str(resolved)
+        except svc.ServiceError:
+            pass
+    # A deployment may configure roots that exclude the service account's
+    # home directory.  Start at the first permitted root in that case so the
+    # browser opens successfully instead of immediately showing an error.
+    for root in svc.ALLOWED_ROOTS:
+        if root.is_dir():
+            return str(root)
+    return str(Path.home())
+
+
+def _build_dir_browser_response(path_str: str, error: str = "") -> tuple:
+    """Call ``list_directory`` and build the Dash callback response tuple.
+
+    Returns ``(is_open, body_children, path_data, data_folder_value)``.
+    """
+    try:
+        data = svc.list_directory(path_str)
+    except svc.ServiceError as exc:
+        body = _render_dir_browser_error(str(exc.message), path_str)
+        return True, body, path_str, no_update
+    body = _render_dir_browser_body(data, error=error)
+    return True, body, data["current_path"], no_update
+
+
+def _render_dir_browser_error(message: str, attempted_path: str = "") -> Any:
+    """Render an error state inside the directory browser modal body."""
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("当前位置：", className="text-muted", style={"fontSize": "12px"}),
+                    html.Code(
+                        attempted_path or "—",
+                        style={"fontSize": "13px", "wordBreak": "break-all"},
+                    ),
+                ],
+                className="mb-2",
+            ),
+            dbc.Button(
+                "⬑ 返回上一级",
+                id="dir-browser-back-btn",
+                color="secondary",
+                size="sm",
+                outline=True,
+                disabled=True,
+                className="mb-2",
+            ),
+            html.Hr(className="my-2"),
+            html.Div(
+                [
+                    html.Span("⚠ ", style={"fontSize": "16px"}),
+                    html.Span(message),
+                ],
+                className="text-danger py-3 text-center",
+            ),
+        ]
+    )
+
+
+def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
+    """Render the directory browser modal body from *data*."""
+    current_path = data["current_path"]
+    can_go_up = data.get("can_go_up", False)
+    subdirs: list[dict[str, Any]] = data.get("subdirs", [])
+
+    # ── Path display + back button ──────────────────────────────────
+    header_children: list[Any] = [
+        html.Div(
+            [
+                html.Span("当前位置：", className="text-muted", style={"fontSize": "12px"}),
+                html.Code(current_path, style={"fontSize": "13px", "wordBreak": "break-all"}),
+            ],
+            className="mb-2",
+        ),
+        dbc.Button(
+            "⬑ 返回上一级",
+            id="dir-browser-back-btn",
+            color="secondary",
+            size="sm",
+            outline=True,
+            disabled=not can_go_up,
+            className="mb-2",
+        ),
+    ]
+
+    # ── Inline error (e.g. "cannot go up further") ──────────────────
+    if error:
+        header_children.append(
+            html.Div(error, className="text-warning small mb-2")
+        )
+
+    # ── Subdirectory list ────────────────────────────────────────────
+    if not subdirs:
+        dir_list: Any = html.Div(
+            "当前目录没有子文件夹", className="text-muted text-center py-3"
+        )
+    else:
+        items: list[Any] = []
+        for d in subdirs:
+            name: str = d.get("name", "")
+            accessible: bool = bool(d.get("accessible", True))
+            if accessible:
+                items.append(
+                    dbc.Button(
+                        name,
+                        id={"type": "dir-browser-entry", "path": d["path"]},
+                        color="light",
+                        size="sm",
+                        className="d-block w-100 text-start mb-1",
+                        style={
+                            "border": "1px solid #dee2e6",
+                            "textAlign": "left",
+                        },
+                    )
+                )
+            else:
+                items.append(
+                    html.Div(
+                        [
+                            html.Span(name),
+                            html.Span(
+                                " (无权限)", className="text-muted", style={"fontSize": "11px"}
+                            ),
+                        ],
+                        className="text-muted small py-1 px-2",
+                        style={"opacity": "0.45"},
+                    )
+                )
+        dir_list = html.Div(
+            items,
+            style={"maxHeight": "380px", "overflowY": "auto"},
+        )
+
+    return html.Div(
+        [*header_children, html.Hr(className="my-2"), dir_list]
+    )
+
+
 # ── Shared column factories ─────────────────────────────────────────
 
 
@@ -1902,24 +2146,18 @@ def _event_columns(rows=None):
     preferred = [
         "event_class",
         "event_index",
-        "candidate_index",
         "event_id",
-        "event_type",
+        "timestep_index",
+        "before_timestep",
+        "after_timestep",
+        "reactant",
+        "product",
+        "atom_count",
+        "atom_ids",
+        "association_status",
+        "reactant_bonds",
+        "product_bonds",
         "anchor_frame",
-        "route_event_start_frame",
-        "route_event_end_frame",
-        "window_start",
-        "window_end",
-        "n_window_frames",
-        "count_at_frame",
-        "delta_from_prev",
-        "matched_smiles_at_anchor",
-        "event_resolution_label",
-        "verification_status",
-        "route_context_atom_count",
-        "route_context_atom_ids",
-        "route_event_atom_count",
-        "route_event_atom_ids",
         "reaction_smiles",
     ]
     return _columns_from_rows(rows or [], preferred)

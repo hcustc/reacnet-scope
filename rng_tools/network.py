@@ -263,6 +263,10 @@ class ReactionNetwork:
             else:
                 merged[k] = Reaction(rxn.reactant_smiles, rxn.product_smiles, rxn.tp)
         self.reactions = list(merged.values())
+        # Reverse-reaction lookups are used while building reports and
+        # tracing paths.  Keeping this index avoids an O(number of reactions)
+        # scan for every queried channel.
+        self._reaction_by_key: Dict[str, Reaction] = merged
 
         # Build species inventory
         self.species: Dict[str, SpeciesInfo] = {}
@@ -328,10 +332,7 @@ class ReactionNetwork:
         """Find the reverse reaction (products→reactants) if it exists."""
         rev_key = '+'.join(sorted(rxn.product_smiles)) + '->' + \
                   '+'.join(sorted(rxn.reactant_smiles))
-        for r in self.reactions:
-            if r.key == rev_key:
-                return r
-        return None
+        return self._reaction_by_key.get(rev_key)
 
     def net_flux(self, rxn: Reaction) -> Tuple[int, int, int, bool]:
         """Compute net flux for a reaction.

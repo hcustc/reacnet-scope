@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import os
+import tempfile
 from pathlib import Path
 
 from scripts.webapp.server import (
@@ -20,6 +22,18 @@ class ReactionFirstFixtureTests(unittest.TestCase):
         cls.query = _prepare_reaction_query((FIXTURE_DIR / "reaction.smiles").read_text().strip())
         cls.route_file = str(FIXTURE_DIR / "event.route")
         cls.species_file = str(FIXTURE_DIR / "event.species")
+        cls._cache_dir = tempfile.TemporaryDirectory()
+        cls._previous_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR")
+        os.environ["REACNET_SCOPE_CACHE_DIR"] = cls._cache_dir.name
+        ROUTE_TRANSITION_INDEX_STORE.build(cls.route_file)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._previous_cache is None:
+            os.environ.pop("REACNET_SCOPE_CACHE_DIR", None)
+        else:
+            os.environ["REACNET_SCOPE_CACHE_DIR"] = cls._previous_cache
+        cls._cache_dir.cleanup()
 
     def test_route_fixture_resolves_forward_transition(self) -> None:
         result = ROUTE_TRANSITION_INDEX_STORE.query_reaction_hits(self.route_file, self.query)
