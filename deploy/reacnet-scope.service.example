@@ -1,0 +1,28 @@
+[Unit]
+Description=ReacNet Scope Dash
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reacnet
+Group=reacnet
+WorkingDirectory=/opt/reacnet-scope
+EnvironmentFile=/etc/reacnet-scope.env
+ExecStart=/opt/reacnet-scope/.venv/bin/gunicorn -c deploy/gunicorn.conf.py scripts.webapp_dash.wsgi:server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/srv/reacnet-data /mnt/reacnet-data
+ReadWritePaths=/srv/reacnet-cache
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
