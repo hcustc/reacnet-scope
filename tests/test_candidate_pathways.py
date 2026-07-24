@@ -13,9 +13,11 @@ from rng_tools.pathways import (
     CandidatePath,
     CandidatePathResult,
     PathwayStep,
+    find_candidate_paths,
     score_path,
     score_step,
 )
+from rng_tools.network import Reaction, ReactionNetwork
 
 
 def test_evidence_linked_step_score_uses_v1_weights() -> None:
@@ -327,6 +329,317 @@ def test_pathway_result_serializes_decimals_and_enums_without_rounding() -> None
     assert payload["query"]["threshold"] == "0.12345678901234567890"
     assert payload["source_signatures"] == {"status": {"value": "1.2300"}}
     json.dumps(payload)
+
+
+def test_hyperedge_branches_retain_all_stoichiometric_terms() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A", "X"), ("B", "C"), 20),
+            Reaction(("B",), ("D",), 10),
+            Reaction(("C",), ("E",), 8),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=2, max_paths=10)
+
+    first_steps = [path.steps[0] for path in result.paths]
+    assert {step.focal_output for step in first_steps} >= {"B", "C"}
+    assert all(step.reactants == ("A", "X") for step in first_steps)
+    assert all(step.products == ("B", "C") for step in first_steps)
+
+
+def test_upstream_traversal_is_symmetric_and_retains_recorded_orientation() -> None:
+    net = ReactionNetwork([Reaction(("A", "X"), ("B", "C"), 20)])
+
+    result = find_candidate_paths(
+        net,
+        "C",
+        direction="upstream",
+        max_depth=1,
+        max_paths=10,
+    )
+
+    assert [path.species for path in result.paths] == [
+        ("C", "A"),
+        ("C", "X"),
+    ]
+    for path in result.paths:
+        step = path.steps[0]
+        assert step.traversal_direction == "upstream"
+        assert step.reactants == ("A", "X")
+        assert step.products == ("B", "C")
+        assert step.focal_input == "C"
+
+
+def test_candidate_paths_never_revisit_a_focal_species() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("B", "X"), ("A",), 7),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=3)
+
+    assert [path.species for path in result.paths] == [("A", "B")]
+    assert all(len(path.species) == len(set(path.species)) for path in result.paths)
+
+
+def test_reverse_dominated_and_below_directionality_branches_are_filtered() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 4),
+            Reaction(("B",), ("A",), 9),
+            Reaction(("A",), ("C",), 100),
+            Reaction(("C",), ("A",), 96),
+            Reaction(("A",), ("D",), 10),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=1)
+
+    assert [path.species for path in result.paths] == [("A", "D")]
+
+
+def test_max_branches_is_applied_after_deterministic_ordering() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("Z",), 10),
+            Reaction(("A",), ("B",), 10),
+            Reaction(("A",), ("C",), 20),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=1, max_branches=2)
+
+    assert [path.species for path in result.paths] == [
+        ("A", "C"),
+        ("A", "B"),
+    ]
+
+
+def test_paths_sort_by_score_species_and_reaction_keys() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A", "Y"), ("B",), 10),
+            Reaction(("A", "X"), ("B",), 10),
+            Reaction(("A",), ("C",), 20),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=1)
+
+    assert [path.score for path in result.paths] == sorted(
+        (path.score for path in result.paths),
+        reverse=True,
+    )
+    tied = [path for path in result.paths if path.species == ("A", "B")]
+    assert [path.steps[0].reaction_key for path in tied] == [
+        "A+X->B",
+        "A+Y->B",
+    ]
+
+
+def test_max_expansions_returns_deterministic_partial_results() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("A",), ("C",), 10),
+            Reaction(("B",), ("D",), 10),
+            Reaction(("C",), ("E",), 10),
+        ]
+    )
+
+    first = find_candidate_paths(net, "A", max_depth=3, max_expansions=1)
+    second = find_candidate_paths(net, "A", max_depth=3, max_expansions=1)
+
+    assert first == second
+    assert [path.species for path in first.paths] == [("A", "B"), ("A", "C")]
+    assert first.expansions == 1
+    assert first.truncated is True
+
+
+def test_absent_start_has_specific_reason() -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B",), 10)])
+
+    result = find_candidate_paths(net, "missing")
+
+    assert result.paths == ()
+    assert result.reason == "species_absent"
+    assert result.expansions == 0
+
+
+def test_present_start_without_positive_net_continuation_has_specific_reason() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 5),
+            Reaction(("B",), ("A",), 10),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A")
+
+    assert result.paths == ()
+    assert result.reason == "no_positive_net_continuation"
+
+
+def test_threshold_removal_has_specific_reason() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("B",), ("A",), 9),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", min_directionality=0.2)
+
+    assert result.paths == ()
+    assert result.reason == "filtered_by_thresholds"
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    [
+        ("max_depth", 0),
+        ("max_depth", 13),
+        ("max_branches", 0),
+        ("max_branches", 101),
+        ("max_paths", 0),
+        ("max_paths", 501),
+        ("max_expansions", 0),
+        ("max_expansions", 1_000_001),
+        ("min_net_tp", 0),
+        ("min_directionality", -0.01),
+        ("min_directionality", 1.01),
+    ],
+)
+def test_candidate_path_query_rejects_out_of_bounds_limits(
+    keyword: str,
+    value: int | float,
+) -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B",), 10)])
+
+    with pytest.raises(ValueError, match=keyword):
+        find_candidate_paths(net, "A", **{keyword: value})
+
+
+def test_candidate_path_query_rejects_an_unknown_direction() -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B",), 10)])
+
+    with pytest.raises(ValueError, match="direction"):
+        find_candidate_paths(net, "A", direction="sideways")
+
+
+def test_result_query_records_all_limits_and_candidate_disclaimer() -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B",), 10)])
+
+    result = find_candidate_paths(net, "A")
+    payload = result.as_dict()
+
+    assert payload["query"] == {
+        "start_smiles": "A",
+        "direction": "downstream",
+        "max_depth": 3,
+        "max_branches": 5,
+        "max_paths": 20,
+        "max_expansions": 5000,
+        "min_net_tp": 1,
+        "min_directionality": 0.05,
+        "score_version": "candidate-path/v1",
+        "interpretation": "candidate route, not mechanistic proof",
+    }
+    assert payload["source_signatures"] == {}
+    assert payload["evidence_status"] == "network_only"
+    assert payload["score_version"] == "candidate-path/v1"
+
+
+class _RecordingEvidenceProvider:
+    source_signatures = {"event_index": {"signature": "fixture"}}
+
+    def __init__(self, summaries: dict[str, dict[str, object]]) -> None:
+        self.summaries = summaries
+        self.calls: list[tuple[str, ...]] = []
+
+    def reaction_summaries(
+        self,
+        reaction_keys: tuple[str, ...],
+    ) -> dict[str, dict[str, object]]:
+        self.calls.append(reaction_keys)
+        return self.summaries
+
+
+def test_evidence_is_prefetched_once_and_applied_without_expansion_io() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("B",), ("C",), 8),
+        ]
+    )
+    provider = _RecordingEvidenceProvider(
+        {
+            "A->B": {
+                "total_events": 4,
+                "matched_events": 3,
+                "distinct_intervals": 2,
+                "available_intervals": 10,
+                "source_references": ("events.sqlite3",),
+            },
+            "B->C": {
+                "total_events": 2,
+                "matched_events": 2,
+                "distinct_intervals": 1,
+                "available_intervals": 10,
+                "source_references": ("events.sqlite3",),
+            },
+        }
+    )
+
+    result = find_candidate_paths(
+        net,
+        "A",
+        max_depth=2,
+        evidence_provider=provider,
+    )
+
+    assert provider.calls == [("A->B", "B->C")]
+    assert result.source_signatures == provider.source_signatures
+    assert result.paths[0].evidence_status == "evidence_linked"
+    assert result.paths[0].steps[0].event_coverage == pytest.approx(3 / 4)
+    assert result.paths[0].steps[0].time_coverage == pytest.approx(2 / 10)
+
+
+def test_search_does_not_treat_partial_score_as_an_upper_bound() -> None:
+    reactions = [
+        Reaction(("A",), ("C",), 10),
+        Reaction(("A",), ("B",), 10),
+        Reaction(("C",), ("X",), 10),
+        Reaction(("X",), ("C",), 4),
+        Reaction(("C",), ("Y",), 10),
+        Reaction(("Y",), ("C",), 4),
+        Reaction(("B",), ("Z",), 10),
+    ]
+    provider = _RecordingEvidenceProvider(
+        {
+            reaction.key: {
+                "total_events": 1,
+                "matched_events": int(reaction.key in {"A->C", "B->Z"}),
+                "distinct_intervals": int(reaction.key in {"A->C", "B->Z"}),
+                "available_intervals": 1,
+            }
+            for reaction in reactions
+        }
+    )
+
+    result = find_candidate_paths(
+        ReactionNetwork(reactions),
+        "A",
+        max_depth=2,
+        max_paths=1,
+        max_branches=5,
+        evidence_provider=provider,
+    )
+
+    assert result.paths[0].species == ("A", "B", "Z")
 
 
 def _step(

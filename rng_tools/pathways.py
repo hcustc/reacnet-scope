@@ -11,10 +11,14 @@ from collections.abc import Set
 from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal
 from enum import Enum
+import heapq
+import itertools
 import math
 from numbers import Real
 from os import PathLike
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
+
+from rng_tools.network import Reaction, ReactionNetwork
 
 
 SCORE_VERSION = "candidate-path/v1"
@@ -210,3 +214,423 @@ def _validate_event_counts(
         raise ValueError("event counts must be nonnegative integers")
     if matched_event_total > event_total:
         raise ValueError("matched event count must not exceed total event count")
+
+
+@dataclass(frozen=True)
+class _SearchState:
+    species: tuple[str, ...]
+    steps: tuple[PathwayStep, ...]
+    step_scores: tuple[float, ...]
+    score: float | None
+
+
+def find_candidate_paths(
+    network: ReactionNetwork,
+    start_smiles: str,
+    *,
+    direction: Literal["downstream", "upstream"] = "downstream",
+    max_depth: int = 3,
+    max_branches: int = 5,
+    max_paths: int = 20,
+    max_expansions: int = 5000,
+    min_net_tp: int = 1,
+    min_directionality: float = 0.05,
+    evidence_provider: EvidenceProvider | None = None,
+) -> CandidatePathResult:
+    """Enumerate bounded, loopless candidate routes without implying proof.
+
+    Search is best-first, but partial scores are used only for queue ordering.
+    They are not admissible upper bounds on completed path scores, so the
+    search remains exhaustive unless the explicit expansion cap is reached.
+    """
+    _validate_query(
+        direction=direction,
+        max_depth=max_depth,
+        max_branches=max_branches,
+        max_paths=max_paths,
+        max_expansions=max_expansions,
+        min_net_tp=min_net_tp,
+        min_directionality=min_directionality,
+    )
+    query = {
+        "start_smiles": start_smiles,
+        "direction": direction,
+        "max_depth": max_depth,
+        "max_branches": max_branches,
+        "max_paths": max_paths,
+        "max_expansions": max_expansions,
+        "min_net_tp": min_net_tp,
+        "min_directionality": min_directionality,
+        "score_version": SCORE_VERSION,
+        "interpretation": "candidate route, not mechanistic proof",
+    }
+
+    if start_smiles not in network.species:
+        return CandidatePathResult(
+            paths=(),
+            query=query,
+            source_signatures={},
+            reason="species_absent",
+            truncated=False,
+            expansions=0,
+        )
+
+    evidence_summaries, source_signatures = _prefetch_evidence(
+        network,
+        evidence_provider,
+    )
+    sequence = itertools.count()
+    root = _SearchState(
+        species=(start_smiles,),
+        steps=(),
+        step_scores=(),
+        score=None,
+    )
+    queue: list[
+        tuple[
+            float,
+            tuple[str, ...],
+            tuple[str, ...],
+            int,
+            _SearchState,
+        ]
+    ] = [
+        (
+            -1.0,
+            root.species,
+            (),
+            next(sequence),
+            root,
+        )
+    ]
+    completed: list[_SearchState] = []
+    expansions = 0
+    root_had_positive = False
+    root_had_threshold_match = False
+
+    while queue:
+        priority = heapq.heappop(queue)
+        state = priority[-1]
+        if len(state.steps) >= max_depth:
+            completed.append(state)
+            continue
+
+        next_steps, had_positive, had_threshold_match = _candidate_steps(
+            network=network,
+            focal_species=state.species[-1],
+            visited_species=frozenset(state.species),
+            direction=direction,
+            min_net_tp=min_net_tp,
+            min_directionality=min_directionality,
+            evidence_summaries=evidence_summaries,
+            evidence_available=evidence_provider is not None,
+        )
+        if not state.steps:
+            root_had_positive = had_positive
+            root_had_threshold_match = had_threshold_match
+        if not next_steps:
+            if state.steps:
+                completed.append(state)
+            continue
+        if expansions >= max_expansions:
+            heapq.heappush(queue, priority)
+            break
+
+        expansions += 1
+        children: list[_SearchState] = []
+        for step in next_steps:
+            child_step_scores = (*state.step_scores, step.score)
+            child = _SearchState(
+                species=(*state.species, step.focal_output),
+                steps=(*state.steps, step),
+                step_scores=child_step_scores,
+                score=score_path(child_step_scores),
+            )
+            children.append(child)
+
+        children.sort(key=_state_sort_key)
+        for child in children[:max_branches]:
+            heapq.heappush(
+                queue,
+                (
+                    -_required_state_score(child),
+                    child.species,
+                    tuple(step.reaction_key for step in child.steps),
+                    next(sequence),
+                    child,
+                ),
+            )
+
+    truncated = bool(queue)
+    result_states = completed
+    if truncated:
+        result_states = [
+            *completed,
+            *(item[-1] for item in queue if item[-1].steps),
+        ]
+    ordered_states = sorted(result_states, key=_state_sort_key)[:max_paths]
+    paths = tuple(
+        CandidatePath(
+            rank=rank,
+            species=state.species,
+            steps=state.steps,
+            score=_required_state_score(state),
+        )
+        for rank, state in enumerate(ordered_states, start=1)
+    )
+
+    if paths:
+        reason = "ok"
+    elif not root_had_positive:
+        reason = "no_positive_net_continuation"
+    elif not root_had_threshold_match:
+        reason = "filtered_by_thresholds"
+    else:
+        reason = "no_positive_net_continuation"
+    return CandidatePathResult(
+        paths=paths,
+        query=query,
+        source_signatures=source_signatures,
+        reason=reason,
+        truncated=truncated,
+        expansions=expansions,
+    )
+
+
+def _validate_query(
+    *,
+    direction: str,
+    max_depth: int,
+    max_branches: int,
+    max_paths: int,
+    max_expansions: int,
+    min_net_tp: int,
+    min_directionality: float,
+) -> None:
+    if direction not in {"downstream", "upstream"}:
+        raise ValueError("direction must be 'downstream' or 'upstream'")
+    _validate_int_bound("max_depth", max_depth, 1, 12)
+    _validate_int_bound("max_branches", max_branches, 1, 100)
+    _validate_int_bound("max_paths", max_paths, 1, 500)
+    _validate_int_bound("max_expansions", max_expansions, 1, 1_000_000)
+    _validate_int_bound("min_net_tp", min_net_tp, 1, None)
+    _validate_unit_metric("min_directionality", min_directionality)
+
+
+def _validate_int_bound(
+    name: str,
+    value: int,
+    minimum: int,
+    maximum: int | None,
+) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        upper = f" and <= {maximum}" if maximum is not None else ""
+        raise ValueError(f"{name} must be >= {minimum}{upper}")
+
+
+def _prefetch_evidence(
+    network: ReactionNetwork,
+    evidence_provider: EvidenceProvider | None,
+) -> tuple[Mapping[str, Mapping[str, Any]], Mapping[str, Any]]:
+    if evidence_provider is None:
+        return {}, {}
+    reaction_keys = tuple(sorted(reaction.key for reaction in network.reactions))
+    summaries = evidence_provider.reaction_summaries(reaction_keys)
+    signatures: Any = getattr(evidence_provider, "source_signatures", {})
+    if callable(signatures):
+        signatures = signatures()
+    if not isinstance(signatures, Mapping):
+        raise ValueError("evidence provider source_signatures must be a mapping")
+    return summaries, signatures
+
+
+def _candidate_steps(
+    *,
+    network: ReactionNetwork,
+    focal_species: str,
+    visited_species: frozenset[str],
+    direction: Literal["downstream", "upstream"],
+    min_net_tp: int,
+    min_directionality: float,
+    evidence_summaries: Mapping[str, Mapping[str, Any]],
+    evidence_available: bool,
+) -> tuple[list[PathwayStep], bool, bool]:
+    if direction == "downstream":
+        indexed_reactions = network.consume_idx.get(focal_species, ())
+    else:
+        indexed_reactions = network.produce_idx.get(focal_species, ())
+
+    reactions_by_key: dict[str, Reaction] = {}
+    for reaction in indexed_reactions:
+        reactions_by_key.setdefault(reaction.key, reaction)
+
+    positive_candidates: list[
+        tuple[Reaction, str, int, int, int, float]
+    ] = []
+    had_positive = False
+    for reaction_key in sorted(reactions_by_key):
+        reaction = reactions_by_key[reaction_key]
+        forward_tp, reverse_tp, signed_net, _ = network.net_flux(reaction)
+        if signed_net <= 0:
+            continue
+        had_positive = True
+        directionality = signed_net / forward_tp if forward_tp > 0 else 0.0
+        outputs = (
+            reaction.product_smiles
+            if direction == "downstream"
+            else reaction.reactant_smiles
+        )
+        for focal_output in sorted(set(outputs)):
+            if focal_output in visited_species:
+                continue
+            positive_candidates.append(
+                (
+                    reaction,
+                    focal_output,
+                    forward_tp,
+                    reverse_tp,
+                    signed_net,
+                    directionality,
+                )
+            )
+
+    threshold_candidates = [
+        candidate
+        for candidate in positive_candidates
+        if candidate[4] >= min_net_tp
+        and candidate[5] >= min_directionality
+    ]
+    if not threshold_candidates:
+        return [], had_positive, False
+
+    net_total = sum(candidate[4] for candidate in threshold_candidates)
+    steps = [
+        _build_step(
+            reaction=reaction,
+            direction=direction,
+            focal_input=focal_species,
+            focal_output=focal_output,
+            forward_tp=forward_tp,
+            reverse_tp=reverse_tp,
+            net_tp=net_tp,
+            net_share=net_tp / net_total,
+            directionality=directionality,
+            evidence_summary=evidence_summaries.get(reaction.key),
+            evidence_available=evidence_available,
+        )
+        for (
+            reaction,
+            focal_output,
+            forward_tp,
+            reverse_tp,
+            net_tp,
+            directionality,
+        ) in threshold_candidates
+    ]
+    return steps, had_positive, True
+
+
+def _build_step(
+    *,
+    reaction: Reaction,
+    direction: Literal["downstream", "upstream"],
+    focal_input: str,
+    focal_output: str,
+    forward_tp: int,
+    reverse_tp: int,
+    net_tp: int,
+    net_share: float,
+    directionality: float,
+    evidence_summary: Mapping[str, Any] | None,
+    evidence_available: bool,
+) -> PathwayStep:
+    if evidence_available:
+        summary = evidence_summary or {}
+        event_total = _summary_count(summary, "total_events", "event_total")
+        matched_event_total = _summary_count(
+            summary,
+            "matched_events",
+            "matched_event_total",
+        )
+        distinct_intervals = _summary_count(summary, "distinct_intervals")
+        available_intervals = _summary_count(summary, "available_intervals")
+        event_coverage = (
+            matched_event_total / event_total if event_total else 0.0
+        )
+        time_coverage = (
+            distinct_intervals / available_intervals
+            if available_intervals
+            else 0.0
+        )
+        source_references = tuple(
+            str(reference)
+            for reference in summary.get("source_references", ())
+        )
+    else:
+        event_total = None
+        matched_event_total = None
+        distinct_intervals = None
+        event_coverage = None
+        time_coverage = None
+        source_references = ()
+
+    step_score, evidence_status = score_step(
+        net_share=net_share,
+        directionality=directionality,
+        event_coverage=event_coverage,
+        time_coverage=time_coverage,
+    )
+    return PathwayStep(
+        reaction_key=reaction.key,
+        traversal_direction=direction,
+        focal_input=focal_input,
+        focal_output=focal_output,
+        reactants=reaction.reactant_smiles,
+        products=reaction.product_smiles,
+        forward_tp=forward_tp,
+        reverse_tp=reverse_tp,
+        net_tp=net_tp,
+        net_share=net_share,
+        directionality=directionality,
+        event_coverage=event_coverage,
+        time_coverage=time_coverage,
+        event_total=event_total,
+        matched_event_total=matched_event_total,
+        distinct_intervals=distinct_intervals,
+        evidence_status=evidence_status,
+        source_references=source_references,
+        score=step_score,
+    )
+
+
+def _summary_count(
+    summary: Mapping[str, Any],
+    key: str,
+    fallback_key: str | None = None,
+) -> int:
+    value = summary.get(key)
+    if value is None and fallback_key is not None:
+        value = summary.get(fallback_key)
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"evidence summary {key} must be a nonnegative integer")
+    return value
+
+
+def _required_state_score(state: _SearchState) -> float:
+    if state.score is None:
+        raise ValueError("a candidate path must contain at least one step")
+    return state.score
+
+
+def _state_sort_key(
+    state: _SearchState,
+) -> tuple[float, tuple[str, ...], tuple[str, ...]]:
+    return (
+        -_required_state_score(state),
+        state.species,
+        tuple(step.reaction_key for step in state.steps),
+    )
