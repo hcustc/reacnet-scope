@@ -31,7 +31,7 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     payload = svc.dataset_preparation_status(str(tmp_path))
     assert payload["dataset_id"]
     assert "/datasets/" in payload["cache_dir"]
-    assert payload["events"]["state"] == "ready"
+    assert payload["events"]["state"] == "needs_preparation"
     assert payload["trajectory"]["state"] == "missing"
     assert payload["rng_event_command"] == "--reaction-event --show-molecule-time"
 

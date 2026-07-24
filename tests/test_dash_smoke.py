@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import services as svc
 
@@ -202,7 +203,8 @@ def test_directory_browser_open_callback_runs_from_initial_layout(tmp_path, monk
     assert result["dir-browser-path"]["data"] == str(tmp_path.resolve())
 
 
-def test_rng_event_query_callback_renders_rng_rows(tmp_path) -> None:
+def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
     molecules = tmp_path / "run.lammpstrj.molecules.csv"
     reactionevent.write_text(
@@ -214,6 +216,7 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path) -> None:
         "0,[C],0,\n0,[O],1,\n10,[C][O],0;1,0-1-1\n",
         encoding="utf-8",
     )
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
     app = create_app()
     client = app.server.test_client()
     dependency = next(

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
 from reacnet_scope.rng_events import (
     canonical_reaction_key,
@@ -73,8 +76,32 @@ def test_dataset_scan_uses_rng_event_outputs_instead_of_route(tmp_path, monkeypa
     artifacts = svc.artifacts_from_status(status)
     assert artifacts["reactionevent"] == str(reactionevent)
     assert artifacts["molecules"] == str(molecules)
-    assert status["dataset"]["readiness"]["event_search"]["ready"] is True
+    assert status["dataset"]["readiness"]["event_search"]["ready"] is False
+    assert (
+        status["dataset"]["readiness"]["event_search"]["state"]
+        == "needs_preparation"
+    )
     assert not Path(f"{trajectory}.route").exists()
+
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    prepared = svc.scan_dataset(str(tmp_path))
+    assert prepared["dataset"]["readiness"]["event_search"]["ready"] is True
+
+
+def test_rng_event_service_requires_prepared_index(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = _rng_outputs(tmp_path)
+    artifacts = {
+        "reactionevent": str(reactionevent),
+        "molecules": str(molecules),
+    }
+
+    with pytest.raises(svc.ServiceError) as error:
+        svc.locate_rng_events(artifacts, "[C] + [O] -> [C][O]")
+
+    assert error.value.reason == "event_index_not_ready"
+    assert "reacnet-scope-prepare" in error.value.message
+    assert "--event-only" in error.value.message
 
 
 def test_rng_event_visualization_reads_only_selected_atoms(tmp_path, monkeypatch) -> None:
@@ -82,6 +109,7 @@ def test_rng_event_visualization_reads_only_selected_atoms(tmp_path, monkeypatch
     reactionevent, molecules = _rng_outputs(tmp_path)
     trajectory = tmp_path / "run.lammpstrj"
     trajectory.write_text(_frame(0) + _frame(10), encoding="utf-8")
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
     TRAJECTORY_INDEX_STORE.build(str(trajectory))
     artifacts = {
         "reactionevent": str(reactionevent),

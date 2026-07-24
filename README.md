@@ -62,16 +62,16 @@ Dash 的默认入口是面向实验解释的四步工作流：
 
 旧的专题分析页面仍在右上角“高级工具”菜单中提供。
 
-生成数据时建议启用 RNG 的事件输出；事件检索直接消费这两个文件，不再从
-Route 重建事件：
+生成数据时建议启用 RNG 的事件输出；事件证据索引由这两个文件离线构建，
+不再从 Route 重建事件：
 
 ```bash
 # 添加到原 ReacNetGenerator 命令
 --reaction-event --show-molecule-time
 ```
 
-大轨迹仍必须先在独立进程中建立帧偏移索引。Dash 只读消费索引，
-不会构建索引，也不会顺序扫描完整轨迹：
+事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 只读消费索引，
+不会构建索引，也不会顺序扫描完整事件 CSV 或轨迹：
 
 ```bash
 export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
@@ -79,7 +79,19 @@ uv run reacnet-scope-prepare /data/case
 uv run reacnet-scope-prepare /data/case --status
 ```
 
-统一命令默认准备轨迹索引和 `.species` 的 C/O/Cl 组成索引；
+如果只需要准备事件检索，可以将索引放在高速缓存盘并使用 `--event-only`：
+
+```bash
+export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
+uv run reacnet-scope-prepare /data/case --event-only
+```
+
+事件索引以流式方式读取 `.reactionevent.csv` 和 `.molecules.csv`，支持中断后
+从检查点继续构建；最终索引通过原子替换发布。Dash 查询期间只打开该索引，
+不会回扫两个原始 CSV。若源文件在构建后发生变化，状态会显示为 `stale`，
+需要重新运行准备命令（必要时加 `--rebuild`）。
+
+统一命令默认准备可用的事件、轨迹以及 `.species` 的 C/O/Cl 组成索引；
 也可只准备组成索引：
 
 ```bash
@@ -92,14 +104,14 @@ uv run reacnet-scope-prepare /data/case --composition-only
 绘图不再回扫 `.species`。用户指定参考物种时，系统按其精确 SMILES 从索引
 按需读取时间序列；点击下钻时只读取一个时间点并查询峰值摘要，避免将数千万
 条物种记录展开为内存 DataFrame。
-`--route-only` 仅作为旧数据兼容入口。命令仍支持 `--trajectory-only`、
-`--composition-only`、`--status`、`--clear` 和 `--rebuild`；
+`--route-only` 仅作为旧数据兼容入口。命令仍支持 `--event-only`、
+`--trajectory-only`、`--composition-only`、`--status`、`--clear` 和 `--rebuild`；
 使用 Ctrl+C 取消时会保留最近的构建检查点。旧的两个
 `reacnet-scope-build-*-index` 命令暂时保留为兼容入口。
 
 在 Dash 的“管理数据”窗口中，“数据准备状态”区域会只读显示基础分析、
 RNG 事件输出和轨迹帧索引状态，并在离线构建运行时自动刷新检查点进度。
-该区域可复制 RNG 输出参数和轨迹准备命令，并可安全清理轨迹索引；
+该区域可复制 RNG 输出参数和各类索引准备命令，并可安全清理缓存索引；
 它不会启动构建任务，也不会删除原始 ReacNetGenerator 输出。
 
 旧版静态 Web 界面仍可通过以下命令启动：

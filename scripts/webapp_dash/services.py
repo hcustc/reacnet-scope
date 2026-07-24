@@ -42,7 +42,11 @@ from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
-from reacnet_scope.rng_events import RngEventDataError, query_rng_events  # noqa: E402
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE  # noqa: E402
+from reacnet_scope.rng_events import (  # noqa: E402
+    canonical_reaction_key,
+    reaction_key,
+)
 from scripts.webapp.server import (  # noqa: E402
     STORE,
     build_dataset_status_payload,
@@ -108,12 +112,49 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
     if not folder_path.is_dir():
         raise ServiceError(f"路径不是目录: {folder_path}", reason="missing_folder")
     try:
-        return build_dataset_status_payload(
+        payload = build_dataset_status_payload(
             {
                 "dataset_dir": [folder_text],
                 "dataset_base": [base or ""],
             }
         )
+        dataset = payload.get("dataset", {}) or {}
+        artifacts = dataset.get("artifacts", {}) or {}
+        reactionevent = str(
+            (artifacts.get("reactionevent") or {}).get("path") or ""
+        )
+        molecules = str((artifacts.get("molecules") or {}).get("path") or "")
+        if reactionevent and molecules:
+            try:
+                event_status = EVENT_EVIDENCE_STORE.status(
+                    reactionevent, molecules
+                )
+            except RuntimeError as exc:
+                event_status = {"state": "invalid", "message": str(exc)}
+            state = str(event_status.get("state") or "missing")
+            if state == "missing":
+                state = "needs_preparation"
+            elif state == "missing_source":
+                state = "missing"
+            event_status = {
+                **event_status,
+                "state": state,
+                "ready": state == "ready",
+            }
+            if state in {
+                "needs_preparation",
+                "stale",
+                "invalid",
+                "building",
+            }:
+                event_status["preparation_command"] = (
+                    "reacnet-scope-prepare "
+                    f"{shlex.quote(str(Path(reactionevent).parent))} "
+                    "--event-only"
+                )
+            readiness = dataset.setdefault("readiness", {})
+            readiness["event_search"] = event_status
+        return payload
     except Exception as exc:
         raise ServiceError(f"扫描数据目录失败: {exc}") from exc
 
@@ -217,12 +258,17 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             composition = {"state": "invalid", "message": str(exc)}
     else:
         composition = {"state": "missing"}
-    index_bytes = int(trajectory.get("index_size", 0) or 0) + int(composition.get("index_size", 0) or 0)
+    index_bytes = (
+        int(events.get("index_size", 0) or 0)
+        + int(trajectory.get("index_size", 0) or 0)
+        + int(composition.get("index_size", 0) or 0)
+    )
     timestamps = [
         value
         for value in (
             trajectory.get("updated_at_epoch"),
             composition.get("updated_at_epoch"),
+            events.get("updated_at_epoch"),
         )
         if value is not None
     ]
@@ -253,6 +299,11 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "trajectory": trajectory,
         "composition": composition,
         "rng_event_command": "--reaction-event --show-molecule-time",
+        "event_command": (
+            f"{command_prefix} --event-only"
+            if artifacts.get("reactionevent") and artifacts.get("molecules")
+            else ""
+        ),
         "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
         "composition_command": f"{command_prefix} --composition-only" if species_source else "",
     }
@@ -1496,15 +1547,61 @@ def locate_rng_events(
             "缺少 .molecules.csv；请在 ReacNetGenerator 中启用 --show-molecule-time",
             reason="missing_molecules",
         )
+    if "->" not in str(reaction_text or ""):
+        raise ServiceError(
+            "请输入完整反应式，例如 A + B -> C + D",
+            reason="bad_reaction_query",
+        )
+    query_left, query_right = str(reaction_text).split("->", 1)
+    normalized = reaction_key(query_left, query_right)
+    normalized_key = canonical_reaction_key(*normalized)
     try:
-        return query_rng_events(
+        payload = EVENT_EVIDENCE_STORE.query_events(
             reactionevent_file,
             molecules_file,
-            reaction_text,
-            max_events=max_events,
+            normalized_key,
+            limit=max_events,
         )
-    except (OSError, ValueError, RngEventDataError) as exc:
+    except IndexStaleError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--event-only",
+            reason="event_index_stale",
+        ) from exc
+    except IndexInvalidError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--event-only",
+            reason="event_index_invalid",
+        ) from exc
+    except IndexNotReadyError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--event-only",
+            reason="event_index_not_ready",
+        ) from exc
+    except (OSError, ValueError) as exc:
         raise ServiceError(str(exc), reason="rng_event_data_error") from exc
+
+    rows = payload.get("rows") or []
+    matched = sum(
+        row.get("association_status") == "matched" for row in rows
+    )
+    payload["meta"] = {
+        "status": "ok",
+        "message": (
+            f"从 RNG 事件索引中找到 {payload.get('total', 0)} 条记录"
+        ),
+        "matched_atoms": matched,
+        "unresolved_atoms": len(rows) - matched,
+        "reactionevent_file": os.path.abspath(reactionevent_file),
+        "molecules_file": os.path.abspath(molecules_file),
+        "evidence_status": "evidence_linked",
+    }
+    return payload
 
 
 def build_rng_event_visualization(

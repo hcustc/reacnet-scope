@@ -16,6 +16,8 @@ from reacnet_scope.indexes import (
     TrajectoryIndexStore,
     clear_index,
 )
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+from scripts.webapp_dash import services as dash_services
 from scripts.webapp.server import read_trajectory_requested_frame_blocks
 
 
@@ -162,6 +164,44 @@ class OnlineIndexContractTests(unittest.TestCase):
         self.assertEqual(counters["iter"], 0)
         self.assertEqual(list(self.cache.rglob("*.building")), [])
         self.assertEqual(list(self.cache.rglob("*-wal")), [])
+
+    def test_event_query_never_opens_event_source_csvs(self) -> None:
+        reactionevent = self.root / "run.lammpstrj.reactionevent.csv"
+        molecules = self.root / "run.lammpstrj.molecules.csv"
+        reactionevent.write_text(
+            "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+            encoding="utf-8",
+        )
+        molecules.write_text(
+            "Timestep,Species,AtomIDs,BondIDs\n"
+            "0,[C],0,\n"
+            "0,[O],1,\n"
+            "10,[C][O],0;1,0-1-1\n",
+            encoding="utf-8",
+        )
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+        real_open = builtins.open
+        protected = {
+            os.path.abspath(reactionevent),
+            os.path.abspath(molecules),
+        }
+
+        def guarded_open(file, *args, **kwargs):
+            if os.path.abspath(os.fspath(file)) in protected:
+                raise AssertionError("online event query opened an RNG source CSV")
+            return real_open(file, *args, **kwargs)
+
+        artifacts = {
+            "reactionevent": str(reactionevent),
+            "molecules": str(molecules),
+        }
+        with mock.patch("builtins.open", side_effect=guarded_open):
+            result = dash_services.locate_rng_events(
+                artifacts, "[O] + [C] -> [C][O]"
+            )
+
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["atom_id_list"], [1, 2])
 
 
 if __name__ == "__main__":

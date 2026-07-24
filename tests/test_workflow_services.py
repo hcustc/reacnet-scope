@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
 from scripts.webapp_dash import services as svc
 
@@ -69,6 +70,9 @@ def test_channels_are_split_by_target_role_and_ranked_by_frequency(tmp_path: Pat
 def test_representative_event_ranking_and_viewer_expose_bond_evidence(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     artifacts = _workflow_artifacts(tmp_path)
+    EVENT_EVIDENCE_STORE.build(
+        artifacts["reactionevent"], artifacts["molecules"]
+    )
     TRAJECTORY_INDEX_STORE.build(artifacts["trajectory"])
 
     ranked = svc.rank_representative_events(artifacts, "[C] + [O] -> [C][O]")
