@@ -212,7 +212,9 @@ def _browser_callback_payload(
             {
                 "id": item["id"],
                 "property": item["property"],
-                "value": state_values.get(item["id"], []),
+                "value": state_values.get(
+                    item["id"], {} if item["id"] == "app-store" else []
+                ),
             }
             for item in dependency["state"]
         ],
@@ -751,6 +753,70 @@ def test_directory_browser_open_selects_one_dataset_without_applying_it(tmp_path
         "label": "rp3.lammpstrj",
     }
     assert result["dir-browser-select-btn"]["disabled"] is False
+
+
+def test_directory_browser_reopens_at_applied_dataset_when_manual_path_blank(
+    tmp_path, monkeypatch
+) -> None:
+    """A normal load supplies the next browser start path without hidden input state."""
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    dataset = tmp_path / "campaign" / "run"
+    dataset.mkdir(parents=True)
+    (dataset / "rp3.lammpstrj.reactionabcd").touch()
+    (dataset / "rp3.lammpstrj.species").touch()
+    candidate = {
+        "folder": str(dataset),
+        "base": str(dataset / "rp3.lammpstrj"),
+        "label": "rp3.lammpstrj",
+    }
+
+    def fake_scan(folder: str, *, base: str = "") -> dict[str, Any]:
+        assert folder == str(dataset)
+        assert base == candidate["base"]
+        return {
+            "dataset": {
+                "selected_base": base,
+                "label": candidate["label"],
+                "ready_count": 2,
+                "artifacts": {},
+                "capabilities": {},
+                "readiness": {},
+            }
+        }
+
+    monkeypatch.setattr(svc, "scan_dataset", fake_scan)
+    app = create_app()
+    client = app.server.test_client()
+    loaded = client.post(
+        "/_dash-update-component",
+        json=_load_dataset_callback_payload(
+            client,
+            candidate=candidate,
+            store={"folder": "", "base": "", "label": ""},
+            recent_records=[],
+        ),
+    )
+    assert loaded.status_code == 200
+    applied = loaded.get_json()["response"]["app-store"]["data"]
+
+    reopened = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-pick-btn.n_clicks",
+            values={"data-pick-btn": 1},
+            state_values={
+                "dir-browser-path": "",
+                "data-folder-input": "",
+                "dataset-browser-candidate": None,
+                "recent-datasets": [],
+                "app-store": applied,
+            },
+        ),
+    )
+    assert reopened.status_code == 200
+    assert reopened.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
 
 
 def test_directory_browser_navigation_and_cancel_preserve_applied_dataset(tmp_path, monkeypatch) -> None:

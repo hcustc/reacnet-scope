@@ -610,6 +610,7 @@ def register_callbacks(app: Any) -> None:
         State("data-folder-input", "value"),
         State("dataset-browser-candidate", "data"),
         State("recent-datasets", "data"),
+        State("app-store", "data"),
         prevent_initial_call=True,
     )
     def _handle_dir_browser(
@@ -628,6 +629,7 @@ def register_callbacks(app: Any) -> None:
         folder_input,
         candidate,
         recent_records,
+        app_store,
     ):
         """Consolidated state machine for the directory browser modal.
 
@@ -646,8 +648,11 @@ def register_callbacks(app: Any) -> None:
 
         # --- OPEN -----------------------------------------------------
         if triggered_id == "data-pick-btn":
-            initial = (folder_input or "").strip()
-            start_path = _resolve_initial_browse_path(initial)
+            start_path = _resolve_initial_browse_path(
+                folder_input,
+                candidate=candidate,
+                app_store=app_store,
+            )
             return _build_dir_browser_response(start_path, recent_records)
 
         # --- ADVANCED MANUAL INPUT -----------------------------------
@@ -711,7 +716,12 @@ def register_callbacks(app: Any) -> None:
             target = (path_input or "").strip()
             if not target:
                 return _build_dir_browser_response(
-                    current_path or _resolve_initial_browse_path(folder_input or ""),
+                    current_path
+                    or _resolve_initial_browse_path(
+                        folder_input,
+                        candidate=candidate,
+                        app_store=app_store,
+                    ),
                     recent_records,
                     error="请输入服务器目录后再前往。",
                 )
@@ -2357,21 +2367,42 @@ def register_callbacks(app: Any) -> None:
 # ── Directory browser helpers ───────────────────────────────────────
 
 
-def _resolve_initial_browse_path(folder_input: str) -> str:
+def _resolve_initial_browse_path(
+    folder_input: str | None,
+    *,
+    candidate: dict[str, Any] | None = None,
+    app_store: dict[str, Any] | None = None,
+) -> str:
     """Determine the starting path for the directory browser.
 
-    If *folder_input* is a valid, existing directory within the allowed
-    roots, use it.  Otherwise fall back to the first allowed root.
+    Prefer a selected candidate, then an explicit manual path, then the
+    currently applied dataset.  This keeps reopening the picker independent
+    of the optional manual-input control while still honoring a freshly typed
+    path.  Invalid or unavailable values fall back to the first allowed root.
     """
     from pathlib import Path
 
-    candidate = folder_input.strip()
-    if candidate:
+    possible_inputs: list[str] = []
+    selected = candidate if isinstance(candidate, dict) else {}
+    for key in ("folder", "base"):
+        value = str(selected.get(key) or "").strip()
+        if value:
+            possible_inputs.append(value)
+    manual = str(folder_input or "").strip()
+    if manual:
+        possible_inputs.append(manual)
+    applied = app_store if isinstance(app_store, dict) else {}
+    for key in ("folder", "base"):
+        value = str(applied.get(key) or "").strip()
+        if value:
+            possible_inputs.append(value)
+
+    for possible in possible_inputs:
         try:
-            resolved = svc.resolve_dataset_input(candidate)
+            resolved = svc.resolve_dataset_input(possible)
             return str(resolved["folder"])
         except svc.ServiceError:
-            pass
+            continue
     # A deployment may configure roots that exclude the service account's
     # home directory.  Start at the first permitted root in that case so the
     # browser opens successfully instead of immediately showing an error.
