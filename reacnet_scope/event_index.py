@@ -71,7 +71,14 @@ def _strict_int(
     minimum: int | None = None,
 ) -> int:
     try:
-        parsed = int(value)
+        if type(value) is int:
+            parsed = value
+        elif isinstance(value, str):
+            parsed = int(value, 10)
+        elif isinstance(value, float) and value.is_integer():
+            parsed = int(value)
+        else:
+            raise TypeError
     except (TypeError, ValueError) as exc:
         raise IndexInvalidError(
             f"Event evidence index {label} is invalid"

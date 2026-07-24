@@ -296,6 +296,12 @@ def test_reaction_summary_translates_invalid_numeric_payload(
         )
 
 
+@pytest.mark.parametrize("value", [True, False, 4.9, b"4"])
+def test_strict_integer_parser_rejects_non_integer_values(value) -> None:
+    with pytest.raises(IndexInvalidError, match="count"):
+        event_index_module._strict_int(value, "count", minimum=0)
+
+
 def test_event_query_translates_sqlite_failures_to_invalid_index(
     tmp_path, monkeypatch
 ) -> None:

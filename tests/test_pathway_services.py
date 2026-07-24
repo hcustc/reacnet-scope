@@ -222,6 +222,9 @@ def test_invalid_event_index_degrades_with_exact_rebuild_command(
     ("column", "value"),
     [
         ("total_events", "broken"),
+        ("total_events", 4.9),
+        ("matched_events", 2.9),
+        ("distinct_intervals", 2.9),
         ("distinct_intervals", 11),
     ],
 )
@@ -246,11 +249,44 @@ def test_corrupt_summary_discovered_during_batch_degrades_to_network_only(
 
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
+    expected = (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
+        "--rebuild event"
+    )
     assert payload["evidence_status"] == "network_only"
-    assert payload["preparation_command"].endswith("--rebuild event")
+    assert payload["preparation_command"] == expected
     step = payload["paths"][0]["steps"][0]
     assert step["event_coverage"] is None
     assert step["time_coverage"] is None
+
+
+def test_fractional_available_intervals_degrades_with_exact_rebuild_command(
+    indexed_artifacts: dict[str, str],
+) -> None:
+    index_path = EVENT_EVIDENCE_STORE.open_required(
+        indexed_artifacts["reactionevent"],
+        indexed_artifacts["molecules"],
+    )["index_path"]
+    connection = sqlite3.connect(index_path)
+    try:
+        connection.execute(
+            "UPDATE meta SET value=10.9 WHERE key='available_intervals'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
+
+    expected = (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
+        "--rebuild event"
+    )
+    assert payload["evidence_status"] == "network_only"
+    assert payload["preparation_command"] == expected
+    assert payload["paths"][0]["steps"][0]["event_coverage"] is None
 
 
 def test_atomic_event_index_replacement_during_batch_degrades_to_network_only(
