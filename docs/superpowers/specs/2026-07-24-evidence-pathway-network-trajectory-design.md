@@ -13,16 +13,57 @@ network, and event viewer into an evidence-linked workflow that can:
 The result is a candidate-mechanism analysis tool. It must not describe a
 ranked path as an automatically confirmed reaction mechanism.
 
+## Reuse and Dependency Policy
+
+ReacNetGenerator remains the authoritative producer of molecule identities,
+HMM-filtered reaction summaries, and time-resolved reaction events.
+ReacNet Scope consumes those artifacts and must not run a second bond
+perception or reaction-detection pipeline over the trajectory. In particular,
+ReaxTools is an interoperability target and an audit-design reference, not a
+replacement event source for a ReacNetGenerator dataset.
+
+The implementation uses established libraries at the following boundaries:
+
+- `networkx>=3.2,<4` is a required dependency for graph containers, standard
+  graph analysis, Cytoscape JSON conversion, and GraphML/GEXF export.
+- `ase>=3.23,<4` is an optional `trajectory` dependency for parsing indexed
+  LAMMPS frame blocks, cell/PBC handling, minimum-image calculations, and
+  XYZ/ExtXYZ writing.
+- OVITO 3.15 or later is an external interoperability target. It is not a
+  runtime dependency; exported local trajectories must open in OVITO.
+- NOCTIS, its Neo4j route-miner, ReNView, Materials Project
+  `reaction-network`, RMD_Digging, LUNAR, SCINE, RMG-Py, and Cantera are not
+  runtime dependencies for this version.
+
+ReaxTools' current GitHub repository does not publish a clear license file,
+even though an older Gitee mirror describes an MIT license. No ReaxTools
+source is copied unless upstream licensing is clarified. Its raw-event,
+event-pair, transfer-flow, and manifest layout may be supported later through
+an independently implemented importer.
+
+Dependency installation is a user-owned prerequisite. Development tasks may
+edit dependency declarations and lock metadata, but must not run `pip
+install`, `uv sync`, Conda, Apt, or other package/system installers. Each
+dependency gate supplies the exact manual command and a read-only import
+verification command, then waits for the user to confirm that the environment
+is ready.
+
 ## Product Scope
 
 The work is delivered in independently testable milestones:
 
-1. offline event-evidence indexing and the pathway domain layer;
+1. dependency/API foundations and offline event-evidence indexing;
 2. pathway query, ranking, export, and Dash integration;
 3. a reactionabcd mechanism-network view alongside the existing table view;
-4. local-environment visualization, atom-type mapping, and event-package
-   export;
-5. real-data acceptance, performance hardening, and documentation.
+4. ASE-backed local-environment visualization, atom-type mapping, and
+   OVITO-compatible event-package export;
+5. real-data acceptance, performance hardening, interoperability
+   documentation, and release checks.
+
+Each milestone receives a separate implementation plan and produces a
+reviewable, tested deliverable. Milestones are executed in order because
+later UI and export work consumes the event and graph interfaces established
+earlier.
 
 New user-facing work targets the recommended Dash application plus reusable
 Python and CLI interfaces. The legacy static Web application remains
@@ -80,6 +121,15 @@ tree. A pathway step contains:
 Reactions remain hyperedges. When a reaction produces multiple new species,
 each can become a candidate focal continuation, but every step retains all
 reactants and products. A path may not revisit a focal species.
+
+The domain objects remain independent of NetworkX so their serialized schema
+is stable. A graph adapter projects them into a directed bipartite
+`networkx.MultiDiGraph` with distinct species and reaction nodes. NetworkX
+provides reachability checks, connected components, centrality, schema
+conversion, and export. It does not provide the ranking engine:
+`shortest_simple_paths` rejects `MultiDiGraph`, and static additive edge
+weights cannot express evidence availability, co-reactants, or query-time
+limits.
 
 The default query is loopless best-first enumeration with:
 
@@ -162,6 +212,12 @@ species selection:
 - **Observation network** preserves the existing `.table` view and
   `aggregate_observation` evidence label.
 
+A third schema value, `kinetic_flux`, is reserved for a future network built
+from actual reaction-rate data. Event counts, passage counts, and atom
+transfer totals must never be relabeled as kinetic flux. ReNView, Cantera
+ReactionPathDiagram, and RMG flux-diagram interoperability is deferred until
+the input dataset supplies compatible rates and conditions.
+
 The mechanism view defaults to a bounded neighborhood around the selected
 species instead of rendering the entire dataset. It supports direction,
 depth, minimum net passage, maximum node count, and evidence-status filters.
@@ -170,8 +226,8 @@ to event search. A pathway can be highlighted without changing the underlying
 network semantics.
 
 Both views retain PNG export. The mechanism view additionally exports
-Cytoscape JSON, node CSV, and edge CSV. Exported schemas include a version and
-evidence level.
+NetworkX-generated Cytoscape JSON, GraphML, GEXF, node CSV, and edge CSV.
+Exported schemas include a version, `network_semantics`, and evidence level.
 
 ### Event viewer and reproducible package
 
@@ -187,11 +243,18 @@ Environment selection uses periodic minimum-image distances. It is capped at
 truncation occurred. The radius and cap are user-adjustable within server
 limits of `2.0–10.0 Å` and `50–2,000` atoms.
 
-Trajectory parsing moves into a reusable core module and supports `x`, `xu`,
-`xs` coordinate variants, orthogonal boxes, and triclinic tilt factors.
+The existing SQLite trajectory index remains responsible only for locating
+bounded byte ranges. Indexed LAMMPS frame blocks are parsed into ASE `Atoms`
+objects. ASE supplies `x`, `xu`, `xs`, and `xsu` coordinate handling,
+orthogonal and restricted/general triclinic cells, PBC flags,
+minimum-image calculations, wrapping, and output writers. ReacNet Scope does
+not maintain a second general-purpose LAMMPS parser.
+
 Viewer coordinates are re-centered on the reaction core per frame to avoid
-periodic jumps. Original wrapped coordinates remain available for faithful
-LAMMPS export.
+periodic jumps. Original coordinates and cell metadata remain available for
+faithful LAMMPS and ExtXYZ export. The reader must seek only to offsets
+returned by the trajectory index; using ASE does not authorize scanning the
+complete trajectory during a Dash request.
 
 Element names follow this precedence:
 
@@ -202,7 +265,7 @@ Element names follow this precedence:
 The mapping is stored in a separate dataset settings file under the cache
 directory and referenced by the generated manifest, so rebuilding indexes
 does not overwrite user settings. Partial mappings are allowed for viewing
-and LAMMPS export. XYZ export is disabled if any selected atom type is
+and LAMMPS export. ExtXYZ export is disabled if any selected atom type is
 unmapped.
 
 An event download produces a ZIP containing:
@@ -212,12 +275,30 @@ An event download produces a ZIP containing:
   parameters;
 - `trajectory.lammpstrj` with the selected local atoms and original coordinate
   convention;
-- `trajectory.xyz` with mapped elements and re-centered coordinates when the
-  mapping is complete;
+- `trajectory.extxyz` with mapped elements, cell/PBC metadata, and
+  re-centered coordinates when the mapping is complete;
 - `bonds.csv`; and
-- `README.txt` explaining provenance, units, transformations, and limitations.
+- `README.txt` explaining provenance, units, transformations, limitations,
+  and commands for opening the trajectory in ASE or OVITO.
 
 No GIF or MP4 encoder is added in this version.
+
+### Interoperability adapters
+
+This version exports stable data rather than embedding larger chemistry
+platforms:
+
+- Cytoscape JSON, GraphML, and GEXF are the graph interchange formats.
+- ExtXYZ and a local LAMMPS dump are the trajectory interchange formats.
+- Node/edge CSV retains complete reaction-node stoichiometry and evidence
+  metadata.
+- A future ReaxTools importer may consume `reaction_events.csv`,
+  `reaction_event_pairs.csv`, `transfer_flow.csv`, `molecules.json`, and its
+  manifest, but imported datasets must carry
+  `event_source="reax_tools_geometry"` and cannot be merged silently with RNG
+  events.
+- NOCTIS/Neo4j, ReNView/Cantera rate models, and Chemkin export are explicitly
+  outside this version.
 
 ## Public Interfaces
 
@@ -254,6 +335,9 @@ build_mechanism_network(
     evidence_provider=None,
 ) -> dict
 
+to_networkx_mechanism_graph(payload) -> networkx.MultiDiGraph
+serialize_mechanism_graph(graph, *, format="cytoscape-json") -> dict | bytes
+
 build_event_view(
     trajectory_file,
     event,
@@ -280,7 +364,10 @@ observation-network payloads remain compatible.
   trajectory event.
 - A missing trajectory index disables the viewer and package export without
   scanning the trajectory.
-- A partial element map preserves `T<type>` labels; only XYZ is withheld.
+- A missing ASE trajectory extra disables frame parsing and package export,
+  preserves event metadata inspection, and returns the exact manual install
+  and import-verification commands.
+- A partial element map preserves `T<type>` labels; only ExtXYZ is withheld.
 - An environment cap records the requested radius, selected count, raw match
   count, and `truncated=true`.
 - Unsupported or malformed box/coordinate metadata fails the environment
@@ -302,13 +389,18 @@ Cover:
 - deterministic scoring, missing-evidence renormalization, hyperedge
   branching, upstream symmetry, cycle prevention, thresholding, and expansion
   truncation;
-- mechanism-network stoichiometry and strict separation from observation
-  network evidence semantics;
+- NetworkX bipartite projection, Cytoscape JSON/GraphML/GEXF round trips,
+  mechanism-network stoichiometry, and strict separation of `mechanism`,
+  `event_transfer`, and reserved `kinetic_flux` semantics;
 - orthogonal and triclinic coordinate parsing, scaled coordinates,
   minimum-image neighbor selection, re-centering, and environment caps;
 - complete and partial type mappings and ZIP member contents; and
 - guarded I/O proving online path/event queries do not open source event CSVs
   and trajectory extraction reads only indexed frame ranges.
+
+The default test environment covers required NetworkX behavior. ASE-backed
+tests run in the manually prepared `trajectory` environment. A separate
+missing-extra test verifies graceful degradation without importing ASE.
 
 ### Dash and CLI tests
 
@@ -332,3 +424,26 @@ Use `ref_data/rng-test-rp3-0523` as an integration fixture and assert:
 
 Full validation runs focused tests, the complete test suite, `compileall`, and
 `git diff --check`.
+
+## Open-Source Decision Record
+
+The reuse decisions are based on the following upstream interfaces:
+
+- ReacNetGenerator generated files and event CLI:
+  <https://docs.deepmodeling.com/projects/reacnetgenerator/en/latest/guide/report.html>
+- ReaxTools audited event/transfer outputs:
+  <https://github.com/tgraphite/reax_tools>
+- NetworkX path limitations and graph exporters:
+  <https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.simple_paths.shortest_simple_paths.html>
+  and
+  <https://networkx.org/documentation/stable/reference/readwrite/index.html>
+- ASE LAMMPS frame, cell, and coordinate handling:
+  <https://docs.ase-lib.org/_modules/ase/io/lammpsrun.html>
+- OVITO file I/O and Python-module license:
+  <https://www.ovito.org/docs/current/python/introduction/file_io.html>
+  and <https://www.ovito.org/manual/licenses/index.html>
+- NOCTIS graph model and Neo4j route-miner:
+  <https://github.com/syngenta/noctis> and
+  <https://github.com/syngenta/noctis-route-miner>
+- ReNView rate/flux inputs:
+  <https://github.com/VlachosGroup/renview>
