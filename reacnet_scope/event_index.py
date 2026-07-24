@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
 import sqlite3
 import time
 from collections import defaultdict, deque
+from contextlib import closing
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from .indexes import (
     IndexInvalidError,
@@ -25,11 +27,12 @@ from .indexes import (
 )
 from .rng_events import (
     MoleculeComponent,
-    _changed_components,
+    MoleculeRow,
+    RngEventDataError,
     _trajectory_bond_id,
     canonical_reaction_key,
-    load_event_rows,
-    load_molecule_timeline,
+    changed_components,
+    reaction_key,
 )
 
 
@@ -54,6 +57,162 @@ def _event_id(timestep_index: int, source_row: int, atom_ids: list[int]) -> str:
         ).encode("utf-8")
     ).hexdigest()[:12]
     return f"rngevt_{timestep_index}_{digest}"
+
+
+def _read_csv_header(
+    source: BinaryIO,
+    *,
+    required: set[str],
+    label: str,
+) -> tuple[tuple[str, ...], int]:
+    source.seek(0)
+    raw = source.readline()
+    if not raw:
+        raise RngEventDataError(f"{label} CSV is empty")
+    try:
+        rows = list(csv.reader([raw.decode("utf-8")], strict=True))
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise RngEventDataError(f"{label} CSV header is invalid") from exc
+    fields = tuple(str(value) for value in rows[0]) if rows else ()
+    if not required.issubset(fields):
+        raise RngEventDataError(f"{label} CSV columns are incompatible")
+    return fields, source.tell()
+
+
+def _parse_csv_record(
+    raw: bytes,
+    fields: tuple[str, ...],
+    *,
+    label: str,
+) -> dict[str, str]:
+    try:
+        rows = list(csv.reader([raw.decode("utf-8")], strict=True))
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise RngEventDataError(
+            f"{label} CSV must contain one complete record per line"
+        ) from exc
+    if len(rows) != 1 or len(rows[0]) != len(fields):
+        raise RngEventDataError(f"{label} CSV record is incompatible")
+    return dict(zip(fields, (str(value) for value in rows[0]), strict=True))
+
+
+def _read_event_group(
+    source: BinaryIO,
+    fields: tuple[str, ...],
+    *,
+    last_interval: int,
+    last_source_row: int,
+) -> tuple[list[dict[str, Any]], int, int] | None:
+    group: list[dict[str, Any]] = []
+    interval: int | None = None
+    source_row = last_source_row
+    while True:
+        record_start = source.tell()
+        raw = source.readline()
+        if not raw:
+            break
+        row = _parse_csv_record(raw, fields, label="reactionevent")
+        try:
+            current_interval = int(row["Timestep_Index"])
+        except (KeyError, ValueError) as exc:
+            raise RngEventDataError(
+                "reactionevent CSV contains an invalid Timestep_Index"
+            ) from exc
+        if interval is None:
+            if current_interval <= last_interval:
+                raise RngEventDataError(
+                    "reactionevent CSV must be sorted by Timestep_Index"
+                )
+            interval = current_interval
+        elif current_interval != interval:
+            if current_interval < interval:
+                raise RngEventDataError(
+                    "reactionevent CSV must be sorted by Timestep_Index"
+                )
+            source.seek(record_start)
+            break
+        source_row += 1
+        reactant = str(row.get("Reactant", "")).strip()
+        product = str(row.get("Product", "")).strip()
+        normalized = reaction_key(reactant, product)
+        group.append(
+            {
+                "source_row": source_row,
+                "timestep_index": current_interval,
+                "reactant": reactant,
+                "product": product,
+                "reaction_key": normalized,
+                "reaction_key_text": canonical_reaction_key(*normalized),
+            }
+        )
+    if interval is None:
+        return None
+    return group, source.tell(), source_row
+
+
+def _read_molecule_group(
+    source: BinaryIO,
+    fields: tuple[str, ...],
+    *,
+    frame_index: int,
+    previous_timestep: int | None,
+) -> tuple[int, int, tuple[MoleculeRow, ...], int] | None:
+    rows: list[MoleculeRow] = []
+    timestep: int | None = None
+    frame_start = source.tell()
+    while True:
+        record_start = source.tell()
+        raw = source.readline()
+        if not raw:
+            break
+        row = _parse_csv_record(raw, fields, label="molecules")
+        try:
+            current_timestep = int(row["Timestep"])
+        except (KeyError, ValueError) as exc:
+            raise RngEventDataError(
+                "molecules CSV contains an invalid Timestep"
+            ) from exc
+        if timestep is None:
+            if (
+                previous_timestep is not None
+                and current_timestep <= previous_timestep
+            ):
+                raise RngEventDataError(
+                    "molecules CSV must be sorted by increasing Timestep"
+                )
+            timestep = current_timestep
+        elif current_timestep != timestep:
+            if current_timestep < timestep:
+                raise RngEventDataError(
+                    "molecules CSV must be sorted by increasing Timestep"
+                )
+            source.seek(record_start)
+            break
+        try:
+            atom_ids = frozenset(
+                int(value)
+                for value in str(row.get("AtomIDs", "")).split(";")
+                if value
+            )
+        except ValueError as exc:
+            raise RngEventDataError(
+                "molecules CSV contains an invalid AtomIDs value"
+            ) from exc
+        bonds = tuple(
+            value
+            for value in str(row.get("BondIDs", "")).split(";")
+            if value
+        )
+        rows.append(
+            MoleculeRow(
+                str(row.get("Species", "")),
+                atom_ids,
+                bonds,
+            )
+        )
+    if timestep is None:
+        return None
+    return frame_index, timestep, tuple(rows), frame_start
 
 
 class EventEvidenceStore:
@@ -318,155 +477,413 @@ class EventEvidenceStore:
                     reaction_source[0], molecule_source[0]
                 )
             building_path = Path(f"{index_path}.building")
-            building_path.unlink(missing_ok=True)
             connection = self._connect_for_build(building_path)
-            try:
-                event_rows = load_event_rows(reaction_source[0])
-                molecule_timesteps, molecule_timeline = load_molecule_timeline(
-                    molecule_source[0]
+            existing = {
+                str(key): str(value)
+                for key, value in connection.execute(
+                    "SELECT key,value FROM meta"
                 )
-                frame_rows = {
-                    index: molecule_timeline[timestep]
-                    for index, timestep in enumerate(molecule_timesteps)
-                }
-                event_groups: dict[int, list[dict[str, Any]]] = defaultdict(
-                    list
-                )
-                for event in event_rows:
-                    event_groups[int(event["timestep_index"])].append(
-                        dict(event)
-                    )
-                for timestep_index in sorted(event_groups):
-                    if (
-                        timestep_index < 0
-                        or timestep_index + 1 >= len(molecule_timesteps)
-                    ):
-                        raise IndexInvalidError(
-                            "Event interval is outside the molecules timeline"
-                        )
-                    pools: dict[
-                        tuple[tuple[str, ...], tuple[str, ...]],
-                        deque[MoleculeComponent],
-                    ] = defaultdict(deque)
-                    for component in _changed_components(
-                        frame_rows[timestep_index],
-                        frame_rows[timestep_index + 1],
-                    ):
-                        pools[component.key].append(component)
-                    occurrences: dict[str, int] = defaultdict(int)
-                    for event in event_groups[timestep_index]:
-                        reaction_key = str(event["reaction_key_text"])
-                        occurrences[reaction_key] += 1
-                        component = (
-                            pools[event["reaction_key"]].popleft()
-                            if pools[event["reaction_key"]]
-                            else None
-                        )
-                        rng_atom_ids = list(component.atom_ids) if component else []
-                        atom_ids = [atom_id + 1 for atom_id in rng_atom_ids]
-                        reactant_bonds = (
-                            [
-                                _trajectory_bond_id(bond)
-                                for bond in component.reactant_bonds
-                            ]
-                            if component
-                            else []
-                        )
-                        product_bonds = (
-                            [
-                                _trajectory_bond_id(bond)
-                                for bond in component.product_bonds
-                            ]
-                            if component
-                            else []
-                        )
-                        connection.execute(
-                            """
-                            INSERT INTO events(
-                                event_id,reaction_key,source_row,timestep_index,
-                                before_timestep,after_timestep,reactant_text,
-                                product_text,atom_ids_json,reactant_bonds_json,
-                                product_bonds_json,association_status,occurrence
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-                            """,
-                            (
-                                _event_id(
-                                    timestep_index,
-                                    int(event["source_row"]),
-                                    atom_ids,
-                                ),
-                                reaction_key,
-                                int(event["source_row"]),
-                                timestep_index,
-                                int(molecule_timesteps[timestep_index]),
-                                int(molecule_timesteps[timestep_index + 1]),
-                                str(event["reactant"]),
-                                str(event["product"]),
-                                json.dumps(atom_ids, separators=(",", ":")),
-                                json.dumps(
-                                    reactant_bonds, separators=(",", ":")
-                                ),
-                                json.dumps(
-                                    product_bonds, separators=(",", ":")
-                                ),
-                                (
-                                    "matched"
-                                    if component
-                                    else "unresolved_hmm_timeline"
-                                ),
-                                occurrences[reaction_key],
-                            ),
-                        )
-                connection.execute("DELETE FROM reaction_summary")
-                connection.execute(
-                    """
-                    INSERT INTO reaction_summary(
-                        reaction_key,total_events,matched_events,
-                        distinct_intervals
-                    )
-                    SELECT reaction_key,COUNT(*),
-                           SUM(CASE WHEN association_status='matched'
-                               THEN 1 ELSE 0 END),
-                           COUNT(DISTINCT timestep_index)
-                    FROM events
-                    GROUP BY reaction_key
-                    """
-                )
-                event_count = int(
-                    connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-                )
-                reaction_type_count = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM reaction_summary"
-                    ).fetchone()[0]
-                )
-                _write_meta(
-                    connection,
-                    {
-                        "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
-                        "build_state": "ready",
-                        "dataset_id": dataset_id_for_source(reaction_source[0]),
-                        "reactionevent_file": reaction_source[0],
-                        "reactionevent_size": reaction_source[1],
-                        "reactionevent_mtime_ns": reaction_source[2],
-                        "molecules_file": molecule_source[0],
-                        "molecules_size": molecule_source[1],
-                        "molecules_mtime_ns": molecule_source[2],
-                        "reactionevent_offset": reaction_source[1],
-                        "molecules_offset": molecule_source[1],
-                        "completed_interval": max(event_groups, default=-1),
-                        "event_count": event_count,
-                        "reaction_type_count": reaction_type_count,
-                        "molecule_frame_count": len(molecule_timesteps),
-                        "available_intervals": max(
-                            len(molecule_timesteps) - 1, 0
-                        ),
-                        "updated_at_epoch": int(time.time()),
-                    },
-                )
-                connection.commit()
-            finally:
+            }
+            compatible = bool(existing) and (
+                int(existing.get("schema_version", 0) or 0)
+                == EVENT_EVIDENCE_SCHEMA_VERSION
+                and existing.get("build_state") == "building"
+                and existing.get("reactionevent_file") == reaction_source[0]
+                and int(existing.get("reactionevent_size", -1) or -1)
+                == reaction_source[1]
+                and int(existing.get("reactionevent_mtime_ns", -1) or -1)
+                == reaction_source[2]
+                and existing.get("molecules_file") == molecule_source[0]
+                and int(existing.get("molecules_size", -1) or -1)
+                == molecule_source[1]
+                and int(existing.get("molecules_mtime_ns", -1) or -1)
+                == molecule_source[2]
+            )
+            if existing and not compatible:
                 connection.close()
+                building_path.unlink(missing_ok=True)
+                connection = self._connect_for_build(building_path)
+                existing = {}
+
+            with closing(connection), open(
+                reaction_source[0], "rb"
+            ) as reaction_handle, open(
+                molecule_source[0], "rb"
+            ) as molecule_handle:
+                reaction_fields, first_event_offset = _read_csv_header(
+                    reaction_handle,
+                    required={"Timestep_Index", "Reactant", "Product"},
+                    label="reactionevent",
+                )
+                molecule_fields, first_molecule_offset = _read_csv_header(
+                    molecule_handle,
+                    required={"Timestep", "Species", "AtomIDs", "BondIDs"},
+                    label="molecules",
+                )
+
+                if compatible:
+                    event_offset = int(
+                        existing.get(
+                            "reactionevent_offset", first_event_offset
+                        )
+                        or first_event_offset
+                    )
+                    molecule_offset = int(
+                        existing.get(
+                            "molecules_offset", first_molecule_offset
+                        )
+                        or first_molecule_offset
+                    )
+                    completed_interval = int(
+                        existing.get("completed_interval", -1) or -1
+                    )
+                    last_source_row = int(
+                        existing.get("last_source_row", 0) or 0
+                    )
+                    molecule_frame_index = int(
+                        existing.get("molecule_frame_index", 0) or 0
+                    )
+                    previous_molecule_timestep = (
+                        int(existing["previous_molecule_timestep"])
+                        if existing.get("previous_molecule_timestep", "")
+                        else None
+                    )
+                else:
+                    event_offset = first_event_offset
+                    molecule_offset = first_molecule_offset
+                    completed_interval = -1
+                    last_source_row = 0
+                    molecule_frame_index = 0
+                    previous_molecule_timestep = None
+                    _write_meta(
+                        connection,
+                        {
+                            "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                            "build_state": "building",
+                            "dataset_id": dataset_id_for_source(
+                                reaction_source[0]
+                            ),
+                            "reactionevent_file": reaction_source[0],
+                            "reactionevent_size": reaction_source[1],
+                            "reactionevent_mtime_ns": reaction_source[2],
+                            "molecules_file": molecule_source[0],
+                            "molecules_size": molecule_source[1],
+                            "molecules_mtime_ns": molecule_source[2],
+                            "reactionevent_offset": event_offset,
+                            "molecules_offset": molecule_offset,
+                            "completed_interval": completed_interval,
+                            "last_source_row": last_source_row,
+                            "molecule_frame_index": molecule_frame_index,
+                            "previous_molecule_timestep": "",
+                            "event_count": 0,
+                            "reaction_type_count": 0,
+                            "updated_at_epoch": int(time.time()),
+                        },
+                    )
+                    connection.commit()
+
+                resumed = compatible and (
+                    completed_interval >= 0
+                    or event_offset > first_event_offset
+                    or molecule_offset > first_molecule_offset
+                )
+                reaction_handle.seek(event_offset)
+                molecule_handle.seek(molecule_offset)
+
+                current_molecule = _read_molecule_group(
+                    molecule_handle,
+                    molecule_fields,
+                    frame_index=molecule_frame_index,
+                    previous_timestep=previous_molecule_timestep,
+                )
+
+                try:
+                    while True:
+                        event_group = _read_event_group(
+                            reaction_handle,
+                            reaction_fields,
+                            last_interval=completed_interval,
+                            last_source_row=last_source_row,
+                        )
+                        if event_group is None:
+                            break
+                        events, next_event_offset, next_source_row = event_group
+                        timestep_index = int(events[0]["timestep_index"])
+
+                        while (
+                            current_molecule is not None
+                            and current_molecule[0] < timestep_index
+                        ):
+                            previous_molecule_timestep = current_molecule[1]
+                            molecule_frame_index = current_molecule[0] + 1
+                            current_molecule = _read_molecule_group(
+                                molecule_handle,
+                                molecule_fields,
+                                frame_index=molecule_frame_index,
+                                previous_timestep=previous_molecule_timestep,
+                            )
+                        if (
+                            current_molecule is None
+                            or current_molecule[0] != timestep_index
+                        ):
+                            raise RngEventDataError(
+                                "molecules timeline does not cover "
+                                f"reaction-event interval {timestep_index}"
+                            )
+                        before_frame = current_molecule
+                        after_frame = _read_molecule_group(
+                            molecule_handle,
+                            molecule_fields,
+                            frame_index=before_frame[0] + 1,
+                            previous_timestep=before_frame[1],
+                        )
+                        if after_frame is None:
+                            raise RngEventDataError(
+                                "molecules timeline does not cover "
+                                f"reaction-event interval {timestep_index + 1}"
+                            )
+
+                        pools: dict[
+                            tuple[tuple[str, ...], tuple[str, ...]],
+                            deque[MoleculeComponent],
+                        ] = defaultdict(deque)
+                        for component in changed_components(
+                            before_frame[2], after_frame[2]
+                        ):
+                            pools[component.key].append(component)
+                        occurrences: dict[str, int] = defaultdict(int)
+                        summary_counts: dict[str, list[int]] = defaultdict(
+                            lambda: [0, 0]
+                        )
+                        for event in events:
+                            normalized_key = str(
+                                event["reaction_key_text"]
+                            )
+                            occurrences[normalized_key] += 1
+                            component = (
+                                pools[event["reaction_key"]].popleft()
+                                if pools[event["reaction_key"]]
+                                else None
+                            )
+                            rng_atom_ids = (
+                                list(component.atom_ids) if component else []
+                            )
+                            atom_ids = [
+                                atom_id + 1 for atom_id in rng_atom_ids
+                            ]
+                            reactant_bonds = (
+                                [
+                                    _trajectory_bond_id(bond)
+                                    for bond in component.reactant_bonds
+                                ]
+                                if component
+                                else []
+                            )
+                            product_bonds = (
+                                [
+                                    _trajectory_bond_id(bond)
+                                    for bond in component.product_bonds
+                                ]
+                                if component
+                                else []
+                            )
+                            status = (
+                                "matched"
+                                if component
+                                else "unresolved_hmm_timeline"
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO events(
+                                    event_id,reaction_key,source_row,
+                                    timestep_index,before_timestep,
+                                    after_timestep,reactant_text,product_text,
+                                    atom_ids_json,reactant_bonds_json,
+                                    product_bonds_json,association_status,
+                                    occurrence
+                                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                """,
+                                (
+                                    _event_id(
+                                        timestep_index,
+                                        int(event["source_row"]),
+                                        atom_ids,
+                                    ),
+                                    normalized_key,
+                                    int(event["source_row"]),
+                                    timestep_index,
+                                    int(before_frame[1]),
+                                    int(after_frame[1]),
+                                    str(event["reactant"]),
+                                    str(event["product"]),
+                                    json.dumps(
+                                        atom_ids, separators=(",", ":")
+                                    ),
+                                    json.dumps(
+                                        reactant_bonds,
+                                        separators=(",", ":"),
+                                    ),
+                                    json.dumps(
+                                        product_bonds,
+                                        separators=(",", ":"),
+                                    ),
+                                    status,
+                                    occurrences[normalized_key],
+                                ),
+                            )
+                            summary_counts[normalized_key][0] += 1
+                            summary_counts[normalized_key][1] += int(
+                                status == "matched"
+                            )
+
+                        for normalized_key, (
+                            total_count,
+                            matched_count,
+                        ) in summary_counts.items():
+                            connection.execute(
+                                """
+                                INSERT INTO reaction_summary(
+                                    reaction_key,total_events,
+                                    matched_events,distinct_intervals
+                                ) VALUES(?,?,?,1)
+                                ON CONFLICT(reaction_key) DO UPDATE SET
+                                    total_events=total_events+excluded.total_events,
+                                    matched_events=matched_events+excluded.matched_events,
+                                    distinct_intervals=distinct_intervals+1
+                                """,
+                                (
+                                    normalized_key,
+                                    total_count,
+                                    matched_count,
+                                ),
+                            )
+
+                        event_count = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM events"
+                            ).fetchone()[0]
+                        )
+                        reaction_type_count = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM reaction_summary"
+                            ).fetchone()[0]
+                        )
+                        _write_meta(
+                            connection,
+                            {
+                                "schema_version": (
+                                    EVENT_EVIDENCE_SCHEMA_VERSION
+                                ),
+                                "build_state": "building",
+                                "dataset_id": dataset_id_for_source(
+                                    reaction_source[0]
+                                ),
+                                "reactionevent_file": reaction_source[0],
+                                "reactionevent_size": reaction_source[1],
+                                "reactionevent_mtime_ns": reaction_source[2],
+                                "molecules_file": molecule_source[0],
+                                "molecules_size": molecule_source[1],
+                                "molecules_mtime_ns": molecule_source[2],
+                                "reactionevent_offset": next_event_offset,
+                                "molecules_offset": after_frame[3],
+                                "completed_interval": timestep_index,
+                                "last_source_row": next_source_row,
+                                "molecule_frame_index": after_frame[0],
+                                "previous_molecule_timestep": before_frame[1],
+                                "event_count": event_count,
+                                "reaction_type_count": reaction_type_count,
+                                "updated_at_epoch": int(time.time()),
+                            },
+                        )
+                        connection.commit()
+                        event_offset = next_event_offset
+                        completed_interval = timestep_index
+                        last_source_row = next_source_row
+                        current_molecule = after_frame
+                        molecule_frame_index = after_frame[0]
+                        previous_molecule_timestep = before_frame[1]
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "progress": min(
+                                        event_offset
+                                        / max(reaction_source[1], 1),
+                                        1.0,
+                                    ),
+                                    "phase": "checkpoint_event_index",
+                                    "message": (
+                                        "Checkpointed event evidence "
+                                        f"interval {timestep_index}"
+                                    ),
+                                    "resumed": resumed,
+                                }
+                            )
+
+                    if current_molecule is None:
+                        molecule_frame_count = molecule_frame_index
+                    else:
+                        molecule_frame_count = current_molecule[0] + 1
+                        while True:
+                            previous_molecule_timestep = current_molecule[1]
+                            next_frame = _read_molecule_group(
+                                molecule_handle,
+                                molecule_fields,
+                                frame_index=current_molecule[0] + 1,
+                                previous_timestep=previous_molecule_timestep,
+                            )
+                            if next_frame is None:
+                                break
+                            current_molecule = next_frame
+                            molecule_frame_count = current_molecule[0] + 1
+
+                    event_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM events"
+                        ).fetchone()[0]
+                    )
+                    reaction_type_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM reaction_summary"
+                        ).fetchone()[0]
+                    )
+                    _write_meta(
+                        connection,
+                        {
+                            "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                            "build_state": "ready",
+                            "dataset_id": dataset_id_for_source(
+                                reaction_source[0]
+                            ),
+                            "reactionevent_file": reaction_source[0],
+                            "reactionevent_size": reaction_source[1],
+                            "reactionevent_mtime_ns": reaction_source[2],
+                            "molecules_file": molecule_source[0],
+                            "molecules_size": molecule_source[1],
+                            "molecules_mtime_ns": molecule_source[2],
+                            "reactionevent_offset": reaction_source[1],
+                            "molecules_offset": molecule_source[1],
+                            "completed_interval": completed_interval,
+                            "last_source_row": last_source_row,
+                            "molecule_frame_index": max(
+                                molecule_frame_count - 1, 0
+                            ),
+                            "previous_molecule_timestep": (
+                                current_molecule[1]
+                                if current_molecule is not None
+                                else ""
+                            ),
+                            "event_count": event_count,
+                            "reaction_type_count": reaction_type_count,
+                            "molecule_frame_count": molecule_frame_count,
+                            "available_intervals": max(
+                                molecule_frame_count - 1, 0
+                            ),
+                            "updated_at_epoch": int(time.time()),
+                        },
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
             os.replace(building_path, index_path)
             if progress_callback:
                 progress_callback(
@@ -477,7 +894,7 @@ class EventEvidenceStore:
                     }
                 )
         result = self.open_required(reaction_source[0], molecule_source[0])
-        result["resumed"] = False
+        result["resumed"] = resumed
         return result
 
     def query_events(

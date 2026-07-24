@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import reacnet_scope.event_index as event_index_module
+import reacnet_scope.rng_events as rng_events
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import (
     IndexInvalidError,
@@ -12,6 +14,7 @@ from reacnet_scope.indexes import (
     event_evidence_index_path,
     resolve_dataset_paths,
 )
+from reacnet_scope.rng_events import RngEventDataError
 
 
 REACTION_KEY = "[H]+[O]->[H][O]"
@@ -75,6 +78,10 @@ def test_event_store_publishes_dataset_local_index_and_pages(
     assert first["rows"][0]["event_id"] != second["rows"][0]["event_id"]
     assert first["rows"][0]["atom_id_list"] == [1, 2]
     assert first["rows"][0]["product_bonds"] == "1-2-1"
+    assert [row["association_status"] for row in first["rows"] + second["rows"]] == [
+        "matched",
+        "unresolved_hmm_timeline",
+    ]
 
 
 def test_event_store_summarizes_known_reactions(tmp_path, monkeypatch) -> None:
@@ -153,3 +160,108 @@ def test_incomplete_event_index_is_invalid(tmp_path, monkeypatch) -> None:
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
     ] == "invalid"
+
+
+def test_changed_components_has_public_compatibility_name() -> None:
+    assert rng_events.changed_components is rng_events._changed_components
+
+
+def test_event_builder_resumes_after_committed_interval_without_duplicates(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    published = event_evidence_index_path(str(reactionevent))
+    checkpoints = 0
+
+    def interrupt(update):
+        nonlocal checkpoints
+        if update.get("phase") == "checkpoint_event_index":
+            checkpoints += 1
+            assert not published.exists()
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        EVENT_EVIDENCE_STORE.build(
+            str(reactionevent),
+            str(molecules),
+            progress_callback=interrupt,
+        )
+
+    assert checkpoints == 1
+    assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
+        "state"
+    ] == "building"
+
+    result = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    rows = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent), str(molecules), REACTION_KEY, limit=100
+    )["rows"]
+
+    assert result["resumed"] is True
+    assert len(rows) == 2
+    assert len({row["event_id"] for row in rows}) == 2
+
+
+def test_event_builder_publishes_only_a_ready_database(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    published = event_evidence_index_path(str(reactionevent))
+    real_replace = event_index_module.os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def checked_replace(source, target):
+        source_path = Path(source)
+        target_path = Path(target)
+        connection = sqlite3.connect(source_path)
+        try:
+            state = connection.execute(
+                "SELECT value FROM meta WHERE key='build_state'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert state == "ready"
+        assert not target_path.exists()
+        replacements.append((source_path, target_path))
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(event_index_module.os, "replace", checked_replace)
+
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+    assert replacements == [(Path(f"{published}.building"), published)]
+
+
+def test_event_builder_rejects_decreasing_event_intervals(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "1,[H]+[O],[H][O]\n"
+        "0,[H]+[O],[H][O]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RngEventDataError, match="sorted"):
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+
+def test_event_builder_rejects_decreasing_molecule_timesteps(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "10,[H],0,\n"
+        "10,[O],1,\n"
+        "0,[H][O],0;1,0-1-1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RngEventDataError, match="sorted"):
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))

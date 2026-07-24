@@ -80,7 +80,10 @@ class MoleculeComponent:
         return self.reactants, self.products
 
 
-def _changed_components(before: tuple[MoleculeRow, ...], after: tuple[MoleculeRow, ...]) -> list[MoleculeComponent]:
+def changed_components(
+    before: tuple[MoleculeRow, ...],
+    after: tuple[MoleculeRow, ...],
+) -> list[MoleculeComponent]:
     before_by_atom = {atom_id: idx for idx, molecule in enumerate(before) for atom_id in molecule.atom_ids}
     after_by_atom = {atom_id: idx for idx, molecule in enumerate(after) for atom_id in molecule.atom_ids}
     graph: dict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
@@ -126,6 +129,9 @@ def _changed_components(before: tuple[MoleculeRow, ...], after: tuple[MoleculeRo
         )
     components.sort(key=lambda item: (item.key, item.atom_ids))
     return components
+
+
+_changed_components = changed_components
 
 
 @lru_cache(maxsize=8)
