@@ -84,6 +84,7 @@ def test_pathway_serialization_retains_stoichiometry_and_raw_metrics() -> None:
         paths=(path,),
         query={"max_paths": 20, "score_version": "candidate-path/v1"},
         source_signatures={"reactionabcd": {"mtime_ns": 123}},
+        evidence_status="evidence_linked",
         reason="ok",
         truncated=False,
         expansions=1,
@@ -177,6 +178,7 @@ def test_pathway_result_serializes_nested_sets_and_paths_deterministically() -> 
             )
         },
         source_signatures={"paths": {Path("source")}},
+        evidence_status="network_only",
         reason="no candidates",
         truncated=False,
         expansions=0,
@@ -319,6 +321,7 @@ def test_pathway_result_serializes_decimals_and_enums_without_rounding() -> None
         paths=(),
         query={"threshold": Decimal("0.12345678901234567890")},
         source_signatures={"status": _SerializationState.LINKED},
+        evidence_status="network_only",
         reason="no candidates",
         truncated=False,
         expansions=0,
@@ -566,6 +569,76 @@ class _RecordingEvidenceProvider:
     ) -> dict[str, dict[str, object]]:
         self.calls.append(reaction_keys)
         return self.summaries
+
+
+@pytest.mark.parametrize(
+    ("network", "start_smiles", "limits", "reason"),
+    [
+        (
+            ReactionNetwork([Reaction(("A",), ("B",), 10)]),
+            "missing",
+            {},
+            "species_absent",
+        ),
+        (
+            ReactionNetwork(
+                [
+                    Reaction(("A",), ("B",), 5),
+                    Reaction(("B",), ("A",), 10),
+                ]
+            ),
+            "A",
+            {},
+            "no_positive_net_continuation",
+        ),
+        (
+            ReactionNetwork(
+                [
+                    Reaction(("A",), ("B",), 10),
+                    Reaction(("B",), ("A",), 9),
+                ]
+            ),
+            "A",
+            {"min_directionality": 0.2},
+            "filtered_by_thresholds",
+        ),
+    ],
+)
+def test_ready_evidence_provider_defines_query_status_for_empty_results(
+    network: ReactionNetwork,
+    start_smiles: str,
+    limits: dict[str, object],
+    reason: str,
+) -> None:
+    provider = _RecordingEvidenceProvider({})
+
+    result = find_candidate_paths(
+        network,
+        start_smiles,
+        evidence_provider=provider,
+        **limits,
+    )
+    payload = result.as_dict()
+
+    assert payload["paths"] == []
+    assert payload["reason"] == reason
+    assert payload["evidence_status"] == "evidence_linked"
+    assert payload["source_signatures"] == provider.source_signatures
+    assert provider.calls == [
+        tuple(sorted(reaction.key for reaction in network.reactions))
+    ]
+
+
+def test_unavailable_evidence_defines_network_only_status_for_empty_result() -> None:
+    result = find_candidate_paths(
+        ReactionNetwork([Reaction(("A",), ("B",), 10)]),
+        "missing",
+    )
+
+    payload = result.as_dict()
+    assert payload["paths"] == []
+    assert payload["evidence_status"] == "network_only"
+    assert payload["source_signatures"] == {}
 
 
 def test_evidence_is_prefetched_once_and_applied_without_expansion_io() -> None:

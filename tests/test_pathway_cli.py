@@ -480,3 +480,54 @@ def test_pathway_empty_result_writes_valid_empty_exports(
     with out_csv.open(newline="", encoding="utf-8") as handle:
         assert list(csv.DictReader(handle)) == []
     assert "species_absent" in capsys.readouterr().out
+
+
+def test_pathway_cli_ready_index_empty_result_keeps_linked_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reaction = _write_reaction_file(tmp_path)
+    reactionevent = tmp_path / "run.reactionevent.csv"
+    molecules = tmp_path / "run.molecules.csv"
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "0,[H]+[O],[H][O]\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "0,[H],0,\n"
+        "0,[O],1,\n"
+        "10,[H][O],0;1,0-1-1\n",
+        encoding="utf-8",
+    )
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    out_json = tmp_path / "empty-linked.json"
+    args = cli.build_parser().parse_args(
+        [
+            "pathway",
+            "--reac",
+            str(reaction),
+            "--start-smiles",
+            "absent",
+            "--out-json",
+            str(out_json),
+        ]
+    )
+
+    assert cli.cmd_pathway(args) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    assert payload["paths"] == []
+    assert payload["reason"] == "species_absent"
+    assert payload["evidence_status"] == "evidence_linked"
+    assert set(payload["source_signatures"]) >= {
+        "reactionabcd",
+        "reactionevent",
+        "molecules",
+        "event_index",
+    }
+    assert captured.err == ""

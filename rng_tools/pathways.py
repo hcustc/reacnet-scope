@@ -184,25 +184,27 @@ class CandidatePathResult:
     paths: tuple[CandidatePath, ...]
     query: Mapping[str, Any]
     source_signatures: Mapping[str, Any]
+    evidence_status: Literal["evidence_linked", "network_only"]
     reason: str
     truncated: bool
     expansions: int
+
+    def __post_init__(self) -> None:
+        if self.evidence_status not in {"evidence_linked", "network_only"}:
+            raise ValueError(
+                "evidence_status must be 'evidence_linked' or 'network_only'"
+            )
+        path_statuses = {path.evidence_status for path in self.paths}
+        if path_statuses and path_statuses != {self.evidence_status}:
+            raise ValueError(
+                "path evidence statuses must match the query evidence status"
+            )
 
     def as_dict(self) -> dict[str, Any]:
         payload = _json_safe(self)
         payload["paths"] = [path.as_dict() for path in self.paths]
         payload["score_version"] = SCORE_VERSION
-        payload["evidence_status"] = _result_evidence_status(self.paths)
         return payload
-
-
-def _result_evidence_status(paths: Sequence[CandidatePath]) -> str:
-    statuses = {path.evidence_status for path in paths}
-    if not statuses:
-        return "network_only"
-    if len(statuses) == 1:
-        return next(iter(statuses))
-    return "mixed"
 
 
 def _validate_event_counts(
@@ -274,20 +276,26 @@ def find_candidate_paths(
         "interpretation": "candidate route, not mechanistic proof",
     }
 
+    evidence_status: Literal["evidence_linked", "network_only"] = (
+        "evidence_linked"
+        if evidence_provider is not None
+        else "network_only"
+    )
+    evidence_summaries, source_signatures = _prefetch_evidence(
+        network,
+        evidence_provider,
+    )
     if start_smiles not in network.species:
         return CandidatePathResult(
             paths=(),
             query=query,
-            source_signatures={},
+            source_signatures=source_signatures,
+            evidence_status=evidence_status,
             reason="species_absent",
             truncated=False,
             expansions=0,
         )
 
-    evidence_summaries, source_signatures = _prefetch_evidence(
-        network,
-        evidence_provider,
-    )
     sequence = itertools.count()
     root = _SearchState(
         species=(start_smiles,),
@@ -420,6 +428,7 @@ def find_candidate_paths(
         paths=paths,
         query=query,
         source_signatures=source_signatures,
+        evidence_status=evidence_status,
         reason=reason,
         truncated=truncated,
         expansions=expansions,

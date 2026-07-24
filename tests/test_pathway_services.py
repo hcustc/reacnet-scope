@@ -144,6 +144,54 @@ def test_pathway_service_degrades_without_event_index(
     assert step["distinct_intervals"] is None
 
 
+@pytest.mark.parametrize(
+    ("start_smiles", "limits", "reason"),
+    [
+        ("missing", {}, "species_absent"),
+        ("[H][O]", {}, "no_positive_net_continuation"),
+        ("[H]", {"min_net_tp": 5}, "filtered_by_thresholds"),
+    ],
+)
+def test_ready_index_preserves_query_evidence_context_for_empty_results(
+    indexed_artifacts: dict[str, str],
+    start_smiles: str,
+    limits: dict[str, Any],
+    reason: str,
+) -> None:
+    payload = svc.find_pathways(
+        indexed_artifacts,
+        start_smiles,
+        max_depth=1,
+        **limits,
+    )
+
+    assert payload["paths"] == []
+    assert payload["reason"] == reason
+    assert payload["evidence_status"] == "evidence_linked"
+    assert "preparation_command" not in payload
+    assert set(payload["source_signatures"]) >= {
+        "reactionabcd",
+        "reactionevent",
+        "molecules",
+        "event_index",
+    }
+
+
+def test_unavailable_index_empty_result_remains_network_only(
+    reaction_only_artifacts: dict[str, str],
+) -> None:
+    payload = svc.find_pathways(
+        reaction_only_artifacts,
+        "missing",
+        max_depth=1,
+    )
+
+    assert payload["paths"] == []
+    assert payload["reason"] == "species_absent"
+    assert payload["evidence_status"] == "network_only"
+    assert payload["preparation_command"].endswith("--event-only")
+
+
 def test_pathway_service_reads_no_event_source_csv(
     indexed_artifacts: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
