@@ -15,7 +15,6 @@ import csv
 import json
 import os
 import re
-import shlex
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -267,26 +266,31 @@ def _print_pathway_table(payload: dict) -> None:
 
 def cmd_pathway(args: argparse.Namespace) -> int:
     artifacts = _pathway_artifacts(args.reac)
-    payload = find_pathways_service(
-        artifacts,
-        args.start_smiles,
-        direction=args.direction,
-        max_depth=args.max_depth,
-        max_branches=args.max_branches,
-        max_paths=args.max_paths,
-        max_expansions=args.max_expansions,
-        min_net_tp=args.min_net_tp,
-        min_directionality=args.min_directionality,
-    )
+    try:
+        payload = find_pathways_service(
+            artifacts,
+            args.start_smiles,
+            direction=args.direction,
+            max_depth=args.max_depth,
+            max_branches=args.max_branches,
+            max_paths=args.max_paths,
+            max_expansions=args.max_expansions,
+            min_net_tp=args.min_net_tp,
+            min_directionality=args.min_directionality,
+        )
+    except Exception as exc:
+        from scripts.webapp_dash.services import ServiceError
+
+        if not isinstance(exc, ServiceError):
+            raise
+        print(f"[ERROR] {exc.message}", file=sys.stderr)
+        return 2
     document = _pathway_document(payload)
     _print_pathway_table(payload)
 
-    if payload.get("preparation_command"):
-        prepare_directory = str(Path(_reaction_base(args.reac)).parent)
-        print(
-            f"reacnet-scope-prepare {shlex.quote(prepare_directory)} --event-only",
-            file=sys.stderr,
-        )
+    preparation_command = payload.get("preparation_command")
+    if preparation_command:
+        print(preparation_command, file=sys.stderr)
 
     if args.out_json:
         _write_json_atomic(args.out_json, document)
@@ -1417,9 +1421,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return int(args.func(args))
 
 

@@ -4,7 +4,6 @@ import builtins
 import csv
 import json
 import os
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -216,7 +215,7 @@ def test_pathway_command_exports_schema_and_one_csv_row_per_step(
     assert row["score_version"] == "candidate-path/v1"
 
 
-def test_pathway_command_infers_event_sources_and_quotes_prepare_command(
+def test_pathway_command_infers_event_sources_and_preserves_prepare_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -225,11 +224,14 @@ def test_pathway_command_infers_event_sources_and_quotes_prepare_command(
     folder.mkdir()
     reaction = _write_reaction_file(folder, name="sample trajectory.reactionabcd")
     captured: dict[str, Any] = {}
+    reported_command = (
+        "reacnet-scope-prepare 'service quoted directory' --event-only"
+    )
 
     def fake_find(artifacts: dict[str, str], start_smiles: str, **limits: Any) -> dict[str, Any]:
         captured.update(artifacts=artifacts, start_smiles=start_smiles, limits=limits)
         payload = _network_only_payload()
-        payload["preparation_command"] = "service-reported-unavailable"
+        payload["preparation_command"] = reported_command
         return payload
 
     monkeypatch.setattr(cli, "find_pathways_service", fake_find)
@@ -245,8 +247,76 @@ def test_pathway_command_infers_event_sources_and_quotes_prepare_command(
         "reactionevent": f"{base}.reactionevent.csv",
         "molecules": f"{base}.molecules.csv",
     }
-    expected = f"reacnet-scope-prepare {shlex.quote(str(folder))} --event-only"
+    assert capsys.readouterr().err.strip() == reported_command
+
+
+@pytest.mark.parametrize("index_state", ["stale", "invalid"])
+def test_pathway_command_preserves_service_rebuild_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    index_state: str,
+) -> None:
+    folder = tmp_path / "data set"
+    folder.mkdir()
+    reaction = _write_reaction_file(folder)
+    expected = f"reacnet-scope-prepare '{folder}' --rebuild event"
+    payload = _network_only_payload()
+    payload["event_index_state"] = index_state
+    payload["preparation_command"] = expected
+    monkeypatch.setattr(
+        cli,
+        "find_pathways_service",
+        lambda *_args, **_kwargs: payload,
+    )
+    args = cli.build_parser().parse_args(
+        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+    )
+
+    assert cli.cmd_pathway(args) == 0
+
     assert capsys.readouterr().err.strip() == expected
+
+
+def test_pathway_main_maps_missing_reaction_to_stable_usage_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing.reactionabcd"
+
+    exit_code = cli.main(
+        [
+            "pathway",
+            "--reac",
+            str(missing),
+            "--start-smiles",
+            "[H]",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "需要 .reactionabcd 文件" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_pathway_command_does_not_swallow_unexpected_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaction = _write_reaction_file(tmp_path)
+
+    def fail_unexpectedly(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(cli, "find_pathways_service", fail_unexpectedly)
+    args = cli.build_parser().parse_args(
+        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        cli.cmd_pathway(args)
 
 
 def test_pathway_command_without_exports_prints_unrounded_ranked_table(
