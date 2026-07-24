@@ -12,13 +12,19 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 import heapq
+import io
+import json
+from numbers import Integral, Real
 from typing import Any, Literal
+
+import networkx as nx
 
 from rng_tools.network import Reaction, ReactionNetwork, smiles_to_formula_fast
 from rng_tools.pathways import EvidenceProvider
 
 
 SCHEMA_VERSION = "reacnet-scope/mechanism-network/v1"
+_SERIALIZATION_FORMATS = ("cytoscape-json", "graphml", "gexf")
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,250 @@ class _OrientedReaction:
     forward_tp: int
     reverse_tp: int
     net_tp: int
+
+
+def to_networkx_mechanism_graph(
+    payload: Mapping[str, Any],
+) -> nx.MultiDiGraph:
+    """Project a mechanism payload into a stable bipartite multigraph."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("mechanism payload must be a mapping")
+    required = (
+        "schema_version",
+        "network_semantics",
+        "evidence_level",
+        "anchor_smiles",
+        "nodes",
+        "edges",
+    )
+    for name in required:
+        if name not in payload:
+            raise ValueError(f"mechanism payload is missing {name}")
+    if payload["network_semantics"] != "mechanism":
+        raise ValueError(
+            "mechanism payload network_semantics must be 'mechanism'"
+        )
+    for name in (
+        "schema_version",
+        "evidence_level",
+        "anchor_smiles",
+    ):
+        if not isinstance(payload[name], str):
+            raise ValueError(f"mechanism payload {name} must be a string")
+
+    raw_nodes = payload["nodes"]
+    raw_edges = payload["edges"]
+    if not _is_record_sequence(raw_nodes):
+        raise ValueError("mechanism payload nodes must be a sequence")
+    if not _is_record_sequence(raw_edges):
+        raise ValueError("mechanism payload edges must be a sequence")
+
+    graph = nx.MultiDiGraph()
+    graph.graph.update(
+        schema_version=payload["schema_version"],
+        network_semantics="mechanism",
+        evidence_level=payload["evidence_level"],
+        anchor_smiles=payload["anchor_smiles"],
+    )
+
+    for index, raw_node in enumerate(raw_nodes):
+        if not isinstance(raw_node, Mapping):
+            raise ValueError(f"mechanism payload node {index} must be a mapping")
+        node = dict(raw_node)
+        node_id = _required_nonempty_string(node, "id", f"node {index}")
+        kind = _required_nonempty_string(node, "kind", f"node {node_id}")
+        if kind not in {"species", "reaction"}:
+            raise ValueError(
+                f"mechanism payload node {node_id} has invalid kind {kind!r}"
+            )
+        if node_id in graph:
+            raise ValueError(f"mechanism payload has duplicate node ID {node_id}")
+        graph.add_node(node_id, **node)
+
+    edge_ids: set[str] = set()
+    for index, raw_edge in enumerate(raw_edges):
+        if not isinstance(raw_edge, Mapping):
+            raise ValueError(f"mechanism payload edge {index} must be a mapping")
+        edge = dict(raw_edge)
+        edge_id = _required_nonempty_string(edge, "id", f"edge {index}")
+        if edge_id in edge_ids:
+            raise ValueError(f"mechanism payload has duplicate edge ID {edge_id}")
+        edge_ids.add(edge_id)
+        source = _required_nonempty_string(edge, "source", f"edge {edge_id}")
+        target = _required_nonempty_string(edge, "target", f"edge {edge_id}")
+        role = _required_nonempty_string(edge, "role", f"edge {edge_id}")
+        if source not in graph:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} references unknown source "
+                f"{source}"
+            )
+        if target not in graph:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} references unknown target "
+                f"{target}"
+            )
+        if role == "reactant":
+            species_id, reaction_id = source, target
+        elif role == "product":
+            reaction_id, species_id = source, target
+        else:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} has invalid role {role!r}"
+            )
+        if graph.nodes[species_id]["kind"] != "species":
+            raise ValueError(
+                f"mechanism payload edge {edge_id} {role} species endpoint "
+                "must have kind 'species'"
+            )
+        if graph.nodes[reaction_id]["kind"] != "reaction":
+            raise ValueError(
+                f"mechanism payload edge {edge_id} {role} reaction endpoint "
+                "must have kind 'reaction'"
+            )
+        key = f"{role}:{reaction_id}:{species_id}"
+        if graph.has_edge(source, target, key):
+            raise ValueError(
+                f"mechanism payload has duplicate semantic edge key {key}"
+            )
+        graph.add_edge(source, target, key=key, **edge)
+    return graph
+
+
+def serialize_mechanism_graph(
+    graph: nx.MultiDiGraph,
+    *,
+    format: str = "cytoscape-json",
+) -> dict[str, Any] | bytes:
+    """Serialize a mechanism graph without mutating it or writing files."""
+    if not isinstance(graph, nx.MultiDiGraph):
+        raise ValueError("mechanism graph must be a networkx.MultiDiGraph")
+    if format not in _SERIALIZATION_FORMATS:
+        supported = ", ".join(_SERIALIZATION_FORMATS)
+        raise ValueError(
+            f"unknown mechanism graph format {format!r}; "
+            f"valid formats: {supported}"
+        )
+    if format == "cytoscape-json":
+        document = nx.cytoscape_data(graph)
+        graph_data = document.get("data", {})
+        if isinstance(graph_data, list):
+            document["data"] = dict(graph_data)
+        elif isinstance(graph_data, Mapping):
+            document["data"] = dict(graph_data)
+        else:
+            raise ValueError("NetworkX returned invalid Cytoscape graph data")
+        return document
+
+    export_graph = _xml_safe_graph_copy(graph)
+    buffer = io.BytesIO()
+    if format == "graphml":
+        nx.write_graphml(export_graph, buffer, encoding="utf-8")
+    else:
+        nx.write_gexf(export_graph, buffer, encoding="utf-8")
+    return buffer.getvalue()
+
+
+def _is_record_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    )
+
+
+def _required_nonempty_string(
+    record: Mapping[str, Any],
+    name: str,
+    context: str,
+) -> str:
+    value = record.get(name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"mechanism payload {context} {name} must be a non-empty string"
+        )
+    return value
+
+
+def _xml_safe_graph_copy(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    copied = nx.MultiDiGraph()
+    copied.graph.update(
+        {key: _xml_attribute(value) for key, value in graph.graph.items()}
+    )
+    for node_id, attributes in graph.nodes(data=True):
+        copied.add_node(
+            node_id,
+            **{
+                key: _xml_attribute(value)
+                for key, value in attributes.items()
+            },
+        )
+    for source, target, key, attributes in graph.edges(
+        keys=True,
+        data=True,
+    ):
+        copied.add_edge(
+            source,
+            target,
+            key=key,
+            **{
+                name: _xml_attribute(value)
+                for name, value in attributes.items()
+            },
+        )
+    return copied
+
+
+def _xml_attribute(value: Any) -> str | int | float:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        return float(value)
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        return json.dumps(
+            _json_safe_attribute(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    return str(value)
+
+
+def _json_safe_attribute(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        return float(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe_attribute(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (set, frozenset)):
+        items = [_json_safe_attribute(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_attribute(item) for item in value]
+    return str(value)
 
 
 def build_mechanism_network(

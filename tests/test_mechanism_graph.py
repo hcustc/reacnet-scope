@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import copy
+import io
+import json
 
+import networkx as nx
 import pytest
 
 import rng_tools.mechanism_graph as mechanism_graph
-from rng_tools.mechanism_graph import build_mechanism_network
+from rng_tools.mechanism_graph import (
+    build_mechanism_network,
+    serialize_mechanism_graph,
+    to_networkx_mechanism_graph,
+)
 from rng_tools.network import Reaction, ReactionNetwork
 
 
@@ -374,3 +382,212 @@ def test_query_validation_is_strict(
             ReactionNetwork([Reaction(("A",), ("B",), 10)]),
             **kwargs,
         )
+
+
+@pytest.fixture
+def mechanism_payload() -> dict[str, object]:
+    return build_mechanism_network(
+        ReactionNetwork(
+            [
+                Reaction(("A", "A", "X"), ("B", "C"), 12),
+                Reaction(("B", "C"), ("A", "A", "X"), 2),
+            ]
+        ),
+        anchor_smiles="A",
+        max_depth=1,
+    )
+
+
+def test_networkx_projection_retains_bipartite_roles_and_stable_ids(
+    mechanism_payload: dict[str, object],
+) -> None:
+    graph = to_networkx_mechanism_graph(mechanism_payload)
+
+    assert isinstance(graph, nx.MultiDiGraph)
+    assert nx.is_weakly_connected(graph)
+    assert graph.graph == {
+        "schema_version": "reacnet-scope/mechanism-network/v1",
+        "network_semantics": "mechanism",
+        "evidence_level": "reaction_passage_counts",
+        "anchor_smiles": "A",
+    }
+    payload_node_ids = {
+        node["id"] for node in mechanism_payload["nodes"]  # type: ignore[index]
+    }
+    payload_edge_ids = {
+        edge["id"] for edge in mechanism_payload["edges"]  # type: ignore[index]
+    }
+    assert set(graph) == payload_node_ids
+    assert {
+        data["id"] for *_, data in graph.edges(data=True)
+    } == payload_edge_ids
+
+    reaction_id = next(
+        node
+        for node, data in graph.nodes(data=True)
+        if data["kind"] == "reaction"
+    )
+    assert {
+        data["role"]
+        for *_, data in graph.in_edges(reaction_id, data=True)
+    } == {"reactant"}
+    assert {
+        data["role"]
+        for *_, data in graph.out_edges(reaction_id, data=True)
+    } == {"product"}
+    for source, target, key, data in graph.edges(keys=True, data=True):
+        species_id = source if data["role"] == "reactant" else target
+        assert key == f"{data['role']}:{reaction_id}:{species_id}"
+
+
+def test_cytoscape_serialization_preserves_schema_and_element_ids(
+    mechanism_payload: dict[str, object],
+) -> None:
+    graph = to_networkx_mechanism_graph(mechanism_payload)
+    before = copy.deepcopy(graph)
+
+    document = serialize_mechanism_graph(graph)
+
+    assert isinstance(document, dict)
+    assert document["data"]["schema_version"] == mechanism_payload["schema_version"]
+    assert document["data"]["network_semantics"] == "mechanism"
+    node_ids = {
+        element["data"]["id"] for element in document["elements"]["nodes"]
+    }
+    edge_ids = {
+        element["data"]["id"] for element in document["elements"]["edges"]
+    }
+    assert node_ids == set(graph)
+    assert edge_ids == {
+        data["id"] for *_, data in graph.edges(data=True)
+    }
+    assert nx.utils.graphs_equal(graph, before)
+
+
+@pytest.mark.parametrize(
+    ("format_name", "reader"),
+    [("graphml", nx.read_graphml), ("gexf", nx.read_gexf)],
+)
+def test_xml_serialization_round_trips_counts_and_canonicalizes_attributes(
+    mechanism_payload: dict[str, object],
+    format_name: str,
+    reader: object,
+) -> None:
+    graph = to_networkx_mechanism_graph(mechanism_payload)
+    reaction_id = next(
+        node
+        for node, data in graph.nodes(data=True)
+        if data["kind"] == "reaction"
+    )
+    graph.graph["structured"] = {
+        "tuple": ("x", None),
+        "flags": [True, False],
+    }
+    graph.nodes[reaction_id]["nested"] = {"b": [2, None], "a": True}
+    before = copy.deepcopy(graph)
+
+    serialized = serialize_mechanism_graph(graph, format=format_name)
+
+    assert isinstance(serialized, bytes)
+    round_tripped = reader(io.BytesIO(serialized))  # type: ignore[operator]
+    assert len(round_tripped.nodes) == len(graph.nodes)
+    assert len(round_tripped.edges) == len(graph.edges)
+    assert round_tripped.nodes[reaction_id]["reactants"] == json.dumps(
+        ["A", "A", "X"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert round_tripped.nodes[reaction_id]["products"] == json.dumps(
+        ["B", "C"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert round_tripped.nodes[reaction_id]["nested"] == (
+        '{"a":1,"b":[2,""]}'
+    )
+    assert nx.utils.graphs_equal(graph, before)
+
+
+def test_xml_serialization_coerces_none_booleans_and_nested_values() -> None:
+    graph = nx.MultiDiGraph(
+        schema_version="test/v1",
+        network_semantics="mechanism",
+        evidence_level="network_only",
+        anchor_smiles="A",
+        optional=None,
+        visible=True,
+    )
+    graph.add_node(
+        "species:A",
+        id="species:A",
+        kind="species",
+        optional=None,
+        visible=False,
+        nested=("A", {"flag": True, "missing": None}),
+    )
+
+    xml = serialize_mechanism_graph(graph, format="graphml")
+    restored = nx.read_graphml(io.BytesIO(xml))
+
+    assert restored.graph["optional"] == ""
+    assert restored.graph["visible"] == 1
+    assert restored.nodes["species:A"]["optional"] == ""
+    assert restored.nodes["species:A"]["visible"] == 0
+    assert restored.nodes["species:A"]["nested"] == '["A",{"flag":1,"missing":""}]'
+
+
+def test_serializer_rejects_unknown_format_with_all_supported_names(
+    mechanism_payload: dict[str, object],
+) -> None:
+    graph = to_networkx_mechanism_graph(mechanism_payload)
+
+    with pytest.raises(ValueError) as error:
+        serialize_mechanism_graph(graph, format="json")
+
+    assert all(
+        name in str(error.value)
+        for name in ("cytoscape-json", "graphml", "gexf")
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "schema_version"),
+        (
+            {
+                "schema_version": "v1",
+                "network_semantics": "event_transfer",
+                "evidence_level": "network_only",
+                "anchor_smiles": "A",
+                "nodes": [],
+                "edges": [],
+            },
+            "network_semantics",
+        ),
+        (
+            {
+                "schema_version": "v1",
+                "network_semantics": "mechanism",
+                "evidence_level": "network_only",
+                "anchor_smiles": "A",
+                "nodes": [{"id": "species:A", "kind": "species"}],
+                "edges": [
+                    {
+                        "id": "edge:missing",
+                        "source": "species:A",
+                        "target": "reaction:missing",
+                        "role": "reactant",
+                    }
+                ],
+            },
+            "unknown target",
+        ),
+    ],
+)
+def test_networkx_projection_reports_clear_payload_validation_errors(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        to_networkx_mechanism_graph(payload)
