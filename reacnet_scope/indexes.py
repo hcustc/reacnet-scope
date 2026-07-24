@@ -31,6 +31,14 @@ from rng_tools.reaction import canonical_smiles
 
 ROUTE_INDEX_SCHEMA_VERSION = 3
 TRAJECTORY_INDEX_SCHEMA_VERSION = 3
+DATASET_SUFFIXES = (
+    ".reactionevent.csv",
+    ".molecules.csv",
+    ".reactionabcd",
+    ".species",
+    ".route",
+    ".table",
+)
 FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 ROUTE_LINE_RE = re.compile(r"^\s*Atom\s+(\d+)\s+\S+:\s*(.*)$")
 ROUTE_STEP_RE = re.compile(r"(\d+)\s+(\S+)")
@@ -78,12 +86,17 @@ def _source_signature(path_text: str) -> tuple[str, int, int]:
     return path, int(stat.st_size), int(stat.st_mtime_ns)
 
 
-def dataset_id_for_source(path: str) -> str:
+def _dataset_base(path: str) -> str:
     absolute = os.path.abspath(path)
-    for suffix in (".reactionabcd", ".species", ".route", ".table"):
+    for suffix in DATASET_SUFFIXES:
         if absolute.endswith(suffix):
             absolute = absolute[: -len(suffix)]
             break
+    return absolute
+
+
+def dataset_id_for_source(path: str) -> str:
+    absolute = _dataset_base(path)
     return hashlib.sha256(absolute.encode("utf-8")).hexdigest()[:20]
 
 
@@ -98,6 +111,7 @@ class DatasetPaths:
     manifest: Path
     route_index: Path
     trajectory_index: Path
+    event_index: Path
 
 
 def resolve_dataset_paths(
@@ -116,11 +130,7 @@ def resolve_dataset_paths(
     candidate = Path(base).expanduser() if base else root
     if not candidate.is_absolute():
         candidate = root / candidate if root.is_dir() else root
-    absolute = os.path.abspath(str(candidate))
-    for suffix in (".reactionabcd", ".species", ".route", ".table"):
-        if absolute.endswith(suffix):
-            absolute = absolute[: -len(suffix)]
-            break
+    absolute = _dataset_base(str(candidate))
     base_path = Path(absolute)
     resolved_cache = (
         Path(cache_root).expanduser().resolve()
@@ -137,6 +147,7 @@ def resolve_dataset_paths(
         manifest=cache_dir / "manifest.json",
         route_index=cache_dir / "route.sqlite3",
         trajectory_index=cache_dir / "trajectory.sqlite3",
+        event_index=cache_dir / "events.sqlite3",
     )
 
 
@@ -148,6 +159,11 @@ def route_index_path(route_file: str) -> Path:
 def trajectory_index_path(trajectory_file: str) -> Path:
     path, _size, _mtime_ns = _source_signature(trajectory_file)
     return resolve_dataset_paths(path).trajectory_index
+
+
+def event_evidence_index_path(reactionevent_file: str) -> Path:
+    path, _size, _mtime_ns = _source_signature(reactionevent_file)
+    return resolve_dataset_paths(path).event_index
 
 
 def _legacy_route_index_path(route_file: str) -> Path:
