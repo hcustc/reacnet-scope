@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 from pathlib import Path
 from typing import Any
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from rng_tools import dir_browser
+from scripts import rng_query_cli as cli
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import services as svc
 
@@ -97,6 +100,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-open-events-btn",
         "pathway-highlight-network-btn",
         "pathway-store",
+        "pathway-highlight-store",
     }:
         assert pathway_id in layout_ids
 
@@ -190,12 +194,25 @@ def _pathway_payload() -> dict[str, Any]:
                 "steps": [
                     {
                         "reaction_key": "[H]+[O]->[H][O]",
+                        "traversal_direction": "downstream",
                         "reactants": ["[H]", "[O]"],
                         "products": ["[H][O]"],
                         "focal_input": "[H]",
                         "focal_output": "[H][O]",
+                        "forward_tp": 7,
+                        "reverse_tp": 2,
+                        "net_tp": 5,
+                        "net_share": 0.625,
+                        "directionality": 5 / 9,
+                        "event_coverage": 0.8,
+                        "time_coverage": 0.4,
+                        "event_total": 5,
+                        "matched_event_total": 4,
+                        "distinct_intervals": 3,
                         "score": 0.6,
                         "evidence_status": "evidence_linked",
+                        "score_version": "candidate-path/v1",
+                        "source_references": ["/cache/events.sqlite3"],
                     }
                 ],
             }
@@ -440,7 +457,7 @@ def test_pathway_downloads_use_store_payload_without_search(monkeypatch) -> None
     )
     assert json_response.status_code == 200
     json_download = json_response.get_json()["response"]["pathway-json-download"]["data"]
-    assert json.loads(json_download["content"]) == payload
+    assert json.loads(json_download["content"]) == cli._pathway_document(payload)
 
     csv_response = client.post(
         "/_dash-update-component",
@@ -454,7 +471,15 @@ def test_pathway_downloads_use_store_payload_without_search(monkeypatch) -> None
     )
     assert csv_response.status_code == 200
     csv_download = csv_response.get_json()["response"]["pathway-csv-download"]["data"]
-    assert "[H]+[O]->[H][O]" in csv_download["content"]
+    with io.StringIO(csv_download["content"]) as handle:
+        reader = csv.DictReader(handle)
+        dash_rows = list(reader)
+        assert reader.fieldnames == cli.PATHWAY_CSV_FIELDS
+    expected_rows = [
+        {field: "" if value is None else str(value) for field, value in row.items()}
+        for row in cli._pathway_csv_rows(payload)
+    ]
+    assert dash_rows == expected_rows
 
 
 def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
@@ -493,8 +518,14 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
         "species_ids": ["[H]", "[H][O]"],
         "reaction_keys": ["[H]+[O]->[H][O]"],
     }
+    assert selection_response.get_json()["response"]["pathway-highlight-store"]["data"] is None
 
-    network_response = client.post(
+    existing_network = {
+        "schema_version": "reacnet-scope/network/v1",
+        "nodes": [{"id": "existing"}],
+        "edges": [],
+    }
+    highlight_response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
@@ -504,10 +535,45 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
             state_values={"pathway-selected-path": selected},
         ),
     )
-    assert network_response.status_code == 200
-    handoff = network_response.get_json()["response"]["network-store"]["data"]
-    assert handoff["species_ids"] == ["[H]", "[H][O]"]
-    assert handoff["reaction_keys"] == ["[H]+[O]->[H][O]"]
+    assert highlight_response.status_code == 200
+    response_payload = highlight_response.get_json()["response"]
+    assert "network-store" not in response_payload
+    assert existing_network == {
+        "schema_version": "reacnet-scope/network/v1",
+        "nodes": [{"id": "existing"}],
+        "edges": [],
+    }
+    handoff = response_payload["pathway-highlight-store"]["data"]
+    assert handoff == {
+        "schema_version": "reacnet-scope/pathway-highlight/v1",
+        "source": "pathway",
+        "path_rank": 1,
+        "species_ids": ["[H]", "[H][O]"],
+        "reaction_keys": ["[H]+[O]->[H][O]"],
+    }
+
+    clear_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "pathway-store",
+                "pathway-grid",
+                "pathway-cytoscape",
+            ],
+            changed="pathway-store.data",
+            input_values={
+                "pathway-store": _pathway_payload(),
+                "pathway-grid": [],
+                "pathway-cytoscape": None,
+            },
+            state_values={"pathway-grid": []},
+        ),
+    )
+    assert clear_response.status_code == 200
+    cleared = clear_response.get_json()["response"]
+    assert cleared["pathway-selected-path"]["data"] is None
+    assert cleared["pathway-highlight-store"]["data"] is None
 
 
 def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:

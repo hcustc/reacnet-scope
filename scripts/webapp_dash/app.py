@@ -1721,6 +1721,7 @@ def build_layout() -> html.Div:
             dcc.Store(id="pathway-store", storage_type="memory", data=None),
             dcc.Store(id="pathway-selected-step", storage_type="memory", data=None),
             dcc.Store(id="pathway-selected-path", storage_type="memory", data=None),
+            dcc.Store(id="pathway-highlight-store", storage_type="memory", data=None),
             dcc.Store(id="literature-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="batch-conditions-store", storage_type="memory", data=None),
             dcc.Store(id="batch-matrix-grid-store", storage_type="memory", data={"rows": []}),

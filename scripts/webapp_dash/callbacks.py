@@ -20,6 +20,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
+from rng_tools.pathway_export import pathway_csv_text, pathway_document
 from scripts.webapp_dash import services as svc
 
 
@@ -2250,6 +2251,7 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-selection-summary", "children"),
         Output("pathway-open-events-btn", "disabled"),
         Output("pathway-highlight-network-btn", "disabled"),
+        Output("pathway-highlight-store", "data"),
         Input("pathway-store", "data"),
         Input("pathway-grid", "selected_rows"),
         Input("pathway-cytoscape", "tapNodeData"),
@@ -2259,7 +2261,7 @@ def register_callbacks(app: Any) -> None:
         payload = payload or {}
         paths = payload.get("paths") or []
         if ctx.triggered_id == "pathway-store" or not paths:
-            return None, None, "选择一条路径或一个反应节点。", True, True
+            return None, None, "选择一条路径或一个反应节点。", True, True, None
 
         selected_path = None
         selected_step = None
@@ -2316,7 +2318,7 @@ def register_callbacks(app: Any) -> None:
                             ),
                         }
         if selected_path is None:
-            return None, None, "选择一条有效路径或反应节点。", True, True
+            return None, None, "选择一条有效路径或反应节点。", True, True, None
         path_handoff = {
             "path_rank": int(selected_path.get("rank") or 0),
             "species_ids": [
@@ -2338,7 +2340,14 @@ def register_callbacks(app: Any) -> None:
                 f"已选路径 {path_handoff['path_rank']}；"
                 "点击黄色反应节点可查看事件证据。"
             )
-        return path_handoff, selected_step, summary, selected_step is None, False
+        return (
+            path_handoff,
+            selected_step,
+            summary,
+            selected_step is None,
+            False,
+            None,
+        )
 
     @app.callback(
         Output("event-reaction-text", "value", allow_duplicate=True),
@@ -2355,7 +2364,7 @@ def register_callbacks(app: Any) -> None:
         return reaction_text
 
     @app.callback(
-        Output("network-store", "data", allow_duplicate=True),
+        Output("pathway-highlight-store", "data", allow_duplicate=True),
         Input("pathway-highlight-network-btn", "n_clicks"),
         State("pathway-selected-path", "data"),
         prevent_initial_call=True,
@@ -2364,7 +2373,7 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None or not selected_path:
             raise PreventUpdate
         return {
-            "schema_version": "reacnet-scope/network-highlight/v1",
+            "schema_version": "reacnet-scope/pathway-highlight/v1",
             "source": "pathway",
             "path_rank": selected_path.get("path_rank"),
             "species_ids": list(selected_path.get("species_ids") or []),
@@ -2381,7 +2390,12 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None or not payload:
             raise PreventUpdate
         return dcc.send_string(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(
+                pathway_document(payload),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "candidate_pathways.json",
         )
 
@@ -2395,7 +2409,7 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None or not payload:
             raise PreventUpdate
         return dcc.send_string(
-            _pathway_csv(payload),
+            pathway_csv_text(payload),
             "candidate_pathways.csv",
         )
 
@@ -3141,64 +3155,6 @@ def _pathway_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
-
-
-def _pathway_csv(payload: dict[str, Any]) -> str:
-    fields = [
-        "path_rank",
-        "step_index",
-        "formula_chain",
-        "smiles_chain",
-        "path_score",
-        "weakest_step_score",
-        "reaction_key",
-        "reaction_text",
-        "reactants",
-        "products",
-        "step_score",
-        "evidence_status",
-        "score_version",
-    ]
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fields)
-    writer.writeheader()
-    for path in payload.get("paths") or []:
-        steps = path.get("steps") or []
-        scores = [
-            float(step.get("score"))
-            for step in steps
-            if step.get("score") is not None
-        ]
-        weakest = min(scores) if scores else None
-        for step_index, step in enumerate(steps, start=1):
-            reactants = [str(value) for value in step.get("reactants") or []]
-            products = [str(value) for value in step.get("products") or []]
-            writer.writerow(
-                {
-                    "path_rank": path.get("rank"),
-                    "step_index": step_index,
-                    "formula_chain": " -> ".join(
-                        str(value) for value in path.get("formulas") or []
-                    ),
-                    "smiles_chain": " -> ".join(
-                        str(value) for value in path.get("species") or []
-                    ),
-                    "path_score": path.get("score"),
-                    "weakest_step_score": weakest,
-                    "reaction_key": step.get("reaction_key"),
-                    "reaction_text": (
-                        f"{' + '.join(reactants)} -> {' + '.join(products)}"
-                    ),
-                    "reactants": json.dumps(reactants, ensure_ascii=False),
-                    "products": json.dumps(products, ensure_ascii=False),
-                    "step_score": step.get("score"),
-                    "evidence_status": step.get("evidence_status"),
-                    "score_version": step.get("score_version")
-                    or path.get("score_version")
-                    or payload.get("score_version"),
-                }
-            )
-    return buffer.getvalue()
 
 
 def _literature_columns():

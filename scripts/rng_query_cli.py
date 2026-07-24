@@ -40,6 +40,12 @@ from rng_tools.carbon_plot import (  # noqa: E402
     plot_carbon_number_evolution,
     species_file_to_tidy_table,
 )
+from rng_tools.pathway_export import (  # noqa: E402
+    PATHWAY_CSV_FIELDS,
+    PATHWAY_SCHEMA_VERSION,
+    pathway_csv_rows as _pathway_csv_rows,
+    pathway_document as _pathway_document,
+)
 
 
 def detect_default_reaction_file() -> Path:
@@ -123,35 +129,6 @@ def write_csv(path: str, fieldnames: Sequence[str], rows: Iterable[dict]) -> Non
             w.writerow(row)
 
 
-PATHWAY_SCHEMA_VERSION = "reacnet-scope/pathways/v1"
-PATHWAY_CSV_FIELDS = [
-    "path_rank",
-    "step_index",
-    "path_species",
-    "reaction_key",
-    "traversal_direction",
-    "focal_input",
-    "focal_output",
-    "reactants",
-    "products",
-    "forward_tp",
-    "reverse_tp",
-    "net_tp",
-    "net_share",
-    "directionality",
-    "event_coverage",
-    "time_coverage",
-    "event_total",
-    "matched_event_total",
-    "distinct_intervals",
-    "path_score",
-    "step_score",
-    "evidence_status",
-    "score_version",
-    "source_references",
-]
-
-
 def find_pathways_service(
     artifacts: dict[str, str],
     start_smiles: str,
@@ -177,12 +154,6 @@ def _pathway_artifacts(reaction_path: str) -> dict[str, str]:
     }
 
 
-def _pathway_document(payload: dict) -> dict:
-    document = dict(payload)
-    document["schema_version"] = PATHWAY_SCHEMA_VERSION
-    return document
-
-
 def _write_json_atomic(path: str, document: dict) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -197,55 +168,6 @@ def _write_json_atomic(path: str, document: dict) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
-
-
-def _json_list(value: object) -> str:
-    return json.dumps(value if value is not None else [], ensure_ascii=False, separators=(",", ":"))
-
-
-def _pathway_csv_rows(payload: dict) -> list[dict]:
-    rows: list[dict] = []
-    for path in payload.get("paths", []):
-        path_rank = path.get("rank")
-        path_score = path.get("score")
-        path_species = _json_list(path.get("species", []))
-        for step_index, step in enumerate(path.get("steps", []), 1):
-            rows.append(
-                {
-                    "path_rank": path_rank,
-                    "step_index": step_index,
-                    "path_species": path_species,
-                    "reaction_key": step.get("reaction_key"),
-                    "traversal_direction": step.get("traversal_direction"),
-                    "focal_input": step.get("focal_input"),
-                    "focal_output": step.get("focal_output"),
-                    "reactants": _json_list(step.get("reactants", [])),
-                    "products": _json_list(step.get("products", [])),
-                    "forward_tp": step.get("forward_tp"),
-                    "reverse_tp": step.get("reverse_tp"),
-                    "net_tp": step.get("net_tp"),
-                    "net_share": step.get("net_share"),
-                    "directionality": step.get("directionality"),
-                    "event_coverage": step.get("event_coverage"),
-                    "time_coverage": step.get("time_coverage"),
-                    "event_total": step.get("event_total"),
-                    "matched_event_total": step.get("matched_event_total"),
-                    "distinct_intervals": step.get("distinct_intervals"),
-                    "path_score": path_score,
-                    "step_score": step.get("score"),
-                    "evidence_status": step.get(
-                        "evidence_status", path.get("evidence_status")
-                    ),
-                    "score_version": step.get(
-                        "score_version",
-                        path.get("score_version", payload.get("score_version")),
-                    ),
-                    "source_references": _json_list(
-                        step.get("source_references", [])
-                    ),
-                }
-            )
-    return rows
 
 
 def _print_pathway_table(payload: dict) -> None:
