@@ -17,6 +17,7 @@ from .indexes import (
     TRAJECTORY_INDEX_STORE,
 )
 from .composition import SPECIES_COMPOSITION_STORE
+from .event_index import EVENT_EVIDENCE_STORE
 from .rng_events import event_output_status
 
 
@@ -32,7 +33,25 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             stem = str(candidates[0])[: -len(".reactionabcd")]
         else:
             routes = sorted(root.glob("*.route"))
-            stems = {str(path)[: -len(".route")] for path in routes}
+            reaction_stems = {
+                str(path)[: -len(".reactionabcd")] for path in candidates
+            }
+            route_stems = {
+                str(path)[: -len(".route")] for path in routes
+            }
+            event_stems = {
+                str(path)[: -len(".reactionevent.csv")]
+                for path in root.glob("*.reactionevent.csv")
+            }
+            molecule_stems = {
+                str(path)[: -len(".molecules.csv")]
+                for path in root.glob("*.molecules.csv")
+            }
+            stems = (
+                reaction_stems
+                | route_stems
+                | (event_stems & molecule_stems)
+            )
             if len(stems) != 1:
                 raise RuntimeError("dataset directory is ambiguous; pass --base")
             stem = stems.pop()
@@ -80,9 +99,16 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         if artifacts["species"]["exists"]
         else {"state": "missing"}
     )
+    event_status = EVENT_EVIDENCE_STORE.status(
+        dataset["reactionevent"], dataset["molecules"]
+    )
+    paths = resolve_dataset_paths(
+        Path(dataset["base"]).parent, Path(dataset["base"]).name
+    )
+    settings_path = paths.cache_dir / "dataset-settings.json"
     return {
-        "manifest_version": 1,
-        "dataset_id": resolve_dataset_paths(Path(dataset["base"]).parent, Path(dataset["base"]).name).dataset_id,
+        "manifest_version": 2,
+        "dataset_id": paths.dataset_id,
         "base": dataset["base"],
         "updated_at_epoch": int(time.time()),
         "artifacts": artifacts,
@@ -90,7 +116,12 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
             "route": route_status,
             "trajectory": trajectory_status,
             "composition": composition_status,
+            "event": event_status,
             "rng_events": event_output_status(dataset["reactionevent"], dataset["molecules"]),
+        },
+        "settings": {
+            "path": str(settings_path),
+            "exists": settings_path.is_file(),
         },
     }
 
@@ -109,6 +140,7 @@ def _capacity_check(
     include_route: bool,
     include_trajectory: bool,
     include_composition: bool,
+    include_event: bool,
 ) -> None:
     cache = Path(os.environ["REACNET_SCOPE_CACHE_DIR"]).expanduser().resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -122,6 +154,13 @@ def _capacity_check(
         required += max(256 * 1024**2, Path(dataset["trajectory"]).stat().st_size // 100)
     if include_composition and Path(dataset["species"]).is_file():
         required += max(128 * 1024**2, Path(dataset["species"]).stat().st_size // 2)
+    if include_event:
+        event_bytes = sum(
+            Path(dataset[key]).stat().st_size
+            for key in ("reactionevent", "molecules")
+            if Path(dataset[key]).is_file()
+        )
+        required += max(128 * 1024**2, event_bytes * 2)
     if free < required:
         raise RuntimeError(
             f"insufficient cache capacity: need about {required / 1024**3:.1f} GiB, "
@@ -138,27 +177,45 @@ def main(argv: list[str] | None = None) -> int:
     only.add_argument("--route-only", action="store_true")
     only.add_argument("--trajectory-only", action="store_true")
     only.add_argument("--composition-only", action="store_true")
-    parser.add_argument("--rebuild", choices=("route", "trajectory", "composition", "all"))
-    parser.add_argument("--clear", choices=("route", "trajectory", "composition", "all"))
+    only.add_argument("--event-only", action="store_true")
+    parser.add_argument(
+        "--rebuild",
+        choices=("route", "trajectory", "composition", "event", "all"),
+    )
+    parser.add_argument(
+        "--clear",
+        choices=("route", "trajectory", "composition", "event", "all"),
+    )
     args = parser.parse_args(argv)
     if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
         parser.error("REACNET_SCOPE_CACHE_DIR must be set")
     dataset = discover_dataset(args.case, args.base)
     # RNG-authored event files replace Route reconstruction in the normal
     # workflow.  Route preparation remains explicit for compatibility only.
-    explicit_only = bool(args.route_only or args.trajectory_only or args.composition_only)
+    explicit_only = bool(
+        args.route_only
+        or args.trajectory_only
+        or args.composition_only
+        or args.event_only
+    )
     if explicit_only:
         selected_route = bool(args.route_only)
         selected_trajectory = bool(args.trajectory_only)
         selected_composition = bool(args.composition_only)
+        selected_event = bool(args.event_only)
     elif args.rebuild:
         selected_route = args.rebuild in {"route", "all"}
         selected_trajectory = args.rebuild in {"trajectory", "all"}
         selected_composition = args.rebuild in {"composition", "all"}
+        selected_event = args.rebuild in {"event", "all"}
     else:
         selected_route = False
-        selected_trajectory = True
-        selected_composition = True
+        selected_trajectory = Path(dataset["trajectory"]).is_file()
+        selected_composition = Path(dataset["species"]).is_file()
+        selected_event = all(
+            Path(dataset[key]).is_file()
+            for key in ("reactionevent", "molecules")
+        )
     route_needs_build = (
         selected_route
         and Path(dataset["route"]).is_file()
@@ -174,12 +231,21 @@ def main(argv: list[str] | None = None) -> int:
         and Path(dataset["species"]).is_file()
         and SPECIES_COMPOSITION_STORE.status(dataset["species"])["state"] != "ready"
     )
+    event_needs_build = (
+        selected_event
+        and Path(dataset["reactionevent"]).is_file()
+        and Path(dataset["molecules"]).is_file()
+        and EVENT_EVIDENCE_STORE.status(
+            dataset["reactionevent"], dataset["molecules"]
+        )["state"] != "ready"
+    )
     if not args.status and not args.clear:
         _capacity_check(
             dataset,
             include_route=route_needs_build,
             include_trajectory=trajectory_needs_build,
             include_composition=composition_needs_build,
+            include_event=event_needs_build,
         )
 
     def report(update: dict[str, Any]) -> None:
@@ -193,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
             clear_index(dataset["trajectory"], kind="trajectory")
         if target in {"composition", "all"} and Path(dataset["species"]).is_file():
             SPECIES_COMPOSITION_STORE.clear(dataset["species"])
+        if target in {"event", "all"}:
+            EVENT_EVIDENCE_STORE.clear(
+                dataset["reactionevent"], dataset["molecules"]
+            )
         if args.clear:
             print(f"Manifest: {write_manifest(dataset)}")
             return 0
@@ -210,6 +280,21 @@ def main(argv: list[str] | None = None) -> int:
                 if not Path(dataset["species"]).is_file():
                     raise FileNotFoundError(f"species file not found: {dataset['species']}")
                 SPECIES_COMPOSITION_STORE.build(dataset["species"], progress_callback=report)
+            if selected_event:
+                if not Path(dataset["reactionevent"]).is_file():
+                    raise FileNotFoundError(
+                        "reactionevent file not found: "
+                        f"{dataset['reactionevent']}"
+                    )
+                if not Path(dataset["molecules"]).is_file():
+                    raise FileNotFoundError(
+                        f"molecules file not found: {dataset['molecules']}"
+                    )
+                EVENT_EVIDENCE_STORE.build(
+                    dataset["reactionevent"],
+                    dataset["molecules"],
+                    progress_callback=report,
+                )
         except KeyboardInterrupt:
             print("Preparation canceled; committed checkpoints were preserved.")
             write_manifest(dataset)

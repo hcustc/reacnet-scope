@@ -31,6 +31,18 @@ from rng_tools.reaction import canonical_smiles
 
 ROUTE_INDEX_SCHEMA_VERSION = 3
 TRAJECTORY_INDEX_SCHEMA_VERSION = 3
+_TRAJECTORY_REQUIRED_TABLE_COLUMNS = {
+    "meta": {"key", "value"},
+    "frames": {"timestep", "byte_start", "byte_end"},
+}
+DATASET_SUFFIXES = (
+    ".reactionevent.csv",
+    ".molecules.csv",
+    ".reactionabcd",
+    ".species",
+    ".route",
+    ".table",
+)
 FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 ROUTE_LINE_RE = re.compile(r"^\s*Atom\s+(\d+)\s+\S+:\s*(.*)$")
 ROUTE_STEP_RE = re.compile(r"(\d+)\s+(\S+)")
@@ -78,12 +90,17 @@ def _source_signature(path_text: str) -> tuple[str, int, int]:
     return path, int(stat.st_size), int(stat.st_mtime_ns)
 
 
-def dataset_id_for_source(path: str) -> str:
+def _dataset_base(path: str) -> str:
     absolute = os.path.abspath(path)
-    for suffix in (".reactionabcd", ".species", ".route", ".table"):
+    for suffix in DATASET_SUFFIXES:
         if absolute.endswith(suffix):
             absolute = absolute[: -len(suffix)]
             break
+    return absolute
+
+
+def dataset_id_for_source(path: str) -> str:
+    absolute = _dataset_base(path)
     return hashlib.sha256(absolute.encode("utf-8")).hexdigest()[:20]
 
 
@@ -98,6 +115,7 @@ class DatasetPaths:
     manifest: Path
     route_index: Path
     trajectory_index: Path
+    event_index: Path
 
 
 def resolve_dataset_paths(
@@ -116,11 +134,7 @@ def resolve_dataset_paths(
     candidate = Path(base).expanduser() if base else root
     if not candidate.is_absolute():
         candidate = root / candidate if root.is_dir() else root
-    absolute = os.path.abspath(str(candidate))
-    for suffix in (".reactionabcd", ".species", ".route", ".table"):
-        if absolute.endswith(suffix):
-            absolute = absolute[: -len(suffix)]
-            break
+    absolute = _dataset_base(str(candidate))
     base_path = Path(absolute)
     resolved_cache = (
         Path(cache_root).expanduser().resolve()
@@ -137,6 +151,7 @@ def resolve_dataset_paths(
         manifest=cache_dir / "manifest.json",
         route_index=cache_dir / "route.sqlite3",
         trajectory_index=cache_dir / "trajectory.sqlite3",
+        event_index=cache_dir / "events.sqlite3",
     )
 
 
@@ -148,6 +163,11 @@ def route_index_path(route_file: str) -> Path:
 def trajectory_index_path(trajectory_file: str) -> Path:
     path, _size, _mtime_ns = _source_signature(trajectory_file)
     return resolve_dataset_paths(path).trajectory_index
+
+
+def event_evidence_index_path(reactionevent_file: str) -> Path:
+    path, _size, _mtime_ns = _source_signature(reactionevent_file)
+    return resolve_dataset_paths(path).event_index
 
 
 def _legacy_route_index_path(route_file: str) -> Path:
@@ -643,7 +663,65 @@ class TrajectoryFrameIndex:
 class TrajectoryIndexStore:
     """SQLite trajectory-offset index with no online scan fallback."""
 
-    def status(self, trajectory_file: str) -> dict[str, Any]:
+    def _validate_metadata(
+        self,
+        index_path: Path,
+        *,
+        path: str,
+        size: int,
+        mtime_ns: int,
+    ) -> None:
+        connection = _readonly_connection(index_path)
+        try:
+            meta = _read_meta(connection)
+            _validate_meta(
+                meta,
+                source_path=path,
+                source_size=size,
+                source_mtime_ns=mtime_ns,
+                schema_version=TRAJECTORY_INDEX_SCHEMA_VERSION,
+                kind="Trajectory",
+            )
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if not _TRAJECTORY_REQUIRED_TABLE_COLUMNS.keys() <= tables:
+                raise IndexInvalidError("Trajectory index tables are incomplete")
+            for table, required_columns in (
+                _TRAJECTORY_REQUIRED_TABLE_COLUMNS.items()
+            ):
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                if not required_columns <= columns:
+                    raise IndexInvalidError(
+                        f"Trajectory index {table} columns are incomplete"
+                    )
+            if int(meta.get("frame_count", -1) or -1) < 0:
+                raise IndexInvalidError(
+                    "Trajectory index frame count is invalid"
+                )
+        except IndexNotReadyError:
+            raise
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            raise IndexInvalidError(
+                f"Trajectory index metadata is invalid: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+
+    def status(
+        self,
+        trajectory_file: str,
+        *,
+        metadata_only: bool = False,
+    ) -> dict[str, Any]:
         path, size, _mtime_ns = _source_signature(trajectory_file)
         index_path = trajectory_index_path(path)
         building_path = Path(f"{index_path}.building")
@@ -661,7 +739,15 @@ class TrajectoryIndexStore:
         state = "ready" if index_path.exists() else ("building" if building_path.exists() else "missing")
         if index_path.exists():
             try:
-                self.open_required(path)
+                if metadata_only:
+                    self._validate_metadata(
+                        index_path,
+                        path=path,
+                        size=size,
+                        mtime_ns=_mtime_ns,
+                    )
+                else:
+                    self.open_required(path)
             except IndexStaleError:
                 state = "stale"
             except IndexNotReadyError:
@@ -671,7 +757,22 @@ class TrajectoryIndexStore:
             if stale is not None:
                 active, meta = stale
                 state = "stale"
-        offset = int(meta.get("source_offset", 0) or 0)
+
+        def display_int(value: Any) -> int:
+            if not metadata_only:
+                return int(value or 0)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        offset = display_int(meta.get("source_offset", 0))
+        updated_at_epoch = display_int(
+            meta.get(
+                "updated_at_epoch",
+                meta.get("built_at_epoch", 0),
+            )
+        )
         return {
             "state": state,
             "trajectory_file": path,
@@ -681,8 +782,8 @@ class TrajectoryIndexStore:
             "index_size": active.stat().st_size if active.exists() else 0,
             "source_offset": offset,
             "progress": min(max(offset / max(size, 1), 0.0), 1.0),
-            "frames": int(meta.get("frame_count", 0) or 0),
-            "updated_at_epoch": int(meta.get("updated_at_epoch", meta.get("built_at_epoch", 0)) or 0) or None,
+            "frames": display_int(meta.get("frame_count", 0)),
+            "updated_at_epoch": updated_at_epoch or None,
             "cache_dir": str(index_path.parent),
         }
 

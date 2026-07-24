@@ -5,12 +5,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import rng_tools.dir_browser as dir_browser
+from rng_tools.dir_browser import DirBrowserError
 from rng_tools.io import load_transition_table
 from scripts.webapp.server import build_dataset_status_payload, build_transition_table_payload, pick_folder_with_system
 
 
 class TransitionTableTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._allowed_roots_patch = patch.object(
+            dir_browser, "ALLOWED_ROOTS", [Path(tempfile.gettempdir()).resolve()]
+        )
+        self._allowed_roots_patch.start()
         handle = tempfile.NamedTemporaryFile("w", suffix=".lammpstrj.table", delete=False)
         handle.write("[H] [H][H] [H][O]\n")
         handle.write("[H] 0 8 2\n")
@@ -21,6 +27,7 @@ class TransitionTableTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.path.unlink(missing_ok=True)
+        self._allowed_roots_patch.stop()
 
     def test_load_transition_matrix(self) -> None:
         parsed = load_transition_table(self.path)
@@ -92,7 +99,7 @@ class TransitionTableTests(unittest.TestCase):
             for item in (reaction_path, species_path, route_path, table_path):
                 item.unlink(missing_ok=True)
 
-    def test_dataset_status_selects_most_complete_folder_group(self) -> None:
+    def test_dataset_status_leaves_ambiguous_folder_groups_unselected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             complete_base = root / "run.lammpstrj"
@@ -102,10 +109,41 @@ class TransitionTableTests(unittest.TestCase):
 
             payload = build_dataset_status_payload({"dataset_dir": [directory]})
             dataset = payload["dataset"]
-            self.assertEqual(dataset["label"], "run.lammpstrj")
-            self.assertEqual(dataset["ready_count"], 7)
-            self.assertEqual(dataset["artifacts"]["table"]["source"], "folder")
-            self.assertTrue(all(item["exists"] for item in dataset["artifacts"].values()))
+            self.assertEqual(dataset["label"], "未选择数据集")
+            self.assertEqual(dataset["ready_count"], 0)
+            self.assertFalse(any(item["selected"] for item in dataset["candidates"]))
+
+    def test_dataset_status_rejects_folder_outside_allowed_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as allowed_directory, tempfile.TemporaryDirectory() as outside_directory:
+            outside = Path(outside_directory)
+            Path(f"{outside / 'private.lammpstrj'}.reactionabcd").write_text(
+                "fixture", encoding="utf-8"
+            )
+
+            with patch.object(dir_browser, "ALLOWED_ROOTS", [Path(allowed_directory)]):
+                with self.assertRaisesRegex(DirBrowserError, "路径超出允许范围"):
+                    build_dataset_status_payload({"dataset_dir": [outside_directory]})
+
+    def test_dataset_status_rejects_explicit_artifacts_outside_allowed_roots(self) -> None:
+        explicit_params = (
+            "reac",
+            "species_file",
+            "moname_file",
+            "trajectory_file",
+            "route_file",
+            "table_file",
+            "reactionevent_file",
+            "molecules_file",
+        )
+        with tempfile.TemporaryDirectory() as allowed_directory, tempfile.TemporaryDirectory() as outside_directory:
+            outside_path = Path(outside_directory) / "private.artifact"
+            outside_path.write_text("fixture", encoding="utf-8")
+
+            with patch.object(dir_browser, "ALLOWED_ROOTS", [Path(allowed_directory)]):
+                for param in explicit_params:
+                    with self.subTest(param=param):
+                        with self.assertRaisesRegex(DirBrowserError, "路径超出允许范围"):
+                            build_dataset_status_payload({param: [str(outside_path)]})
 
     def test_dataset_status_can_select_a_specific_folder_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

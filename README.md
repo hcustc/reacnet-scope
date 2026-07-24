@@ -43,6 +43,13 @@ The project includes both CLI and web interfaces so the same core logic can be u
 uv sync --extra plot
 ```
 
+NetworkX 是基础依赖，会由 `uv sync` 自动安装。需要使用 ASE 轨迹适配能力时，
+启用 `trajectory` 可选依赖；Dash 与轨迹功能一起使用可执行：
+
+```bash
+uv sync --extra web --extra trajectory
+```
+
 2. 启动 Dash Web（推荐）
 
 ```bash
@@ -53,6 +60,17 @@ REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/data:/mnt" \
 
 打开 `http://127.0.0.1:8060`。远程部署时，目录浏览器看到的是服务端文件系统；请把实际数据挂载点加入 `REACNET_SCOPE_ALLOWED_ROOTS`，多个目录用冒号分隔。
 
+### 加载 ReacNetGenerator 数据集
+
+在“管理数据”中点击“选择其他数据集”。服务器浏览器会标记当前目录中的
+ReacNetGenerator 数据集；目录中只有一个数据集时自动选中，存在多个数据集时
+按文件名前缀列出候选。选择后点击一次“加载数据集”即可。最近成功加载的十个
+数据集会保存在当前浏览器本地，方便再次选择；它们不会自动切换当前数据集。
+
+`base` 是同组 RNG 输出的内部公共前缀，通常无需手动填写。手动路径输入保留在
+“手动输入服务器路径”中，可填写数据目录或完整公共前缀；所有路径仍受
+`REACNET_SCOPE_ALLOWED_ROOTS` 限制。
+
 Dash 的默认入口是面向实验解释的四步工作流：
 
 1. 在 `.species` 目录中按分子式、SMILES 或质量选定实验物种；若同目录有 `.moname`，它会作为可选的原子/键结构证据。
@@ -62,16 +80,16 @@ Dash 的默认入口是面向实验解释的四步工作流：
 
 旧的专题分析页面仍在右上角“高级工具”菜单中提供。
 
-生成数据时建议启用 RNG 的事件输出；事件检索直接消费这两个文件，不再从
-Route 重建事件：
+生成数据时建议启用 RNG 的事件输出；事件证据索引由这两个文件离线构建，
+不再从 Route 重建事件：
 
 ```bash
 # 添加到原 ReacNetGenerator 命令
 --reaction-event --show-molecule-time
 ```
 
-大轨迹仍必须先在独立进程中建立帧偏移索引。Dash 只读消费索引，
-不会构建索引，也不会顺序扫描完整轨迹：
+事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 只读消费索引，
+不会构建索引，也不会顺序扫描完整事件 CSV 或轨迹：
 
 ```bash
 export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
@@ -79,7 +97,19 @@ uv run reacnet-scope-prepare /data/case
 uv run reacnet-scope-prepare /data/case --status
 ```
 
-统一命令默认准备轨迹索引和 `.species` 的 C/O/Cl 组成索引；
+如果只需要准备事件检索，可以将索引放在高速缓存盘并使用 `--event-only`：
+
+```bash
+export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
+uv run reacnet-scope-prepare /data/case --event-only
+```
+
+事件索引以流式方式读取 `.reactionevent.csv` 和 `.molecules.csv`，支持中断后
+从检查点继续构建；最终索引通过原子替换发布。Dash 查询期间只打开该索引，
+不会回扫两个原始 CSV。若源文件在构建后发生变化，状态会显示为 `stale`，
+需要重新运行准备命令（必要时加 `--rebuild`）。
+
+统一命令默认准备可用的事件、轨迹以及 `.species` 的 C/O/Cl 组成索引；
 也可只准备组成索引：
 
 ```bash
@@ -92,14 +122,14 @@ uv run reacnet-scope-prepare /data/case --composition-only
 绘图不再回扫 `.species`。用户指定参考物种时，系统按其精确 SMILES 从索引
 按需读取时间序列；点击下钻时只读取一个时间点并查询峰值摘要，避免将数千万
 条物种记录展开为内存 DataFrame。
-`--route-only` 仅作为旧数据兼容入口。命令仍支持 `--trajectory-only`、
-`--composition-only`、`--status`、`--clear` 和 `--rebuild`；
+`--route-only` 仅作为旧数据兼容入口。命令仍支持 `--event-only`、
+`--trajectory-only`、`--composition-only`、`--status`、`--clear` 和 `--rebuild`；
 使用 Ctrl+C 取消时会保留最近的构建检查点。旧的两个
 `reacnet-scope-build-*-index` 命令暂时保留为兼容入口。
 
 在 Dash 的“管理数据”窗口中，“数据准备状态”区域会只读显示基础分析、
 RNG 事件输出和轨迹帧索引状态，并在离线构建运行时自动刷新检查点进度。
-该区域可复制 RNG 输出参数和轨迹准备命令，并可安全清理轨迹索引；
+该区域可复制 RNG 输出参数和各类索引准备命令，并可安全清理缓存索引；
 它不会启动构建任务，也不会删除原始 ReacNetGenerator 输出。
 
 旧版静态 Web 界面仍可通过以下命令启动：
@@ -134,8 +164,9 @@ uv run ./run_cli.sh species --reac /path/to/xxx.reactionabcd --formula C6H4
 ## 依赖
 
 - Python 3.10+
-- 基础依赖：`pandas`、`openpyxl`、`rdkit`
+- 基础依赖：`pandas`、`openpyxl`、`rdkit`、`networkx`
 - 可选绘图增强：`matplotlib`、`scipy`（CLI `plot --out-png`、Carbon-number evolution plot 时需要）
+- 可选轨迹适配：`ase`（安装 extra：`trajectory`）
 
 ### 使用 uv 安装
 

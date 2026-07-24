@@ -1359,107 +1359,150 @@ def _data_modal() -> dbc.Modal:
             dbc.ModalHeader(dbc.ModalTitle("管理数据")),
             dbc.ModalBody(
                 [
-                    dbc.Row(
+                    html.Div(id="data-load-feedback"),
+                    html.Div(
                         [
-                            dbc.Col(
-                                [
-                                    dbc.Label("数据目录"),
-                                    dbc.Input(id="data-folder-input", placeholder="输入或选择数据目录"),
-                                ],
-                                width=True,
+                            html.Div(id="data-candidate-summary", className="mb-2"),
+                            html.Div(id="data-scan-status", className="small text-muted mb-2"),
+                            html.Div(id="data-artifacts", className="small text-muted mb-3"),
+                            html.Div(id="data-recent-datasets", className="rs-browser-recent mb-3"),
+                            dbc.Button(
+                                "选择其他数据集",
+                                id="data-pick-btn",
+                                color="primary",
+                                size="sm",
+                                className="mb-3",
                             ),
-                            dbc.Col(
-                                dbc.Button("浏览服务器目录", id="data-pick-btn", color="secondary", size="sm"),
-                                width="auto",
-                                className="align-self-end",
-                            ),
-                        ],
-                        className="g-2 mb-2",
-                    ),
-                    dbc.Row(
-                        [
-                            dbc.Col(
+                            html.Details(
                                 [
-                                    dbc.Label("运行组 (base)"),
-                                    dcc.Dropdown(
-                                        id="data-rungroup",
-                                        options=[],
-                                        clearable=True,
-                                        placeholder="留空使用默认",
+                                    html.Summary("数据准备与高级工具"),
+                                    dbc.Card(
+                                        dbc.CardBody(
+                                            [
+                                                html.Div(
+                                                    [
+                                                        html.Div("数据准备状态", className="rs-card-title"),
+                                                        html.Div(
+                                                            [
+                                                                html.Span("只读", className="rs-page-status is-independent"),
+                                                                dbc.Button("刷新", id="data-prep-refresh-btn", color="secondary", size="sm", outline=True),
+                                                            ],
+                                                            className="d-flex align-items-center gap-2",
+                                                        ),
+                                                    ],
+                                                    className="d-flex justify-content-between align-items-center mb-2",
+                                                ),
+                                                html.Div(id="data-prep-status", className="small"),
+                                                html.Div(
+                                                    [
+                                                        html.Div("ReacNetGenerator 事件输出参数", className="small text-muted mt-2"),
+                                                        html.Div(
+                                                            [
+                                                                html.Code(id="data-rng-event-command", className="small flex-grow-1"),
+                                                                dcc.Clipboard(id="data-rng-event-copy", title="复制 RNG 事件输出参数"),
+                                                            ],
+                                                            className="d-flex align-items-start gap-2 rs-command-line",
+                                                        ),
+                                                        html.Div("轨迹准备命令", className="small text-muted mt-2"),
+                                                        html.Div(
+                                                            [
+                                                                html.Code(id="data-prep-trajectory-command", className="small flex-grow-1"),
+                                                                dcc.Clipboard(id="data-prep-trajectory-copy", title="复制轨迹准备命令"),
+                                                            ],
+                                                            className="d-flex align-items-start gap-2 rs-command-line",
+                                                        ),
+                                                        html.Div("C/O/Cl 组成索引准备命令", className="small text-muted mt-2"),
+                                                        html.Div(
+                                                            [
+                                                                html.Code(id="data-prep-composition-command", className="small flex-grow-1"),
+                                                                dcc.Clipboard(id="data-prep-composition-copy", title="复制组成索引准备命令"),
+                                                            ],
+                                                            className="d-flex align-items-start gap-2 rs-command-line",
+                                                        ),
+                                                    ]
+                                                ),
+                                                html.Div(id="data-prep-clear-alert", className="mt-2"),
+                                                html.Div(
+                                                    [
+                                                        dbc.Button("清理轨迹索引", id="data-clear-trajectory-btn", color="danger", size="sm", outline=True),
+                                                    ],
+                                                    className="d-flex gap-2 mt-2",
+                                                ),
+                                            ]
+                                        ),
+                                        className="rs-card rs-preparation-card mt-2",
                                     ),
                                 ],
-                                width=True,
+                                id="data-advanced-tools",
+                                className="mb-3",
+                            ),
+                            html.Div(
+                                dbc.Button("关闭", id="data-close-btn", color="secondary", size="sm", outline=True),
+                                className="d-flex justify-content-end",
                             ),
                         ],
-                        className="g-2 mb-2",
+                        id="data-overview-view",
+                        className="rs-data-view",
                     ),
-                    html.Div(id="data-scan-status"),
-                    html.Hr(),
-                    html.Div(id="data-artifacts", className="small text-muted"),
-                    html.Hr(),
-                    dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.Div(
-                                    [
-                                        html.Div("数据准备状态", className="rs-card-title"),
-                                        html.Div(
-                                            [
-                                                html.Span("只读", className="rs-page-status is-independent"),
-                                                dbc.Button("刷新", id="data-prep-refresh-btn", color="secondary", size="sm", outline=True),
-                                            ],
-                                            className="d-flex align-items-center gap-2",
-                                        ),
-                                    ],
-                                    className="d-flex justify-content-between align-items-center mb-2",
-                                ),
-                                html.Div(id="data-prep-status", className="small"),
-                                html.Div(
-                                    [
-                                        html.Div("ReacNetGenerator 事件输出参数", className="small text-muted mt-2"),
-                                        html.Div(
-                                            [
-                                                html.Code(id="data-rng-event-command", className="small flex-grow-1"),
-                                                dcc.Clipboard(id="data-rng-event-copy", title="复制 RNG 事件输出参数"),
-                                            ],
-                                            className="d-flex align-items-start gap-2 rs-command-line",
-                                        ),
-                                        html.Div("轨迹准备命令", className="small text-muted mt-2"),
-                                        html.Div(
-                                            [
-                                                html.Code(id="data-prep-trajectory-command", className="small flex-grow-1"),
-                                                dcc.Clipboard(id="data-prep-trajectory-copy", title="复制轨迹准备命令"),
-                                            ],
-                                            className="d-flex align-items-start gap-2 rs-command-line",
-                                        ),
-                                        html.Div("C/O/Cl 组成索引准备命令", className="small text-muted mt-2"),
-                                        html.Div(
-                                            [
-                                                html.Code(id="data-prep-composition-command", className="small flex-grow-1"),
-                                                dcc.Clipboard(id="data-prep-composition-copy", title="复制组成索引准备命令"),
-                                            ],
-                                            className="d-flex align-items-start gap-2 rs-command-line",
-                                        ),
-                                    ]
-                                ),
-                                html.Div(id="data-prep-clear-alert", className="mt-2"),
-                                html.Div(
-                                    [
-                                        dbc.Button("清理轨迹索引", id="data-clear-trajectory-btn", color="danger", size="sm", outline=True),
-                                    ],
-                                    className="d-flex gap-2 mt-2",
-                                ),
-                            ]
-                        ),
-                        className="rs-card rs-preparation-card",
+                    html.Div(
+                        [
+                            dbc.Button(
+                                "↑ 上一级",
+                                id="dir-browser-back-btn",
+                                color="secondary",
+                                size="sm",
+                                outline=True,
+                                disabled=True,
+                                className="mb-2",
+                            ),
+                            dbc.InputGroup(
+                                [
+                                    dbc.Input(
+                                        id="dir-browser-path-input",
+                                        debounce=True,
+                                        placeholder="输入服务器目录或数据集公共前缀",
+                                    ),
+                                    dbc.Button("前往", id="dir-browser-go-btn", color="secondary"),
+                                ],
+                                className="rs-browser-path-control",
+                            ),
+                            html.Div(id="dir-browser-current", className="rs-browser-current"),
+                            html.Div(
+                                id="dir-browser-body",
+                                children=html.Div("正在加载…", className="small text-muted"),
+                                className="rs-browser-directory-list",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Button(
+                                        "返回",
+                                        id="dir-browser-cancel-btn",
+                                        color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                    ),
+                                    dbc.Button(
+                                        "加载数据集",
+                                        id="data-apply-btn",
+                                        color="success",
+                                        size="sm",
+                                        disabled=True,
+                                    ),
+                                ],
+                                className="d-flex justify-content-between mt-3",
+                            ),
+                        ],
+                        id="data-browser-view",
+                        className="rs-data-view d-none",
                     ),
-                ]
-            ),
-            dbc.ModalFooter(
-                [
-                    dbc.Button("扫描", id="data-scan-btn", color="primary", size="sm", className="me-auto"),
-                    dbc.Button("应用", id="data-apply-btn", color="success", size="sm"),
-                    dbc.Button("关闭", id="data-close-btn", color="secondary", size="sm", outline=True),
+                    dbc.Input(
+                        id="data-folder-input",
+                        debounce=True,
+                        style={"display": "none"},
+                    ),
+                    # ``base`` remains an internal compatibility value for
+                    # legacy callbacks while browser candidates own selection.
+                    dcc.Dropdown(id="data-rungroup", options=[], style={"display": "none"}),
                 ]
             ),
         ],
@@ -1484,57 +1527,6 @@ def _index_clear_confirm_modal() -> dbc.Modal:
         ],
         id="data-clear-confirm-modal",
         is_open=False,
-        backdrop="static",
-    )
-
-
-def _dir_browser_modal() -> dbc.Modal:
-    """Directory browser modal for remote server file-system navigation."""
-    return dbc.Modal(
-        [
-            dbc.ModalHeader(dbc.ModalTitle("浏览服务器目录")),
-            dbc.ModalBody(
-                html.Div(
-                    id="dir-browser-body",
-                    children=[
-                        # This input must exist in the initial layout.  Dash's
-                        # renderer will not schedule the open callback when an
-                        # explicit callback input is entirely absent.
-                        dbc.Button(
-                            "⬑ 返回上一级",
-                            id="dir-browser-back-btn",
-                            color="secondary",
-                            size="sm",
-                            outline=True,
-                            disabled=True,
-                            className="mb-2",
-                        ),
-                        html.Div("正在加载…", className="text-center text-muted py-4"),
-                    ],
-                )
-            ),
-            dbc.ModalFooter(
-                [
-                    dbc.Button(
-                        "选择当前目录",
-                        id="dir-browser-select-btn",
-                        color="primary",
-                        size="sm",
-                        className="me-auto",
-                    ),
-                    dbc.Button(
-                        "取消",
-                        id="dir-browser-cancel-btn",
-                        color="secondary",
-                        size="sm",
-                        outline=True,
-                    ),
-                ]
-            ),
-        ],
-        id="dir-browser-modal",
-        is_open=False,
-        size="lg",
         backdrop="static",
     )
 
@@ -1572,8 +1564,9 @@ def build_layout() -> html.Div:
             html.Div([html.Button(id="nav-species"), html.Button(id="nav-transitions"), html.Button(id="nav-events")], style={"display": "none"}),
             _data_modal(),
             _index_clear_confirm_modal(),
-            _dir_browser_modal(),
             dcc.Store(id="dir-browser-path", storage_type="memory", data=""),
+            dcc.Store(id="dataset-browser-candidate", storage_type="memory", data=None),
+            dcc.Store(id="recent-datasets", storage_type="local", data=[]),
             dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
             dcc.Store(id="workflow-store", storage_type="session", data=cb.initial_workflow_store()),
             dcc.Store(id="workflow-viewer-store", storage_type="memory", data=None),

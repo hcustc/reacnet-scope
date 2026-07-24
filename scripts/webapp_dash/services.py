@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sqlite3
 import sys
 import time
 import traceback
@@ -22,7 +23,7 @@ from functools import lru_cache
 from bisect import bisect_left
 from pathlib import Path
 from collections import Counter
-from typing import Any
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 # Ensure the project tool root is importable when this package is loaded
@@ -42,7 +43,15 @@ from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
-from reacnet_scope.rng_events import RngEventDataError, query_rng_events  # noqa: E402
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE  # noqa: E402
+from reacnet_scope.rng_events import (  # noqa: E402
+    canonical_reaction_key,
+    reaction_key,
+)
+from reacnet_scope.datasets import (  # noqa: E402
+    ARTIFACT_SUFFIXES,
+    discover_dataset_candidates,
+)
 from scripts.webapp.server import (  # noqa: E402
     STORE,
     build_dataset_status_payload,
@@ -108,12 +117,54 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
     if not folder_path.is_dir():
         raise ServiceError(f"路径不是目录: {folder_path}", reason="missing_folder")
     try:
-        return build_dataset_status_payload(
+        payload = build_dataset_status_payload(
             {
                 "dataset_dir": [folder_text],
                 "dataset_base": [base or ""],
             }
         )
+        dataset = payload.get("dataset", {}) or {}
+        artifacts = dataset.get("artifacts", {}) or {}
+        reactionevent = str(
+            (artifacts.get("reactionevent") or {}).get("path") or ""
+        )
+        molecules = str((artifacts.get("molecules") or {}).get("path") or "")
+        if reactionevent and molecules:
+            try:
+                event_status = EVENT_EVIDENCE_STORE.status(
+                    reactionevent, molecules
+                )
+            except RuntimeError as exc:
+                event_status = {"state": "invalid", "message": str(exc)}
+            state = str(event_status.get("state") or "missing")
+            if state == "missing":
+                state = "needs_preparation"
+            elif state == "missing_source":
+                state = "missing"
+            event_status = {
+                **event_status,
+                "state": state,
+                "ready": state == "ready",
+            }
+            if state in {
+                "needs_preparation",
+                "stale",
+                "invalid",
+                "building",
+            }:
+                prepare_option = (
+                    "--rebuild event"
+                    if state in {"stale", "invalid"}
+                    else "--event-only"
+                )
+                event_status["preparation_command"] = (
+                    "reacnet-scope-prepare "
+                    f"{shlex.quote(str(Path(reactionevent).parent))} "
+                    f"{prepare_option}"
+                )
+            readiness = dataset.setdefault("readiness", {})
+            readiness["event_search"] = event_status
+        return payload
     except Exception as exc:
         raise ServiceError(f"扫描数据目录失败: {exc}") from exc
 
@@ -149,6 +200,142 @@ def list_directory(path_str: str) -> dict[str, Any]:
         return _core_list_directory(path_str)
     except DirBrowserError as exc:
         raise ServiceError(exc.message, reason=exc.reason) from exc
+
+
+def _breadcrumbs_within_allowed_root(current: Path) -> list[dict[str, str]]:
+    """Return breadcrumbs starting at the most-specific permitted root."""
+    containing = [
+        root.resolve()
+        for root in ALLOWED_ROOTS
+        if current.is_relative_to(root.resolve())
+    ]
+    if not containing:
+        raise ServiceError("路径超出允许范围", reason="path_out_of_bounds")
+    root = max(containing, key=lambda item: len(item.parts))
+    crumbs = [{"label": root.name or str(root), "path": str(root)}]
+    cursor = root
+    for part in current.relative_to(root).parts:
+        cursor = cursor / part
+        crumbs.append({"label": part, "path": str(cursor)})
+    return crumbs
+
+
+def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
+    """Return prepared-index states without scanning a dataset or its manifest."""
+    artifact_paths = dict(candidate.get("artifact_paths") or {})
+
+    def status_for(
+        store: Any,
+        *kinds: str,
+        metadata_only: bool = False,
+    ) -> dict[str, Any]:
+        paths = [str(artifact_paths.get(kind) or "") for kind in kinds]
+        if not all(path and Path(path).is_file() for path in paths):
+            return {"state": "missing"}
+        try:
+            if metadata_only:
+                return store.status(*paths, metadata_only=True)
+            return store.status(*paths)
+        except FileNotFoundError:
+            return {"state": "missing"}
+        except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+            return {"state": "invalid", "message": str(exc)}
+
+    return {
+        "event": str(
+            status_for(
+                EVENT_EVIDENCE_STORE, "reactionevent", "molecules"
+            ).get("state")
+            or "missing"
+        ),
+        "trajectory": str(
+            status_for(
+                TRAJECTORY_INDEX_STORE,
+                "trajectory",
+                metadata_only=True,
+            ).get("state")
+            or "missing"
+        ),
+        "composition": str(
+            status_for(
+                SPECIES_COMPOSITION_STORE,
+                "species",
+                metadata_only=True,
+            ).get("state")
+            or "missing"
+        ),
+    }
+
+
+def browse_dataset_location(path: str) -> dict[str, Any]:
+    """Build a read-only directory and dataset-discovery browser snapshot."""
+    current = validate_browse_path(path)
+    try:
+        listing = _core_list_directory(str(current))
+        candidates = discover_dataset_candidates(current)
+    except DirBrowserError as exc:
+        raise ServiceError(exc.message, reason=exc.reason) from exc
+    except OSError as exc:
+        raise ServiceError(f"读取数据集目录失败: {exc}", reason="read_error") from exc
+
+    datasets: list[dict[str, Any]] = []
+    for candidate in candidates:
+        datasets.append(
+            {
+                **candidate,
+                "auto_selected": len(candidates) == 1,
+                "completeness": f"{candidate['score']}/{len(ARTIFACT_SUFFIXES)}",
+                "index_states": _candidate_index_states(candidate),
+            }
+        )
+    return {
+        **listing,
+        "breadcrumbs": _breadcrumbs_within_allowed_root(current),
+        "datasets": datasets,
+    }
+
+
+def resolve_dataset_input(path: str) -> dict[str, str]:
+    """Normalise a selected directory or manually entered dataset prefix."""
+    raw = Path(str(path or "").strip()).expanduser()
+    if raw.is_dir():
+        folder = validate_browse_path(str(raw))
+        return {"folder": str(folder), "preferred_base": ""}
+    folder = validate_browse_path(str(raw.parent))
+    if not folder.is_dir():
+        raise ServiceError("数据集父目录不存在", reason="missing_folder")
+    return {
+        "folder": str(folder),
+        "preferred_base": str(raw.resolve()),
+    }
+
+
+def normalise_recent_datasets(
+    records: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Validate, deduplicate, and cap persisted recent-dataset records."""
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    if not isinstance(records, (list, tuple)):
+        return []
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            continue
+        folder = str(raw.get("folder") or "").strip()
+        base = str(raw.get("base") or "").strip()
+        if not folder or not base:
+            continue
+        try:
+            loaded_at = int(raw.get("loaded_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        key = (os.path.abspath(folder), os.path.abspath(base))
+        deduped[key] = {
+            "folder": key[0],
+            "base": key[1],
+            "label": str(raw.get("label") or Path(base).name),
+            "loaded_at": loaded_at,
+        }
+    return sorted(deduped.values(), key=lambda item: -item["loaded_at"])[:10]
 
 
 # ---------------------------------------------------------------------------
@@ -210,19 +397,24 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     events = dict(readiness.get("event_search") or {"state": "missing"})
     trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
     species_source = artifacts.get("species", "")
-    if species_source:
+    if species_source and Path(species_source).is_file():
         try:
             composition = SPECIES_COMPOSITION_STORE.status(species_source)
         except RuntimeError as exc:
             composition = {"state": "invalid", "message": str(exc)}
     else:
         composition = {"state": "missing"}
-    index_bytes = int(trajectory.get("index_size", 0) or 0) + int(composition.get("index_size", 0) or 0)
+    index_bytes = (
+        int(events.get("index_size", 0) or 0)
+        + int(trajectory.get("index_size", 0) or 0)
+        + int(composition.get("index_size", 0) or 0)
+    )
     timestamps = [
         value
         for value in (
             trajectory.get("updated_at_epoch"),
             composition.get("updated_at_epoch"),
+            events.get("updated_at_epoch"),
         )
         if value is not None
     ]
@@ -253,6 +445,15 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "trajectory": trajectory,
         "composition": composition,
         "rng_event_command": "--reaction-event --show-molecule-time",
+        "event_command": (
+            (
+                f"{command_prefix} --rebuild event"
+                if events.get("state") in {"stale", "invalid"}
+                else f"{command_prefix} --event-only"
+            )
+            if artifacts.get("reactionevent") and artifacts.get("molecules")
+            else ""
+        ),
         "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
         "composition_command": f"{command_prefix} --composition-only" if species_source else "",
     }
@@ -1496,15 +1697,61 @@ def locate_rng_events(
             "缺少 .molecules.csv；请在 ReacNetGenerator 中启用 --show-molecule-time",
             reason="missing_molecules",
         )
+    if "->" not in str(reaction_text or ""):
+        raise ServiceError(
+            "请输入完整反应式，例如 A + B -> C + D",
+            reason="bad_reaction_query",
+        )
+    query_left, query_right = str(reaction_text).split("->", 1)
+    normalized = reaction_key(query_left, query_right)
+    normalized_key = canonical_reaction_key(*normalized)
     try:
-        return query_rng_events(
+        payload = EVENT_EVIDENCE_STORE.query_events(
             reactionevent_file,
             molecules_file,
-            reaction_text,
-            max_events=max_events,
+            normalized_key,
+            limit=max_events,
         )
-    except (OSError, ValueError, RngEventDataError) as exc:
+    except IndexStaleError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--rebuild event",
+            reason="event_index_stale",
+        ) from exc
+    except IndexInvalidError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--rebuild event",
+            reason="event_index_invalid",
+        ) from exc
+    except IndexNotReadyError as exc:
+        raise ServiceError(
+            f"{exc}; 运行 reacnet-scope-prepare "
+            f"{shlex.quote(str(Path(reactionevent_file).parent))} "
+            "--event-only",
+            reason="event_index_not_ready",
+        ) from exc
+    except (OSError, ValueError) as exc:
         raise ServiceError(str(exc), reason="rng_event_data_error") from exc
+
+    rows = payload.get("rows") or []
+    matched = sum(
+        row.get("association_status") == "matched" for row in rows
+    )
+    payload["meta"] = {
+        "status": "ok",
+        "message": (
+            f"从 RNG 事件索引中找到 {payload.get('total', 0)} 条记录"
+        ),
+        "matched_atoms": matched,
+        "unresolved_atoms": len(rows) - matched,
+        "reactionevent_file": os.path.abspath(reactionevent_file),
+        "molecules_file": os.path.abspath(molecules_file),
+        "evidence_status": "evidence_linked",
+    }
+    return payload
 
 
 def build_rng_event_visualization(
@@ -1959,7 +2206,10 @@ def run_batch_comparison(
 __all__ = [
     "ALLOWED_ROOTS",
     "ServiceError",
+    "browse_dataset_location",
     "list_directory",
+    "normalise_recent_datasets",
+    "resolve_dataset_input",
     "scan_dataset",
     "validate_browse_path",
     "artifacts_from_status",

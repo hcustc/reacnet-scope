@@ -13,7 +13,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 class RngEventDataError(RuntimeError):
@@ -29,11 +29,43 @@ def _signature(path_text: str) -> tuple[str, int, int]:
 def _terms(text: str) -> tuple[str, ...]:
     # RNG currently joins canonical species with '+'.  Keep multiplicity: it
     # is essential for reactions such as H2O + O -> 2 OH.
-    return tuple(sorted(item.strip() for item in str(text or "").split("+") if item.strip()))
+    terms: list[str] = []
+    current: list[str] = []
+    bracket_depth = 0
+    for character in str(text or ""):
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth:
+            bracket_depth -= 1
+        if character == "+" and bracket_depth == 0:
+            term = "".join(current).strip()
+            if term:
+                terms.append(term)
+            current = []
+            continue
+        current.append(character)
+    term = "".join(current).strip()
+    if term:
+        terms.append(term)
+    return tuple(sorted(terms))
 
 
 def reaction_key(reactant: str, product: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return _terms(reactant), _terms(product)
+
+
+def canonical_reaction_key(
+    reactants: Iterable[str],
+    products: Iterable[str],
+) -> str:
+    """Return one stable, multiplicity-preserving reaction key."""
+    left = "+".join(
+        sorted(str(item).strip() for item in reactants if str(item).strip())
+    )
+    right = "+".join(
+        sorted(str(item).strip() for item in products if str(item).strip())
+    )
+    return f"{left}->{right}"
 
 
 def _trajectory_bond_id(rng_bond: str) -> str:
@@ -66,7 +98,10 @@ class MoleculeComponent:
         return self.reactants, self.products
 
 
-def _changed_components(before: tuple[MoleculeRow, ...], after: tuple[MoleculeRow, ...]) -> list[MoleculeComponent]:
+def changed_components(
+    before: tuple[MoleculeRow, ...],
+    after: tuple[MoleculeRow, ...],
+) -> list[MoleculeComponent]:
     before_by_atom = {atom_id: idx for idx, molecule in enumerate(before) for atom_id in molecule.atom_ids}
     after_by_atom = {atom_id: idx for idx, molecule in enumerate(after) for atom_id in molecule.atom_ids}
     graph: dict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
@@ -112,6 +147,9 @@ def _changed_components(before: tuple[MoleculeRow, ...], after: tuple[MoleculeRo
         )
     components.sort(key=lambda item: (item.key, item.atom_ids))
     return components
+
+
+_changed_components = changed_components
 
 
 @lru_cache(maxsize=8)
@@ -204,6 +242,7 @@ def _load_event_rows_cached(path: str, size: int, mtime_ns: int) -> tuple[dict[s
         for source_row, row in enumerate(reader, 1):
             reactant = str(row["Reactant"] or "").strip()
             product = str(row["Product"] or "").strip()
+            normalized = reaction_key(reactant, product)
             rows.append(
                 {
                     "source_row": source_row,
@@ -211,7 +250,8 @@ def _load_event_rows_cached(path: str, size: int, mtime_ns: int) -> tuple[dict[s
                     "reactant": reactant,
                     "product": product,
                     "reaction_smiles": f"{reactant} -> {product}",
-                    "reaction_key": reaction_key(reactant, product),
+                    "reaction_key": normalized,
+                    "reaction_key_text": canonical_reaction_key(*normalized),
                 }
             )
     return tuple(rows)
