@@ -335,6 +335,9 @@ def find_candidate_paths(
             stopped_at_expansion_cap = True
             break
 
+        # Every popped nonterminal state consumes an expansion, even when all
+        # of its candidate branches are later pruned.
+        expansions += 1
         (
             next_steps,
             had_positive,
@@ -359,7 +362,6 @@ def find_candidate_paths(
                 completed.append(state)
             continue
 
-        expansions += 1
         children: list[_SearchState] = []
         for step in next_steps:
             child_step_scores = (*state.step_scores, step.score)

@@ -747,6 +747,57 @@ def test_expansion_cap_precedes_further_candidate_evidence_validation() -> None:
     assert result.truncated is True
 
 
+def test_expansion_cap_counts_loop_and_threshold_pruned_dead_ends_before_queued_evidence() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 20),
+            Reaction(("A",), ("C",), 10),
+            Reaction(("B", "X"), ("A",), 10),
+            Reaction(("B",), ("E",), 1),
+            Reaction(("C",), ("D",), 10),
+        ]
+    )
+    provider = _RecordingEvidenceProvider(
+        {
+            "A->B": {
+                "total_events": 1,
+                "matched_events": 1,
+                "distinct_intervals": 1,
+                "available_intervals": 1,
+            },
+            "A->C": {
+                "total_events": 1,
+                "matched_events": 1,
+                "distinct_intervals": 1,
+                "available_intervals": 1,
+            },
+            "C->D": {"total_events": True},
+        }
+    )
+
+    first = find_candidate_paths(
+        net,
+        "A",
+        max_depth=3,
+        max_expansions=2,
+        min_net_tp=2,
+        evidence_provider=provider,
+    )
+    second = find_candidate_paths(
+        net,
+        "A",
+        max_depth=3,
+        max_expansions=2,
+        min_net_tp=2,
+        evidence_provider=provider,
+    )
+
+    assert first == second
+    assert [path.species for path in first.paths] == [("A", "B"), ("A", "C")]
+    assert first.expansions == 2
+    assert first.truncated is True
+
+
 def test_safe_top_n_bound_stops_exact_search_before_expansion_cap() -> None:
     net = ReactionNetwork(
         [
