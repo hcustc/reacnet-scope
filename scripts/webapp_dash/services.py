@@ -33,6 +33,7 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from rng_tools.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
+from rng_tools.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
     IndexInvalidError,
@@ -43,7 +44,10 @@ from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
-from reacnet_scope.event_index import EVENT_EVIDENCE_STORE  # noqa: E402
+from reacnet_scope.event_index import (  # noqa: E402
+    EVENT_EVIDENCE_STORE,
+    EventIndexEvidenceProvider,
+)
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
@@ -544,6 +548,160 @@ def _file_signature(path_text: str) -> tuple[str, int, int]:
         return "", 0, 0
     stat = path.stat()
     return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def _pathway_formula(smiles: str) -> str:
+    return formula_from_counts(count_atoms_fast(smiles))
+
+
+def _pathway_source_signature(path_text: str) -> dict[str, Any]:
+    path, size, mtime_ns = _file_signature(path_text)
+    return {
+        "path": path,
+        "size": size,
+        "mtime_ns": mtime_ns,
+    }
+
+
+def _pathway_preparation_command(
+    reaction_path: str,
+    reactionevent_path: str,
+    *,
+    rebuild: bool,
+) -> str:
+    source = reactionevent_path or reaction_path
+    option = "--rebuild event" if rebuild else "--event-only"
+    return (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(source).parent))} "
+        f"{option}"
+    )
+
+
+_PATHWAY_QUERY_KEYS = {
+    "direction",
+    "max_depth",
+    "max_branches",
+    "max_paths",
+    "max_expansions",
+    "min_net_tp",
+    "min_directionality",
+}
+
+
+def find_pathways(
+    artifacts: dict[str, str],
+    start_smiles: str,
+    **limits: Any,
+) -> dict[str, Any]:
+    """Find candidate paths, linking a ready SQLite event index if present."""
+    reaction_path = (artifacts.get("reaction") or "").strip()
+    if (
+        not reaction_path.lower().endswith(".reactionabcd")
+        or not Path(reaction_path).is_file()
+    ):
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        )
+
+    unknown_limits = sorted(set(limits) - _PATHWAY_QUERY_KEYS)
+    if unknown_limits:
+        raise ServiceError(
+            f"无效的路径查询参数: {', '.join(unknown_limits)}",
+            reason="bad_pathway_query",
+        )
+
+    try:
+        network = STORE.get(reaction_path, 1)
+    except FileNotFoundError as exc:
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        ) from exc
+    except RuntimeError as exc:
+        raise ServiceError(
+            f"无法加载反应网络: {exc}",
+            reason="bad_reac",
+        ) from exc
+
+    reactionevent_path = (artifacts.get("reactionevent") or "").strip()
+    molecules_path = (artifacts.get("molecules") or "").strip()
+    evidence_provider: EventIndexEvidenceProvider | None = None
+    rebuild_event_index = False
+    if (
+        reactionevent_path
+        and molecules_path
+        and Path(reactionevent_path).is_file()
+        and Path(molecules_path).is_file()
+    ):
+        try:
+            opened = EVENT_EVIDENCE_STORE.open_required(
+                reactionevent_path,
+                molecules_path,
+            )
+            evidence_provider = EventIndexEvidenceProvider(
+                reactionevent_path,
+                molecules_path,
+                store=EVENT_EVIDENCE_STORE,
+                opened=opened,
+            )
+        except (IndexStaleError, IndexInvalidError):
+            rebuild_event_index = True
+        except IndexNotReadyError:
+            rebuild_event_index = False
+
+    try:
+        result = find_candidate_paths(
+            network,
+            start_smiles,
+            evidence_provider=evidence_provider,
+            **limits,
+        )
+    except (TypeError, ValueError) as exc:
+        message = str(exc)
+        if isinstance(exc, TypeError) or any(
+            name in message for name in _PATHWAY_QUERY_KEYS
+        ):
+            raise ServiceError(
+                f"无效的路径查询参数: {message}",
+                reason="bad_pathway_query",
+            ) from exc
+        raise
+
+    payload = result.as_dict()
+    for path in payload["paths"]:
+        path["formulas"] = [
+            _pathway_formula(smiles)
+            for smiles in path["species"]
+        ]
+        for step in path["steps"]:
+            step["focal_input_formula"] = _pathway_formula(
+                step["focal_input"]
+            )
+            step["focal_output_formula"] = _pathway_formula(
+                step["focal_output"]
+            )
+            step["reactant_formulas"] = [
+                _pathway_formula(smiles)
+                for smiles in step["reactants"]
+            ]
+            step["product_formulas"] = [
+                _pathway_formula(smiles)
+                for smiles in step["products"]
+            ]
+
+    payload["source_signatures"] = {
+        "reactionabcd": _pathway_source_signature(reaction_path),
+        **dict(payload["source_signatures"]),
+    }
+    if evidence_provider is None:
+        payload["preparation_command"] = _pathway_preparation_command(
+            reaction_path,
+            reactionevent_path,
+            rebuild=rebuild_event_index,
+        )
+    return payload
 
 
 def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2221,6 +2379,7 @@ __all__ = [
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
+    "find_pathways",
     "search_species_catalog",
     "search_species",
     "species_detail",

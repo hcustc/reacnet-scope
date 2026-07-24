@@ -27,6 +27,10 @@ SCORE_VERSION = "candidate-path/v1"
 class EvidenceProvider(Protocol):
     """Read-only source of batched event summaries for reaction keys."""
 
+    @property
+    def source_signatures(self) -> Mapping[str, Any]:
+        """Describe the immutable evidence sources used for the summaries."""
+
     def reaction_summaries(
         self, reaction_keys: Sequence[str]
     ) -> Mapping[str, Mapping[str, Any]]:

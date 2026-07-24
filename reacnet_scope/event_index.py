@@ -1232,3 +1232,89 @@ class EventEvidenceStore:
 
 
 EVENT_EVIDENCE_STORE = EventEvidenceStore()
+
+
+class EventIndexEvidenceProvider:
+    """Adapt one ready event index to the candidate-path evidence protocol."""
+
+    def __init__(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        *,
+        store: EventEvidenceStore = EVENT_EVIDENCE_STORE,
+        opened: dict[str, Any] | None = None,
+    ) -> None:
+        self._reactionevent_file = os.path.abspath(reactionevent_file)
+        self._molecules_file = os.path.abspath(molecules_file)
+        self._store = store
+        self._opened = dict(
+            opened
+            if opened is not None
+            else store.open_required(
+                self._reactionevent_file,
+                self._molecules_file,
+            )
+        )
+        self._index_path = os.path.abspath(str(self._opened["index_path"]))
+        self._source_signatures = {
+            "reactionevent": self._signature(self._reactionevent_file),
+            "molecules": self._signature(self._molecules_file),
+            "event_index": {
+                **self._signature(self._index_path),
+                "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+            },
+        }
+
+    @staticmethod
+    def _signature(path_text: str) -> dict[str, Any]:
+        path = os.path.abspath(path_text)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return {"path": path}
+        return {
+            "path": path,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    @property
+    def source_signatures(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: dict(signature)
+            for name, signature in self._source_signatures.items()
+        }
+
+    def reaction_summaries(
+        self,
+        reaction_keys: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        selected = tuple(
+            sorted({str(key) for key in reaction_keys if str(key)})
+        )
+        if not selected:
+            return {}
+        found = self._store.reaction_summary(
+            self._reactionevent_file,
+            self._molecules_file,
+            selected,
+        )
+        available_intervals = _strict_int(
+            self._opened.get("available_intervals"),
+            "available_intervals",
+            minimum=0,
+        )
+        summaries: dict[str, dict[str, Any]] = {}
+        for key in selected:
+            summaries[key] = {
+                "reaction_key": key,
+                "total_events": 0,
+                "matched_events": 0,
+                "distinct_intervals": 0,
+                "available_intervals": available_intervals,
+                "source_references": (self._index_path,),
+                **dict(found.get(key, {})),
+            }
+            summaries[key]["source_references"] = (self._index_path,)
+        return summaries
