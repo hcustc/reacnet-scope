@@ -13,7 +13,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 class RngEventDataError(RuntimeError):
@@ -34,6 +34,20 @@ def _terms(text: str) -> tuple[str, ...]:
 
 def reaction_key(reactant: str, product: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return _terms(reactant), _terms(product)
+
+
+def canonical_reaction_key(
+    reactants: Iterable[str],
+    products: Iterable[str],
+) -> str:
+    """Return one stable, multiplicity-preserving reaction key."""
+    left = "+".join(
+        sorted(str(item).strip() for item in reactants if str(item).strip())
+    )
+    right = "+".join(
+        sorted(str(item).strip() for item in products if str(item).strip())
+    )
+    return f"{left}->{right}"
 
 
 def _trajectory_bond_id(rng_bond: str) -> str:
@@ -204,6 +218,7 @@ def _load_event_rows_cached(path: str, size: int, mtime_ns: int) -> tuple[dict[s
         for source_row, row in enumerate(reader, 1):
             reactant = str(row["Reactant"] or "").strip()
             product = str(row["Product"] or "").strip()
+            normalized = reaction_key(reactant, product)
             rows.append(
                 {
                     "source_row": source_row,
@@ -211,7 +226,8 @@ def _load_event_rows_cached(path: str, size: int, mtime_ns: int) -> tuple[dict[s
                     "reactant": reactant,
                     "product": product,
                     "reaction_smiles": f"{reactant} -> {product}",
-                    "reaction_key": reaction_key(reactant, product),
+                    "reaction_key": normalized,
+                    "reaction_key_text": canonical_reaction_key(*normalized),
                 }
             )
     return tuple(rows)

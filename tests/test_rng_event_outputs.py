@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
-from reacnet_scope.rng_events import event_output_status, query_rng_events
+from reacnet_scope.rng_events import (
+    canonical_reaction_key,
+    event_output_status,
+    query_rng_events,
+)
 from scripts.webapp_dash import services as svc
 
 
@@ -35,6 +39,12 @@ def _rng_outputs(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return reactionevent, molecules
+
+
+def test_canonical_reaction_key_sorts_each_side_and_preserves_multiplicity() -> None:
+    assert canonical_reaction_key(("[O]", "[H]", "[H]"), ("[H][O][H]",)) == (
+        "[H]+[H]+[O]->[H][O][H]"
+    )
 
 
 def test_rng_event_query_preserves_stoichiometry_and_maps_atoms(tmp_path) -> None:

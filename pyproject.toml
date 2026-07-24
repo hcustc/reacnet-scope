@@ -13,6 +13,7 @@ dependencies = [
   "pandas>=2.0",
   "openpyxl>=3.1",
   "rdkit>=2023.9",
+  "networkx>=3.2,<4",
 ]
 keywords = ["reacnetgenerator", "reaction-network", "md", "chemistry", "smiles"]
 classifiers = [
@@ -35,6 +36,9 @@ web = [
     "dash-cytoscape>=1,<2",
     "matplotlib>=3.8",
     "scipy>=1.11",
+]
+trajectory = [
+    "ase>=3.23,<4",
 ]
 
 [project.scripts]
@@ -69,3 +73,8 @@ include = [
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+]
