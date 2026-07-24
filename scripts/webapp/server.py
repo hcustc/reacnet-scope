@@ -70,6 +70,7 @@ from rng_tools.network import (  # noqa: E402
     smiles_to_formula_fast,
 )
 from rng_tools.io import load_transition_table  # noqa: E402
+from rng_tools.dir_browser import validate_browse_path  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     choose_dataset_candidate,
@@ -755,6 +756,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     folder_files: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
     if folder:
+        folder = str(validate_browse_path(folder))
         preferred_base = (params.get("dataset_base", [""])[0] or "").strip()
         folder_base, folder_files, candidates = _scan_rng_dataset_directory(folder, preferred_base=preferred_base)
     seed = next((value for value in explicit.values() if value), folder_base)
