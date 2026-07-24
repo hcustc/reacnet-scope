@@ -153,8 +153,9 @@ uv run ./run_cli.sh species --reac /path/to/xxx.reactionabcd --formula C6H4
 ## 依赖
 
 - Python 3.10+
-- 基础依赖：`pandas`、`openpyxl`、`rdkit`
+- 基础依赖：`pandas`、`openpyxl`、`rdkit`、`networkx`
 - 可选绘图增强：`matplotlib`、`scipy`（CLI `plot --out-png`、Carbon-number evolution plot 时需要）
+- 可选轨迹适配：`ase`（安装 extra：`trajectory`）
 
 ### 使用 uv 安装
 

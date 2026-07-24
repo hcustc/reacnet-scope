@@ -64,6 +64,46 @@ _REQUIRED_TABLE_COLUMNS = {
 }
 
 
+def _strict_int(
+    value: Any,
+    label: str,
+    *,
+    minimum: int | None = None,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise IndexInvalidError(
+            f"Event evidence index {label} is invalid"
+        ) from exc
+    if minimum is not None and parsed < minimum:
+        raise IndexInvalidError(
+            f"Event evidence index {label} is invalid"
+        )
+    return parsed
+
+
+def _safe_meta_int(meta: dict[str, str], key: str) -> int:
+    try:
+        return _strict_int(meta.get(key), key, minimum=0)
+    except IndexInvalidError:
+        return 0
+
+
+def _decode_json_list(raw: Any, label: str) -> list[Any]:
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise IndexInvalidError(
+            f"Event evidence index {label} payload is invalid"
+        ) from exc
+    if not isinstance(value, list):
+        raise IndexInvalidError(
+            f"Event evidence index {label} payload must be a list"
+        )
+    return value
+
+
 def _write_meta(connection: sqlite3.Connection, values: dict[str, Any]) -> None:
     connection.executemany(
         """
@@ -308,10 +348,10 @@ class EventEvidenceStore:
     ) -> None:
         reaction_path, reaction_size, reaction_mtime_ns = reaction_source
         molecule_path, molecule_size, molecule_mtime_ns = molecule_source
-        if (
-            int(meta.get("schema_version", 0) or 0)
-            != EVENT_EVIDENCE_SCHEMA_VERSION
-        ):
+        if _strict_int(
+            meta.get("schema_version"),
+            "schema_version",
+        ) != EVENT_EVIDENCE_SCHEMA_VERSION:
             raise IndexInvalidError("Event evidence index schema is incompatible")
         if meta.get("build_state") != "ready":
             raise IndexInvalidError("Event evidence index is not complete")
@@ -334,7 +374,7 @@ class EventEvidenceStore:
         for key, expected, label in checks:
             actual: str | int = meta.get(key, "")
             if isinstance(expected, int):
-                actual = int(actual or -1)
+                actual = _strict_int(actual, key, minimum=0)
             if actual != expected:
                 raise IndexStaleError(f"Event evidence index {label} changed")
         if meta.get("dataset_id") != dataset_id_for_source(reaction_path):
@@ -369,10 +409,21 @@ class EventEvidenceStore:
                     raise IndexInvalidError(
                         f"Event evidence index {table} columns are incomplete"
                     )
-            event_count = int(meta.get("event_count", -1) or -1)
-            reaction_types = int(meta.get("reaction_type_count", -1) or -1)
-            if event_count < 0 or reaction_types < 0:
-                raise IndexInvalidError("Event evidence index counts are invalid")
+            event_count = _strict_int(
+                meta.get("event_count"),
+                "event_count",
+                minimum=0,
+            )
+            reaction_types = _strict_int(
+                meta.get("reaction_type_count"),
+                "reaction_type_count",
+                minimum=0,
+            )
+            available_intervals = _strict_int(
+                meta.get("available_intervals"),
+                "available_intervals",
+                minimum=0,
+            )
             query_only = bool(connection.execute("PRAGMA query_only").fetchone()[0])
         except IndexNotReadyError:
             raise
@@ -388,9 +439,7 @@ class EventEvidenceStore:
             "dataset_id": meta["dataset_id"],
             "event_count": event_count,
             "reaction_types": reaction_types,
-            "available_intervals": int(
-                meta.get("available_intervals", 0) or 0
-            ),
+            "available_intervals": available_intervals,
             "query_only": query_only,
         }
 
@@ -445,23 +494,29 @@ class EventEvidenceStore:
             "reactionevent_file": str(reaction_path.resolve()),
             "molecules_file": str(molecule_path.resolve()),
             "event_count": int(
-                details.get("event_count", meta.get("event_count", 0)) or 0
+                details.get(
+                    "event_count",
+                    _safe_meta_int(meta, "event_count"),
+                )
+                or 0
             ),
             "reaction_types": int(
                 details.get(
-                    "reaction_types", meta.get("reaction_type_count", 0)
+                    "reaction_types",
+                    _safe_meta_int(meta, "reaction_type_count"),
                 )
                 or 0
             ),
             "available_intervals": int(
                 details.get(
                     "available_intervals",
-                    meta.get("available_intervals", 0),
+                    _safe_meta_int(meta, "available_intervals"),
                 )
                 or 0
             ),
-            "updated_at_epoch": int(meta.get("updated_at_epoch", 0) or 0)
-            or None,
+            "updated_at_epoch": (
+                _safe_meta_int(meta, "updated_at_epoch") or None
+            ),
             "cache_dir": str(index_path.parent),
         }
 
@@ -990,15 +1045,41 @@ class EventEvidenceStore:
                     association_status,
                     occurrence,
                 ) = record
-                atom_ids = [
-                    int(value) for value in json.loads(atom_ids_json)
-                ]
-                reactant_bonds = [
-                    str(value) for value in json.loads(reactant_bonds_json)
-                ]
-                product_bonds = [
-                    str(value) for value in json.loads(product_bonds_json)
-                ]
+                atom_values = _decode_json_list(
+                    atom_ids_json, "atom_ids_json"
+                )
+                if any(
+                    not isinstance(value, int) or isinstance(value, bool)
+                    for value in atom_values
+                ):
+                    raise IndexInvalidError(
+                        "Event evidence index atom_ids_json payload "
+                        "must contain integers"
+                    )
+                atom_ids = list(atom_values)
+                reactant_values = _decode_json_list(
+                    reactant_bonds_json, "reactant_bonds_json"
+                )
+                product_values = _decode_json_list(
+                    product_bonds_json, "product_bonds_json"
+                )
+                if any(
+                    not isinstance(value, str)
+                    for value in reactant_values + product_values
+                ):
+                    raise IndexInvalidError(
+                        "Event evidence index bond payloads "
+                        "must contain strings"
+                    )
+                reactant_bonds = list(reactant_values)
+                product_bonds = list(product_values)
+                if association_status not in {
+                    "matched",
+                    "unresolved_hmm_timeline",
+                }:
+                    raise IndexInvalidError(
+                        "Event evidence index association_status is invalid"
+                    )
                 rows.append(
                     {
                         "event_index": page_index,
@@ -1028,7 +1109,7 @@ class EventEvidenceStore:
                         ),
                     }
                 )
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             raise IndexInvalidError(
                 f"Event evidence index payload is invalid: {exc}"
             ) from exc
@@ -1078,15 +1159,39 @@ class EventEvidenceStore:
                     """,
                     chunk,
                 ):
+                    total_events = _strict_int(
+                        total,
+                        "reaction summary total_events",
+                        minimum=0,
+                    )
+                    matched_events = _strict_int(
+                        matched,
+                        "reaction summary matched_events",
+                        minimum=0,
+                    )
+                    distinct_intervals = _strict_int(
+                        intervals,
+                        "reaction summary distinct_intervals",
+                        minimum=0,
+                    )
+                    if matched_events > total_events:
+                        raise IndexInvalidError(
+                            "Event evidence index reaction summary "
+                            "matched_events is invalid"
+                        )
                     output[str(key)] = {
                         "reaction_key": str(key),
-                        "total_events": int(total),
-                        "matched_events": int(matched),
-                        "distinct_intervals": int(intervals),
-                        "available_intervals": int(
-                            opened["available_intervals"]
-                        ),
+                        "total_events": total_events,
+                        "matched_events": matched_events,
+                        "distinct_intervals": distinct_intervals,
+                        "available_intervals": opened[
+                            "available_intervals"
+                        ],
                     }
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event evidence index reaction summary is corrupt: {exc}"
+            ) from exc
         finally:
             connection.close()
         return output

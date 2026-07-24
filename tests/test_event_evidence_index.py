@@ -232,6 +232,70 @@ def test_malformed_event_json_is_reported_as_invalid_index(
         )
 
 
+def test_structurally_invalid_event_json_is_reported_as_invalid_index(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        connection.execute("UPDATE events SET atom_ids_json='{}'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="list"):
+        EVENT_EVIDENCE_STORE.query_events(
+            str(reactionevent), str(molecules), REACTION_KEY, limit=1
+        )
+
+
+def test_corrupt_numeric_metadata_reports_invalid_state(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        connection.execute(
+            "UPDATE meta SET value='bad' WHERE key='event_count'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="event_count"):
+        EVENT_EVIDENCE_STORE.open_required(
+            str(reactionevent), str(molecules)
+        )
+    assert EVENT_EVIDENCE_STORE.status(
+        str(reactionevent), str(molecules)
+    )["state"] == "invalid"
+
+
+def test_reaction_summary_translates_invalid_numeric_payload(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        connection.execute(
+            "UPDATE reaction_summary SET total_events='bad'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="summary"):
+        EVENT_EVIDENCE_STORE.reaction_summary(
+            str(reactionevent), str(molecules), [REACTION_KEY]
+        )
+
+
 def test_event_query_translates_sqlite_failures_to_invalid_index(
     tmp_path, monkeypatch
 ) -> None:
