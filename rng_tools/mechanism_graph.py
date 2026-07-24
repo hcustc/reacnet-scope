@@ -83,6 +83,144 @@ def to_networkx_mechanism_graph(
     return _to_networkx_validated_mechanism_graph(validated)
 
 
+def mechanism_graph_metrics(graph: nx.MultiDiGraph) -> dict[str, Any]:
+    """Return deterministic metrics for one bounded mechanism graph.
+
+    Reachability is reported from the graph's stable anchor species ID.
+    ``reachable_species_ids`` is the sorted union of upstream and downstream
+    reachable species and deliberately excludes the separately reported
+    anchor.  Degree centrality is NetworkX's unrounded MultiDiGraph value:
+    parallel edges are counted and can therefore produce values above one.
+
+    The caller remains responsible for constructing a bounded graph.  This
+    function uses only linear graph traversals and does not mutate ``graph``.
+    """
+    _validate_mechanism_graph_contract(graph)
+
+    components = list(nx.weakly_connected_components(graph))
+    component_sizes = sorted(
+        (len(component) for component in components),
+        reverse=True,
+    )
+    centrality = nx.degree_centrality(graph)
+
+    anchor_id: str | None = None
+    downstream_node_ids: list[str] = []
+    upstream_node_ids: list[str] = []
+    downstream_species_ids: list[str] = []
+    upstream_species_ids: list[str] = []
+    anchor_smiles = graph.graph["anchor_smiles"]
+    candidate_anchor_id = stable_mechanism_id("species", anchor_smiles)
+    if candidate_anchor_id in graph:
+        anchor_id = candidate_anchor_id
+        downstream = nx.descendants(graph, anchor_id)
+        upstream = nx.ancestors(graph, anchor_id)
+        downstream_node_ids = sorted(downstream)
+        upstream_node_ids = sorted(upstream)
+        downstream_species_ids = sorted(
+            node_id
+            for node_id in downstream
+            if graph.nodes[node_id]["kind"] == "species"
+        )
+        upstream_species_ids = sorted(
+            node_id
+            for node_id in upstream
+            if graph.nodes[node_id]["kind"] == "species"
+        )
+
+    return {
+        "weak_component_count": len(components),
+        "weak_component_sizes": component_sizes,
+        "anchor_id": anchor_id,
+        "downstream_node_ids": downstream_node_ids,
+        "upstream_node_ids": upstream_node_ids,
+        "downstream_species_ids": downstream_species_ids,
+        "upstream_species_ids": upstream_species_ids,
+        "reachable_species_ids": sorted(
+            set(downstream_species_ids) | set(upstream_species_ids)
+        ),
+        "degree_centrality": {
+            node_id: centrality[node_id]
+            for node_id in sorted(centrality)
+        },
+    }
+
+
+def _validate_mechanism_graph_contract(graph: nx.MultiDiGraph) -> None:
+    if not isinstance(graph, nx.MultiDiGraph):
+        raise ValueError("mechanism graph must be a networkx.MultiDiGraph")
+    if graph.graph.get("network_semantics") != "mechanism":
+        raise ValueError(
+            "mechanism graph network_semantics must be 'mechanism'"
+        )
+    anchor_smiles = graph.graph.get("anchor_smiles")
+    if not isinstance(anchor_smiles, str) or not anchor_smiles:
+        raise ValueError(
+            "mechanism graph anchor_smiles must be a non-empty string"
+        )
+
+    for node_id, attributes in graph.nodes(data=True):
+        if not isinstance(node_id, str) or not node_id:
+            raise ValueError(
+                "mechanism graph node IDs must be non-empty strings"
+            )
+        if attributes.get("id") != node_id:
+            raise ValueError(
+                f"mechanism graph node {node_id!r} id must match its key"
+            )
+        kind = attributes.get("kind")
+        if kind == "species":
+            identity_name = "smiles"
+        elif kind == "reaction":
+            identity_name = "reaction_key"
+        else:
+            raise ValueError(
+                f"mechanism graph node {node_id!r} kind must be "
+                "'species' or 'reaction'"
+            )
+        identity_value = attributes.get(identity_name)
+        if not isinstance(identity_value, str) or not identity_value:
+            raise ValueError(
+                f"mechanism graph node {node_id!r} {identity_name} "
+                "must be a non-empty string"
+            )
+        expected_id = stable_mechanism_id(kind, identity_value)
+        if node_id != expected_id:
+            raise ValueError(
+                f"mechanism graph node {node_id!r} does not match "
+                f"stable identity {expected_id!r}"
+            )
+
+    for source, target, _key, attributes in graph.edges(
+        keys=True,
+        data=True,
+    ):
+        if source == target:
+            raise ValueError(
+                f"mechanism graph self-loop at {source!r} is invalid"
+            )
+        source_kind = graph.nodes[source]["kind"]
+        target_kind = graph.nodes[target]["kind"]
+        role = attributes.get("role")
+        if role == "reactant":
+            valid_endpoints = (
+                source_kind == "species" and target_kind == "reaction"
+            )
+        elif role == "product":
+            valid_endpoints = (
+                source_kind == "reaction" and target_kind == "species"
+            )
+        else:
+            raise ValueError(
+                "mechanism graph edge role must be 'reactant' or 'product'"
+            )
+        if not valid_endpoints:
+            raise ValueError(
+                f"mechanism graph {role} edge {source!r}->{target!r} "
+                "violates bipartite direction"
+            )
+
+
 def validate_mechanism_payload(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:

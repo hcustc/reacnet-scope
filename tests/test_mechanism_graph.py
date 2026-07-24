@@ -15,6 +15,7 @@ from rng_tools.mechanism_graph import (
     build_mechanism_network,
     canonical_mechanism_reaction_key,
     decode_gexf_mechanism_metadata,
+    mechanism_graph_metrics,
     serialize_mechanism_graph,
     stable_mechanism_edge_id,
     stable_mechanism_id,
@@ -970,3 +971,182 @@ def test_public_identity_helpers_lock_version_one_hash_contract() -> None:
         "edge:"
         + hashlib.sha256(edge_seed.encode("utf-8")).hexdigest()[:20]
     )
+
+
+def _metric_node(
+    graph: nx.MultiDiGraph,
+    kind: str,
+    value: str,
+) -> str:
+    node_id = stable_mechanism_id(kind, value)
+    attributes = {"id": node_id, "kind": kind}
+    attributes["smiles" if kind == "species" else "reaction_key"] = value
+    graph.add_node(node_id, **attributes)
+    return node_id
+
+
+def _metric_graph(anchor_smiles: str = "A") -> nx.MultiDiGraph:
+    return nx.MultiDiGraph(
+        network_semantics="mechanism",
+        anchor_smiles=anchor_smiles,
+    )
+
+
+def test_mechanism_graph_metrics_reports_sorted_components_and_reachability(
+) -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    species_b = _metric_node(graph, "species", "B")
+    species_c = _metric_node(graph, "species", "C")
+    reaction_ab = _metric_node(graph, "reaction", "A->B")
+    reaction_ca = _metric_node(graph, "reaction", "C->A")
+    species_x = _metric_node(graph, "species", "X")
+    species_y = _metric_node(graph, "species", "Y")
+    reaction_xy = _metric_node(graph, "reaction", "X->Y")
+    graph.add_edge(species_c, reaction_ca, role="reactant")
+    graph.add_edge(reaction_ca, species_a, role="product")
+    graph.add_edge(species_a, reaction_ab, role="reactant")
+    graph.add_edge(reaction_ab, species_b, role="product")
+    graph.add_edge(species_x, reaction_xy, role="reactant")
+    graph.add_edge(reaction_xy, species_y, role="product")
+    before = copy.deepcopy(graph)
+
+    metrics = mechanism_graph_metrics(graph)
+
+    assert metrics == {
+        "weak_component_count": 2,
+        "weak_component_sizes": [5, 3],
+        "anchor_id": species_a,
+        "downstream_node_ids": sorted([reaction_ab, species_b]),
+        "upstream_node_ids": sorted([reaction_ca, species_c]),
+        "downstream_species_ids": [species_b],
+        "upstream_species_ids": [species_c],
+        # Reachable species is the union of upstream and downstream species;
+        # the separately reported anchor is deliberately not included.
+        "reachable_species_ids": sorted([species_b, species_c]),
+        "degree_centrality": {
+            node_id: nx.degree_centrality(graph)[node_id]
+            for node_id in sorted(graph)
+        },
+    }
+    assert list(metrics["degree_centrality"]) == sorted(graph)
+    json.dumps(metrics, allow_nan=False)
+    assert nx.utils.graphs_equal(graph, before)
+
+
+def test_mechanism_graph_metrics_is_deterministic_across_insertion_order(
+) -> None:
+    first = _metric_graph()
+    second = _metric_graph()
+    first_ids = {
+        (kind, value): _metric_node(first, kind, value)
+        for kind, value in (
+            ("species", "A"),
+            ("reaction", "A->B"),
+            ("species", "B"),
+        )
+    }
+    second_ids = {
+        (kind, value): _metric_node(second, kind, value)
+        for kind, value in reversed(
+            (
+                ("species", "A"),
+                ("reaction", "A->B"),
+                ("species", "B"),
+            )
+        )
+    }
+    for graph, ids in ((first, first_ids), (second, second_ids)):
+        graph.add_edge(
+            ids[("species", "A")],
+            ids[("reaction", "A->B")],
+            role="reactant",
+        )
+        graph.add_edge(
+            ids[("reaction", "A->B")],
+            ids[("species", "B")],
+            role="product",
+        )
+
+    assert mechanism_graph_metrics(first) == mechanism_graph_metrics(second)
+
+
+def test_mechanism_graph_metrics_empty_and_missing_anchor_are_nonfatal(
+) -> None:
+    empty = _metric_graph()
+    assert mechanism_graph_metrics(empty) == {
+        "weak_component_count": 0,
+        "weak_component_sizes": [],
+        "anchor_id": None,
+        "downstream_node_ids": [],
+        "upstream_node_ids": [],
+        "downstream_species_ids": [],
+        "upstream_species_ids": [],
+        "reachable_species_ids": [],
+        "degree_centrality": {},
+    }
+
+    disconnected = _metric_graph(anchor_smiles="missing")
+    species_a = _metric_node(disconnected, "species", "A")
+    assert mechanism_graph_metrics(disconnected) == {
+        "weak_component_count": 1,
+        "weak_component_sizes": [1],
+        "anchor_id": None,
+        "downstream_node_ids": [],
+        "upstream_node_ids": [],
+        "downstream_species_ids": [],
+        "upstream_species_ids": [],
+        "reachable_species_ids": [],
+        "degree_centrality": {species_a: 1.0},
+    }
+
+
+def test_mechanism_graph_metrics_preserves_parallel_edge_centrality() -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    reaction_ab = _metric_node(graph, "reaction", "A->B")
+    graph.add_edge(species_a, reaction_ab, key="first", role="reactant")
+    graph.add_edge(species_a, reaction_ab, key="second", role="reactant")
+
+    metrics = mechanism_graph_metrics(graph)
+
+    # NetworkX counts parallel edges in MultiDiGraph degree centrality, so the
+    # unrounded value can exceed one and must not be clamped.
+    assert metrics["degree_centrality"] == {
+        reaction_ab: 2.0,
+        species_a: 2.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("graph", "message"),
+    [
+        (nx.DiGraph(network_semantics="mechanism"), "MultiDiGraph"),
+        (nx.MultiDiGraph(network_semantics="event_transfer"), "mechanism"),
+    ],
+)
+def test_mechanism_graph_metrics_rejects_invalid_graph_contract(
+    graph: nx.Graph,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        mechanism_graph_metrics(graph)  # type: ignore[arg-type]
+
+
+def test_mechanism_graph_metrics_rejects_self_loops_and_bad_node_identity(
+) -> None:
+    self_loop = _metric_graph()
+    species_a = _metric_node(self_loop, "species", "A")
+    self_loop.add_edge(species_a, species_a, role="reactant")
+    with pytest.raises(ValueError, match="self-loop"):
+        mechanism_graph_metrics(self_loop)
+
+    bad_identity = _metric_graph()
+    bad_identity.add_node(
+        "species:not-stable",
+        id="species:not-stable",
+        kind="species",
+        smiles="A",
+    )
+    with pytest.raises(ValueError, match="stable"):
+        mechanism_graph_metrics(bad_identity)
