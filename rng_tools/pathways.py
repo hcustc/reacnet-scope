@@ -56,7 +56,12 @@ def _json_safe(value: Any) -> Any:
 
 
 def _validate_unit_metric(name: str, value: float) -> None:
-    if not isinstance(value, Real) or not math.isfinite(value) or not 0 <= value <= 1:
+    if (
+        not isinstance(value, Real)
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or not 0 <= value <= 1
+    ):
         raise ValueError(f"{name} must be a finite number in [0, 1]")
 
 
@@ -239,9 +244,9 @@ def find_candidate_paths(
 ) -> CandidatePathResult:
     """Enumerate bounded, loopless candidate routes without implying proof.
 
-    Search is best-first, but partial scores are used only for queue ordering.
-    They are not admissible upper bounds on completed path scores, so the
-    search remains exhaustive unless the explicit expansion cap is reached.
+    Search is best-first. Raw partial scores order the queue but are never used
+    as completion bounds. Exact top-N completion is proved only from a queued
+    state's best possible score after filling every remaining step with 1.0.
     """
     _validate_query(
         direction=direction,
@@ -306,16 +311,36 @@ def find_candidate_paths(
     completed: list[_SearchState] = []
     expansions = 0
     root_had_positive = False
+    root_had_fresh_continuation = False
     root_had_threshold_match = False
+    stopped_at_expansion_cap = False
 
     while queue:
+        if _can_stop_with_exact_top_n(
+            completed=completed,
+            queue=queue,
+            max_paths=max_paths,
+            max_depth=max_depth,
+        ):
+            break
+
         priority = heapq.heappop(queue)
         state = priority[-1]
         if len(state.steps) >= max_depth:
             completed.append(state)
             continue
 
-        next_steps, had_positive, had_threshold_match = _candidate_steps(
+        if expansions >= max_expansions:
+            heapq.heappush(queue, priority)
+            stopped_at_expansion_cap = True
+            break
+
+        (
+            next_steps,
+            had_positive,
+            had_fresh_continuation,
+            had_threshold_match,
+        ) = _candidate_steps(
             network=network,
             focal_species=state.species[-1],
             visited_species=frozenset(state.species),
@@ -327,14 +352,12 @@ def find_candidate_paths(
         )
         if not state.steps:
             root_had_positive = had_positive
+            root_had_fresh_continuation = had_fresh_continuation
             root_had_threshold_match = had_threshold_match
         if not next_steps:
             if state.steps:
                 completed.append(state)
             continue
-        if expansions >= max_expansions:
-            heapq.heappush(queue, priority)
-            break
 
         expansions += 1
         children: list[_SearchState] = []
@@ -361,7 +384,7 @@ def find_candidate_paths(
                 ),
             )
 
-    truncated = bool(queue)
+    truncated = stopped_at_expansion_cap
     result_states = completed
     if truncated:
         result_states = [
@@ -381,7 +404,7 @@ def find_candidate_paths(
 
     if paths:
         reason = "ok"
-    elif not root_had_positive:
+    elif not root_had_positive or not root_had_fresh_continuation:
         reason = "no_positive_net_continuation"
     elif not root_had_threshold_match:
         reason = "filtered_by_thresholds"
@@ -446,6 +469,42 @@ def _prefetch_evidence(
     return summaries, signatures
 
 
+def _can_stop_with_exact_top_n(
+    *,
+    completed: Sequence[_SearchState],
+    queue: Sequence[
+        tuple[
+            float,
+            tuple[str, ...],
+            tuple[str, ...],
+            int,
+            _SearchState,
+        ]
+    ],
+    max_paths: int,
+    max_depth: int,
+) -> bool:
+    if len(completed) < max_paths or not queue:
+        return False
+    retained = sorted(completed, key=_state_sort_key)[:max_paths]
+    worst_retained_score = _required_state_score(retained[-1])
+    best_queued_bound = max(
+        _state_completion_upper_bound(item[-1], max_depth)
+        for item in queue
+    )
+    return best_queued_bound < worst_retained_score
+
+
+def _state_completion_upper_bound(
+    state: _SearchState,
+    max_depth: int,
+) -> float:
+    remaining_depth = max_depth - len(state.step_scores)
+    if not state.step_scores:
+        return 1.0
+    return score_path((*state.step_scores, *((1.0,) * remaining_depth)))
+
+
 def _candidate_steps(
     *,
     network: ReactionNetwork,
@@ -456,7 +515,14 @@ def _candidate_steps(
     min_directionality: float,
     evidence_summaries: Mapping[str, Mapping[str, Any]],
     evidence_available: bool,
-) -> tuple[list[PathwayStep], bool, bool]:
+) -> tuple[list[PathwayStep], bool, bool, bool]:
+    """Build eligible steps and report each candidate-filtering stage.
+
+    The booleans distinguish a positive-net reaction, a positive-net branch
+    to an unvisited species, and a fresh branch surviving query thresholds.
+    Net shares use the raw positive branch population before any of those
+    branch-level filters, including repeated stoichiometric terms.
+    """
     if direction == "downstream":
         indexed_reactions = network.consume_idx.get(focal_species, ())
     else:
@@ -466,7 +532,7 @@ def _candidate_steps(
     for reaction in indexed_reactions:
         reactions_by_key.setdefault(reaction.key, reaction)
 
-    positive_candidates: list[
+    raw_positive_candidates: list[
         tuple[Reaction, str, int, int, int, float]
     ] = []
     had_positive = False
@@ -482,10 +548,8 @@ def _candidate_steps(
             if direction == "downstream"
             else reaction.reactant_smiles
         )
-        for focal_output in sorted(set(outputs)):
-            if focal_output in visited_species:
-                continue
-            positive_candidates.append(
+        for focal_output in sorted(outputs):
+            raw_positive_candidates.append(
                 (
                     reaction,
                     focal_output,
@@ -496,16 +560,21 @@ def _candidate_steps(
                 )
             )
 
+    fresh_candidates = [
+        candidate
+        for candidate in raw_positive_candidates
+        if candidate[1] not in visited_species
+    ]
     threshold_candidates = [
         candidate
-        for candidate in positive_candidates
+        for candidate in fresh_candidates
         if candidate[4] >= min_net_tp
         and candidate[5] >= min_directionality
     ]
     if not threshold_candidates:
-        return [], had_positive, False
+        return [], had_positive, bool(fresh_candidates), False
 
-    net_total = sum(candidate[4] for candidate in threshold_candidates)
+    net_total = sum(candidate[4] for candidate in raw_positive_candidates)
     steps = [
         _build_step(
             reaction=reaction,
@@ -529,7 +598,7 @@ def _candidate_steps(
             directionality,
         ) in threshold_candidates
     ]
-    return steps, had_positive, True
+    return steps, had_positive, True, True
 
 
 def _build_step(

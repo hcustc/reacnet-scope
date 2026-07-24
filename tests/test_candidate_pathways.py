@@ -642,6 +642,173 @@ def test_search_does_not_treat_partial_score_as_an_upper_bound() -> None:
     assert result.paths[0].species == ("A", "B", "Z")
 
 
+def test_net_share_is_invariant_to_threshold_pruning() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("A",), ("C",), 10),
+            Reaction(("C",), ("A",), 9),
+        ]
+    )
+
+    unfiltered = find_candidate_paths(net, "A", max_depth=1, min_net_tp=1)
+    filtered = find_candidate_paths(net, "A", max_depth=1, min_net_tp=2)
+
+    unfiltered_b = next(
+        path.steps[0] for path in unfiltered.paths if path.species == ("A", "B")
+    )
+    assert filtered.paths[0].steps[0].net_share == pytest.approx(
+        unfiltered_b.net_share
+    )
+    assert filtered.paths[0].steps[0].net_share == pytest.approx(10 / 11)
+
+
+def test_net_share_is_invariant_to_branch_cap_pruning() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("A",), ("C",), 5),
+        ]
+    )
+
+    uncapped = find_candidate_paths(net, "A", max_depth=1, max_branches=2)
+    capped = find_candidate_paths(net, "A", max_depth=1, max_branches=1)
+
+    uncapped_b = next(
+        path.steps[0] for path in uncapped.paths if path.species == ("A", "B")
+    )
+    assert capped.paths[0].steps[0].net_share == pytest.approx(
+        uncapped_b.net_share
+    )
+    assert capped.paths[0].steps[0].net_share == pytest.approx(2 / 3)
+
+
+def test_net_share_is_computed_before_visited_species_pruning() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 20),
+            Reaction(("B", "X"), ("A",), 10),
+            Reaction(("B",), ("C",), 5),
+        ]
+    )
+
+    result = find_candidate_paths(net, "A", max_depth=2)
+
+    assert result.paths[0].species == ("A", "B", "C")
+    assert result.paths[0].steps[1].net_share == pytest.approx(1 / 3)
+
+
+def test_repeated_output_terms_retain_search_multiplicity() -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B", "B"), 10)])
+
+    result = find_candidate_paths(net, "A", max_depth=1, max_paths=10)
+
+    assert [path.species for path in result.paths] == [
+        ("A", "B"),
+        ("A", "B"),
+    ]
+    assert [path.steps[0].net_share for path in result.paths] == pytest.approx(
+        [0.5, 0.5]
+    )
+    assert all(path.steps[0].products == ("B", "B") for path in result.paths)
+
+
+def test_expansion_cap_precedes_further_candidate_evidence_validation() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("B",), ("C",), 10),
+        ]
+    )
+    provider = _RecordingEvidenceProvider(
+        {
+            "A->B": {
+                "total_events": 1,
+                "matched_events": 1,
+                "distinct_intervals": 1,
+                "available_intervals": 1,
+            },
+            "B->C": {
+                "total_events": True,
+            },
+        }
+    )
+
+    result = find_candidate_paths(
+        net,
+        "A",
+        max_depth=3,
+        max_expansions=1,
+        evidence_provider=provider,
+    )
+
+    assert [path.species for path in result.paths] == [("A", "B")]
+    assert result.expansions == 1
+    assert result.truncated is True
+
+
+def test_safe_top_n_bound_stops_exact_search_before_expansion_cap() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 100),
+            Reaction(("A",), ("C",), 1),
+            Reaction(("B",), ("D",), 100),
+            Reaction(("C",), ("E",), 1),
+        ]
+    )
+
+    result = find_candidate_paths(
+        net,
+        "A",
+        max_depth=2,
+        max_paths=1,
+        max_expansions=3,
+    )
+
+    assert [path.species for path in result.paths] == [("A", "B", "D")]
+    assert result.expansions == 2
+    assert result.truncated is False
+
+
+def test_safe_top_n_bound_continues_on_equal_score_for_semantic_ties() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(("A",), ("B",), 10),
+            Reaction(("A",), ("C",), 10),
+            Reaction(("B",), ("D",), 10),
+            Reaction(("C",), ("E",), 10),
+        ]
+    )
+
+    result = find_candidate_paths(
+        net,
+        "A",
+        max_depth=2,
+        max_paths=1,
+        max_expansions=3,
+    )
+
+    assert [path.species for path in result.paths] == [("A", "B", "D")]
+    assert result.expansions == 3
+    assert result.truncated is False
+
+
+def test_positive_reaction_without_fresh_output_has_no_continuation_reason() -> None:
+    net = ReactionNetwork([Reaction(("A", "X"), ("A",), 10)])
+
+    result = find_candidate_paths(net, "A")
+
+    assert result.paths == ()
+    assert result.reason == "no_positive_net_continuation"
+
+
+def test_candidate_path_query_rejects_boolean_directionality_bound() -> None:
+    net = ReactionNetwork([Reaction(("A",), ("B",), 10)])
+
+    with pytest.raises(ValueError, match="min_directionality"):
+        find_candidate_paths(net, "A", min_directionality=True)
+
+
 def _step(
     *,
     evidence_status: str,
