@@ -9,6 +9,19 @@ from reacnet_scope import prepare
 from scripts.webapp_dash import services as svc
 
 
+def test_normalise_recent_datasets_ignores_malformed_loaded_at() -> None:
+    records = svc.normalise_recent_datasets(
+        [
+            {"folder": "/valid", "base": "/valid/run", "label": "valid", "loaded_at": 3},
+            {"folder": "/bad", "base": "/bad/run", "label": "bad", "loaded_at": "not-a-time"},
+        ]
+    )
+
+    assert records == [
+        {"folder": "/valid", "base": "/valid/run", "label": "valid", "loaded_at": 3}
+    ]
+
+
 def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     trajectory = tmp_path / "run.lammpstrj"

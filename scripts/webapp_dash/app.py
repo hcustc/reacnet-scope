@@ -1376,6 +1376,7 @@ def _data_modal() -> dbc.Modal:
                     # ``base`` remains an internal compatibility value for
                     # legacy callbacks while the user chooses dataset cards.
                     dcc.Dropdown(id="data-rungroup", options=[], style={"display": "none"}),
+                    html.Div(id="data-load-feedback"),
                     html.Div(id="data-scan-status"),
                     html.Hr(),
                     html.Div(id="data-artifacts", className="small text-muted"),

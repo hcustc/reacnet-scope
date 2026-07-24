@@ -324,12 +324,16 @@ def normalise_recent_datasets(
         base = str(raw.get("base") or "").strip()
         if not folder or not base:
             continue
+        try:
+            loaded_at = int(raw.get("loaded_at") or 0)
+        except (TypeError, ValueError):
+            continue
         key = (os.path.abspath(folder), os.path.abspath(base))
         deduped[key] = {
             "folder": key[0],
             "base": key[1],
             "label": str(raw.get("label") or Path(base).name),
-            "loaded_at": int(raw.get("loaded_at") or 0),
+            "loaded_at": loaded_at,
         }
     return sorted(deduped.values(), key=lambda item: -item["loaded_at"])[:10]
 

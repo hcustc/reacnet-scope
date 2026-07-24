@@ -703,7 +703,7 @@ def register_callbacks(app: Any) -> None:
                 compact,
                 compact is None,
                 no_update,
-                compact["base"] if compact else no_update,
+                no_update,
             )
 
         # --- PATH INPUT / GO -----------------------------------------
@@ -795,8 +795,8 @@ def register_callbacks(app: Any) -> None:
                 no_update,
                 compact,
                 False,
-                compact["folder"],
-                compact["base"],
+                no_update,
+                no_update,
             )
 
         raise PreventUpdate
@@ -809,6 +809,8 @@ def register_callbacks(app: Any) -> None:
         Output("topbar-status", "className"),
         Output("data-modal", "is_open"),
         Output("recent-datasets", "data"),
+        Output("dataset-browser-candidate", "data", allow_duplicate=True),
+        Output("data-load-feedback", "children"),
         Input("data-apply-btn", "n_clicks"),
         State("dataset-browser-candidate", "data"),
         State("app-store", "data"),
@@ -831,6 +833,8 @@ def register_callbacks(app: Any) -> None:
                 no_update,
                 True,
                 recent_records,
+                None,
+                dbc.Alert("请选择一个可用的数据集后再加载。", color="warning", className="py-2"),
             )
         try:
             status = svc.scan_dataset(folder, base=base)
@@ -838,7 +842,7 @@ def register_callbacks(app: Any) -> None:
             selected_base_new = str(dataset.get("selected_base") or "")
             if selected_base_new != base:
                 raise svc.ServiceError("所选数据集已不存在，请重新选择。")
-        except Exception:
+        except Exception as exc:
             return (
                 store,
                 no_update,
@@ -847,6 +851,12 @@ def register_callbacks(app: Any) -> None:
                 no_update,
                 True,
                 recent_records,
+                None,
+                dbc.Alert(
+                    f"所选数据集不可用，未切换当前数据：{exc}",
+                    color="danger",
+                    className="py-2",
+                ),
             )
         artifacts = svc.artifacts_from_status(status)
         capabilities = svc.dataset_capabilities(status)
@@ -887,6 +897,8 @@ def register_callbacks(app: Any) -> None:
             status_class,
             False,
             recent,
+            no_update,
+            None,
         )
 
     # ── Focused four-step evidence workflow ─────────────────────────
@@ -2356,9 +2368,8 @@ def _resolve_initial_browse_path(folder_input: str) -> str:
     candidate = folder_input.strip()
     if candidate:
         try:
-            resolved = svc.validate_browse_path(candidate)
-            if resolved.is_dir():
-                return str(resolved)
+            resolved = svc.resolve_dataset_input(candidate)
+            return str(resolved["folder"])
         except svc.ServiceError:
             pass
     # A deployment may configure roots that exclude the service account's
