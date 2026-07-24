@@ -92,7 +92,7 @@ class TransitionTableTests(unittest.TestCase):
             for item in (reaction_path, species_path, route_path, table_path):
                 item.unlink(missing_ok=True)
 
-    def test_dataset_status_selects_most_complete_folder_group(self) -> None:
+    def test_dataset_status_leaves_ambiguous_folder_groups_unselected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             complete_base = root / "run.lammpstrj"
@@ -102,10 +102,9 @@ class TransitionTableTests(unittest.TestCase):
 
             payload = build_dataset_status_payload({"dataset_dir": [directory]})
             dataset = payload["dataset"]
-            self.assertEqual(dataset["label"], "run.lammpstrj")
-            self.assertEqual(dataset["ready_count"], 7)
-            self.assertEqual(dataset["artifacts"]["table"]["source"], "folder")
-            self.assertTrue(all(item["exists"] for item in dataset["artifacts"].values()))
+            self.assertEqual(dataset["label"], "未选择数据集")
+            self.assertEqual(dataset["ready_count"], 0)
+            self.assertFalse(any(item["selected"] for item in dataset["candidates"]))
 
     def test_dataset_status_can_select_a_specific_folder_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

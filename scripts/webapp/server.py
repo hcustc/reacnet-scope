@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from bisect import bisect_left, bisect_right
-from collections import Counter, OrderedDict, defaultdict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from http import HTTPStatus
@@ -70,6 +70,11 @@ from rng_tools.network import (  # noqa: E402
     smiles_to_formula_fast,
 )
 from rng_tools.io import load_transition_table  # noqa: E402
+from reacnet_scope.datasets import (  # noqa: E402
+    ARTIFACT_SUFFIXES,
+    choose_dataset_candidate,
+    discover_dataset_candidates,
+)
 from rng_tools.observation_network import build_observation_network  # noqa: E402
 from rng_tools.formula import formula_exact_mass, formula_nominal_mass  # noqa: E402
 from rng_tools.reaction import canonical_smiles  # noqa: E402
@@ -687,10 +692,10 @@ def _dataset_base_path(path_text: str) -> str:
     path = (path_text or "").strip()
     if not path:
         return ""
-    for suffix in (
-        ".reactionevent.csv", ".molecules.csv", ".reactionabcd",
-        ".species", ".moname", ".route", ".table", ".json", ".html", ".svg",
-    ):
+    for suffix, kind in ARTIFACT_SUFFIXES:
+        if path.lower().endswith(suffix):
+            return path if kind == "trajectory" else path[: -len(suffix)]
+    for suffix in (".json", ".html", ".svg"):
         if path.lower().endswith(suffix):
             return path[: -len(suffix)]
     if path.lower().endswith(".lammpstrj"):
@@ -716,62 +721,16 @@ def _scan_rng_dataset_directory(
 ) -> tuple[str, dict[str, str], list[dict[str, Any]]]:
     """Find the most complete ReacNetGenerator output set in one directory."""
 
-    directory = Path(directory_text).expanduser().resolve()
-    if not directory.is_dir():
-        raise FileNotFoundError(f"dataset folder not found: {directory}")
-    preferred = (preferred_base or "").strip()
-    preferred_resolved = str(Path(preferred).expanduser().resolve()) if preferred else ""
-
-    groups: dict[str, dict[str, Path]] = defaultdict(dict)
-    for path in directory.iterdir():
-        if not path.is_file():
-            continue
-        name = path.name.lower()
-        kind = ""
-        if name.endswith(".reactionabcd"):
-            kind = "reaction"
-        elif name.endswith(".reactionevent.csv"):
-            kind = "reactionevent"
-        elif name.endswith(".molecules.csv"):
-            kind = "molecules"
-        elif name.endswith(".species"):
-            kind = "species"
-        elif name.endswith(".moname"):
-            kind = "moname"
-        elif name.endswith(".route"):
-            kind = "route"
-        elif name.endswith(".table"):
-            kind = "table"
-        elif name.endswith(".lammpstrj"):
-            kind = "trajectory"
-        if kind:
-            groups[_dataset_base_path(str(path))][kind] = path
-
-    candidates: list[dict[str, Any]] = []
-    for base, files in groups.items():
-        candidates.append(
-            {
-                "base": base,
-                "label": Path(base).name,
-                "kinds": sorted(files),
-                "score": len(files),
-                "mtime": max((item.stat().st_mtime for item in files.values()), default=0.0),
-            }
-        )
-    candidates.sort(key=lambda item: (-int(item["score"]), -float(item["mtime"]), str(item["label"])))
+    candidates = discover_dataset_candidates(directory_text)
     if not candidates:
         return "", {}, []
-    chosen = next(
-        (
-            item
-            for item in candidates
-            if preferred and str(item["base"]) in {preferred, preferred_resolved}
-        ),
-        candidates[0],
-    )
+    preferred = (preferred_base or "").strip()
+    chosen = choose_dataset_candidate(candidates, preferred)
     for item in candidates:
-        item["selected"] = str(item["base"]) == str(chosen["base"])
-    selected = {key: str(value) for key, value in groups[str(chosen["base"])].items()}
+        item["selected"] = bool(chosen and str(item["base"]) == str(chosen["base"]))
+    if not chosen:
+        return "", {}, candidates[:12]
+    selected = dict(chosen["artifact_paths"])
     visible_candidates = candidates[:12]
     if chosen not in visible_candidates:
         visible_candidates = [chosen, *visible_candidates[:11]]
