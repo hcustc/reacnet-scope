@@ -83,19 +83,20 @@ def to_networkx_mechanism_graph(
     return _to_networkx_validated_mechanism_graph(validated)
 
 
-def mechanism_graph_metrics(graph: nx.MultiDiGraph) -> dict[str, Any]:
+def mechanism_graph_metrics(graph: nx.DiGraph) -> dict[str, Any]:
     """Return deterministic metrics for one bounded mechanism graph.
 
     Reachability is reported from the graph's stable anchor species ID.
     ``reachable_species_ids`` is the sorted union of upstream and downstream
     reachable species and deliberately excludes the separately reported
-    anchor.  Degree centrality is NetworkX's unrounded MultiDiGraph value:
-    parallel edges are counted and can therefore produce values above one.
+    anchor.  Degree centrality is NetworkX's unrounded value.  For a
+    MultiDiGraph, parallel edges are counted and can therefore produce values
+    above one.
 
     The caller remains responsible for constructing a bounded graph.  This
     function uses only linear graph traversals and does not mutate ``graph``.
     """
-    _validate_mechanism_graph_contract(graph)
+    metadata = _validate_mechanism_graph_contract(graph)
 
     components = list(nx.weakly_connected_components(graph))
     component_sizes = sorted(
@@ -109,7 +110,7 @@ def mechanism_graph_metrics(graph: nx.MultiDiGraph) -> dict[str, Any]:
     upstream_node_ids: list[str] = []
     downstream_species_ids: list[str] = []
     upstream_species_ids: list[str] = []
-    anchor_smiles = graph.graph["anchor_smiles"]
+    anchor_smiles = metadata["anchor_smiles"]
     candidate_anchor_id = stable_mechanism_id("species", anchor_smiles)
     if candidate_anchor_id in graph:
         anchor_id = candidate_anchor_id
@@ -146,14 +147,25 @@ def mechanism_graph_metrics(graph: nx.MultiDiGraph) -> dict[str, Any]:
     }
 
 
-def _validate_mechanism_graph_contract(graph: nx.MultiDiGraph) -> None:
-    if not isinstance(graph, nx.MultiDiGraph):
-        raise ValueError("mechanism graph must be a networkx.MultiDiGraph")
-    if graph.graph.get("network_semantics") != "mechanism":
+def _validate_mechanism_graph_contract(
+    graph: nx.DiGraph,
+) -> dict[str, Any]:
+    if not isinstance(graph, nx.DiGraph):
+        raise ValueError("mechanism graph must be a directed NetworkX graph")
+
+    metadata = dict(graph.graph)
+    if (
+        "network_semantics" not in metadata
+        or "anchor_smiles" not in metadata
+    ) and "name" in metadata:
+        for name, value in decode_gexf_mechanism_metadata(graph).items():
+            metadata.setdefault(name, value)
+
+    if metadata.get("network_semantics") != "mechanism":
         raise ValueError(
             "mechanism graph network_semantics must be 'mechanism'"
         )
-    anchor_smiles = graph.graph.get("anchor_smiles")
+    anchor_smiles = metadata.get("anchor_smiles")
     if not isinstance(anchor_smiles, str) or not anchor_smiles:
         raise ValueError(
             "mechanism graph anchor_smiles must be a non-empty string"
@@ -164,7 +176,8 @@ def _validate_mechanism_graph_contract(graph: nx.MultiDiGraph) -> None:
             raise ValueError(
                 "mechanism graph node IDs must be non-empty strings"
             )
-        if attributes.get("id") != node_id:
+        attribute_id = attributes.get("id")
+        if attribute_id is not None and attribute_id != node_id:
             raise ValueError(
                 f"mechanism graph node {node_id!r} id must match its key"
             )
@@ -191,10 +204,7 @@ def _validate_mechanism_graph_contract(graph: nx.MultiDiGraph) -> None:
                 f"stable identity {expected_id!r}"
             )
 
-    for source, target, _key, attributes in graph.edges(
-        keys=True,
-        data=True,
-    ):
+    for source, target, attributes in _mechanism_graph_edges(graph):
         if source == target:
             raise ValueError(
                 f"mechanism graph self-loop at {source!r} is invalid"
@@ -219,6 +229,20 @@ def _validate_mechanism_graph_contract(graph: nx.MultiDiGraph) -> None:
                 f"mechanism graph {role} edge {source!r}->{target!r} "
                 "violates bipartite direction"
             )
+    return metadata
+
+
+def _mechanism_graph_edges(
+    graph: nx.DiGraph,
+) -> Iterable[tuple[str, str, Mapping[str, Any]]]:
+    if graph.is_multigraph():
+        for source, target, _key, attributes in graph.edges(
+            keys=True,
+            data=True,
+        ):
+            yield source, target, attributes
+        return
+    yield from graph.edges(data=True)
 
 
 def validate_mechanism_payload(

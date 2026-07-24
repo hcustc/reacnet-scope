@@ -974,7 +974,7 @@ def test_public_identity_helpers_lock_version_one_hash_contract() -> None:
 
 
 def _metric_node(
-    graph: nx.MultiDiGraph,
+    graph: nx.DiGraph,
     kind: str,
     value: str,
 ) -> str:
@@ -987,7 +987,9 @@ def _metric_node(
 
 def _metric_graph(anchor_smiles: str = "A") -> nx.MultiDiGraph:
     return nx.MultiDiGraph(
+        schema_version="reacnet-scope/mechanism-network/v1",
         network_semantics="mechanism",
+        evidence_level="reaction_passage_counts",
         anchor_smiles=anchor_smiles,
     )
 
@@ -1119,9 +1121,60 @@ def test_mechanism_graph_metrics_preserves_parallel_edge_centrality() -> None:
 
 
 @pytest.mark.parametrize(
+    ("format_name", "reader"),
+    [("graphml", nx.read_graphml), ("gexf", nx.read_gexf)],
+)
+def test_mechanism_graph_metrics_accepts_nonparallel_xml_round_trip(
+    format_name: str,
+    reader: object,
+) -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    reaction_ab = _metric_node(graph, "reaction", "A->B")
+    species_b = _metric_node(graph, "species", "B")
+    graph.add_edge(
+        species_a,
+        reaction_ab,
+        id=stable_mechanism_edge_id("reactant", "A->B", "A"),
+        role="reactant",
+        coefficient=1,
+    )
+    graph.add_edge(
+        reaction_ab,
+        species_b,
+        id=stable_mechanism_edge_id("product", "A->B", "B"),
+        role="product",
+        coefficient=1,
+    )
+    expected = mechanism_graph_metrics(graph)
+
+    restored = reader(  # type: ignore[operator]
+        io.BytesIO(serialize_mechanism_graph(graph, format=format_name))
+    )
+
+    assert isinstance(restored, nx.DiGraph)
+    assert not restored.is_multigraph()
+    assert mechanism_graph_metrics(restored) == expected
+
+
+def test_mechanism_graph_metrics_accepts_directed_graph_subclasses() -> None:
+    class MechanismDiGraph(nx.DiGraph):
+        pass
+
+    graph = MechanismDiGraph(
+        network_semantics="mechanism",
+        anchor_smiles="A",
+    )
+    species_a = _metric_node(graph, "species", "A")
+
+    assert mechanism_graph_metrics(graph)["anchor_id"] == species_a
+
+
+@pytest.mark.parametrize(
     ("graph", "message"),
     [
-        (nx.DiGraph(network_semantics="mechanism"), "MultiDiGraph"),
+        (nx.Graph(network_semantics="mechanism"), "directed"),
+        (nx.MultiGraph(network_semantics="mechanism"), "directed"),
         (nx.MultiDiGraph(network_semantics="event_transfer"), "mechanism"),
     ],
 )
