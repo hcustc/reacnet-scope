@@ -7,9 +7,11 @@ not establish an atom-continuous reaction mechanism.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+from collections.abc import Set
+from dataclasses import dataclass, field, fields, is_dataclass
 import math
 from numbers import Real
+from os import PathLike
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 
 
@@ -33,6 +35,13 @@ def _json_safe(value: Any) -> Any:
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
+    if isinstance(value, Set):
+        return sorted(
+            (_json_safe(item) for item in value),
+            key=lambda item: repr(item),
+        )
+    if isinstance(value, PathLike):
+        return str(value)
     return value
 
 
@@ -53,7 +62,9 @@ def score_step(
     _validate_unit_metric("directionality", directionality)
 
     if (event_coverage is None) != (time_coverage is None):
-        raise ValueError("event_coverage and time_coverage must both be supplied or both be None")
+        raise ValueError(
+            "event evidence coverage and time coverage must both be supplied or both be None"
+        )
     if event_coverage is None:
         return (
             (0.40 * net_share + 0.25 * directionality) / 0.65,
@@ -104,7 +115,18 @@ class PathwayStep:
     evidence_status: Literal["evidence_linked", "network_only"]
     source_references: tuple[str, ...]
     score: float
-    score_version: str = SCORE_VERSION
+    score_version: str = field(default=SCORE_VERSION, init=False)
+
+    def __post_init__(self) -> None:
+        _, expected_evidence_status = score_step(
+            net_share=self.net_share,
+            directionality=self.directionality,
+            event_coverage=self.event_coverage,
+            time_coverage=self.time_coverage,
+        )
+        if self.evidence_status != expected_evidence_status:
+            raise ValueError("evidence_status must match the supplied evidence coverage")
+        _validate_unit_metric("score", self.score)
 
     def as_dict(self) -> dict[str, Any]:
         return _json_safe(self)

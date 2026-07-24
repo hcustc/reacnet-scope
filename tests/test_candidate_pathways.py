@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -123,3 +126,90 @@ def test_score_path_rejects_empty_or_invalid_scores() -> None:
         score_path([])
     with pytest.raises(ValueError, match="step_scores"):
         score_path([1.1])
+
+
+@pytest.mark.parametrize(
+    ("event_coverage", "time_coverage", "evidence_status"),
+    [
+        (0.75, None, "evidence_linked"),
+        (None, None, "evidence_linked"),
+        (0.75, 0.125, "network_only"),
+    ],
+)
+def test_pathway_step_rejects_inconsistent_evidence_state(
+    event_coverage: float | None,
+    time_coverage: float | None,
+    evidence_status: str,
+) -> None:
+    with pytest.raises(ValueError, match="evidence"):
+        PathwayStep(
+            reaction_key="A->B",
+            traversal_direction="downstream",
+            focal_input="A",
+            focal_output="B",
+            reactants=("A",),
+            products=("B",),
+            forward_tp=1,
+            reverse_tp=0,
+            net_tp=1,
+            net_share=1.0,
+            directionality=1.0,
+            event_coverage=event_coverage,
+            time_coverage=time_coverage,
+            event_total=None,
+            matched_event_total=None,
+            distinct_intervals=None,
+            evidence_status=evidence_status,  # type: ignore[arg-type]
+            source_references=(),
+            score=1.0,
+        )
+
+
+def test_pathway_result_serializes_nested_sets_and_paths_deterministically() -> None:
+    result = CandidatePathResult(
+        paths=(),
+        query={
+            "nested": MappingProxyType(
+                {"reaction_keys": {"B->C", "A->B"}, "event_file": Path("events.sqlite3")}
+            )
+        },
+        source_signatures={"paths": {Path("source")}},
+        reason="no candidates",
+        truncated=False,
+        expansions=0,
+    )
+
+    payload = result.as_dict()
+
+    assert payload["query"]["nested"] == {
+        "reaction_keys": ["A->B", "B->C"],
+        "event_file": "events.sqlite3",
+    }
+    assert payload["source_signatures"] == {"paths": ["source"]}
+    assert json.dumps(payload, sort_keys=True) == json.dumps(result.as_dict(), sort_keys=True)
+
+
+def test_pathway_step_score_version_is_not_caller_overridable() -> None:
+    with pytest.raises(TypeError, match="score_version"):
+        PathwayStep(
+            reaction_key="A->B",
+            traversal_direction="downstream",
+            focal_input="A",
+            focal_output="B",
+            reactants=("A",),
+            products=("B",),
+            forward_tp=1,
+            reverse_tp=0,
+            net_tp=1,
+            net_share=1.0,
+            directionality=1.0,
+            event_coverage=None,
+            time_coverage=None,
+            event_total=None,
+            matched_event_total=None,
+            distinct_intervals=None,
+            evidence_status="network_only",
+            source_references=(),
+            score=1.0,
+            score_version="caller-version",
+        )
