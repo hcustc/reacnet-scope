@@ -10,6 +10,7 @@ from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import dataset_id_for_source
 from rng_tools import dir_browser
 from scripts import rng_query_cli as cli
+from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import services as svc
 
@@ -158,7 +159,7 @@ def _callback_payload(
     client: Any,
     *,
     input_ids: list[str],
-    changed: str,
+    changed: str | list[str],
     input_values: dict[str, Any],
     state_values: dict[str, Any],
     output_id: str = "",
@@ -190,7 +191,9 @@ def _callback_payload(
     return {
         "output": output_spec,
         "outputs": outputs,
-        "changedPropIds": [changed],
+        "changedPropIds": (
+            list(changed) if isinstance(changed, list) else [changed]
+        ),
         "inputs": [
             {
                 "id": item["id"],
@@ -1586,6 +1589,71 @@ def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
     }
 
 
+def test_pathway_reset_trigger_kind_prioritizes_dataset_changes() -> None:
+    class FakeContext:
+        def __init__(
+            self,
+            prop_ids: list[str],
+            *,
+            triggered_id: str | None = None,
+        ) -> None:
+            self.triggered_prop_ids = {
+                prop_id: prop_id.split(".", 1)[0]
+                for prop_id in prop_ids
+            }
+            self.triggered_id = triggered_id
+
+    class LegacyContext:
+        triggered = [
+            {"prop_id": "network-semantics.value"},
+            {"prop_id": "app-store.data"},
+        ]
+        triggered_id = "network-semantics"
+
+    old_context = {
+        "schema_version": "reacnet-scope/pathway-context/v1",
+        "dataset_id": "dataset-A",
+    }
+    for prop_ids in (
+        ["network-semantics.value", "app-store.data"],
+        ["app-store.data", "network-semantics.value"],
+    ):
+        assert cb._pathway_reset_trigger_kind(
+            FakeContext(prop_ids, triggered_id="network-semantics"),
+            {"dataset_id": "dataset-B"},
+            old_context,
+        ) == "dataset"
+    assert cb._pathway_reset_trigger_kind(
+        LegacyContext(),
+        {"dataset_id": "dataset-B"},
+        old_context,
+    ) == "dataset"
+
+    assert cb._pathway_reset_trigger_kind(
+        FakeContext(
+            ["network-semantics.value", "app-store.data"],
+            triggered_id="app-store",
+        ),
+        {"dataset_id": "dataset-A", "selected_smiles": "[H]"},
+        old_context,
+    ) == "semantics"
+    assert cb._pathway_reset_trigger_kind(
+        FakeContext(["app-store.data"], triggered_id="app-store"),
+        {"dataset_id": "dataset-A", "selected_smiles": "[H]"},
+        old_context,
+    ) is None
+    assert cb._pathway_reset_trigger_kind(
+        FakeContext(["app-store.data"], triggered_id="app-store"),
+        {},
+        old_context,
+    ) == "dataset"
+    assert cb._pathway_reset_trigger_kind(
+        FakeContext([], triggered_id=None),
+        {"dataset_id": "dataset-A"},
+        old_context,
+    ) is None
+
+
 def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -1595,36 +1663,43 @@ def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -
         "source_signatures": {},
     }
 
-    changed_dataset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["app-store", "network-semantics"],
-            changed="app-store.data",
-            input_values={
-                "app-store": {"dataset_id": "dataset-B"},
-                "network-semantics": "mechanism",
-            },
-            state_values={
-                "pathway-context-store": old_context,
-                "pathway-highlight-store": {
-                    "dataset_id": "dataset-A",
-                    "pending": False,
+    for changed_order in (
+        ["network-semantics.value", "app-store.data"],
+        ["app-store.data", "network-semantics.value"],
+    ):
+        changed_dataset = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=["app-store", "network-semantics"],
+                changed=changed_order,
+                input_values={
+                    "app-store": {"dataset_id": "dataset-B"},
+                    "network-semantics": "mechanism",
                 },
-            },
-            output_id="pathway-context-store",
-        ),
-    )
-    assert changed_dataset.status_code == 200
-    changed = changed_dataset.get_json()["response"]
-    assert changed["pathway-store"]["data"] is None
-    assert changed["pathway-context-store"]["data"] is None
-    assert changed["pathway-selected-path"]["data"] is None
-    assert changed["pathway-selected-step"]["data"] is None
-    assert changed["pathway-highlight-store"]["data"] is None
-    assert changed["pathway-grid"]["selected_rows"] == []
-    assert changed["pathway-grid"]["data"] == []
-    assert changed["pathway-cytoscape"]["elements"] == []
+                state_values={
+                    "pathway-context-store": old_context,
+                    "pathway-highlight-store": {
+                        "dataset_id": "dataset-A",
+                        "pending": False,
+                    },
+                },
+                output_id="pathway-context-store",
+            ),
+        )
+        assert changed_dataset.status_code == 200
+        changed = changed_dataset.get_json()["response"]
+        assert changed["pathway-store"]["data"] is None
+        assert changed["pathway-context-store"]["data"] is None
+        assert changed["pathway-selected-path"]["data"] is None
+        assert changed["pathway-selected-step"]["data"] is None
+        assert changed["pathway-highlight-store"]["data"] is None
+        assert changed["pathway-grid"]["selected_rows"] == []
+        assert changed["pathway-grid"]["data"] == []
+        assert changed["pathway-cytoscape"]["elements"] == []
+        assert changed["pathway-cytoscape"]["tapNodeData"] is None
+        assert changed["pathway-open-events-btn"]["disabled"] is True
+        assert changed["pathway-highlight-network-btn"]["disabled"] is True
 
     changed_semantics = client.post(
         "/_dash-update-component",
@@ -1653,6 +1728,39 @@ def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -
     assert semantics["pathway-selected-path"]["data"] is None
     assert semantics["pathway-selected-step"]["data"] is None
     assert semantics["pathway-highlight-store"]["data"] is None
+
+    same_dataset_multi_trigger = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store", "network-semantics"],
+            changed=["app-store.data", "network-semantics.value"],
+            input_values={
+                "app-store": {
+                    "dataset_id": "dataset-A",
+                    "selected_smiles": "[H]",
+                },
+                "network-semantics": "event_transfer",
+            },
+            state_values={
+                "pathway-context-store": old_context,
+                "pathway-highlight-store": {
+                    "dataset_id": "dataset-A",
+                    "pending": False,
+                },
+            },
+            output_id="pathway-context-store",
+        ),
+    )
+    assert same_dataset_multi_trigger.status_code == 200
+    same_dataset = same_dataset_multi_trigger.get_json()["response"]
+    assert "pathway-store" not in same_dataset
+    assert "pathway-context-store" not in same_dataset
+    assert "data" not in same_dataset.get("pathway-grid", {})
+    assert "elements" not in same_dataset.get("pathway-cytoscape", {})
+    assert same_dataset["pathway-selected-path"]["data"] is None
+    assert same_dataset["pathway-selected-step"]["data"] is None
+    assert same_dataset["pathway-highlight-store"]["data"] is None
 
     pending_handoff = client.post(
         "/_dash-update-component",

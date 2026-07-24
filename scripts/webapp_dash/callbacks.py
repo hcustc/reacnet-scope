@@ -177,6 +177,81 @@ def _dataset_id_from_selection(folder: str, base: str) -> str:
     return dataset_id_for_source(str(source))
 
 
+def _triggered_property_ids(callback_context: Any) -> frozenset[str]:
+    """Return every property reported for the current callback invocation."""
+    try:
+        triggered_prop_ids = getattr(
+            callback_context,
+            "triggered_prop_ids",
+            None,
+        )
+    except RuntimeError:
+        triggered_prop_ids = None
+    if triggered_prop_ids is not None:
+        keys = getattr(triggered_prop_ids, "keys", None)
+        if callable(keys):
+            property_ids = frozenset(str(value) for value in keys())
+            if property_ids:
+                return property_ids
+
+    try:
+        triggered = getattr(callback_context, "triggered", None)
+    except RuntimeError:
+        triggered = None
+    if triggered:
+        property_ids = frozenset(
+            str(item.get("prop_id") or "")
+            for item in triggered
+            if isinstance(item, dict) and item.get("prop_id")
+        )
+        if property_ids:
+            return property_ids
+
+    try:
+        triggered_id = getattr(callback_context, "triggered_id", None)
+    except RuntimeError:
+        triggered_id = None
+    if isinstance(triggered_id, str) and triggered_id:
+        return frozenset({triggered_id})
+    return frozenset()
+
+
+def _pathway_reset_trigger_kind(
+    callback_context: Any,
+    app_store: dict[str, Any] | None,
+    pathway_context: dict[str, Any] | None,
+) -> str | None:
+    """Choose the strongest pathway reset required by one Dash update."""
+    property_ids = _triggered_property_ids(callback_context)
+    triggered_components = {
+        property_id.split(".", 1)[0]
+        for property_id in property_ids
+    }
+    app_store_triggered = (
+        "app-store.data" in property_ids
+        or "app-store" in triggered_components
+    )
+    semantics_triggered = (
+        "network-semantics.value" in property_ids
+        or "network-semantics" in triggered_components
+    )
+
+    if app_store_triggered:
+        current_dataset_id = _network_dataset_id(app_store)
+        source_dataset_id = str(
+            (pathway_context or {}).get("dataset_id") or ""
+        )
+        if (
+            not current_dataset_id
+            or not source_dataset_id
+            or current_dataset_id != source_dataset_id
+        ):
+            return "dataset"
+    if semantics_triggered:
+        return "semantics"
+    return None
+
+
 def _network_status_alert(payload: dict[str, Any] | None) -> Any:
     if not isinstance(payload, dict):
         return ""
@@ -2727,16 +2802,12 @@ def register_callbacks(app: Any) -> None:
         pathway_context,
         pathway_handoff,
     ):
-        if ctx.triggered_id == "app-store":
-            current_dataset_id = _network_dataset_id(app_store)
-            source_dataset_id = str(
-                (pathway_context or {}).get("dataset_id") or ""
-            )
-            if (
-                source_dataset_id
-                and source_dataset_id == current_dataset_id
-            ):
-                raise PreventUpdate
+        reset_kind = _pathway_reset_trigger_kind(
+            ctx,
+            app_store,
+            pathway_context,
+        )
+        if reset_kind == "dataset":
             return (
                 None,
                 None,
@@ -2752,7 +2823,7 @@ def register_callbacks(app: Any) -> None:
                 True,
                 "",
             )
-        if ctx.triggered_id == "network-semantics":
+        if reset_kind == "semantics":
             handoff = (
                 pathway_handoff
                 if isinstance(pathway_handoff, dict)
