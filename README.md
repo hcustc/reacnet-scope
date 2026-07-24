@@ -43,6 +43,13 @@ The project includes both CLI and web interfaces so the same core logic can be u
 uv sync --extra plot
 ```
 
+NetworkX 是基础依赖，会由 `uv sync` 自动安装。需要使用 ASE 轨迹适配能力时，
+启用 `trajectory` 可选依赖；Dash 与轨迹功能一起使用可执行：
+
+```bash
+uv sync --extra web --extra trajectory
+```
+
 2. 启动 Dash Web（推荐）
 
 ```bash

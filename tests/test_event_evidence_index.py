@@ -84,6 +84,37 @@ def test_event_store_publishes_dataset_local_index_and_pages(
     ]
 
 
+def test_builder_only_runs_global_counts_once_at_finalization(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    statements: list[str] = []
+    real_connect = EVENT_EVIDENCE_STORE._connect_for_build
+
+    def traced_connect(target):
+        connection = real_connect(target)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(
+        EVENT_EVIDENCE_STORE, "_connect_for_build", traced_connect
+    )
+
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+    global_counts = [
+        " ".join(statement.upper().split())
+        for statement in statements
+        if "SELECT COUNT(*) FROM EVENTS" in statement.upper()
+        or "SELECT COUNT(*) FROM REACTION_SUMMARY" in statement.upper()
+    ]
+    assert global_counts == [
+        "SELECT COUNT(*) FROM EVENTS",
+        "SELECT COUNT(*) FROM REACTION_SUMMARY",
+    ]
+
+
 def test_event_store_summarizes_known_reactions(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent, molecules = write_rng_fixture(tmp_path)
@@ -160,6 +191,80 @@ def test_incomplete_event_index_is_invalid(tmp_path, monkeypatch) -> None:
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
     ] == "invalid"
+
+
+def test_event_index_with_missing_required_column_is_invalid(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        connection.execute("ALTER TABLE events RENAME TO original_events")
+        connection.execute(
+            "CREATE TABLE events(event_id TEXT PRIMARY KEY, reaction_key TEXT)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="columns"):
+        EVENT_EVIDENCE_STORE.open_required(str(reactionevent), str(molecules))
+
+
+def test_malformed_event_json_is_reported_as_invalid_index(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        connection.execute("UPDATE events SET atom_ids_json='not-json'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="payload"):
+        EVENT_EVIDENCE_STORE.query_events(
+            str(reactionevent), str(molecules), REACTION_KEY, limit=1
+        )
+
+
+def test_event_query_translates_sqlite_failures_to_invalid_index(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    real_readonly = event_index_module._readonly_connection
+    calls = 0
+
+    class BrokenConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.DatabaseError("simulated corruption")
+
+        def close(self):
+            return None
+
+    def fail_query_connection(path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return BrokenConnection()
+        return real_readonly(path)
+
+    monkeypatch.setattr(
+        event_index_module,
+        "_readonly_connection",
+        fail_query_connection,
+    )
+
+    with pytest.raises(IndexInvalidError, match="corrupt"):
+        EVENT_EVIDENCE_STORE.query_events(
+            str(reactionevent), str(molecules), REACTION_KEY, limit=1
+        )
 
 
 def test_changed_components_has_public_compatibility_name() -> None:
@@ -280,3 +385,20 @@ def test_event_store_clear_removes_only_cache_files(tmp_path, monkeypatch) -> No
     assert cleared["released_bytes"] > 0
     assert not Path(built["index_path"]).exists()
     assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes
+
+
+def test_event_store_clear_works_after_sources_are_removed(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    reactionevent.unlink()
+    molecules.unlink()
+
+    cleared = EVENT_EVIDENCE_STORE.clear(
+        str(reactionevent), str(molecules)
+    )
+
+    assert built["index_path"] in cleared["removed"]
+    assert not Path(built["index_path"]).exists()

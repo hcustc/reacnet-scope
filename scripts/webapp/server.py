@@ -90,21 +90,9 @@ try:  # noqa: E402
         route_index_path as prepared_route_index_path,
         trajectory_index_path as prepared_trajectory_index_path,
     )
-    from reacnet_scope.rng_events import event_output_status
-
     _HAS_PREPARED_INDEXES = True
 except ModuleNotFoundError:  # pragma: no cover - fallback for source-only deployments
     _HAS_PREPARED_INDEXES = False
-
-    def event_output_status(reactionevent_file: str, molecules_file: str) -> dict[str, Any]:
-        reactionevent_exists = bool(reactionevent_file and Path(reactionevent_file).is_file())
-        molecules_exists = bool(molecules_file and Path(molecules_file).is_file())
-        return {
-            "ready": bool(reactionevent_exists and molecules_exists),
-            "state": "ready" if reactionevent_exists and molecules_exists else "missing",
-            "reactionevent_exists": reactionevent_exists,
-            "molecules_exists": molecules_exists,
-        }
 
 
 ROUTE_TRANSITION_INDEX_SCHEMA_VERSION = 2
@@ -866,10 +854,18 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         except Exception as exc:
             trajectory_index_status = {"state": "invalid", "message": str(exc)}
 
-    rng_event_status = event_output_status(
-        artifacts["reactionevent"]["path"],
-        artifacts["molecules"]["path"],
-    )
+    reactionevent_exists = bool(artifacts["reactionevent"]["exists"])
+    molecules_exists = bool(artifacts["molecules"]["exists"])
+    rng_event_status = {
+        "ready": bool(reactionevent_exists and molecules_exists),
+        "state": (
+            "ready"
+            if reactionevent_exists and molecules_exists
+            else "missing"
+        ),
+        "reactionevent_exists": reactionevent_exists,
+        "molecules_exists": molecules_exists,
+    }
 
     readiness = {
         "basic_analysis": {

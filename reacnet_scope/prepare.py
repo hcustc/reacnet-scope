@@ -33,7 +33,25 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             stem = str(candidates[0])[: -len(".reactionabcd")]
         else:
             routes = sorted(root.glob("*.route"))
-            stems = {str(path)[: -len(".route")] for path in routes}
+            reaction_stems = {
+                str(path)[: -len(".reactionabcd")] for path in candidates
+            }
+            route_stems = {
+                str(path)[: -len(".route")] for path in routes
+            }
+            event_stems = {
+                str(path)[: -len(".reactionevent.csv")]
+                for path in root.glob("*.reactionevent.csv")
+            }
+            molecule_stems = {
+                str(path)[: -len(".molecules.csv")]
+                for path in root.glob("*.molecules.csv")
+            }
+            stems = (
+                reaction_stems
+                | route_stems
+                | (event_stems & molecule_stems)
+            )
             if len(stems) != 1:
                 raise RuntimeError("dataset directory is ambiguous; pass --base")
             stem = stems.pop()
@@ -241,11 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             clear_index(dataset["trajectory"], kind="trajectory")
         if target in {"composition", "all"} and Path(dataset["species"]).is_file():
             SPECIES_COMPOSITION_STORE.clear(dataset["species"])
-        if (
-            target in {"event", "all"}
-            and Path(dataset["reactionevent"]).is_file()
-            and Path(dataset["molecules"]).is_file()
-        ):
+        if target in {"event", "all"}:
             EVENT_EVIDENCE_STORE.clear(
                 dataset["reactionevent"], dataset["molecules"]
             )

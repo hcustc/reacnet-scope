@@ -147,10 +147,15 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
                 "invalid",
                 "building",
             }:
+                prepare_option = (
+                    "--rebuild event"
+                    if state in {"stale", "invalid"}
+                    else "--event-only"
+                )
                 event_status["preparation_command"] = (
                     "reacnet-scope-prepare "
                     f"{shlex.quote(str(Path(reactionevent).parent))} "
-                    "--event-only"
+                    f"{prepare_option}"
                 )
             readiness = dataset.setdefault("readiness", {})
             readiness["event_search"] = event_status
@@ -251,7 +256,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     events = dict(readiness.get("event_search") or {"state": "missing"})
     trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
     species_source = artifacts.get("species", "")
-    if species_source:
+    if species_source and Path(species_source).is_file():
         try:
             composition = SPECIES_COMPOSITION_STORE.status(species_source)
         except RuntimeError as exc:
@@ -300,7 +305,11 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "composition": composition,
         "rng_event_command": "--reaction-event --show-molecule-time",
         "event_command": (
-            f"{command_prefix} --event-only"
+            (
+                f"{command_prefix} --rebuild event"
+                if events.get("state") in {"stale", "invalid"}
+                else f"{command_prefix} --event-only"
+            )
             if artifacts.get("reactionevent") and artifacts.get("molecules")
             else ""
         ),
@@ -1566,14 +1575,14 @@ def locate_rng_events(
         raise ServiceError(
             f"{exc}; 运行 reacnet-scope-prepare "
             f"{shlex.quote(str(Path(reactionevent_file).parent))} "
-            "--event-only",
+            "--rebuild event",
             reason="event_index_stale",
         ) from exc
     except IndexInvalidError as exc:
         raise ServiceError(
             f"{exc}; 运行 reacnet-scope-prepare "
             f"{shlex.quote(str(Path(reactionevent_file).parent))} "
-            "--event-only",
+            "--rebuild event",
             reason="event_index_invalid",
         ) from exc
     except IndexNotReadyError as exc:

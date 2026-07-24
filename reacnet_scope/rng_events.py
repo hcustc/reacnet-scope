@@ -29,7 +29,25 @@ def _signature(path_text: str) -> tuple[str, int, int]:
 def _terms(text: str) -> tuple[str, ...]:
     # RNG currently joins canonical species with '+'.  Keep multiplicity: it
     # is essential for reactions such as H2O + O -> 2 OH.
-    return tuple(sorted(item.strip() for item in str(text or "").split("+") if item.strip()))
+    terms: list[str] = []
+    current: list[str] = []
+    bracket_depth = 0
+    for character in str(text or ""):
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth:
+            bracket_depth -= 1
+        if character == "+" and bracket_depth == 0:
+            term = "".join(current).strip()
+            if term:
+                terms.append(term)
+            current = []
+            continue
+        current.append(character)
+    term = "".join(current).strip()
+    if term:
+        terms.append(term)
+    return tuple(sorted(terms))
 
 
 def reaction_key(reactant: str, product: str) -> tuple[tuple[str, ...], tuple[str, ...]]:

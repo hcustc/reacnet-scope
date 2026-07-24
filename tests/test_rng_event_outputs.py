@@ -10,6 +10,7 @@ from reacnet_scope.rng_events import (
     canonical_reaction_key,
     event_output_status,
     query_rng_events,
+    reaction_key,
 )
 from scripts.webapp_dash import services as svc
 
@@ -47,6 +48,18 @@ def _rng_outputs(tmp_path: Path) -> tuple[Path, Path]:
 def test_canonical_reaction_key_sorts_each_side_and_preserves_multiplicity() -> None:
     assert canonical_reaction_key(("[O]", "[H]", "[H]"), ("[H][O][H]",)) == (
         "[H]+[H]+[O]->[H][O][H]"
+    )
+
+
+def test_reaction_key_does_not_split_charge_signs_inside_smiles_brackets() -> None:
+    normalized = reaction_key("[NH4+]+[OH-]", "[NH3]+[OH2]")
+
+    assert normalized == (
+        ("[NH4+]", "[OH-]"),
+        ("[NH3]", "[OH2]"),
+    )
+    assert canonical_reaction_key(*normalized) == (
+        "[NH4+]+[OH-]->[NH3]+[OH2]"
     )
 
 
@@ -102,6 +115,36 @@ def test_rng_event_service_requires_prepared_index(tmp_path, monkeypatch) -> Non
     assert error.value.reason == "event_index_not_ready"
     assert "reacnet-scope-prepare" in error.value.message
     assert "--event-only" in error.value.message
+
+
+def test_stale_event_index_recommends_explicit_rebuild(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = _rng_outputs(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    reactionevent.write_text(
+        reactionevent.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+
+    status = svc.scan_dataset(str(tmp_path))
+    event_status = status["dataset"]["readiness"]["event_search"]
+    assert event_status["state"] == "stale"
+    assert event_status["preparation_command"].endswith("--rebuild event")
+    preparation = svc.dataset_preparation_status(str(tmp_path))
+    assert preparation["event_command"].endswith("--rebuild event")
+
+    with pytest.raises(svc.ServiceError) as error:
+        svc.locate_rng_events(
+            {
+                "reactionevent": str(reactionevent),
+                "molecules": str(molecules),
+            },
+            "[C] + [O] -> [C][O]",
+        )
+    assert error.value.reason == "event_index_stale"
+    assert "--rebuild event" in error.value.message
 
 
 def test_rng_event_visualization_reads_only_selected_atoms(tmp_path, monkeypatch) -> None:

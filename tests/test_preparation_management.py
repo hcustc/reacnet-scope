@@ -98,6 +98,46 @@ def test_default_preparation_builds_available_event_index(
     ] == "ready"
 
 
+def test_event_only_discovers_paired_rng_outputs_without_reaction_file(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    Path(f"{base}.reactionabcd").unlink()
+
+    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+
+    assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
+        "state"
+    ] == "ready"
+
+
+def test_prepare_can_clear_event_cache_after_sources_are_removed(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    index_path = resolve_dataset_paths(tmp_path, base.name).event_index
+    reactionevent.unlink()
+    molecules.unlink()
+
+    assert (
+        prepare.main(
+            [
+                str(tmp_path),
+                "--base",
+                base.name,
+                "--clear",
+                "event",
+            ]
+        )
+        == 0
+    )
+
+    assert not index_path.exists()
+
+
 def test_scan_dataset_reads_version_one_manifest(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     base, _reactionevent, _molecules = _event_only_dataset(tmp_path)

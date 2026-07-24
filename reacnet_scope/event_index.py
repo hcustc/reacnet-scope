@@ -38,6 +38,30 @@ from .rng_events import (
 
 
 EVENT_EVIDENCE_SCHEMA_VERSION = 1
+_REQUIRED_TABLE_COLUMNS = {
+    "meta": {"key", "value"},
+    "events": {
+        "event_id",
+        "reaction_key",
+        "source_row",
+        "timestep_index",
+        "before_timestep",
+        "after_timestep",
+        "reactant_text",
+        "product_text",
+        "atom_ids_json",
+        "reactant_bonds_json",
+        "product_bonds_json",
+        "association_status",
+        "occurrence",
+    },
+    "reaction_summary": {
+        "reaction_key",
+        "total_events",
+        "matched_events",
+        "distinct_intervals",
+    },
+}
 
 
 def _write_meta(connection: sqlite3.Connection, values: dict[str, Any]) -> None:
@@ -334,22 +358,21 @@ class EventEvidenceStore:
             }
             if not {"meta", "events", "reaction_summary"}.issubset(tables):
                 raise IndexInvalidError("Event evidence index tables are incomplete")
+            for table, required_columns in _REQUIRED_TABLE_COLUMNS.items():
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                if not required_columns.issubset(columns):
+                    raise IndexInvalidError(
+                        f"Event evidence index {table} columns are incomplete"
+                    )
             event_count = int(meta.get("event_count", -1) or -1)
             reaction_types = int(meta.get("reaction_type_count", -1) or -1)
             if event_count < 0 or reaction_types < 0:
                 raise IndexInvalidError("Event evidence index counts are invalid")
-            actual_events = int(
-                connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-            )
-            actual_reactions = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM reaction_summary"
-                ).fetchone()[0]
-            )
-            if actual_events != event_count or actual_reactions != reaction_types:
-                raise IndexInvalidError(
-                    "Event evidence index row counts are inconsistent"
-                )
             query_only = bool(connection.execute("PRAGMA query_only").fetchone()[0])
         except IndexNotReadyError:
             raise
@@ -549,6 +572,10 @@ class EventEvidenceStore:
                         if existing.get("previous_molecule_timestep", "")
                         else None
                     )
+                    event_count = int(existing.get("event_count", 0) or 0)
+                    reaction_type_count = int(
+                        existing.get("reaction_type_count", 0) or 0
+                    )
                 else:
                     event_offset = first_event_offset
                     molecule_offset = first_molecule_offset
@@ -556,6 +583,8 @@ class EventEvidenceStore:
                     last_source_row = 0
                     molecule_frame_index = 0
                     previous_molecule_timestep = None
+                    event_count = 0
+                    reaction_type_count = 0
                     _write_meta(
                         connection,
                         {
@@ -741,6 +770,14 @@ class EventEvidenceStore:
                             total_count,
                             matched_count,
                         ) in summary_counts.items():
+                            if connection.execute(
+                                """
+                                SELECT 1 FROM reaction_summary
+                                WHERE reaction_key=?
+                                """,
+                                (normalized_key,),
+                            ).fetchone() is None:
+                                reaction_type_count += 1
                             connection.execute(
                                 """
                                 INSERT INTO reaction_summary(
@@ -759,16 +796,7 @@ class EventEvidenceStore:
                                 ),
                             )
 
-                        event_count = int(
-                            connection.execute(
-                                "SELECT COUNT(*) FROM events"
-                            ).fetchone()[0]
-                        )
-                        reaction_type_count = int(
-                            connection.execute(
-                                "SELECT COUNT(*) FROM reaction_summary"
-                            ).fetchone()[0]
-                        )
+                        event_count += len(events)
                         _write_meta(
                             connection,
                             {
@@ -837,16 +865,23 @@ class EventEvidenceStore:
                             current_molecule = next_frame
                             molecule_frame_count = current_molecule[0] + 1
 
-                    event_count = int(
+                    actual_event_count = int(
                         connection.execute(
                             "SELECT COUNT(*) FROM events"
                         ).fetchone()[0]
                     )
-                    reaction_type_count = int(
+                    actual_reaction_type_count = int(
                         connection.execute(
                             "SELECT COUNT(*) FROM reaction_summary"
                         ).fetchone()[0]
                     )
+                    if (
+                        actual_event_count != event_count
+                        or actual_reaction_type_count != reaction_type_count
+                    ):
+                        raise IndexInvalidError(
+                            "Event evidence checkpoint counts are inconsistent"
+                        )
                     _write_meta(
                         connection,
                         {
@@ -931,61 +966,72 @@ class EventEvidenceStore:
                 """,
                 (str(reaction_key), safe_limit, safe_offset),
             ).fetchall()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event evidence index is corrupt: {exc}"
+            ) from exc
         finally:
             connection.close()
         rows: list[dict[str, Any]] = []
-        for page_index, record in enumerate(records, safe_offset + 1):
-            (
-                event_id,
-                _stored_key,
-                source_row,
-                timestep_index,
-                before_timestep,
-                after_timestep,
-                reactant,
-                product,
-                atom_ids_json,
-                reactant_bonds_json,
-                product_bonds_json,
-                association_status,
-                occurrence,
-            ) = record
-            atom_ids = [int(value) for value in json.loads(atom_ids_json)]
-            reactant_bonds = [
-                str(value) for value in json.loads(reactant_bonds_json)
-            ]
-            product_bonds = [
-                str(value) for value in json.loads(product_bonds_json)
-            ]
-            rows.append(
-                {
-                    "event_index": page_index,
-                    "event_id": str(event_id),
-                    "source_row": int(source_row),
-                    "timestep_index": int(timestep_index),
-                    "before_timestep": int(before_timestep),
-                    "after_timestep": int(after_timestep),
-                    "anchor_frame": int(after_timestep),
-                    "reactant": str(reactant),
-                    "product": str(product),
-                    "reaction_smiles": f"{reactant} -> {product}",
-                    "occurrence": int(occurrence),
-                    "atom_ids": ",".join(map(str, atom_ids)),
-                    "atom_id_list": atom_ids,
-                    "rng_atom_ids": ",".join(
-                        str(atom_id - 1) for atom_id in atom_ids
-                    ),
-                    "atom_count": len(atom_ids),
-                    "reactant_bonds": ";".join(reactant_bonds),
-                    "product_bonds": ";".join(product_bonds),
-                    "association_status": str(association_status),
-                    "event_class": (
-                        "RNG 事件"
-                        if association_status == "matched"
-                        else "RNG 事件（原子关联不确定）"
-                    ),
-                }
-            )
+        try:
+            for page_index, record in enumerate(records, safe_offset + 1):
+                (
+                    event_id,
+                    _stored_key,
+                    source_row,
+                    timestep_index,
+                    before_timestep,
+                    after_timestep,
+                    reactant,
+                    product,
+                    atom_ids_json,
+                    reactant_bonds_json,
+                    product_bonds_json,
+                    association_status,
+                    occurrence,
+                ) = record
+                atom_ids = [
+                    int(value) for value in json.loads(atom_ids_json)
+                ]
+                reactant_bonds = [
+                    str(value) for value in json.loads(reactant_bonds_json)
+                ]
+                product_bonds = [
+                    str(value) for value in json.loads(product_bonds_json)
+                ]
+                rows.append(
+                    {
+                        "event_index": page_index,
+                        "event_id": str(event_id),
+                        "source_row": int(source_row),
+                        "timestep_index": int(timestep_index),
+                        "before_timestep": int(before_timestep),
+                        "after_timestep": int(after_timestep),
+                        "anchor_frame": int(after_timestep),
+                        "reactant": str(reactant),
+                        "product": str(product),
+                        "reaction_smiles": f"{reactant} -> {product}",
+                        "occurrence": int(occurrence),
+                        "atom_ids": ",".join(map(str, atom_ids)),
+                        "atom_id_list": atom_ids,
+                        "rng_atom_ids": ",".join(
+                            str(atom_id - 1) for atom_id in atom_ids
+                        ),
+                        "atom_count": len(atom_ids),
+                        "reactant_bonds": ";".join(reactant_bonds),
+                        "product_bonds": ";".join(product_bonds),
+                        "association_status": str(association_status),
+                        "event_class": (
+                            "RNG 事件"
+                            if association_status == "matched"
+                            else "RNG 事件（原子关联不确定）"
+                        ),
+                    }
+                )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise IndexInvalidError(
+                f"Event evidence index payload is invalid: {exc}"
+            ) from exc
         return {
             "rows": rows,
             "total": total,
@@ -1050,10 +1096,10 @@ class EventEvidenceStore:
         reactionevent_file: str,
         molecules_file: str,
     ) -> dict[str, Any]:
-        reaction_source, _molecule_source = self._source_pair(
-            reactionevent_file, molecules_file
-        )
-        index_path = event_evidence_index_path(reaction_source[0])
+        del molecules_file
+        index_path = resolve_dataset_paths(
+            os.path.abspath(reactionevent_file)
+        ).event_index
         cache_root = _cache_root().resolve()
         try:
             index_path.resolve().relative_to(cache_root)

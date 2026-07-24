@@ -203,6 +203,39 @@ class OnlineIndexContractTests(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 1)
         self.assertEqual(result["rows"][0]["atom_id_list"], [1, 2])
 
+    def test_dataset_scan_never_opens_event_source_csvs(self) -> None:
+        reactionevent = self.root / "run.lammpstrj.reactionevent.csv"
+        molecules = self.root / "run.lammpstrj.molecules.csv"
+        reactionevent.write_text(
+            "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+            encoding="utf-8",
+        )
+        molecules.write_text(
+            "Timestep,Species,AtomIDs,BondIDs\n"
+            "0,[C],0,\n"
+            "0,[O],1,\n"
+            "10,[C][O],0;1,0-1-1\n",
+            encoding="utf-8",
+        )
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+        protected = {
+            os.path.abspath(reactionevent),
+            os.path.abspath(molecules),
+        }
+        real_path_open = Path.open
+
+        def guarded_path_open(path, *args, **kwargs):
+            if os.path.abspath(path) in protected:
+                raise AssertionError("dataset scan opened an RNG source CSV")
+            return real_path_open(path, *args, **kwargs)
+
+        with mock.patch("pathlib.Path.open", new=guarded_path_open):
+            result = dash_services.scan_dataset(str(self.root))
+
+        self.assertTrue(
+            result["dataset"]["readiness"]["event_search"]["ready"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
