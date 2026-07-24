@@ -10,10 +10,12 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from hashlib import sha256
 import heapq
 import io
 import json
+import math
 from numbers import Integral, Real
 from typing import Any, Literal
 
@@ -25,6 +27,14 @@ from rng_tools.pathways import EvidenceProvider
 
 SCHEMA_VERSION = "reacnet-scope/mechanism-network/v1"
 _SERIALIZATION_FORMATS = ("cytoscape-json", "graphml", "gexf")
+_GEXF_METADATA_FORMAT = "reacnet-scope/gexf-metadata/v1"
+_MECHANISM_METADATA_FIELDS = (
+    "schema_version",
+    "network_semantics",
+    "evidence_level",
+    "anchor_smiles",
+)
+_GRAPHML_SEMANTIC_KEY_ATTRIBUTE = "semantic_key"
 
 
 @dataclass(frozen=True)
@@ -172,10 +182,76 @@ def serialize_mechanism_graph(
     export_graph = _xml_safe_graph_copy(graph)
     buffer = io.BytesIO()
     if format == "graphml":
-        nx.write_graphml(export_graph, buffer, encoding="utf-8")
+        nx.write_graphml(
+            export_graph,
+            buffer,
+            encoding="utf-8",
+            edge_id_from_attribute="id",
+        )
     else:
+        # NetworkX's GEXF writer only preserves the graph ``name`` field.
+        # Reserve it for a versioned JSON envelope so required ReacNet Scope
+        # metadata remains machine-readable without adding sentinel elements.
+        export_graph.graph["name"] = _gexf_metadata_envelope(graph)
         nx.write_gexf(export_graph, buffer, encoding="utf-8")
     return buffer.getvalue()
+
+
+def decode_gexf_mechanism_metadata(
+    graph: nx.Graph,
+) -> dict[str, str]:
+    """Decode metadata stored in ReacNet Scope's reserved GEXF ``name`` field.
+
+    ``serialize_mechanism_graph(..., format="gexf")`` reserves the graph
+    ``name`` attribute for a canonical JSON envelope identified by
+    ``reacnet-scope/gexf-metadata/v1``.  This is necessary because NetworkX's
+    GEXF writer does not round-trip arbitrary graph attributes.
+    """
+    raw_name = graph.graph.get("name")
+    if not isinstance(raw_name, str):
+        raise ValueError("GEXF graph is missing ReacNet Scope metadata name")
+    try:
+        envelope = json.loads(raw_name)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "GEXF graph name is not valid ReacNet Scope metadata JSON"
+        ) from error
+    if not isinstance(envelope, Mapping):
+        raise ValueError("GEXF graph metadata envelope must be a mapping")
+    if envelope.get("format") != _GEXF_METADATA_FORMAT:
+        raise ValueError(
+            "GEXF graph metadata envelope has unsupported format"
+        )
+    metadata = envelope.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("GEXF graph metadata envelope is missing metadata")
+    decoded: dict[str, str] = {}
+    for field in _MECHANISM_METADATA_FIELDS:
+        value = metadata.get(field)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"GEXF graph metadata {field} must be a string"
+            )
+        decoded[field] = value
+    return decoded
+
+
+def _gexf_metadata_envelope(graph: nx.Graph) -> str:
+    metadata: dict[str, str] = {}
+    for field in _MECHANISM_METADATA_FIELDS:
+        value = graph.graph.get(field)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"mechanism graph {field} must be a string for GEXF export"
+            )
+        metadata[field] = value
+    return json.dumps(
+        {"format": _GEXF_METADATA_FORMAT, "metadata": metadata},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _is_record_sequence(value: object) -> bool:
@@ -215,14 +291,18 @@ def _xml_safe_graph_copy(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
         keys=True,
         data=True,
     ):
+        edge_attributes = {
+            name: _xml_attribute(value)
+            for name, value in attributes.items()
+        }
+        # GraphML consumes the payload ``id`` as the XML edge identifier.
+        # Preserve the MultiDiGraph key separately for semantic round trips.
+        edge_attributes[_GRAPHML_SEMANTIC_KEY_ATTRIBUTE] = str(key)
         copied.add_edge(
             source,
             target,
             key=key,
-            **{
-                name: _xml_attribute(value)
-                for name, value in attributes.items()
-            },
+            **edge_attributes,
         )
     return copied
 
@@ -236,8 +316,10 @@ def _xml_attribute(value: Any) -> str | int | float:
         return value
     if isinstance(value, Integral):
         return int(value)
+    if isinstance(value, Decimal):
+        return _decimal_json_safe(value)
     if isinstance(value, Real):
-        return float(value)
+        return _real_json_safe(value)
     if isinstance(value, (Mapping, list, tuple, set, frozenset)):
         return json.dumps(
             _json_safe_attribute(value),
@@ -258,8 +340,10 @@ def _json_safe_attribute(value: Any) -> Any:
         return value
     if isinstance(value, Integral):
         return int(value)
+    if isinstance(value, Decimal):
+        return _decimal_json_safe(value)
     if isinstance(value, Real):
-        return float(value)
+        return _real_json_safe(value)
     if isinstance(value, Mapping):
         return {
             str(key): _json_safe_attribute(item)
@@ -278,6 +362,23 @@ def _json_safe_attribute(value: Any) -> Any:
         )
     if isinstance(value, (list, tuple)):
         return [_json_safe_attribute(item) for item in value]
+    return str(value)
+
+
+def _real_json_safe(value: Real) -> float | str:
+    converted = float(value)
+    if math.isnan(converted):
+        return "NaN"
+    if math.isinf(converted):
+        return "-Infinity" if converted < 0 else "Infinity"
+    return converted
+
+
+def _decimal_json_safe(value: Decimal) -> str:
+    if value.is_nan():
+        return "NaN"
+    if value.is_infinite():
+        return "-Infinity" if value.is_signed() else "Infinity"
     return str(value)
 
 

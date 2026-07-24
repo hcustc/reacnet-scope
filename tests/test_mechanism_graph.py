@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import copy
+from decimal import Decimal
 import io
 import json
 
@@ -11,6 +12,7 @@ import pytest
 import rng_tools.mechanism_graph as mechanism_graph
 from rng_tools.mechanism_graph import (
     build_mechanism_network,
+    decode_gexf_mechanism_metadata,
     serialize_mechanism_graph,
     to_networkx_mechanism_graph,
 )
@@ -534,6 +536,132 @@ def test_xml_serialization_coerces_none_booleans_and_nested_values() -> None:
     assert restored.nodes["species:A"]["optional"] == ""
     assert restored.nodes["species:A"]["visible"] == 0
     assert restored.nodes["species:A"]["nested"] == '["A",{"flag":1,"missing":""}]'
+
+
+def test_graphml_round_trip_uses_payload_ids_and_retains_semantic_keys() -> None:
+    graph = nx.MultiDiGraph(
+        schema_version="test/v1",
+        network_semantics="mechanism",
+        evidence_level="network_only",
+        anchor_smiles="A",
+    )
+    graph.add_edge(
+        "species:A",
+        "reaction:1",
+        key="reactant:reaction:1:species:A:first",
+        id="edge:first",
+        role="reactant",
+    )
+    graph.add_edge(
+        "species:A",
+        "reaction:1",
+        key="reactant:reaction:1:species:A:second",
+        id="edge:second",
+        role="reactant",
+    )
+
+    xml = serialize_mechanism_graph(graph, format="graphml")
+    restored = nx.read_graphml(io.BytesIO(xml))
+
+    assert isinstance(restored, nx.MultiDiGraph)
+    assert set(restored["species:A"]["reaction:1"]) == {
+        "edge:first",
+        "edge:second",
+    }
+    assert {
+        data["id"] for *_, data in restored.edges(data=True)
+    } == {"edge:first", "edge:second"}
+    assert {
+        data["semantic_key"] for *_, data in restored.edges(data=True)
+    } == {
+        "reactant:reaction:1:species:A:first",
+        "reactant:reaction:1:species:A:second",
+    }
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_gexf_round_trip_retains_machine_readable_mechanism_metadata(
+    empty: bool,
+) -> None:
+    graph = nx.MultiDiGraph(
+        schema_version="reacnet-scope/mechanism-network/v1",
+        network_semantics="mechanism",
+        evidence_level="event_linked",
+        anchor_smiles="[CH3]",
+    )
+    if not empty:
+        graph.add_edge(
+            "species:A",
+            "reaction:1",
+            key="reactant:reaction:1:species:A",
+            id="edge:1",
+            role="reactant",
+        )
+
+    xml = serialize_mechanism_graph(graph, format="gexf")
+    restored = nx.read_gexf(io.BytesIO(xml))
+
+    assert len(restored.nodes) == len(graph.nodes)
+    assert len(restored.edges) == len(graph.edges)
+    assert decode_gexf_mechanism_metadata(restored) == {
+        "schema_version": "reacnet-scope/mechanism-network/v1",
+        "network_semantics": "mechanism",
+        "evidence_level": "event_linked",
+        "anchor_smiles": "[CH3]",
+    }
+    assert json.loads(restored.graph["name"])["format"] == (
+        "reacnet-scope/gexf-metadata/v1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("format_name", "reader"),
+    [("graphml", nx.read_graphml), ("gexf", nx.read_gexf)],
+)
+def test_xml_serialization_canonicalizes_nonfinite_numbers_recursively(
+    format_name: str,
+    reader: object,
+) -> None:
+    graph = nx.MultiDiGraph(
+        schema_version="test/v1",
+        network_semantics="mechanism",
+        evidence_level="network_only",
+        anchor_smiles="A",
+    )
+    graph.add_node(
+        "species:A",
+        id="species:A",
+        kind="species",
+        nan=float("nan"),
+        positive_infinity=float("inf"),
+        negative_infinity=float("-inf"),
+        decimal_nan=Decimal("NaN"),
+        decimal_positive_infinity=Decimal("Infinity"),
+        decimal_negative_infinity=Decimal("-Infinity"),
+        nested={
+            "nan": float("nan"),
+            "positive": Decimal("Infinity"),
+            "negative": float("-inf"),
+        },
+    )
+    before = copy.deepcopy(graph)
+
+    first = serialize_mechanism_graph(graph, format=format_name)
+    second = serialize_mechanism_graph(graph, format=format_name)
+    restored = reader(io.BytesIO(first))  # type: ignore[operator]
+    attributes = restored.nodes["species:A"]
+
+    assert first == second
+    assert attributes["nan"] == "NaN"
+    assert attributes["positive_infinity"] == "Infinity"
+    assert attributes["negative_infinity"] == "-Infinity"
+    assert attributes["decimal_nan"] == "NaN"
+    assert attributes["decimal_positive_infinity"] == "Infinity"
+    assert attributes["decimal_negative_infinity"] == "-Infinity"
+    assert attributes["nested"] == (
+        '{"nan":"NaN","negative":"-Infinity","positive":"Infinity"}'
+    )
+    assert nx.utils.graphs_equal(graph, before)
 
 
 def test_serializer_rejects_unknown_format_with_all_supported_names(
