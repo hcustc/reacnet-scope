@@ -3,10 +3,48 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from rng_tools import dir_browser
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import ROUTE_INDEX_STORE, resolve_dataset_paths
 from reacnet_scope import prepare
+from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import services as svc
+
+
+def _layout_node_by_id(node, component_id: str):
+    if isinstance(node, dict):
+        if (node.get("props") or {}).get("id") == component_id:
+            return node
+        for value in node.values():
+            found = _layout_node_by_id(value, component_id)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _layout_node_by_id(value, component_id)
+            if found is not None:
+                return found
+    return None
+
+
+def test_preparation_controls_are_inside_collapsed_advanced_details() -> None:
+    app = create_app()
+    layout = app.server.test_client().get("/_dash-layout").get_json()
+    details = _layout_node_by_id(layout, "data-advanced-tools")
+
+    assert details is not None
+    assert details["type"] == "Details"
+    assert not (details.get("props") or {}).get("open", False)
+    details_text = json.dumps(details, ensure_ascii=False)
+    assert "数据准备与高级工具" in details_text
+    for component_id in (
+        "data-prep-status",
+        "data-rng-event-command",
+        "data-prep-trajectory-command",
+        "data-prep-composition-command",
+        "data-clear-trajectory-btn",
+    ):
+        assert component_id in details_text
 
 
 def test_normalise_recent_datasets_ignores_malformed_loaded_at() -> None:
@@ -24,6 +62,8 @@ def test_normalise_recent_datasets_ignores_malformed_loaded_at() -> None:
 
 def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     trajectory = tmp_path / "run.lammpstrj"
     route = Path(f"{trajectory}.route")
     reaction = Path(f"{trajectory}.reactionabcd")
@@ -153,6 +193,8 @@ def test_prepare_can_clear_event_cache_after_sources_are_removed(
 
 def test_scan_dataset_reads_version_one_manifest(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
     paths = resolve_dataset_paths(tmp_path, base.name)
     paths.cache_dir.mkdir(parents=True)

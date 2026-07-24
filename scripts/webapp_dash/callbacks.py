@@ -410,6 +410,35 @@ def register_callbacks(app: Any) -> None:
         return is_open
 
     @app.callback(
+        Output("data-overview-view", "className"),
+        Output("data-browser-view", "className"),
+        Input("open-data-modal", "n_clicks"),
+        Input("species-open-data-modal", "n_clicks"),
+        Input("data-pick-btn", "n_clicks"),
+        Input("dir-browser-cancel-btn", "n_clicks"),
+        Input({"type": "dir-browser-recent-entry", "folder": ALL, "base": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _switch_data_modal_view(
+        _topbar_open,
+        _species_open,
+        _pick_clicks,
+        _return_clicks,
+        _recent_clicks,
+    ):
+        triggered = ctx.triggered_id
+        if triggered == "data-pick-btn" or _pattern_trigger_type(triggered) == "dir-browser-recent-entry":
+            return "rs-data-view d-none", "rs-data-view"
+        return "rs-data-view", "rs-data-view d-none"
+
+    @app.callback(
+        Output("data-recent-datasets", "children"),
+        Input("recent-datasets", "data"),
+    )
+    def _show_recent_datasets(recent_records):
+        return _render_recent_datasets(recent_records)
+
+    @app.callback(
         Output("data-candidate-summary", "children"),
         Output("data-scan-status", "children"),
         Output("data-artifacts", "children"),
@@ -581,31 +610,26 @@ def register_callbacks(app: Any) -> None:
             ),
         )
 
-    # ── Directory browser (remote server file-system navigation) ──────
+    # ── Directory browser (internal data-modal view) ──────────────────
 
     @app.callback(
-        Output("dir-browser-modal", "is_open"),
         Output("dir-browser-path-input", "value"),
-        Output("dir-browser-breadcrumbs", "children"),
-        Output("dir-browser-recent", "children"),
-        Output("dir-browser-datasets", "children"),
+        Output("dir-browser-back-btn", "disabled"),
+        Output("dir-browser-current", "children"),
         Output("dir-browser-body", "children"),
         Output("dir-browser-path", "data"),
         Output("dataset-browser-candidate", "data"),
-        Output("dir-browser-select-btn", "disabled"),
+        Output("data-apply-btn", "disabled", allow_duplicate=True),
         Output("data-folder-input", "value", allow_duplicate=True),
         Output("data-rungroup", "value", allow_duplicate=True),
         Input("data-pick-btn", "n_clicks"),
         Input("data-folder-input", "value"),
         Input("dir-browser-path-input", "value"),
         Input("dir-browser-go-btn", "n_clicks"),
-        Input({"type": "dir-browser-crumb", "path": ALL}, "n_clicks"),
         Input({"type": "dir-browser-entry", "path": ALL}, "n_clicks"),
         Input("dir-browser-back-btn", "n_clicks"),
         Input({"type": "dir-browser-dataset", "base": ALL}, "n_clicks"),
         Input({"type": "dir-browser-recent-entry", "folder": ALL, "base": ALL}, "n_clicks"),
-        Input("dir-browser-select-btn", "n_clicks"),
-        Input("dir-browser-cancel-btn", "n_clicks"),
         State("dir-browser-path", "data"),
         State("data-folder-input", "value"),
         State("dataset-browser-candidate", "data"),
@@ -618,33 +642,25 @@ def register_callbacks(app: Any) -> None:
         manual_dataset_input,
         path_input,
         go_clicks,
-        _crumb_clicks,
         _entry_clicks,
         back_clicks,
         _dataset_clicks,
         _recent_clicks,
-        select_clicks,
-        cancel_clicks,
         current_path,
         folder_input,
         candidate,
         recent_records,
         app_store,
     ):
-        """Consolidated state machine for the directory browser modal.
+        """Consolidated state machine for the directory browser view.
 
         Browser state stays separate from the applied dataset. Directory
-        navigation or manual input can choose a candidate, but only the
-        explicit load action applies it to ``app-store``.
+        navigation or manual input can choose a candidate; the separate atomic
+        apply callback is the only writer to ``app-store``.
         """
         triggered_id = ctx.triggered_id
         if triggered_id is None:
             raise PreventUpdate
-
-        # --- CANCEL ---------------------------------------------------
-        if triggered_id == "dir-browser-cancel-btn":
-            return (False, no_update, no_update, no_update, no_update, no_update,
-                    no_update, no_update, no_update, no_update, no_update)
 
         # --- OPEN -----------------------------------------------------
         if triggered_id == "data-pick-btn":
@@ -665,8 +681,6 @@ def register_callbacks(app: Any) -> None:
                     no_update,
                     no_update,
                     no_update,
-                    no_update,
-                    no_update,
                     None,
                     True,
                     no_update,
@@ -677,8 +691,6 @@ def register_callbacks(app: Any) -> None:
                 snapshot = svc.browse_dataset_location(resolved["folder"])
             except svc.ServiceError:
                 return (
-                    no_update,
-                    no_update,
                     no_update,
                     no_update,
                     no_update,
@@ -698,8 +710,6 @@ def register_callbacks(app: Any) -> None:
             )
             compact = _compact_browser_candidate(actual) if actual else None
             return (
-                no_update,
-                no_update,
                 no_update,
                 no_update,
                 no_update,
@@ -726,12 +736,6 @@ def register_callbacks(app: Any) -> None:
                     error="请输入服务器目录后再前往。",
                 )
             return _build_dir_browser_response(target, recent_records)
-
-        # --- BREADCRUMB ----------------------------------------------
-        if _pattern_trigger_type(triggered_id) == "dir-browser-crumb":
-            if not _triggered_click_value():
-                raise PreventUpdate
-            return _build_dir_browser_response(triggered_id["path"], recent_records)
 
         # --- NAVIGATE TO SUBDIR ---------------------------------------
         if _pattern_trigger_type(triggered_id) == "dir-browser-entry":
@@ -776,39 +780,6 @@ def register_callbacks(app: Any) -> None:
                 recent_records,
             )
 
-        # --- USE SELECTED DATASET ------------------------------------
-        if triggered_id == "dir-browser-select-btn":
-            selected = candidate or {}
-            folder = str(selected.get("folder") or "").strip()
-            base = str(selected.get("base") or "").strip()
-            if not folder or not base:
-                raise PreventUpdate
-            try:
-                snapshot = svc.browse_dataset_location(folder)
-            except svc.ServiceError:
-                return _build_dir_browser_response(folder, recent_records)
-            actual = _candidate_for_base(snapshot, base)
-            if actual is None:
-                return _build_dir_browser_response(
-                    folder,
-                    recent_records,
-                    error="所选数据集已不存在，请重新选择。",
-                )
-            compact = _compact_browser_candidate(actual)
-            return (
-                False,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                compact,
-                False,
-                no_update,
-                no_update,
-            )
-
         raise PreventUpdate
 
     @app.callback(
@@ -847,6 +818,9 @@ def register_callbacks(app: Any) -> None:
                 dbc.Alert("请选择一个可用的数据集后再加载。", color="warning", className="py-2"),
             )
         try:
+            snapshot = svc.browse_dataset_location(folder)
+            if _candidate_for_base(snapshot, base) is None:
+                raise svc.ServiceError("所选数据集已不存在，请重新选择。")
             status = svc.scan_dataset(folder, base=base)
             dataset = status.get("dataset", {}) or {}
             selected_base_new = str(dataset.get("selected_base") or "")
@@ -2460,30 +2434,35 @@ def _build_dir_browser_response(
 ) -> tuple:
     """Build a complete browser snapshot response without applying a dataset."""
     try:
-        data = svc.browse_dataset_location(path_str)
+        resolved = svc.resolve_dataset_input(path_str)
+        data = svc.browse_dataset_location(resolved["folder"])
     except svc.ServiceError as exc:
         attempted = str(path_str or "")
         return (
+            attempted,
             True,
-            attempted,
-            [],
-            _render_recent_datasets(recent_records),
-            _render_dataset_cards([]),
-            _render_dir_browser_error(str(exc.message), attempted),
-            attempted,
+            _render_browser_current(None, None, error=str(exc.message), path=attempted),
+            _render_dir_browser_error(str(exc.message)),
+            no_update,
             None,
             True,
             no_update,
             no_update,
         )
     datasets = data.get("datasets") or []
-    candidate = _compact_browser_candidate(datasets[0]) if len(datasets) == 1 else None
+    preferred_base = str(resolved.get("preferred_base") or "")
+    actual = (
+        _candidate_for_base(data, preferred_base)
+        if preferred_base
+        else (datasets[0] if len(datasets) == 1 else None)
+    )
+    candidate = _compact_browser_candidate(actual) if actual else None
+    if preferred_base and actual is None:
+        error = "当前目录未发现指定的数据集前缀。"
     return (
-        True,
         data["current_path"],
-        _render_breadcrumbs(data.get("breadcrumbs") or []),
-        _render_recent_datasets(recent_records),
-        _render_dataset_cards(datasets),
+        not bool(data.get("can_go_up")),
+        _render_browser_current(data, candidate, error=error),
         _render_dir_browser_body(data, error=error),
         data["current_path"],
         candidate,
@@ -2511,59 +2490,72 @@ def _select_browser_candidate(
             recent_records,
             error="该数据集已不存在，请从当前目录重新选择。",
         )
-    response[7] = _compact_browser_candidate(candidate)
-    response[8] = False
+    compact = _compact_browser_candidate(candidate)
+    response[2] = _render_browser_current(snapshot, compact)
+    response[5] = compact
+    response[6] = False
     return tuple(response)
 
 
-def _render_breadcrumbs(breadcrumbs: list[dict[str, str]]) -> Any:
-    if not breadcrumbs:
-        return None
-    return html.Div(
-        [
-            dbc.Button(
-                item["label"],
-                id={"type": "dir-browser-crumb", "path": item["path"]},
-                color="link",
-                size="sm",
-                className="rs-browser-crumb",
-            )
-            for item in breadcrumbs
-        ],
-        className="rs-browser-crumb-list",
-    )
-
-
-def _render_dataset_cards(datasets: list[dict[str, Any]]) -> Any:
-    """Render discovered datasets separately from filesystem directories."""
+def _render_browser_current(
+    data: dict[str, Any] | None,
+    candidate: dict[str, str] | None,
+    *,
+    error: str = "",
+    path: str = "",
+) -> Any:
+    """Render compact current-directory status and candidate rows."""
+    snapshot = data or {}
+    current_path = str(snapshot.get("current_path") or path or "")
+    datasets = snapshot.get("datasets") or []
+    selected_base = str((candidate or {}).get("base") or "")
     if not datasets:
-        content: Any = html.Div(
+        candidates: Any = html.Div(
             "当前目录未发现 ReacNetGenerator 数据集，可继续进入子目录。",
-            className="rs-empty",
+            className="rs-browser-empty-line",
         )
     else:
-        content = [
+        candidates = html.Div(
+            [
             dbc.Button(
                 [
-                    html.Strong(item["label"]),
+                    html.Span(
+                        "●" if item["base"] == selected_base else "○",
+                        className="rs-browser-radio",
+                    ),
+                    html.Strong(item["label"], className="rs-browser-candidate-name"),
                     html.Span(
                         f"文件完整度 {item['completeness']}",
-                        className="rs-dataset-meta",
-                    ),
-                    html.Span(
-                        " · ".join(
-                            f"{key}: {value}" for key, value in item["index_states"].items()
-                        ),
-                        className="rs-dataset-index-states",
+                        className="rs-browser-candidate-meta",
                     ),
                 ],
                 id={"type": "dir-browser-dataset", "base": item["base"]},
                 color="light",
-                className="rs-dataset-card",
+                size="sm",
+                className=(
+                    "rs-browser-candidate-row is-selected"
+                    if item["base"] == selected_base
+                    else "rs-browser-candidate-row"
+                ),
             )
             for item in datasets
+            ],
+            className="rs-browser-candidate-list",
+        )
+    alert = html.Div(error, className="text-warning small") if error else None
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("当前目录", className="text-muted"),
+                    html.Code(current_path, className="rs-browser-current-path"),
+                ],
+                className="rs-browser-current-line",
+            ),
+            alert,
+            candidates,
         ]
-    return html.Section([html.H6("发现的数据集"), content])
+    )
 
 
 def _render_recent_datasets(records: list[dict[str, Any]] | None) -> Any:
@@ -2596,27 +2588,11 @@ def _render_recent_datasets(records: list[dict[str, Any]] | None) -> Any:
     return html.Section([html.H6("最近加载"), html.Div(entries, className="rs-browser-recent-list")])
 
 
-def _render_dir_browser_error(message: str, attempted_path: str = "") -> Any:
+def _render_dir_browser_error(message: str) -> Any:
     """Render a recoverable error inside the directory-list section."""
-    return html.Section(
-        [
-            html.Div(
-                [
-                    dbc.Button(
-                        "⬑ 返回上一级",
-                        id="dir-browser-back-btn",
-                        color="secondary",
-                        size="sm",
-                        outline=True,
-                        disabled=True,
-                        className="mb-2",
-                    ),
-                    html.Span(attempted_path or "—", className="rs-browser-error-path"),
-                ]
-            ),
-            html.Div([html.Span("⚠ "), html.Span(message)], className="text-danger py-3 text-center"),
-        ],
-        className="rs-browser-directories",
+    return html.Div(
+        [html.Span("⚠ "), html.Span(message)],
+        className="text-danger small py-2",
     )
 
 
@@ -2624,12 +2600,16 @@ def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
     """Render only the subdirectory section for a browser snapshot."""
     subdirs: list[dict[str, Any]] = data.get("subdirs", [])
     if not subdirs:
-        directory_list: Any = html.Div("当前目录没有子文件夹", className="rs-empty")
+        directory_list: Any = html.Div("当前目录没有子文件夹", className="rs-browser-empty-line")
     else:
         directory_list = html.Div(
             [
                 dbc.Button(
-                    item.get("name", ""),
+                    [
+                        html.Span("📁", className="rs-browser-folder-icon"),
+                        html.Span(item.get("name", ""), className="rs-browser-folder-name"),
+                        html.Span("›", className="rs-browser-chevron"),
+                    ],
                     id={"type": "dir-browser-entry", "path": item["path"]},
                     color="light",
                     size="sm",
@@ -2640,28 +2620,7 @@ def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
             ],
             className="rs-browser-directory-list",
         )
-    alert = html.Div(error, className="text-warning small mb-2") if error else None
-    return html.Section(
-        [
-            html.Div(
-                [
-                    dbc.Button(
-                        "⬑ 返回上一级",
-                        id="dir-browser-back-btn",
-                        color="secondary",
-                        size="sm",
-                        outline=True,
-                        disabled=not bool(data.get("can_go_up")),
-                    ),
-                    html.H6("子目录"),
-                ],
-                className="rs-browser-directory-heading",
-            ),
-            alert,
-            directory_list,
-        ],
-        className="rs-browser-directories",
-    )
+    return directory_list
 
 
 # ── Shared column factories ─────────────────────────────────────────
