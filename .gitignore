@@ -15,8 +15,15 @@ build/
 dist/
 *.egg-info/
 .pytest_cache/
+.pytest-*/
 .mypy_cache/
 .ruff_cache/
+
+# Local subagent/review artifacts
+.superpowers/sdd/progress.md
+.superpowers/sdd/review-*.diff
+.superpowers/sdd/task-*-brief.md
+.superpowers/sdd/task-*-report.md
 
 # Reference data files (large, not for github)
 ref_data/
