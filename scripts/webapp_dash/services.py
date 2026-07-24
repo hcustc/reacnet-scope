@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sqlite3
 import sys
 import time
 import traceback
@@ -237,7 +238,7 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
             return store.status(*paths)
         except FileNotFoundError:
             return {"state": "missing"}
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
             return {"state": "invalid", "message": str(exc)}
 
     return {

@@ -403,6 +403,114 @@ class OnlineIndexContractTests(unittest.TestCase):
         )
         self.assertEqual(forbidden_reads, [])
 
+    def test_browser_marks_corrupt_prepared_indexes_invalid(self) -> None:
+        """A broken cache must not make the whole browser snapshot unusable."""
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        reactionevent = Path(f"{trajectory}.reactionevent.csv")
+        molecules = Path(f"{trajectory}.molecules.csv")
+        trajectory.write_bytes(_frame(0))
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        reactionevent.write_text(
+            "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+            encoding="utf-8",
+        )
+        molecules.write_text(
+            "Timestep,Species,AtomIDs,BondIDs\n"
+            "0,[C],0,\n"
+            "0,[O],1,\n"
+            "10,[C][O],0;1,0-1-1\n",
+            encoding="utf-8",
+        )
+        trajectory_index = TrajectoryIndexStore().build(str(trajectory))
+        composition_index = SPECIES_COMPOSITION_STORE.build(str(species))
+        event_index = EVENT_EVIDENCE_STORE.build(
+            str(reactionevent), str(molecules)
+        )
+        for index_path in (
+            trajectory_index.index_path,
+            composition_index["index_path"],
+            event_index["index_path"],
+        ):
+            Path(index_path).write_bytes(b"not a SQLite database")
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(
+            dash_services, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(len(snapshot["datasets"]), 1)
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"],
+            {
+                "event": "invalid",
+                "trajectory": "invalid",
+                "composition": "invalid",
+            },
+        )
+
+    def test_browser_contains_database_errors_from_prepared_indexes(
+        self,
+    ) -> None:
+        """A store-level SQLite error is isolated to the affected index state."""
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        reactionevent = Path(f"{trajectory}.reactionevent.csv")
+        molecules = Path(f"{trajectory}.molecules.csv")
+        trajectory.write_bytes(_frame(0))
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        reactionevent.write_text(
+            "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+            encoding="utf-8",
+        )
+        molecules.write_text(
+            "Timestep,Species,AtomIDs,BondIDs\n"
+            "0,[C],0,\n"
+            "0,[O],1,\n"
+            "10,[C][O],0;1,0-1-1\n",
+            encoding="utf-8",
+        )
+        TrajectoryIndexStore().build(str(trajectory))
+        SPECIES_COMPOSITION_STORE.build(str(species))
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+        def corrupt_connection(*_args, **_kwargs):
+            raise sqlite3.DatabaseError("simulated corrupt SQLite index")
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(
+            dash_services, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            event_index_module,
+            "_readonly_connection",
+            side_effect=corrupt_connection,
+        ), mock.patch.object(
+            indexes_module,
+            "_readonly_connection",
+            side_effect=corrupt_connection,
+        ), mock.patch.object(
+            composition_module,
+            "_readonly_connection",
+            side_effect=corrupt_connection,
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"],
+            {
+                "event": "invalid",
+                "trajectory": "invalid",
+                "composition": "invalid",
+            },
+        )
+
     def test_browser_reports_malformed_trajectory_metadata_as_invalid(
         self,
     ) -> None:
