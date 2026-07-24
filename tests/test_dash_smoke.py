@@ -81,6 +81,24 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "carbon-reference-smiles" in layout_ids
     assert "carbon-timestep" in layout_ids
     assert "carbon-parent-name" not in layout_ids
+    for pathway_id in {
+        "pathway-start-smiles",
+        "pathway-direction",
+        "pathway-max-depth",
+        "pathway-max-branches",
+        "pathway-max-paths",
+        "pathway-min-net-tp",
+        "pathway-min-directionality",
+        "pathway-search-btn",
+        "pathway-grid",
+        "pathway-cytoscape",
+        "pathway-json-download",
+        "pathway-csv-download",
+        "pathway-open-events-btn",
+        "pathway-highlight-network-btn",
+        "pathway-store",
+    }:
+        assert pathway_id in layout_ids
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -101,6 +119,395 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     layout_text = json.dumps(layout, ensure_ascii=False)
     assert "运行组 (base)" not in layout_text
     assert "加载数据集" in layout_text
+
+
+def _callback_payload(
+    client: Any,
+    *,
+    input_ids: list[str],
+    changed: str,
+    input_values: dict[str, Any],
+    state_values: dict[str, Any],
+) -> dict[str, Any]:
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]] == input_ids
+    )
+    output_spec = dependency["output"]
+    outputs: Any
+    if output_spec.startswith(".."):
+        outputs = [
+            {
+                "id": token.split(".")[0],
+                "property": token.split(".")[1].split("@")[0],
+            }
+            for token in output_spec.strip(".").split("...")
+        ]
+    else:
+        outputs = {
+            "id": output_spec.split(".")[0],
+            "property": output_spec.split(".")[1].split("@")[0],
+        }
+    return {
+        "output": output_spec,
+        "outputs": outputs,
+        "changedPropIds": [changed],
+        "inputs": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": input_values.get(
+                    f"{item['id']}.{item['property']}",
+                    input_values.get(item["id"]),
+                ),
+            }
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": state_values.get(
+                    f"{item['id']}.{item['property']}",
+                    state_values.get(item["id"]),
+                ),
+            }
+            for item in dependency["state"]
+        ],
+    }
+
+
+def _pathway_payload() -> dict[str, Any]:
+    return {
+        "paths": [
+            {
+                "rank": 1,
+                "species": ["[H]", "[H][O]"],
+                "formulas": ["H", "HO"],
+                "score": 0.7,
+                "evidence_status": "evidence_linked",
+                "steps": [
+                    {
+                        "reaction_key": "[H]+[O]->[H][O]",
+                        "reactants": ["[H]", "[O]"],
+                        "products": ["[H][O]"],
+                        "focal_input": "[H]",
+                        "focal_output": "[H][O]",
+                        "score": 0.6,
+                        "evidence_status": "evidence_linked",
+                    }
+                ],
+            }
+        ],
+        "query": {"start_smiles": "[H]"},
+        "reason": "ok",
+        "truncated": False,
+        "expansions": 1,
+        "evidence_status": "evidence_linked",
+        "score_version": "candidate-path/v1",
+        "source_signatures": {},
+    }
+
+
+def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_find(_artifacts, start_smiles, **limits):
+        captured["start_smiles"] = start_smiles
+        captured.update(limits)
+        return _pathway_payload()
+
+    monkeypatch.setattr(svc, "find_pathways", fake_find)
+    app = create_app()
+    client = app.server.test_client()
+    inputs = ["pathway-search-btn"]
+    states = {
+        "pathway-start-smiles": "[H]",
+        "pathway-direction": "upstream",
+        "pathway-max-depth": 4,
+        "pathway-max-branches": 6,
+        "pathway-max-paths": 7,
+        "pathway-min-net-tp": 2,
+        "pathway-min-directionality": 0,
+        "app-store": {"artifacts": {"reaction": "/tmp/run.reactionabcd"}},
+    }
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=inputs,
+            changed="pathway-search-btn.n_clicks",
+            input_values={"pathway-search-btn": 1},
+            state_values=states,
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "start_smiles": "[H]",
+        "direction": "upstream",
+        "max_depth": 4,
+        "max_branches": 6,
+        "max_paths": 7,
+        "min_net_tp": 2,
+        "min_directionality": 0,
+    }
+    result = response.get_json()["response"]
+    row = result["pathway-grid"]["data"][0]
+    assert row["formula_chain"] == "H → HO"
+    assert row["smiles_chain"] == "[H] → [H][O]"
+    assert row["path_score"] == 0.7
+    assert row["weakest_step_score"] == 0.6
+    assert row["depth"] == 1
+    assert row["evidence_badge"] == "事件已关联"
+    assert result["pathway-store"]["data"] == _pathway_payload()
+
+
+def test_pathway_search_reports_distinct_empty_reasons_and_truncation(monkeypatch) -> None:
+    app = create_app()
+    client = app.server.test_client()
+    base = _pathway_payload()
+    cases = [
+        ("species_absent", "不在当前反应网络"),
+        ("no_positive_net_continuation", "没有正净通量"),
+        ("filtered_by_thresholds", "阈值过滤"),
+    ]
+    for reason, expected in cases:
+        payload = {**base, "paths": [], "reason": reason, "expansions": 3}
+        monkeypatch.setattr(
+            svc,
+            "find_pathways",
+            lambda *_args, _payload=payload, **_kwargs: _payload,
+        )
+        response = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=["pathway-search-btn"],
+                changed="pathway-search-btn.n_clicks",
+                input_values={"pathway-search-btn": 1},
+                state_values={
+                    "pathway-start-smiles": "[H]",
+                    "pathway-direction": "downstream",
+                    "pathway-max-depth": 3,
+                    "pathway-max-branches": 5,
+                    "pathway-max-paths": 20,
+                    "pathway-min-net-tp": 1,
+                    "pathway-min-directionality": 0.05,
+                    "app-store": {"artifacts": {"reaction": "run.reactionabcd"}},
+                },
+            ),
+        )
+        assert response.status_code == 200
+        assert expected in str(
+            response.get_json()["response"]["pathway-alert"]["children"]
+        )
+
+    truncated = {**base, "truncated": True, "expansions": 5000}
+    monkeypatch.setattr(
+        svc,
+        "find_pathways",
+        lambda *_args, **_kwargs: truncated,
+    )
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-search-btn"],
+            changed="pathway-search-btn.n_clicks",
+            input_values={"pathway-search-btn": 1},
+            state_values={
+                "pathway-start-smiles": "[H]",
+                "pathway-direction": "downstream",
+                "pathway-max-depth": 3,
+                "pathway-max-branches": 5,
+                "pathway-max-paths": 20,
+                "pathway-min-net-tp": 1,
+                "pathway-min-directionality": 0.05,
+                "app-store": {"artifacts": {"reaction": "run.reactionabcd"}},
+            },
+        ),
+    )
+    alert = str(response.get_json()["response"]["pathway-alert"]["children"])
+    assert "截断" in alert
+    assert "expansions=5000" in alert
+
+
+def test_species_and_reaction_handoffs_preserve_exact_smiles() -> None:
+    app = create_app()
+    client = app.server.test_client()
+
+    species_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-to-pathway-btn", "rxn-to-pathway-btn"],
+            changed="species-to-pathway-btn.n_clicks",
+            input_values={
+                "species-to-pathway-btn": 1,
+                "rxn-to-pathway-btn": None,
+            },
+            state_values={
+                "species-grid.selected_rows": [0],
+                "species-grid.data": [{"smiles": "[C@@H](O)[Cl]"}],
+                "rxn-grid.selected_rows": [],
+                "rxn-grid.data": [],
+                "app-store": {"selected_smiles": "wrong"},
+            },
+        ),
+    )
+    assert species_response.status_code == 200
+    assert (
+        species_response.get_json()["response"]["pathway-start-smiles"]["value"]
+        == "[C@@H](O)[Cl]"
+    )
+
+    reaction_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-to-pathway-btn", "rxn-to-pathway-btn"],
+            changed="rxn-to-pathway-btn.n_clicks",
+            input_values={
+                "species-to-pathway-btn": None,
+                "rxn-to-pathway-btn": 1,
+            },
+            state_values={
+                "species-grid.selected_rows": [],
+                "species-grid.data": [],
+                "rxn-grid.selected_rows": [0],
+                "rxn-grid.data": [
+                    {
+                        "reactant_smiles": ["[13CH3]", "[OH-]"],
+                        "reaction_smiles": "[13CH3] + [OH-] -> [13CH3][OH-]",
+                    }
+                ],
+                "app-store": {},
+            },
+        ),
+    )
+    assert reaction_response.status_code == 200
+    assert (
+        reaction_response.get_json()["response"]["pathway-start-smiles"]["value"]
+        == "[13CH3]"
+    )
+
+
+def test_selected_pathway_step_handoff_uses_full_reaction_text() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    reaction_text = "[H] + [O] + [O] -> [H][O] + [O]"
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-open-events-btn"],
+            changed="pathway-open-events-btn.n_clicks",
+            input_values={"pathway-open-events-btn": 1},
+            state_values={
+                "pathway-selected-step": {
+                    "reaction_text": reaction_text,
+                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                }
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["response"]["event-reaction-text"]["value"] == reaction_text
+
+
+def test_pathway_downloads_use_store_payload_without_search(monkeypatch) -> None:
+    payload = _pathway_payload()
+
+    def forbidden_search(*_args, **_kwargs):
+        raise AssertionError("downloads must not recompute the search")
+
+    monkeypatch.setattr(svc, "find_pathways", forbidden_search)
+    app = create_app()
+    client = app.server.test_client()
+    json_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-json-btn"],
+            changed="pathway-json-btn.n_clicks",
+            input_values={"pathway-json-btn": 1},
+            state_values={"pathway-store": payload},
+        ),
+    )
+    assert json_response.status_code == 200
+    json_download = json_response.get_json()["response"]["pathway-json-download"]["data"]
+    assert json.loads(json_download["content"]) == payload
+
+    csv_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-csv-btn"],
+            changed="pathway-csv-btn.n_clicks",
+            input_values={"pathway-csv-btn": 1},
+            state_values={"pathway-store": payload},
+        ),
+    )
+    assert csv_response.status_code == 200
+    csv_download = csv_response.get_json()["response"]["pathway-csv-download"]["data"]
+    assert "[H]+[O]->[H][O]" in csv_download["content"]
+
+
+def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    payload = _pathway_payload()
+    rows = [
+        {
+            "rank": 1,
+            "formula_chain": "H → HO",
+            "smiles_chain": "[H] → [H][O]",
+        }
+    ]
+    selection_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "pathway-store",
+                "pathway-grid",
+                "pathway-cytoscape",
+            ],
+            changed="pathway-grid.selected_rows",
+            input_values={
+                "pathway-store": payload,
+                "pathway-grid": [0],
+                "pathway-cytoscape": None,
+            },
+            state_values={"pathway-grid": rows},
+        ),
+    )
+    assert selection_response.status_code == 200
+    selected = selection_response.get_json()["response"]["pathway-selected-path"]["data"]
+    assert selected == {
+        "path_rank": 1,
+        "species_ids": ["[H]", "[H][O]"],
+        "reaction_keys": ["[H]+[O]->[H][O]"],
+    }
+
+    network_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-highlight-network-btn"],
+            changed="pathway-highlight-network-btn.n_clicks",
+            input_values={"pathway-highlight-network-btn": 1},
+            state_values={"pathway-selected-path": selected},
+        ),
+    )
+    assert network_response.status_code == 200
+    handoff = network_response.get_json()["response"]["network-store"]["data"]
+    assert handoff["species_ids"] == ["[H]", "[H][O]"]
+    assert handoff["reaction_keys"] == ["[H]+[O]->[H][O]"]
 
 
 def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:

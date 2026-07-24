@@ -563,3 +563,98 @@ def test_pathway_service_uses_existing_network_cache(
     svc.find_pathways(reaction_only_artifacts, "[H]", max_depth=1)
 
     assert calls == [(reaction_only_artifacts["reaction"], 1)]
+
+
+def test_pathway_elements_preserve_exact_species_and_complete_hyperedges() -> None:
+    payload = {
+        "paths": [
+            {
+                "rank": 2,
+                "species": ["[H]", "[H][O]"],
+                "steps": [
+                    {
+                        "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                        "reactants": ["[H]", "[O]", "[O]"],
+                        "products": ["[H][O]", "[O]"],
+                        "focal_input": "[H]",
+                        "focal_output": "[H][O]",
+                        "evidence_status": "network_only",
+                        "score": 0.4,
+                    }
+                ],
+            }
+        ]
+    }
+
+    elements = svc.build_pathway_elements(payload)
+
+    species = [
+        item for item in elements
+        if "species" in str(item.get("classes") or "").split()
+    ]
+    reactions = [
+        item for item in elements
+        if "reaction" in str(item.get("classes") or "").split()
+    ]
+    edges = [item for item in elements if "source" in (item.get("data") or {})]
+    assert {item["data"]["smiles"] for item in species} == {
+        "[H]",
+        "[O]",
+        "[H][O]",
+    }
+    assert len(reactions) == 1
+    assert reactions[0]["data"]["id"].endswith("path-2-step-1")
+    assert reactions[0]["data"]["reaction_text"] == (
+        "[H] + [O] + [O] -> [H][O] + [O]"
+    )
+    assert "path-rank-2" in reactions[0]["classes"].split()
+    assert "network-only" in reactions[0]["classes"].split()
+    assert len(edges) == 5
+    assert sum(edge["data"]["source"].startswith("species:") for edge in edges) == 3
+    assert sum(edge["data"]["target"].startswith("species:") for edge in edges) == 2
+
+
+def test_pathway_elements_use_collision_safe_node_ids() -> None:
+    payload = {
+        "paths": [
+            {
+                "rank": 1,
+                "species": ["a:b", "a/b"],
+                "steps": [
+                    {
+                        "reaction_key": "same",
+                        "reactants": ["a:b"],
+                        "products": ["a/b"],
+                        "focal_input": "a:b",
+                        "focal_output": "a/b",
+                        "evidence_status": "evidence_linked",
+                        "score": 0.9,
+                    }
+                ],
+            },
+            {
+                "rank": 2,
+                "species": ["a:b", "a/b"],
+                "steps": [
+                    {
+                        "reaction_key": "same",
+                        "reactants": ["a:b"],
+                        "products": ["a/b"],
+                        "focal_input": "a:b",
+                        "focal_output": "a/b",
+                        "evidence_status": "evidence_linked",
+                        "score": 0.8,
+                    }
+                ],
+            },
+        ]
+    }
+
+    elements = svc.build_pathway_elements(payload)
+    node_ids = [
+        item["data"]["id"]
+        for item in elements
+        if "source" not in item["data"]
+    ]
+
+    assert len(node_ids) == len(set(node_ids))

@@ -12,6 +12,7 @@ This module never reimplements analysis logic.  It only:
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shlex
@@ -750,6 +751,108 @@ def find_pathways(
     return payload
 
 
+def _pathway_species_node_id(smiles: str) -> str:
+    encoded = base64.urlsafe_b64encode(smiles.encode("utf-8")).decode("ascii")
+    return f"species:{encoded}"
+
+
+def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Build a lossless bipartite Cytoscape payload from serialized paths.
+
+    Species identity is the exact SMILES string.  Reaction nodes remain
+    path-local because the same reaction may occur at different ranks/steps.
+    Repeated reactants/products intentionally produce repeated edges.
+    """
+    species_classes: dict[str, set[str]] = {}
+    species_order: list[str] = []
+    reaction_nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for path in payload.get("paths") or []:
+        rank = int(path.get("rank") or 0)
+        rank_class = f"path-rank-{rank}"
+        for step_index, step in enumerate(path.get("steps") or [], start=1):
+            reaction_key = str(step.get("reaction_key") or "")
+            encoded_key = base64.urlsafe_b64encode(
+                reaction_key.encode("utf-8")
+            ).decode("ascii")
+            reaction_id = (
+                f"reaction:{encoded_key}:path-{rank}-step-{step_index}"
+            )
+            reactants = [str(value) for value in step.get("reactants") or []]
+            products = [str(value) for value in step.get("products") or []]
+            reaction_text = (
+                f"{' + '.join(reactants)} -> {' + '.join(products)}"
+            )
+            classes = {"reaction", rank_class}
+            network_only = step.get("evidence_status") == "network_only"
+            if network_only:
+                classes.add("network-only")
+            reaction_nodes.append(
+                {
+                    "data": {
+                        "id": reaction_id,
+                        "node_kind": "reaction",
+                        "label": f"R{rank}.{step_index}",
+                        "path_rank": rank,
+                        "step_index": step_index,
+                        "reaction_key": reaction_key,
+                        "reaction_text": reaction_text,
+                        "score": step.get("score"),
+                        "evidence_status": step.get("evidence_status"),
+                    },
+                    "classes": " ".join(sorted(classes)),
+                }
+            )
+            for side, members in (("reactant", reactants), ("product", products)):
+                for occurrence, smiles in enumerate(members, start=1):
+                    if smiles not in species_classes:
+                        species_classes[smiles] = {"species"}
+                        species_order.append(smiles)
+                    species_classes[smiles].add(rank_class)
+                    species_id = _pathway_species_node_id(smiles)
+                    edge_id = (
+                        f"edge:{rank}:{step_index}:{side}:{occurrence}:"
+                        f"{encoded_key}"
+                    )
+                    if side == "reactant":
+                        source, target = species_id, reaction_id
+                    else:
+                        source, target = reaction_id, species_id
+                    edges.append(
+                        {
+                            "data": {
+                                "id": edge_id,
+                                "source": source,
+                                "target": target,
+                                "path_rank": rank,
+                                "step_index": step_index,
+                                "side": side,
+                                "occurrence": occurrence,
+                            },
+                            "classes": " ".join(
+                                [
+                                    rank_class,
+                                    side,
+                                    *(["network-only"] if network_only else []),
+                                ]
+                            ),
+                        }
+                    )
+    species_nodes = [
+        {
+            "data": {
+                "id": _pathway_species_node_id(smiles),
+                "node_kind": "species",
+                "label": smiles,
+                "smiles": smiles,
+            },
+            "classes": " ".join(sorted(species_classes[smiles])),
+        }
+        for smiles in species_order
+    ]
+    return [*species_nodes, *reaction_nodes, *edges]
+
+
 def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build one catalogue row, calculating chemistry only for that SMILES."""
     formula = smiles_formula_cached(smiles) or "?"
@@ -1310,6 +1413,8 @@ def search_reactions_by_formula(
                 "product_formulas": " + ".join(rxn.product_formulas),
                 "reaction_formulas": reaction_formula_str(rxn),
                 "reaction_smiles": reaction_smiles_str(rxn),
+                "reactant_smiles": list(rxn.reactant_smiles),
+                "product_smiles": list(rxn.product_smiles),
                 **reaction_mass_fields(rxn),
             }
         )

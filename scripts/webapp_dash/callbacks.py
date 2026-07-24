@@ -10,6 +10,9 @@ from __future__ import annotations
 import re
 import time
 import base64
+import csv
+import io
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,12 +23,13 @@ from dash.exceptions import PreventUpdate
 from scripts.webapp_dash import services as svc
 
 
-PAGE_IDS = ["workflow", "species", "transitions", "reactions", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
+PAGE_IDS = ["workflow", "species", "transitions", "reactions", "pathway", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
 PAGE_LABELS = {
     "workflow": "反应证据工作流",
     "species": "物种检索",
     "transitions": "转化关系",
     "reactions": "反应式检索",
+    "pathway": "关键路径",
     "intermediate": "中间体筛选",
     "evolution": "时间演化",
     "carbon": "C/O/Cl 组成演化",
@@ -39,6 +43,7 @@ PAGE_DESCRIPTIONS = {
     "species": "按分子式、SMILES 或精确质量定位物种，并查看结构与通量。",
     "transitions": "围绕已选物种查看生成、消耗及净通量关系。",
     "reactions": "按反应物和产物组合检索反应，比较正反向通量。",
+    "pathway": "从精确 SMILES 出发，搜索有界候选路径并关联事件证据。",
     "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "选择 O/Cl 条件，查看碳数随时间变化，再点击曲线查看代表物种。",
@@ -51,6 +56,7 @@ PAGE_DATA_REQUIREMENTS = {
     "species": ("reaction", "reactionabcd"),
     "transitions": ("reaction", "reactionabcd"),
     "reactions": ("reaction", "reactionabcd"),
+    "pathway": ("reaction", "reactionabcd"),
     "intermediate": ("species", ".species"),
     "evolution": ("species", ".species"),
     "carbon": ("species", ".species"),
@@ -272,6 +278,7 @@ def register_callbacks(app: Any) -> None:
         Output("page-species", "className"),
         Output("page-transitions", "className"),
         Output("page-reactions", "className"),
+        Output("page-pathway", "className"),
         Output("page-intermediate", "className"),
         Output("page-evolution", "className"),
         Output("page-carbon", "className"),
@@ -283,6 +290,7 @@ def register_callbacks(app: Any) -> None:
         Output("nav-species", "className"),
         Output("nav-transitions", "className"),
         Output("nav-reactions", "className"),
+        Output("nav-pathway", "className"),
         Output("nav-intermediate", "className"),
         Output("nav-evolution", "className"),
         Output("nav-carbon", "className"),
@@ -299,6 +307,7 @@ def register_callbacks(app: Any) -> None:
         Input("nav-species", "n_clicks"),
         Input("nav-transitions", "n_clicks"),
         Input("nav-reactions", "n_clicks"),
+        Input("nav-pathway", "n_clicks"),
         Input("nav-intermediate", "n_clicks"),
         Input("nav-evolution", "n_clicks"),
         Input("nav-carbon", "n_clicks"),
@@ -309,13 +318,21 @@ def register_callbacks(app: Any) -> None:
         Input("species-to-event-btn", "n_clicks"),
         Input("rxn-to-event-btn", "n_clicks"),
         Input("transitions-to-event-btn", "n_clicks"),
+        Input("species-to-pathway-btn", "n_clicks"),
+        Input("rxn-to-pathway-btn", "n_clicks"),
+        Input("pathway-open-events-btn", "n_clicks"),
+        Input("pathway-highlight-network-btn", "n_clicks"),
         State("page-store", "data"),
     )
     def _navigate(*_args):
         triggered_id = ctx.triggered_id
         stored_page = (_args[-1] or {}).get("page") if _args else None
-        if triggered_id in {"species-to-event-btn", "rxn-to-event-btn", "transitions-to-event-btn"}:
+        if triggered_id in {"species-to-event-btn", "rxn-to-event-btn", "transitions-to-event-btn", "pathway-open-events-btn"}:
             page_id = "events"
+        elif triggered_id in {"species-to-pathway-btn", "rxn-to-pathway-btn"}:
+            page_id = "pathway"
+        elif triggered_id == "pathway-highlight-network-btn":
+            page_id = "network"
         else:
             page_id = triggered_id.removeprefix("nav-") if triggered_id else stored_page
         if page_id not in PAGE_IDS:
@@ -362,6 +379,7 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("transitions-search-btn", "disabled"),
         Output("rxn-search-btn", "disabled"),
+        Output("pathway-search-btn", "disabled"),
         Output("inter-search-btn", "disabled"),
         Output("evolution-search-btn", "disabled"),
         Output("carbon-search-btn", "disabled"),
@@ -380,6 +398,7 @@ def register_callbacks(app: Any) -> None:
         no_trajectory = not bool((readiness.get("trajectory_evidence") or {}).get("ready"))
         no_table = not bool(artifacts.get("table"))
         return (
+            no_reaction,
             no_reaction,
             no_reaction,
             no_species,
@@ -1258,6 +1277,7 @@ def register_callbacks(app: Any) -> None:
         Output("detail-body", "children"),
         Output("detail-empty", "style"),
         Output("species-to-event-btn", "disabled"),
+        Output("species-to-pathway-btn", "disabled"),
         Output("app-store", "data", allow_duplicate=True),
         Output("transitions-smiles", "value"),
         Output("evolution-targets", "value"),
@@ -1276,6 +1296,7 @@ def register_callbacks(app: Any) -> None:
                 {"display": "none"},
                 [],
                 {"display": "block"},
+                True,
                 True,
                 no_update,
                 no_update,
@@ -1299,6 +1320,7 @@ def register_callbacks(app: Any) -> None:
                 {"display": "none"},
                 [],
                 {"display": "block"},
+                True,
                 True,
                 no_update,
                 no_update,
@@ -1378,11 +1400,62 @@ def register_callbacks(app: Any) -> None:
             children,
             {"display": "none"},
             False,
+            False,
             updated_store,
             smiles,
             evolution_targets,
             smiles,
         )
+
+    @app.callback(
+        Output("pathway-start-smiles", "value"),
+        Input("species-to-pathway-btn", "n_clicks"),
+        Input("rxn-to-pathway-btn", "n_clicks"),
+        State("species-grid", "selected_rows"),
+        State("species-grid", "data"),
+        State("rxn-grid", "selected_rows"),
+        State("rxn-grid", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _send_selection_to_pathway(
+        species_clicks,
+        reaction_clicks,
+        species_selected,
+        species_rows,
+        reaction_selected,
+        reaction_rows,
+        store,
+    ):
+        if ctx.triggered_id == "species-to-pathway-btn":
+            if species_clicks is None:
+                raise PreventUpdate
+            rows = species_rows or []
+            if species_selected:
+                index = int(species_selected[0])
+                if 0 <= index < len(rows):
+                    smiles = str((rows[index] or {}).get("smiles") or "")
+                    if smiles:
+                        return smiles
+            smiles = str((store or {}).get("selected_smiles") or "")
+            if smiles:
+                return smiles
+            raise PreventUpdate
+        if reaction_clicks is None or not reaction_selected:
+            raise PreventUpdate
+        rows = reaction_rows or []
+        index = int(reaction_selected[0])
+        if index < 0 or index >= len(rows):
+            raise PreventUpdate
+        row = rows[index] or {}
+        reactants = row.get("reactant_smiles") or []
+        if reactants:
+            return str(reactants[0])
+        reaction_text = str(row.get("reaction_smiles") or "")
+        first_side, separator, _second_side = reaction_text.partition(" -> ")
+        if separator and first_side:
+            return first_side.split(" + ", 1)[0]
+        raise PreventUpdate
 
     # ── Transitions ─────────────────────────────────────────────────
 
@@ -2095,6 +2168,237 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         return {"content": svc.rows_to_csv(rows), "filename": "event_evidence.csv", "type": "text/csv"}
 
+    # ── Candidate pathways ─────────────────────────────────────────
+
+    @app.callback(
+        Output("pathway-grid", "data"),
+        Output("pathway-grid", "columns"),
+        Output("pathway-cytoscape", "elements"),
+        Output("pathway-alert", "children"),
+        Output("pathway-store", "data"),
+        Output("pathway-grid", "selected_rows"),
+        Input("pathway-search-btn", "n_clicks"),
+        State("pathway-start-smiles", "value"),
+        State("pathway-direction", "value"),
+        State("pathway-max-depth", "value"),
+        State("pathway-max-branches", "value"),
+        State("pathway-max-paths", "value"),
+        State("pathway-min-net-tp", "value"),
+        State("pathway-min-directionality", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _search_pathways(
+        n_clicks,
+        start_smiles,
+        direction,
+        max_depth,
+        max_branches,
+        max_paths,
+        min_net_tp,
+        min_directionality,
+        store,
+    ):
+        if n_clicks is None:
+            raise PreventUpdate
+        start = str(start_smiles or "")
+        artifacts = (store or {}).get("artifacts") or {}
+        try:
+            payload = svc.find_pathways(
+                artifacts,
+                start,
+                direction=direction if direction is not None else "downstream",
+                max_depth=int(3 if max_depth is None else max_depth),
+                max_branches=int(5 if max_branches is None else max_branches),
+                max_paths=int(20 if max_paths is None else max_paths),
+                min_net_tp=int(1 if min_net_tp is None else min_net_tp),
+                min_directionality=float(
+                    0.05
+                    if min_directionality is None
+                    else min_directionality
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            return [], _pathway_columns(), [], str(exc), None, []
+        except svc.ServiceError as exc:
+            return [], _pathway_columns(), [], str(exc.message), None, []
+
+        rows = _pathway_rows(payload)
+        elements = svc.build_pathway_elements(payload)
+        reason_messages = {
+            "species_absent": "起始物种不在当前反应网络中。",
+            "no_positive_net_continuation": "该物种没有正净通量的可继续反应。",
+            "filtered_by_thresholds": "候选路径均被当前净通量或方向性阈值过滤。",
+        }
+        if rows:
+            message = f"找到 {len(rows)} 条候选路径；已展开 {int(payload.get('expansions') or 0)} 个状态。"
+        else:
+            message = reason_messages.get(
+                str(payload.get("reason") or ""),
+                "未找到候选路径。",
+            )
+        if payload.get("truncated"):
+            message += (
+                f" 搜索达到展开上限，结果已截断（expansions="
+                f"{int(payload.get('expansions') or 0)}）。"
+            )
+        return rows, _pathway_columns(), elements, message, payload, []
+
+    @app.callback(
+        Output("pathway-selected-path", "data"),
+        Output("pathway-selected-step", "data"),
+        Output("pathway-selection-summary", "children"),
+        Output("pathway-open-events-btn", "disabled"),
+        Output("pathway-highlight-network-btn", "disabled"),
+        Input("pathway-store", "data"),
+        Input("pathway-grid", "selected_rows"),
+        Input("pathway-cytoscape", "tapNodeData"),
+        State("pathway-grid", "data"),
+    )
+    def _select_pathway(payload, selected_rows, node_data, grid_rows):
+        payload = payload or {}
+        paths = payload.get("paths") or []
+        if ctx.triggered_id == "pathway-store" or not paths:
+            return None, None, "选择一条路径或一个反应节点。", True, True
+
+        selected_path = None
+        selected_step = None
+        if ctx.triggered_id == "pathway-grid":
+            rows = grid_rows or []
+            if selected_rows:
+                index = int(selected_rows[0])
+                if 0 <= index < len(rows):
+                    rank = int((rows[index] or {}).get("rank") or 0)
+                    selected_path = next(
+                        (
+                            path
+                            for path in paths
+                            if int(path.get("rank") or 0) == rank
+                        ),
+                        None,
+                    )
+        elif (
+            ctx.triggered_id == "pathway-cytoscape"
+            and isinstance(node_data, dict)
+            and node_data.get("node_kind") == "reaction"
+        ):
+            rank = int(node_data.get("path_rank") or 0)
+            step_index = int(node_data.get("step_index") or 0)
+            reaction_key = str(node_data.get("reaction_key") or "")
+            selected_path = next(
+                (
+                    path
+                    for path in paths
+                    if int(path.get("rank") or 0) == rank
+                ),
+                None,
+            )
+            if selected_path is not None:
+                steps = selected_path.get("steps") or []
+                if 1 <= step_index <= len(steps):
+                    candidate = steps[step_index - 1]
+                    if str(candidate.get("reaction_key") or "") == reaction_key:
+                        reactants = [
+                            str(value)
+                            for value in candidate.get("reactants") or []
+                        ]
+                        products = [
+                            str(value)
+                            for value in candidate.get("products") or []
+                        ]
+                        selected_step = {
+                            **candidate,
+                            "path_rank": rank,
+                            "step_index": step_index,
+                            "reaction_text": (
+                                f"{' + '.join(reactants)} -> "
+                                f"{' + '.join(products)}"
+                            ),
+                        }
+        if selected_path is None:
+            return None, None, "选择一条有效路径或反应节点。", True, True
+        path_handoff = {
+            "path_rank": int(selected_path.get("rank") or 0),
+            "species_ids": [
+                str(value) for value in selected_path.get("species") or []
+            ],
+            "reaction_keys": [
+                str(step.get("reaction_key") or "")
+                for step in selected_path.get("steps") or []
+            ],
+        }
+        if selected_step is not None:
+            summary = (
+                f"路径 {path_handoff['path_rank']} · 第 "
+                f"{selected_step['step_index']} 步 · "
+                f"{selected_step['reaction_text']}"
+            )
+        else:
+            summary = (
+                f"已选路径 {path_handoff['path_rank']}；"
+                "点击黄色反应节点可查看事件证据。"
+            )
+        return path_handoff, selected_step, summary, selected_step is None, False
+
+    @app.callback(
+        Output("event-reaction-text", "value", allow_duplicate=True),
+        Input("pathway-open-events-btn", "n_clicks"),
+        State("pathway-selected-step", "data"),
+        prevent_initial_call=True,
+    )
+    def _send_pathway_step_to_events(n_clicks, selected_step):
+        if n_clicks is None or not selected_step:
+            raise PreventUpdate
+        reaction_text = str(selected_step.get("reaction_text") or "")
+        if not reaction_text:
+            raise PreventUpdate
+        return reaction_text
+
+    @app.callback(
+        Output("network-store", "data", allow_duplicate=True),
+        Input("pathway-highlight-network-btn", "n_clicks"),
+        State("pathway-selected-path", "data"),
+        prevent_initial_call=True,
+    )
+    def _send_pathway_to_network(n_clicks, selected_path):
+        if n_clicks is None or not selected_path:
+            raise PreventUpdate
+        return {
+            "schema_version": "reacnet-scope/network-highlight/v1",
+            "source": "pathway",
+            "path_rank": selected_path.get("path_rank"),
+            "species_ids": list(selected_path.get("species_ids") or []),
+            "reaction_keys": list(selected_path.get("reaction_keys") or []),
+        }
+
+    @app.callback(
+        Output("pathway-json-download", "data"),
+        Input("pathway-json-btn", "n_clicks"),
+        State("pathway-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_pathway_json(n_clicks, payload):
+        if n_clicks is None or not payload:
+            raise PreventUpdate
+        return dcc.send_string(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            "candidate_pathways.json",
+        )
+
+    @app.callback(
+        Output("pathway-csv-download", "data"),
+        Input("pathway-csv-btn", "n_clicks"),
+        State("pathway-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_pathway_csv(n_clicks, payload):
+        if n_clicks is None or not payload:
+            raise PreventUpdate
+        return dcc.send_string(
+            _pathway_csv(payload),
+            "candidate_pathways.csv",
+        )
+
     # ── Observation network ─────────────────────────────────────────
 
     @app.callback(
@@ -2792,6 +3096,109 @@ def _event_columns(rows=None):
         "reaction_smiles",
     ]
     return _columns_from_rows(rows or [], preferred)
+
+
+def _pathway_columns():
+    return _dt_columns(
+        [
+            {"field": "rank", "headerName": "#", "type": "numericColumn"},
+            {"field": "formula_chain", "headerName": "分子式路径"},
+            {"field": "smiles_chain", "headerName": "SMILES 路径"},
+            {"field": "path_score", "headerName": "路径分数", "type": "numericColumn"},
+            {"field": "weakest_step_score", "headerName": "最弱步分数", "type": "numericColumn"},
+            {"field": "depth", "headerName": "深度", "type": "numericColumn"},
+            {"field": "evidence_badge", "headerName": "证据"},
+        ]
+    )
+
+
+def _pathway_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in payload.get("paths") or []:
+        steps = path.get("steps") or []
+        step_scores = [
+            float(step.get("score"))
+            for step in steps
+            if step.get("score") is not None
+        ]
+        rows.append(
+            {
+                "rank": int(path.get("rank") or 0),
+                "formula_chain": " → ".join(
+                    str(value) for value in path.get("formulas") or []
+                ),
+                "smiles_chain": " → ".join(
+                    str(value) for value in path.get("species") or []
+                ),
+                "path_score": path.get("score"),
+                "weakest_step_score": min(step_scores) if step_scores else None,
+                "depth": len(steps),
+                "evidence_badge": (
+                    "事件已关联"
+                    if path.get("evidence_status") == "evidence_linked"
+                    else "仅网络"
+                ),
+            }
+        )
+    return rows
+
+
+def _pathway_csv(payload: dict[str, Any]) -> str:
+    fields = [
+        "path_rank",
+        "step_index",
+        "formula_chain",
+        "smiles_chain",
+        "path_score",
+        "weakest_step_score",
+        "reaction_key",
+        "reaction_text",
+        "reactants",
+        "products",
+        "step_score",
+        "evidence_status",
+        "score_version",
+    ]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for path in payload.get("paths") or []:
+        steps = path.get("steps") or []
+        scores = [
+            float(step.get("score"))
+            for step in steps
+            if step.get("score") is not None
+        ]
+        weakest = min(scores) if scores else None
+        for step_index, step in enumerate(steps, start=1):
+            reactants = [str(value) for value in step.get("reactants") or []]
+            products = [str(value) for value in step.get("products") or []]
+            writer.writerow(
+                {
+                    "path_rank": path.get("rank"),
+                    "step_index": step_index,
+                    "formula_chain": " -> ".join(
+                        str(value) for value in path.get("formulas") or []
+                    ),
+                    "smiles_chain": " -> ".join(
+                        str(value) for value in path.get("species") or []
+                    ),
+                    "path_score": path.get("score"),
+                    "weakest_step_score": weakest,
+                    "reaction_key": step.get("reaction_key"),
+                    "reaction_text": (
+                        f"{' + '.join(reactants)} -> {' + '.join(products)}"
+                    ),
+                    "reactants": json.dumps(reactants, ensure_ascii=False),
+                    "products": json.dumps(products, ensure_ascii=False),
+                    "step_score": step.get("score"),
+                    "evidence_status": step.get("evidence_status"),
+                    "score_version": step.get("score_version")
+                    or path.get("score_version")
+                    or payload.get("score_version"),
+                }
+            )
+    return buffer.getvalue()
 
 
 def _literature_columns():

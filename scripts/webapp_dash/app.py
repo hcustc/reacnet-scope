@@ -38,12 +38,13 @@ from scripts.webapp_dash import services as svc  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-PAGE_IDS = ["workflow", "species", "transitions", "reactions", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
+PAGE_IDS = ["workflow", "species", "transitions", "reactions", "pathway", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
 PAGE_LABELS = {
     "workflow": "反应证据工作流",
     "species": "物种检索",
     "transitions": "转化关系",
     "reactions": "反应式检索",
+    "pathway": "关键路径",
     "intermediate": "中间体筛选",
     "evolution": "时间演化",
     "carbon": "C/O/Cl 组成演化",
@@ -57,6 +58,7 @@ PAGE_DESCRIPTIONS = {
     "species": "按分子式、SMILES 或精确质量定位物种，并查看结构与通量。",
     "transitions": "围绕已选物种查看生成、消耗及净通量关系。",
     "reactions": "按反应物和产物组合检索反应，比较正反向通量。",
+    "pathway": "从精确 SMILES 出发，搜索有界候选路径并关联事件证据。",
     "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "选择 O/Cl 条件，查看碳数随时间变化，再点击曲线查看代表物种。",
@@ -119,6 +121,7 @@ def _topbar() -> dbc.Container:
                     dbc.DropdownMenu(
                         [
                             dbc.DropdownMenuItem("反应式检索", id="nav-reactions"),
+                            dbc.DropdownMenuItem("关键路径", id="nav-pathway"),
                             dbc.DropdownMenuItem("中间体筛选", id="nav-intermediate"),
                             dbc.DropdownMenuItem("时间演化", id="nav-evolution"),
                             dbc.DropdownMenuItem("C/O/Cl 组成演化", id="nav-carbon"),
@@ -142,7 +145,7 @@ def _topbar() -> dbc.Container:
 
 def _nav() -> html.Div:
     groups = [
-        ("检索与筛选", ["species", "transitions", "reactions", "intermediate"]),
+        ("检索与筛选", ["species", "transitions", "reactions", "pathway", "intermediate"]),
         ("动力学分析", ["evolution", "carbon", "events", "network"]),
         ("验证与对比", ["literature", "batch-compare"]),
     ]
@@ -162,7 +165,7 @@ def _nav() -> html.Div:
     children.append(
         html.Div(
             [
-                html.Span("10", className="rs-nav-count"),
+                html.Span("11", className="rs-nav-count"),
                 html.Span("个分析工具"),
             ],
             className="rs-nav-footer",
@@ -194,7 +197,13 @@ def _detail_panel() -> html.Div:
             html.Div(
                 [
                     html.Div([html.H6("选中物种详情"), html.Span("结构与网络统计", className="rs-detail-kicker")]),
-                    dbc.Button("定位该物种事件", id="species-to-event-btn", color="secondary", size="sm", outline=True, disabled=True),
+                    html.Div(
+                        [
+                            dbc.Button("作为路径起点", id="species-to-pathway-btn", color="primary", size="sm", outline=True, disabled=True),
+                            dbc.Button("定位该物种事件", id="species-to-event-btn", color="secondary", size="sm", outline=True, disabled=True),
+                        ],
+                        className="d-flex gap-2",
+                    ),
                 ],
                 className="rs-detail-header",
             ),
@@ -506,6 +515,7 @@ def _reactions_page() -> html.Div:
                         dbc.Label("Top", className="mb-0", style={"fontSize": 12}),
                         dcc.Input(id="rxn-top", value="50", type="number", style={"width": 76}),
                         dbc.Button("查询", id="rxn-search-btn", color="primary", size="sm"),
+                        dbc.Button("从所选反应起点找路径", id="rxn-to-pathway-btn", color="primary", size="sm", outline=True),
                         dbc.Button("送入事件证据", id="rxn-to-event-btn", color="secondary", size="sm", outline=True),
                         dbc.Button("导出 CSV", id="rxn-csv-btn", color="secondary", size="sm", outline=True),
                         dcc.Download(id="rxn-csv-download"),
@@ -1147,6 +1157,130 @@ def _network_page() -> html.Div:
     return html.Div([query_card, cyto_card], className="rs-page", id="page-network")
 
 
+def _pathway_page() -> html.Div:
+    controls = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                dbc.Label("起始物种（精确 SMILES）"),
+                                dcc.Input(
+                                    id="pathway-start-smiles",
+                                    value="",
+                                    placeholder="例如 [CH3]",
+                                    className="rs-pathway-start",
+                                ),
+                            ],
+                            className="rs-pathway-field rs-pathway-start-field",
+                        ),
+                        html.Div(
+                            [
+                                dbc.Label("方向"),
+                                dcc.Dropdown(
+                                    id="pathway-direction",
+                                    options=[
+                                        {"label": "下游（消耗）", "value": "downstream"},
+                                        {"label": "上游（生成）", "value": "upstream"},
+                                    ],
+                                    value="downstream",
+                                    clearable=False,
+                                ),
+                            ],
+                            className="rs-pathway-field",
+                        ),
+                        html.Div([dbc.Label("最大深度"), dcc.Input(id="pathway-max-depth", value=3, type="number", min=1)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("每步分支"), dcc.Input(id="pathway-max-branches", value=5, type="number", min=1)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("路径上限"), dcc.Input(id="pathway-max-paths", value=20, type="number", min=1)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("最小净 TP"), dcc.Input(id="pathway-min-net-tp", value=1, type="number", min=1)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("最小方向性"), dcc.Input(id="pathway-min-directionality", value=0.05, type="number", min=0, max=1, step=0.01)], className="rs-pathway-field"),
+                        dbc.Button("搜索候选路径", id="pathway-search-btn", color="primary", className="rs-pathway-search"),
+                    ],
+                    className="rs-pathway-controls",
+                ),
+                html.P(
+                    "候选路径按网络通量与可用事件证据排序，不代表已经证明的原子连续机理。",
+                    className="rs-step-note mt-2 mb-0",
+                ),
+            ],
+            className="p-3",
+        ),
+        className="rs-card",
+    )
+    results = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(id="pathway-alert", className="rs-result-summary"),
+                        html.Div(
+                            [
+                                dbc.Button("下载 JSON", id="pathway-json-btn", color="secondary", size="sm", outline=True),
+                                dbc.Button("下载 CSV", id="pathway-csv-btn", color="secondary", size="sm", outline=True),
+                                dcc.Download(id="pathway-json-download"),
+                                dcc.Download(id="pathway-csv-download"),
+                            ],
+                            className="d-flex gap-2",
+                        ),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                dcc.Loading(
+                    html.Div(
+                        _grid("pathway-grid"),
+                        className="rs-grid-wrap",
+                    ),
+                    type="circle",
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+    )
+    graph = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.H6("候选路径超图", className="rs-card-title mb-0"),
+                                html.Div(id="pathway-selection-summary", className="rs-step-note"),
+                            ]
+                        ),
+                        html.Div(
+                            [
+                                dbc.Button("查看该步事件", id="pathway-open-events-btn", color="secondary", size="sm", outline=True, disabled=True),
+                                dbc.Button("在网络中高亮路径", id="pathway-highlight-network-btn", color="primary", size="sm", outline=True, disabled=True),
+                            ],
+                            className="d-flex gap-2",
+                        ),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                cyto.Cytoscape(
+                    id="pathway-cytoscape",
+                    layout={"name": "breadthfirst", "directed": True, "padding": 20},
+                    elements=[],
+                    style={"width": "100%", "height": "460px"},
+                    className="rs-cytoscape rs-pathway-cytoscape",
+                    stylesheet=[
+                        {"selector": "node.species", "style": {"label": "data(label)", "background-color": "#dbeafe", "border-color": "#60a5fa", "border-width": 1, "font-size": 8}},
+                        {"selector": "node.reaction", "style": {"label": "data(label)", "shape": "diamond", "width": 24, "height": 24, "background-color": "#fbbf24", "font-size": 8}},
+                        {"selector": "node.network-only", "style": {"background-color": "#d1d5db", "border-style": "dashed"}},
+                        {"selector": "edge", "style": {"curve-style": "bezier", "target-arrow-shape": "triangle", "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", "width": 1}},
+                        {"selector": ".is-selected-path", "style": {"line-color": "#2563eb", "target-arrow-color": "#2563eb", "border-color": "#2563eb", "border-width": 3, "width": 3}},
+                    ],
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card",
+    )
+    return html.Div([controls, results, graph], className="rs-page rs-pathway-page", id="page-pathway")
+
+
 def _literature_page() -> html.Div:
     input_card = dbc.Card(
         dbc.CardBody(
@@ -1545,6 +1679,7 @@ def build_layout() -> html.Div:
                             _species_page(),
                             _transitions_page(),
                             _reactions_page(),
+                            _pathway_page(),
                             _intermediate_page(),
                             _evolution_page(),
                             _carbon_page(),
@@ -1583,6 +1718,9 @@ def build_layout() -> html.Div:
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
             dcc.Store(id="network-store", storage_type="memory", data=None),
+            dcc.Store(id="pathway-store", storage_type="memory", data=None),
+            dcc.Store(id="pathway-selected-step", storage_type="memory", data=None),
+            dcc.Store(id="pathway-selected-path", storage_type="memory", data=None),
             dcc.Store(id="literature-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="batch-conditions-store", storage_type="memory", data=None),
             dcc.Store(id="batch-matrix-grid-store", storage_type="memory", data={"rows": []}),
