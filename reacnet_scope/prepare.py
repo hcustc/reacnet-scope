@@ -16,6 +16,7 @@ from .indexes import (
     ROUTE_INDEX_STORE,
     TRAJECTORY_INDEX_STORE,
 )
+from .composition import SPECIES_COMPOSITION_STORE
 from .rng_events import event_output_status
 
 
@@ -74,6 +75,11 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         if artifacts["trajectory"]["exists"]
         else {"state": "missing"}
     )
+    composition_status = (
+        SPECIES_COMPOSITION_STORE.status(dataset["species"])
+        if artifacts["species"]["exists"]
+        else {"state": "missing"}
+    )
     return {
         "manifest_version": 1,
         "dataset_id": resolve_dataset_paths(Path(dataset["base"]).parent, Path(dataset["base"]).name).dataset_id,
@@ -83,6 +89,7 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         "indexes": {
             "route": route_status,
             "trajectory": trajectory_status,
+            "composition": composition_status,
             "rng_events": event_output_status(dataset["reactionevent"], dataset["molecules"]),
         },
     }
@@ -101,6 +108,7 @@ def _capacity_check(
     *,
     include_route: bool,
     include_trajectory: bool,
+    include_composition: bool,
 ) -> None:
     cache = Path(os.environ["REACNET_SCOPE_CACHE_DIR"]).expanduser().resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -112,6 +120,8 @@ def _capacity_check(
         required += int(Path(dataset["route"]).stat().st_size * 2.5)
     if include_trajectory and Path(dataset["trajectory"]).is_file():
         required += max(256 * 1024**2, Path(dataset["trajectory"]).stat().st_size // 100)
+    if include_composition and Path(dataset["species"]).is_file():
+        required += max(128 * 1024**2, Path(dataset["species"]).stat().st_size // 2)
     if free < required:
         raise RuntimeError(
             f"insufficient cache capacity: need about {required / 1024**3:.1f} GiB, "
@@ -124,18 +134,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("case", help="Dataset directory or dataset base path")
     parser.add_argument("--base", default="", help="Dataset base name when a directory contains multiple runs")
     parser.add_argument("--status", action="store_true", help="Inspect state without building")
-    parser.add_argument("--route-only", action="store_true")
-    parser.add_argument("--trajectory-only", action="store_true")
-    parser.add_argument("--rebuild", choices=("route", "trajectory", "all"))
-    parser.add_argument("--clear", choices=("route", "trajectory", "all"))
+    only = parser.add_mutually_exclusive_group()
+    only.add_argument("--route-only", action="store_true")
+    only.add_argument("--trajectory-only", action="store_true")
+    only.add_argument("--composition-only", action="store_true")
+    parser.add_argument("--rebuild", choices=("route", "trajectory", "composition", "all"))
+    parser.add_argument("--clear", choices=("route", "trajectory", "composition", "all"))
     args = parser.parse_args(argv)
     if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
         parser.error("REACNET_SCOPE_CACHE_DIR must be set")
     dataset = discover_dataset(args.case, args.base)
     # RNG-authored event files replace Route reconstruction in the normal
     # workflow.  Route preparation remains explicit for compatibility only.
-    selected_route = bool(args.route_only or args.rebuild in {"route", "all"})
-    selected_trajectory = bool(not args.route_only or args.rebuild in {"trajectory", "all"})
+    explicit_only = bool(args.route_only or args.trajectory_only or args.composition_only)
+    if explicit_only:
+        selected_route = bool(args.route_only)
+        selected_trajectory = bool(args.trajectory_only)
+        selected_composition = bool(args.composition_only)
+    elif args.rebuild:
+        selected_route = args.rebuild in {"route", "all"}
+        selected_trajectory = args.rebuild in {"trajectory", "all"}
+        selected_composition = args.rebuild in {"composition", "all"}
+    else:
+        selected_route = False
+        selected_trajectory = True
+        selected_composition = True
     route_needs_build = (
         selected_route
         and Path(dataset["route"]).is_file()
@@ -146,11 +169,17 @@ def main(argv: list[str] | None = None) -> int:
         and Path(dataset["trajectory"]).is_file()
         and TRAJECTORY_INDEX_STORE.status(dataset["trajectory"])["state"] != "ready"
     )
+    composition_needs_build = (
+        selected_composition
+        and Path(dataset["species"]).is_file()
+        and SPECIES_COMPOSITION_STORE.status(dataset["species"])["state"] != "ready"
+    )
     if not args.status and not args.clear:
         _capacity_check(
             dataset,
             include_route=route_needs_build,
             include_trajectory=trajectory_needs_build,
+            include_composition=composition_needs_build,
         )
 
     def report(update: dict[str, Any]) -> None:
@@ -162,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
             clear_index(dataset["route"], kind="route")
         if target in {"trajectory", "all"} and Path(dataset["trajectory"]).is_file():
             clear_index(dataset["trajectory"], kind="trajectory")
+        if target in {"composition", "all"} and Path(dataset["species"]).is_file():
+            SPECIES_COMPOSITION_STORE.clear(dataset["species"])
         if args.clear:
             print(f"Manifest: {write_manifest(dataset)}")
             return 0
@@ -175,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
                 if not Path(dataset["trajectory"]).is_file():
                     raise FileNotFoundError(f"trajectory file not found: {dataset['trajectory']}")
                 TRAJECTORY_INDEX_STORE.build(dataset["trajectory"], progress_callback=report)
+            if selected_composition:
+                if not Path(dataset["species"]).is_file():
+                    raise FileNotFoundError(f"species file not found: {dataset['species']}")
+                SPECIES_COMPOSITION_STORE.build(dataset["species"], progress_callback=report)
         except KeyboardInterrupt:
             print("Preparation canceled; committed checkpoints were preserved.")
             write_manifest(dataset)

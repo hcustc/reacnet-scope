@@ -4,6 +4,8 @@ from typing import Any
 
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import services as svc
+
+
 def _layout_string_ids(node: Any) -> set[str]:
     ids: set[str] = set()
     if isinstance(node, dict):
@@ -38,6 +40,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-prep-refresh-btn" in layout_ids
     assert "data-rng-event-command" in layout_ids
     assert "data-clear-trajectory-btn" in layout_ids
+    assert "carbon-reference-smiles" in layout_ids
+    assert "carbon-timestep" in layout_ids
+    assert "carbon-parent-name" not in layout_ids
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -48,6 +53,106 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
             if component_id not in layout_ids:
                 missing.append(component_id)
     assert missing == []
+
+
+def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_build(_artifacts, **kwargs):
+        captured.update(kwargs)
+        return {
+            "carbon_skeleton_rows": [],
+            "summary": {},
+            "meta": {},
+            "filters": {},
+            "x_name": "Time (ps)",
+        }
+
+    monkeypatch.setattr(svc, "build_elemental_composition_evolution", fake_build)
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]] == ["carbon-search-btn"]
+    )
+    state_values = {
+        "carbon-max-c": 8,
+        "carbon-chlorine-state": "all",
+        "carbon-oxygen-state": "all",
+        "carbon-reference-smiles": "[C][C]",
+        "carbon-timestep": 0.002,
+        "app-store": {"artifacts": {"species": "/tmp/example.species"}},
+    }
+    payload = {
+        "output": dependency["output"],
+        "outputs": [
+            {"id": "carbon-alert", "property": "children"},
+            {"id": "carbon-highlights", "property": "children"},
+            {"id": "carbon-payload-store", "property": "data"},
+            {"id": "carbon-composition-trend", "property": "figure"},
+        ],
+        "changedPropIds": ["carbon-search-btn.n_clicks"],
+        "inputs": [{"id": "carbon-search-btn", "property": "n_clicks", "value": 1}],
+        "state": [
+            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
+            for item in dependency["state"]
+        ],
+    }
+
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    assert captured["reference_smiles"] == "[C][C]"
+    assert captured["timestep_ps"] == 0.002
+
+
+def test_species_search_preserves_zero_mass_tolerance(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_search(_artifacts, _query, **kwargs):
+        captured.update(kwargs)
+        return {"rows": [], "meta": {"catalog_size": 0, "moname_available": False}}
+
+    monkeypatch.setattr(svc, "search_species_catalog", fake_search)
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]]
+        == ["workflow-species-search", "app-store"]
+    )
+    input_values = {
+        "workflow-species-search": 1,
+        "app-store": {"artifacts": {"species": "/tmp/example.species"}},
+    }
+    state_values = {
+        "workflow-species-query": "31",
+        "workflow-species-kind": "mass",
+        "workflow-mass-tolerance": 0,
+        "workflow-mass-mode": "exact",
+    }
+    payload = {
+        "output": dependency["output"],
+        "outputs": [
+            {"id": "workflow-species-grid", "property": "data"},
+            {"id": "workflow-species-grid", "property": "columns"},
+            {"id": "workflow-species-alert", "property": "children"},
+        ],
+        "changedPropIds": ["workflow-species-search.n_clicks"],
+        "inputs": [
+            {"id": item["id"], "property": item["property"], "value": input_values[item["id"]]}
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
+            for item in dependency["state"]
+        ],
+    }
+
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    assert captured["mass_tolerance"] == 0
 
 
 def test_directory_browser_open_callback_runs_from_initial_layout(tmp_path, monkeypatch) -> None:

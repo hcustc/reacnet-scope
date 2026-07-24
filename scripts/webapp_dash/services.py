@@ -16,11 +16,14 @@ import os
 import re
 import shlex
 import sys
+import time
 import traceback
+from functools import lru_cache
 from bisect import bisect_left
 from pathlib import Path
 from collections import Counter
 from typing import Any
+from urllib.parse import quote
 
 # Ensure the project tool root is importable when this package is loaded
 # directly (e.g. via ``uv run reacnet-scope-web-dash``).
@@ -28,14 +31,17 @@ _TOOL_ROOT = Path(__file__).resolve().parents[2]
 if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
-from rng_tools.network import ReactionNetwork, parse_reactionabcd  # noqa: E402
+from rng_tools.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
+    IndexInvalidError,
     IndexNotReadyError,
+    IndexStaleError,
     clear_index,
     resolve_dataset_paths,
     TRAJECTORY_INDEX_STORE,
 )
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
 from reacnet_scope.rng_events import RngEventDataError, query_rng_events  # noqa: E402
 from scripts.webapp.server import (  # noqa: E402
     STORE,
@@ -44,6 +50,7 @@ from scripts.webapp.server import (  # noqa: E402
     build_intermediate_candidates_payload,
     build_species_plot_payload,
     build_transition_table_payload,
+    collect_species_totals,
     collect_next_reactions,
     derive_species_path,
     formula_mass_fields,
@@ -154,7 +161,7 @@ def artifacts_from_status(status: dict[str, Any]) -> dict[str, str]:
     dataset = status.get("dataset", {}) if status else {}
     artifacts = dataset.get("artifacts", {}) or {}
     out: dict[str, str] = {}
-    for key in ("reaction", "species", "trajectory", "route", "table", "reactionevent", "molecules"):
+    for key in ("reaction", "species", "moname", "trajectory", "route", "table", "reactionevent", "molecules"):
         item = artifacts.get(key, {}) or {}
         path_text = item.get("path") or ""
         if path_text:
@@ -190,25 +197,37 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     artifacts = artifacts_from_status(status)
     readiness = dataset_readiness(status)
     selected_base = str(dataset.get("selected_base") or dataset.get("base") or "")
-    paths = (
-        resolve_dataset_paths(Path(selected_base).parent, Path(selected_base).name)
-        if selected_base
-        else None
-    )
+    try:
+        paths = (
+            resolve_dataset_paths(Path(selected_base).parent, Path(selected_base).name)
+            if selected_base
+            else None
+        )
+    except RuntimeError:
+        paths = None
     dataset_id = paths.dataset_id if paths else ""
     manifest = dataset.get("manifest", {}) or {}
     events = dict(readiness.get("event_search") or {"state": "missing"})
     trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
-    index_bytes = int(trajectory.get("index_size", 0) or 0)
+    species_source = artifacts.get("species", "")
+    if species_source:
+        try:
+            composition = SPECIES_COMPOSITION_STORE.status(species_source)
+        except RuntimeError as exc:
+            composition = {"state": "invalid", "message": str(exc)}
+    else:
+        composition = {"state": "missing"}
+    index_bytes = int(trajectory.get("index_size", 0) or 0) + int(composition.get("index_size", 0) or 0)
     timestamps = [
         value
         for value in (
             trajectory.get("updated_at_epoch"),
+            composition.get("updated_at_epoch"),
         )
         if value is not None
     ]
     cache_dir = str(paths.cache_dir) if paths else ""
-    for item in (events, trajectory):
+    for item in (events, trajectory, composition):
         if item.get("cache_dir"):
             cache_dir = str(item["cache_dir"])
             break
@@ -232,8 +251,10 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "basic": dict(readiness.get("basic_analysis") or {"state": "missing"}),
         "events": events,
         "trajectory": trajectory,
+        "composition": composition,
         "rng_event_command": "--reaction-event --show-molecule-time",
         "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
+        "composition_command": f"{command_prefix} --composition-only" if species_source else "",
     }
 
 
@@ -263,6 +284,217 @@ def candidates_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Species search (formula / SMILES / mass)
 # ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=8)
+def _load_moname_catalog(path_text: str, size: int, mtime_ns: int) -> dict[str, dict[str, Any]]:
+    """Return compact, optional structure evidence grouped by exact SMILES.
+
+    ReacNetGenerator's historical ``.moname`` format is deliberately treated
+    as supplementary evidence: the species catalogue is always sourced from
+    ``.species`` and this parser never attempts to infer a molecular identity
+    from atom IDs alone.
+    """
+    del size, mtime_ns
+    out: dict[str, dict[str, Any]] = {}
+    with open(path_text, encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            parts = raw.strip().split(None, 2)
+            if not parts:
+                continue
+            smiles = parts[0]
+            record = out.setdefault(
+                smiles,
+                {"moname_occurrences": 0, "moname_atom_count": 0, "moname_bond_count": 0},
+            )
+            record["moname_occurrences"] += 1
+            if len(parts) > 1:
+                atom_ids = [item for item in re.split(r"[;,]+", parts[1]) if item.strip()]
+                record["moname_atom_count"] = max(int(record["moname_atom_count"]), len(atom_ids))
+            if len(parts) > 2:
+                bonds = []
+                for item in (value.strip() for value in parts[2].split(";")):
+                    if not item:
+                        continue
+                    comma_fields = [value.strip() for value in item.split(",")]
+                    if len(comma_fields) == 3 and all(comma_fields):
+                        bonds.append(item)
+                        continue
+                    # Retain compatibility with older generated fixtures/files.
+                    hyphen_fields = [value.strip() for value in item.split("-")]
+                    if len(hyphen_fields) == 3 and all(hyphen_fields):
+                        bonds.append(item)
+                record["moname_bond_count"] = max(int(record["moname_bond_count"]), len(bonds))
+    return out
+
+
+def _moname_catalog(path_text: str) -> dict[str, dict[str, Any]]:
+    path = Path(path_text)
+    if not path.is_file():
+        return {}
+    stat = path.stat()
+    return _load_moname_catalog(str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _file_signature(path_text: str) -> tuple[str, int, int]:
+    """Return a cache-safe signature for an optional artifact file."""
+    path = Path(path_text).expanduser()
+    if not path.is_file():
+        return "", 0, 0
+    stat = path.stat()
+    return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build one catalogue row, calculating chemistry only for that SMILES."""
+    formula = smiles_formula_cached(smiles) or "?"
+    mass_fields = formula_mass_fields(formula) if formula != "?" else {}
+    evidence = evidence or {}
+    return {
+        "smiles": smiles,
+        "formula": formula,
+        "exact_mass": mass_fields.get("exact_mass"),
+        "nominal_mass": mass_fields.get("nominal_mass"),
+        "total_count": int(total_count),
+        "structure_source": ".moname" if evidence else "SMILES",
+        "moname_available": bool(evidence),
+        "moname_occurrences": int(evidence.get("moname_occurrences") or 0),
+        "moname_atom_count": int(evidence.get("moname_atom_count") or 0),
+        "moname_bond_count": int(evidence.get("moname_bond_count") or 0),
+    }
+
+
+@lru_cache(maxsize=8)
+def _load_species_search_catalog(
+    species_path_text: str,
+    species_size: int,
+    species_mtime_ns: int,
+    moname_path_text: str,
+    moname_size: int,
+    moname_mtime_ns: int,
+) -> tuple[dict[str, Any], ...]:
+    """Materialize formula/mass metadata once per input-file revision.
+
+    A 10k+ species catalogue must only pay the RDKit formula/mass cost once;
+    later searches filter this cached metadata and the cache expires if either
+    source file changes.
+    """
+    del species_size, species_mtime_ns, moname_size, moname_mtime_ns
+    totals = collect_species_totals(species_path_text)
+    moname = _moname_catalog(moname_path_text) if moname_path_text else {}
+    catalog: list[dict[str, Any]] = []
+    for smiles, total_count in totals.items():
+        catalog.append(_species_catalog_entry(smiles, int(total_count), moname.get(smiles)))
+    return tuple(catalog)
+
+
+def _structure_markdown(smiles: str) -> str:
+    """Return a same-origin SVG preview URL accepted by Dash DataTable."""
+    if not smiles:
+        return ""
+    return f"![{smiles}](/api/structure.svg?smiles={quote(smiles, safe='')})"
+
+
+def search_species_catalog(
+    artifacts: dict[str, str],
+    query: str = "",
+    *,
+    kind: str = "auto",
+    mass_tolerance: float = 0.5,
+    mass_mode: str = "exact",
+    top: int = 50,
+) -> dict[str, Any]:
+    """Search the ``.species``-derived target-species catalogue.
+
+    Unlike the legacy species search, this endpoint does not require a
+    reaction network.  It is the first stage of the focused experimental
+    species workflow; reaction channels are joined only in the next stage.
+    """
+    species_path = (artifacts.get("species") or "").strip()
+    if not species_path or not Path(species_path).is_file():
+        raise ServiceError("缺少 .species 数据文件，无法建立物种目录", reason="missing_species_file")
+    text = (query or "").strip()
+    effective_kind = kind if kind and kind != "auto" else (detect_query_kind(text) if text else "all")
+    if effective_kind not in {"all", "formula", "smiles", "mass"}:
+        raise ServiceError(f"未知查询类型: {effective_kind}", reason="bad_kind")
+    target_mass: float | None = None
+    if effective_kind == "mass":
+        try:
+            target_mass = float(text)
+        except ValueError as exc:
+            raise ServiceError(f"无效的质量数: {text}", reason="bad_mass") from exc
+
+    species_signature = _file_signature(species_path)
+    moname_signature = _file_signature((artifacts.get("moname") or "").strip())
+    # The landing table is deliberately a fast path: it needs only the most
+    # abundant rows, not formula/mass derivation for every species in a large
+    # trajectory.  Formula and mass searches build the reusable full index.
+    limit = max(1, int(top or 30))
+    if effective_kind in {"all", "smiles"}:
+        totals = collect_species_totals(species_signature[0])
+        fast_items = [
+            (smiles, total_count)
+            for smiles, total_count in totals.items()
+            if effective_kind == "all" or text.lower() in smiles.lower()
+        ]
+        matching_count = len(fast_items)
+        fast_items.sort(key=lambda item: (-int(item[1]), item[0]))
+        catalog = tuple(_species_catalog_entry(smiles, int(total_count)) for smiles, total_count in fast_items[:limit])
+        catalog_size = len(totals)
+        full_catalog_cached = False
+    else:
+        catalog = _load_species_search_catalog(*species_signature, *moname_signature)
+        catalog_size = len(catalog)
+        full_catalog_cached = True
+        matching_count = None
+    rows: list[dict[str, Any]] = []
+    tolerance = max(0.0, float(mass_tolerance or 0.0))
+    normalized_mode = mass_mode if mass_mode in {"exact", "nominal"} else "exact"
+    for entry in catalog:
+        smiles = str(entry["smiles"])
+        formula = str(entry["formula"])
+        exact = entry.get("exact_mass")
+        nominal = entry.get("nominal_mass")
+        mass_error: float | None = None
+        if effective_kind == "formula" and formula != text:
+            continue
+        if effective_kind == "smiles" and text.lower() not in smiles.lower():
+            continue
+        if effective_kind == "mass":
+            if exact is None or nominal is None or target_mass is None:
+                continue
+            comparison = float(exact) if normalized_mode == "exact" else float(nominal)
+            target = target_mass if normalized_mode == "exact" else float(round(target_mass))
+            mass_error = comparison - target
+            if abs(mass_error) > tolerance:
+                continue
+        rows.append(
+            {
+                **entry,
+                "mass_error": round(mass_error, 6) if mass_error is not None else None,
+                "ppm_error": round(mass_error / target_mass * 1e6, 3) if mass_error is not None and target_mass else None,
+            }
+        )
+    if effective_kind == "mass":
+        rows.sort(key=lambda row: (abs(float(row.get("mass_error") or 0.0)), -int(row["total_count"]), row["smiles"]))
+    else:
+        rows.sort(key=lambda row: (-int(row["total_count"]), row["formula"], row["smiles"]))
+    visible_rows = rows[:limit]
+    for row in visible_rows:
+        row["structure"] = _structure_markdown(str(row["smiles"]))
+    return {
+        "ok": True,
+        "query": {"text": text, "kind": effective_kind, "mass_mode": normalized_mode, "mass_tolerance": tolerance},
+        "rows": visible_rows,
+        "n_rows": matching_count if matching_count is not None else len(rows),
+        "meta": {
+            "species_file": species_signature[0],
+            "moname_file": moname_signature[0],
+            "moname_available": bool(moname_signature[0]),
+            "catalog_size": catalog_size,
+            "catalog_cache": "memory" if full_catalog_cached else "fast-path",
+        },
+    }
 
 
 def detect_query_kind(query: str) -> str:
@@ -494,6 +726,137 @@ def collect_transitions(
         "rows": rows,
         "n_rows": len(rows),
     }
+
+
+def collect_species_channels(
+    artifacts: dict[str, str],
+    smiles: str,
+    *,
+    top: int = 20,
+) -> dict[str, Any]:
+    """Split one target species' high-frequency pathways into two lanes."""
+    production = collect_transitions(artifacts, smiles, direction="produce", top=0).get("rows") or []
+    consumption = collect_transitions(artifacts, smiles, direction="consume", top=0).get("rows") or []
+
+    def decorate(rows: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
+        prepared = []
+        for row in rows:
+            out = dict(row)
+            out["workflow_role"] = role
+            out["role_label"] = "生成" if role == "produce" else "消耗"
+            prepared.append(out)
+        prepared.sort(key=lambda row: (-int(row.get("forward_tp") or 0), -abs(int(row.get("net_tp") or 0)), str(row.get("reaction_smiles") or "")))
+        for rank, row in enumerate(prepared, 1):
+            row["rank"] = rank
+        return prepared[: max(1, int(top or 20))]
+
+    return {
+        "ok": True,
+        "smiles": smiles,
+        "production_rows": decorate(production, "produce"),
+        "consumption_rows": decorate(consumption, "consume"),
+    }
+
+
+def _bond_key(value: str) -> str:
+    parts = [part for part in str(value or "").strip().split("-") if part]
+    if len(parts) < 2:
+        return ""
+    try:
+        left, right = sorted((int(parts[0]), int(parts[1])))
+        suffix = "-".join(parts[2:])
+        return f"{left}-{right}" + (f"-{suffix}" if suffix else "")
+    except ValueError:
+        return "-".join(parts)
+
+
+def _bond_values(value: Any) -> list[str]:
+    return [item for item in (_bond_key(raw) for raw in str(value or "").split(";")) if item]
+
+
+def _bond_atom_ids(bonds: list[str]) -> list[int]:
+    ids: set[int] = set()
+    for bond in bonds:
+        parts = bond.split("-")
+        if len(parts) < 2:
+            continue
+        try:
+            ids.update((int(parts[0]), int(parts[1])))
+        except ValueError:
+            continue
+    return sorted(ids)
+
+
+def rank_representative_events(
+    artifacts: dict[str, str],
+    reaction_text: str,
+    *,
+    max_events: int = 100,
+) -> dict[str, Any]:
+    """Return auditable representative-event recommendations.
+
+    The recommendation is intentionally tiered rather than a hidden numeric
+    score: researchers retain the final choice while seeing why an event is
+    ready (or not ready) for local trajectory validation.
+    """
+    payload = locate_rng_events(artifacts, reaction_text, max_events=max_events)
+    trajectory_path = (artifacts.get("trajectory") or "").strip()
+    indexed_frames: set[int] | None = None
+    index_message = ""
+    if trajectory_path and Path(trajectory_path).is_file():
+        try:
+            indexed_frames = set(TRAJECTORY_INDEX_STORE.open_required(trajectory_path).frames)
+        except IndexNotReadyError as exc:
+            index_message = str(exc)
+    else:
+        index_message = "缺少原始轨迹文件"
+
+    ranked: list[dict[str, Any]] = []
+    for raw in payload.get("rows") or []:
+        row = dict(raw)
+        reactant_bonds = _bond_values(row.get("reactant_bonds"))
+        product_bonds = _bond_values(row.get("product_bonds"))
+        broken = sorted(set(reactant_bonds).difference(product_bonds))
+        formed = sorted(set(product_bonds).difference(reactant_bonds))
+        changed_atoms = _bond_atom_ids([*broken, *formed])
+        before = int(row.get("before_timestep") or 0)
+        after = int(row.get("after_timestep") or 0)
+        association_ok = row.get("association_status") == "matched" and bool(row.get("atom_id_list"))
+        trajectory_ok = indexed_frames is not None and before in indexed_frames and after in indexed_frames
+        if association_ok and trajectory_ok and (broken or formed):
+            tier, reason, priority = "recommended", "原子、键变化和轨迹索引均可核查", 0
+        elif association_ok and trajectory_ok:
+            tier, reason, priority = "reviewable", "可查看局部轨迹，但没有可区分的键变化", 1
+        elif not association_ok:
+            tier, reason, priority = "unavailable", "molecules 时间线未能唯一关联参与原子", 2
+        else:
+            tier, reason, priority = "unavailable", index_message or "轨迹索引未覆盖反应前后帧", 2
+        row.update(
+            {
+                "recommendation": tier,
+                "recommendation_reason": reason,
+                "trajectory_ready": trajectory_ok,
+                "broken_bonds": ";".join(broken),
+                "formed_bonds": ";".join(formed),
+                "changed_atom_ids": changed_atoms,
+                "validation_ready": tier in {"recommended", "reviewable"},
+                "_priority": priority,
+            }
+        )
+        ranked.append(row)
+    ranked.sort(key=lambda row: (int(row["_priority"]), int(row.get("timestep_index") or 0), str(row.get("event_id") or "")))
+    for rank, row in enumerate(ranked, 1):
+        row["recommendation_rank"] = rank
+        row.pop("_priority", None)
+    meta = dict(payload.get("meta") or {})
+    meta.update(
+        {
+            "trajectory_index_ready": indexed_frames is not None,
+            "trajectory_index_message": index_message,
+            "recommended_count": sum(row["recommendation"] == "recommended" for row in ranked),
+        }
+    )
+    return {"ok": True, "rows": ranked, "meta": meta}
 
 
 def search_reactions_by_formula(
@@ -813,7 +1176,258 @@ def build_carbon_evolution(
 
 def carbon_plot_to_csv(payload: dict[str, Any]) -> str:
     """Serialize Carbon plot_data rows to CSV."""
-    return rows_to_csv(payload.get("plot_data") or [])
+    return rows_to_csv(payload.get("csv_rows") or payload.get("plot_data") or [])
+
+
+def build_elemental_composition_evolution(
+    artifacts: dict[str, str],
+    *,
+    species_file: str = "",
+    reference_smiles: str = "",
+    x_axis: str = "ps",
+    timestep_ps: float = 0.0001,
+    max_carbon: int = 6,
+    chlorine_state: str = "all",
+    oxygen_state: str = "all",
+    max_points: int = 600,
+) -> dict[str, Any]:
+    """Build the minimal filtered carbon-skeleton trajectory."""
+    started = time.perf_counter()
+    try:
+        timestep_ps = float(timestep_ps)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("Timestep 必须是正数（ps）", reason="invalid_timestep") from exc
+    if timestep_ps <= 0:
+        raise ServiceError("Timestep 必须是正数（ps）", reason="invalid_timestep")
+    species_path = (species_file or artifacts.get("species") or "").strip()
+    if not species_path or not Path(species_path).is_file():
+        raise ServiceError("缺少 .species 数据文件", reason="missing_species_file")
+    chlorine_state = chlorine_state if chlorine_state in {"all", "chlorinated", "unchlorinated"} else "all"
+    oxygen_state = oxygen_state if oxygen_state in {"all", "oxygenated", "unoxygenated"} else "all"
+    try:
+        indexed = SPECIES_COMPOSITION_STORE.query(
+            species_path,
+            max_points=max_points,
+            max_carbon=max(0, int(max_carbon)),
+            max_oxygen=None,
+            chlorine_mode="exact",
+        )
+    except (
+        IndexNotReadyError,
+        IndexStaleError,
+        IndexBuildInProgressError,
+        IndexInvalidError,
+        RuntimeError,
+    ) as exc:
+        raise ServiceError(str(exc), reason="composition_index_not_ready") from exc
+
+    def convert_time(timestep: int) -> int | float:
+        if x_axis == "step":
+            return int(timestep)
+        value = float(timestep) * float(timestep_ps)
+        return value / 1000.0 if x_axis == "ns" else value
+
+    rows = list(indexed.get("rows") or [])
+    if not rows:
+        raise ServiceError("碳数过滤范围内没有物种组成数据", reason="empty_composition")
+    sampled_timesteps = [int(value) for value in indexed.get("timesteps") or []]
+    first_timestep = sampled_timesteps[0]
+    last_timestep = sampled_timesteps[-1]
+    reference_smiles = str(reference_smiles or "").strip()
+    reference_atoms = count_atoms_fast(reference_smiles) if reference_smiles else {}
+    reference_record = {
+        "smiles": reference_smiles,
+        "formula": formula_from_counts(reference_atoms) if reference_smiles else "",
+        "carbon": int(reference_atoms.get("C", 0)),
+        "oxygen": int(reference_atoms.get("O", 0)),
+        "chlorine": int(reference_atoms.get("Cl", 0)),
+    }
+    if reference_smiles and int(reference_record["carbon"]) <= 0:
+        raise ServiceError(
+            "参考物种必须是包含碳原子的有效 SMILES",
+            reason="invalid_reference_species",
+        )
+    reference_counts = (
+        SPECIES_COMPOSITION_STORE.species_count_series(
+            species_path,
+            sampled_timesteps,
+            reference_smiles,
+        )
+        if reference_smiles
+        else {}
+    )
+
+    def matches_filter(oxygen: int, chlorine: int) -> bool:
+        chlorine_ok = (
+            chlorine_state == "all"
+            or (chlorine_state == "chlorinated" and chlorine > 0)
+            or (chlorine_state == "unchlorinated" and chlorine == 0)
+        )
+        oxygen_ok = (
+            oxygen_state == "all"
+            or (oxygen_state == "oxygenated" and oxygen > 0)
+            or (oxygen_state == "unoxygenated" and oxygen == 0)
+        )
+        return chlorine_ok and oxygen_ok
+
+    reference_c = int(reference_record["carbon"])
+    carbon_totals: Counter[tuple[int, int]] = Counter()
+    for row in rows:
+        if matches_filter(int(row["oxygen"]), int(row["chlorine"])):
+            carbon_totals[(int(row["timestep"]), int(row["carbon"]))] += int(row["count"])
+    reference_allowed = bool(reference_smiles) and matches_filter(
+        int(reference_record["oxygen"]),
+        int(reference_record["chlorine"]),
+    )
+    carbon_skeleton_rows: list[dict[str, Any]] = []
+    for timestep in sampled_timesteps:
+        reference_count = int(reference_counts.get(timestep, 0)) if reference_allowed else 0
+        for carbon in range(1, int(max_carbon) + 1):
+            carbon_skeleton_rows.append(
+                {
+                    "timestep": timestep,
+                    "x": convert_time(timestep),
+                    "series": f"C{carbon}",
+                    "count": int(carbon_totals[(timestep, carbon)]),
+                }
+            )
+        if reference_smiles:
+            carbon_skeleton_rows.append(
+                {
+                    "timestep": timestep,
+                    "x": convert_time(timestep),
+                    "series": "参考物种",
+                    "count": reference_count,
+                }
+            )
+        if reference_smiles and reference_c <= int(max_carbon):
+            carbon_skeleton_rows.append(
+                {
+                    "timestep": timestep,
+                    "x": convert_time(timestep),
+                    "series": f"C{reference_c} 其他物种",
+                    "count": max(
+                        0,
+                        int(carbon_totals[(timestep, reference_c)]) - reference_count,
+                    ),
+                }
+            )
+    meta = dict(indexed.get("meta") or {})
+    meta["analysis_seconds"] = round(time.perf_counter() - started, 4)
+    return {
+        "ok": True,
+        "view": "composition",
+        "x_name": {"step": "Timestep", "ps": "Time (ps)", "ns": "Time (ns)"}.get(x_axis, "Time (ps)"),
+        "carbon_skeleton_rows": carbon_skeleton_rows,
+        "csv_rows": list(carbon_skeleton_rows),
+        "filters": {
+            "chlorine_state": chlorine_state,
+            "oxygen_state": oxygen_state,
+        },
+        "summary": {
+            "reference_group": (
+                f"C{reference_record['carbon']}O{reference_record['oxygen']}Cl{reference_record['chlorine']}"
+                if reference_smiles
+                else ""
+            ),
+            "reference_smiles": reference_smiles,
+            "reference_formula": str(reference_record["formula"]),
+            "reference_carbon": reference_c,
+            "first_timestep": first_timestep,
+            "last_timestep": last_timestep,
+            "timestep_ps": float(timestep_ps),
+        },
+        "meta": meta,
+    }
+
+
+def composition_index_status(artifacts: dict[str, str]) -> dict[str, Any]:
+    """Return a UI-safe status snapshot for the current composition index."""
+    species_path = str((artifacts or {}).get("species") or "").strip()
+    if not species_path or not Path(species_path).is_file():
+        return {
+            "state": "missing_source",
+            "progress": 0.0,
+            "timepoints": 0,
+            "unique_species": 0,
+        }
+    try:
+        return SPECIES_COMPOSITION_STORE.status(species_path)
+    except (OSError, RuntimeError, IndexInvalidError, IndexNotReadyError, IndexStaleError) as exc:
+        return {
+            "state": "invalid",
+            "progress": 0.0,
+            "timepoints": 0,
+            "unique_species": 0,
+            "message": str(exc),
+        }
+
+
+def build_carbon_species_drilldown(
+    payload: dict[str, Any],
+    *,
+    series: str,
+    timestep: int,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Resolve one clicked carbon curve to exact species peak statistics."""
+    meta = payload.get("meta") or {}
+    summary = payload.get("summary") or {}
+    filters = payload.get("filters") or {}
+    species_path = str(meta.get("species_file") or "")
+    if not species_path or not Path(species_path).is_file():
+        raise ServiceError("组成索引缺少 .species 来源", reason="missing_species_file")
+    reference_smiles = str(summary.get("reference_smiles") or "")
+    reference_carbon = int(summary.get("reference_carbon") or 0)
+    only_smiles = ""
+    exclude_smiles = ""
+    if series == "参考物种" and reference_smiles:
+        carbon = reference_carbon
+        only_smiles = reference_smiles
+    elif series == f"C{reference_carbon} 其他物种" and reference_smiles:
+        carbon = reference_carbon
+        exclude_smiles = reference_smiles
+    else:
+        matched = re.fullmatch(r"C(\d+)", str(series or ""))
+        if not matched:
+            raise ServiceError("无法识别所选碳数组", reason="invalid_carbon_series")
+        carbon = int(matched.group(1))
+    try:
+        result = SPECIES_COMPOSITION_STORE.query_species_summary(
+            species_path,
+            carbon=carbon,
+            current_timestep=int(timestep),
+            chlorine_state=str(filters.get("chlorine_state") or "all"),
+            oxygen_state=str(filters.get("oxygen_state") or "all"),
+            only_smiles=only_smiles,
+            exclude_smiles=exclude_smiles,
+            limit=limit,
+        )
+    except (
+        IndexNotReadyError,
+        IndexStaleError,
+        IndexBuildInProgressError,
+        IndexInvalidError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise ServiceError(str(exc), reason="composition_index_not_ready") from exc
+    timestep_ps = float(summary.get("timestep_ps") or 0.0001)
+    rows = [
+        {
+            **row,
+            "peak_time": float(row["peak_timestep"]) * timestep_ps,
+        }
+        for row in result.get("rows") or []
+    ]
+    return {
+        "series": series,
+        "carbon": carbon,
+        "timestep": int(timestep),
+        "current_time": float(timestep) * timestep_ps,
+        "rows": rows,
+        "query_seconds": result.get("query_seconds"),
+    }
 
 
 def build_intermediate_candidates(
@@ -935,6 +1549,11 @@ def build_rng_event_visualization(
     selected_frames = available[start:stop]
     offsets = index.offsets_for(selected_frames)
     wanted = set(atom_ids)
+    reactant_bonds = _bond_values(event_row.get("reactant_bonds"))
+    product_bonds = _bond_values(event_row.get("product_bonds"))
+    broken_bonds = sorted(set(reactant_bonds).difference(product_bonds))
+    formed_bonds = sorted(set(product_bonds).difference(reactant_bonds))
+    core_atom_ids = _bond_atom_ids([*broken_bonds, *formed_bonds]) or atom_ids
     frames: list[dict[str, Any]] = []
     with open(trajectory_file, "rb") as source:
         for frame in selected_frames:
@@ -959,7 +1578,24 @@ def build_rng_event_visualization(
                 for atom_id, atom in sorted((parsed.get("atoms") or {}).items())
             ]
             if atoms:
-                frames.append({"frame": int(frame), "box": parsed.get("box") or [], "atoms": atoms})
+                if int(frame) <= before_timestep:
+                    frame_bonds, bond_state = reactant_bonds, "before"
+                elif int(frame) >= after_timestep:
+                    frame_bonds, bond_state = product_bonds, "after"
+                else:
+                    # Coordinates are real for intermediate frames; RNG's
+                    # molecule timeline does not expose instantaneous bond
+                    # orders for those frames, so do not invent them.
+                    frame_bonds, bond_state = [], "intermediate"
+                frames.append(
+                    {
+                        "frame": int(frame),
+                        "box": parsed.get("box") or [],
+                        "atoms": atoms,
+                        "bonds": frame_bonds,
+                        "bond_state": bond_state,
+                    }
+                )
     if not frames:
         raise ServiceError("选中事件的参与原子未出现在轨迹窗口中", reason="no_coordinates")
 
@@ -971,7 +1607,13 @@ def build_rng_event_visualization(
     return {
         "event_id": str(event_row.get("event_id") or ""),
         "frames": frames,
-        "atom_groups": {"core": atom_ids, "reactant": atom_ids, "product": atom_ids, "context": atom_ids},
+        "atom_groups": {"core": core_atom_ids, "reactant": atom_ids, "product": atom_ids, "context": atom_ids},
+        "bond_evidence": {
+            "reactant": reactant_bonds,
+            "product": product_bonds,
+            "broken": broken_bonds,
+            "formed": formed_bonds,
+        },
         "storyboard_frames": storyboard,
         "storyboard_labels": {str(frame): labels.get(str(frame), f"Frame {frame}") for frame in storyboard},
         "meta": {
@@ -981,6 +1623,48 @@ def build_rng_event_visualization(
         },
         "paths": {"trajectory": trajectory_file, "vmd": "", "type_map": ""},
     }
+
+
+def upsert_validation_record(
+    validations: list[dict[str, Any]] | None,
+    *,
+    dataset_id: str,
+    species: dict[str, Any],
+    channel: dict[str, Any],
+    event: dict[str, Any],
+    outcome: str,
+    note: str = "",
+    recorded_at: str = "",
+) -> list[dict[str, Any]]:
+    """Upsert one user validation in the session-local evidence ledger."""
+    normalized = outcome if outcome in {"support", "insufficient", "exclude"} else "insufficient"
+    row = {
+        "dataset_id": dataset_id,
+        "species_formula": species.get("formula") or "",
+        "species_smiles": species.get("smiles") or "",
+        "channel_role": channel.get("role_label") or channel.get("workflow_role") or "",
+        "reaction_formulas": channel.get("reaction_formulas") or "",
+        "reaction_smiles": channel.get("reaction_smiles") or "",
+        "forward_tp": channel.get("forward_tp"),
+        "reverse_tp": channel.get("reverse_tp"),
+        "net_tp": channel.get("net_tp"),
+        "event_id": event.get("event_id") or "",
+        "before_timestep": event.get("before_timestep"),
+        "after_timestep": event.get("after_timestep"),
+        "atom_ids": event.get("atom_ids") or "",
+        "association_status": event.get("association_status") or "",
+        "validation_outcome": normalized,
+        "note": (note or "").strip(),
+        "recorded_at": recorded_at,
+    }
+    items = [dict(item) for item in (validations or [])]
+    key = (str(dataset_id), str(row["event_id"]))
+    for index, item in enumerate(items):
+        if (str(item.get("dataset_id") or ""), str(item.get("event_id") or "")) == key:
+            items[index] = row
+            return items
+    items.append(row)
+    return items
 
 
 def rows_to_csv(rows: list[dict[str, Any]]) -> str:
@@ -1287,19 +1971,26 @@ __all__ = [
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
+    "search_species_catalog",
     "search_species",
     "species_detail",
     "render_species_svg",
     "collect_transitions",
+    "collect_species_channels",
     "search_reactions_by_formula",
     "build_transition_table",
     "build_species_evolution",
     "evolution_to_csv",
     "build_carbon_evolution",
+    "build_elemental_composition_evolution",
+    "composition_index_status",
+    "build_carbon_species_drilldown",
     "carbon_plot_to_csv",
     "build_intermediate_candidates",
     "locate_rng_events",
+    "rank_representative_events",
     "build_rng_event_visualization",
+    "upsert_validation_record",
     "rows_to_csv",
     "build_observation_elements",
     "verify_literature_mechanism",

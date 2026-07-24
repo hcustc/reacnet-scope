@@ -701,7 +701,7 @@ def _dataset_base_path(path_text: str) -> str:
         return ""
     for suffix in (
         ".reactionevent.csv", ".molecules.csv", ".reactionabcd",
-        ".species", ".route", ".table", ".json", ".html", ".svg",
+        ".species", ".moname", ".route", ".table", ".json", ".html", ".svg",
     ):
         if path.lower().endswith(suffix):
             return path[: -len(suffix)]
@@ -748,6 +748,8 @@ def _scan_rng_dataset_directory(
             kind = "molecules"
         elif name.endswith(".species"):
             kind = "species"
+        elif name.endswith(".moname"):
+            kind = "moname"
         elif name.endswith(".route"):
             kind = "route"
         elif name.endswith(".table"):
@@ -794,6 +796,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     explicit = {
         "reaction": (params.get("reac", [""])[0] or "").strip(),
         "species": (params.get("species_file", [""])[0] or "").strip(),
+        "moname": (params.get("moname_file", [""])[0] or "").strip(),
         "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
         "route": (params.get("route_file", [""])[0] or "").strip(),
         "table": (params.get("table_file", [""])[0] or "").strip(),
@@ -812,6 +815,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     inferred = {
         "reaction": f"{base}.reactionabcd" if base else "",
         "species": f"{base}.species" if base else "",
+        "moname": f"{base}.moname" if base else "",
         "trajectory": base,
         "route": f"{base}.route" if base else "",
         "table": f"{base}.table" if base else "",
@@ -819,8 +823,13 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "molecules": f"{base}.molecules.csv" if base else "",
     }
     artifacts: dict[str, dict[str, Any]] = {}
-    for key in ("reaction", "species", "trajectory", "route", "table", "reactionevent", "molecules"):
+    for key in ("reaction", "species", "moname", "trajectory", "route", "table", "reactionevent", "molecules"):
         selected = explicit[key] or folder_files.get(key, "") or inferred[key]
+        # ``.moname`` is optional structure evidence.  Preserve the historic
+        # artifact contract for datasets that do not produce it while still
+        # exposing it whenever an explicit or paired file is available.
+        if key == "moname" and not (explicit[key] or folder_files.get(key) or os.path.isfile(selected)):
+            continue
         source = "explicit" if explicit[key] else ("folder" if folder_files.get(key) else "derived")
         artifacts[key] = _dataset_file_descriptor(selected, source=source)
 
