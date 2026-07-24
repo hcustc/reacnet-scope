@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 
@@ -75,7 +77,6 @@ def test_pathway_serialization_retains_stoichiometry_and_raw_metrics() -> None:
         species=("A", "B"),
         steps=(step,),
         score=0.456789123,
-        evidence_status="evidence_linked",
     )
     result = CandidatePathResult(
         paths=(path,),
@@ -213,3 +214,155 @@ def test_pathway_step_score_version_is_not_caller_overridable() -> None:
             score=1.0,
             score_version="caller-version",
         )
+
+
+def test_candidate_path_derives_evidence_status_from_its_steps() -> None:
+    step = _step(evidence_status="evidence_linked")
+
+    path = CandidatePath(
+        rank=1,
+        species=("A", "B"),
+        steps=(step,),
+        score=step.score,
+    )
+
+    assert path.evidence_status == "evidence_linked"
+    assert path.as_dict()["evidence_status"] == "evidence_linked"
+
+
+def test_candidate_path_does_not_accept_a_caller_supplied_evidence_status() -> None:
+    with pytest.raises(TypeError, match="evidence_status"):
+        CandidatePath(
+            rank=1,
+            species=("A", "B"),
+            steps=(_step(evidence_status="network_only"),),
+            score=1.0,
+            evidence_status="evidence_linked",  # type: ignore[call-arg]
+        )
+
+
+def test_candidate_path_rejects_mixed_step_evidence_statuses() -> None:
+    with pytest.raises(ValueError, match="mixed"):
+        CandidatePath(
+            rank=1,
+            species=("A", "B", "C"),
+            steps=(
+                _step(evidence_status="network_only"),
+                _step(evidence_status="evidence_linked"),
+            ),
+            score=1.0,
+        )
+
+
+def test_candidate_path_rejects_an_empty_step_sequence() -> None:
+    with pytest.raises(ValueError, match="steps"):
+        CandidatePath(
+            rank=1,
+            species=("A",),
+            steps=(),
+            score=1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_total", "matched_event_total", "distinct_intervals"),
+    [
+        (None, 1, 1),
+        (1, None, 1),
+        (1, 1, None),
+        (-1, 0, 0),
+        (1, -1, 0),
+        (1, 0, -1),
+        (1, 2, 1),
+    ],
+)
+def test_evidence_linked_step_rejects_incomplete_or_invalid_counts(
+    event_total: int | None,
+    matched_event_total: int | None,
+    distinct_intervals: int | None,
+) -> None:
+    with pytest.raises(ValueError, match="event"):
+        _step(
+            evidence_status="evidence_linked",
+            event_total=event_total,
+            matched_event_total=matched_event_total,
+            distinct_intervals=distinct_intervals,
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_total", "matched_event_total", "distinct_intervals"),
+    [(0, None, None), (None, 0, None), (None, None, 0)],
+)
+def test_network_only_step_rejects_any_event_counts(
+    event_total: int | None,
+    matched_event_total: int | None,
+    distinct_intervals: int | None,
+) -> None:
+    with pytest.raises(ValueError, match="event"):
+        _step(
+            evidence_status="network_only",
+            event_total=event_total,
+            matched_event_total=matched_event_total,
+            distinct_intervals=distinct_intervals,
+        )
+
+
+class _SerializationState(Enum):
+    LINKED = {"value": Decimal("1.2300")}
+
+
+def test_pathway_result_serializes_decimals_and_enums_without_rounding() -> None:
+    result = CandidatePathResult(
+        paths=(),
+        query={"threshold": Decimal("0.12345678901234567890")},
+        source_signatures={"status": _SerializationState.LINKED},
+        reason="no candidates",
+        truncated=False,
+        expansions=0,
+    )
+
+    payload = result.as_dict()
+
+    assert payload["query"]["threshold"] == "0.12345678901234567890"
+    assert payload["source_signatures"] == {"status": {"value": "1.2300"}}
+    json.dumps(payload)
+
+
+def _step(
+    *,
+    evidence_status: str,
+    event_total: int | None | object = ...,
+    matched_event_total: int | None | object = ...,
+    distinct_intervals: int | None | object = ...,
+) -> PathwayStep:
+    evidence_linked = evidence_status == "evidence_linked"
+    return PathwayStep(
+        reaction_key="A->B",
+        traversal_direction="downstream",
+        focal_input="A",
+        focal_output="B",
+        reactants=("A",),
+        products=("B",),
+        forward_tp=1,
+        reverse_tp=0,
+        net_tp=1,
+        net_share=1.0,
+        directionality=1.0,
+        event_coverage=1.0 if evidence_linked else None,
+        time_coverage=1.0 if evidence_linked else None,
+        event_total=(1 if evidence_linked else None) if event_total is ... else event_total,
+        matched_event_total=(
+            (1 if evidence_linked else None)
+            if matched_event_total is ...
+            else matched_event_total
+        ),
+        distinct_intervals=(
+            (1 if evidence_linked else None)
+            if distinct_intervals is ...
+            else distinct_intervals
+        ),
+        evidence_status=evidence_status,  # type: ignore[arg-type]
+        source_references=(),
+        score=1.0,
+    )

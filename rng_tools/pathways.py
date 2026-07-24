@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Set
 from dataclasses import dataclass, field, fields, is_dataclass
+from decimal import Decimal
+from enum import Enum
 import math
 from numbers import Real
 from os import PathLike
@@ -29,10 +31,14 @@ class EvidenceProvider(Protocol):
 
 def _json_safe(value: Any) -> Any:
     """Convert immutable domain records into JSON-compatible primitives."""
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, Decimal):
+        return str(value)
     if is_dataclass(value) and not isinstance(value, type):
         return {field.name: _json_safe(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
     if isinstance(value, Set):
@@ -126,6 +132,12 @@ class PathwayStep:
         )
         if self.evidence_status != expected_evidence_status:
             raise ValueError("evidence_status must match the supplied evidence coverage")
+        _validate_event_counts(
+            evidence_status=expected_evidence_status,
+            event_total=self.event_total,
+            matched_event_total=self.matched_event_total,
+            distinct_intervals=self.distinct_intervals,
+        )
         _validate_unit_metric("score", self.score)
 
     def as_dict(self) -> dict[str, Any]:
@@ -138,7 +150,15 @@ class CandidatePath:
     species: tuple[str, ...]
     steps: tuple[PathwayStep, ...]
     score: float
-    evidence_status: str
+    evidence_status: Literal["evidence_linked", "network_only"] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not self.steps:
+            raise ValueError("steps must not be empty")
+        statuses = {step.evidence_status for step in self.steps}
+        if len(statuses) != 1:
+            raise ValueError("mixed step evidence statuses are not supported")
+        object.__setattr__(self, "evidence_status", statuses.pop())
 
     def as_dict(self) -> dict[str, Any]:
         payload = _json_safe(self)
@@ -170,3 +190,23 @@ def _result_evidence_status(paths: Sequence[CandidatePath]) -> str:
     if len(statuses) == 1:
         return next(iter(statuses))
     return "mixed"
+
+
+def _validate_event_counts(
+    *,
+    evidence_status: Literal["evidence_linked", "network_only"],
+    event_total: int | None,
+    matched_event_total: int | None,
+    distinct_intervals: int | None,
+) -> None:
+    counts = (event_total, matched_event_total, distinct_intervals)
+    if evidence_status == "network_only":
+        if any(count is not None for count in counts):
+            raise ValueError("network-only steps must not contain event counts")
+        return
+    if any(count is None for count in counts):
+        raise ValueError("evidence-linked steps require all event counts")
+    if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts):
+        raise ValueError("event counts must be nonnegative integers")
+    if matched_event_total > event_total:
+        raise ValueError("matched event count must not exceed total event count")
