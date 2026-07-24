@@ -18,6 +18,7 @@ from .indexes import (
     IndexNotReadyError,
     IndexStaleError,
     _exclusive_build_lock,
+    _cache_root,
     _read_meta,
     _readonly_connection,
     _source_signature,
@@ -1043,6 +1044,40 @@ class EventEvidenceStore:
         finally:
             connection.close()
         return output
+
+    def clear(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+    ) -> dict[str, Any]:
+        reaction_source, _molecule_source = self._source_pair(
+            reactionevent_file, molecules_file
+        )
+        index_path = event_evidence_index_path(reaction_source[0])
+        cache_root = _cache_root().resolve()
+        try:
+            index_path.resolve().relative_to(cache_root)
+        except ValueError as exc:
+            raise IndexInvalidError(
+                "event evidence index path escapes REACNET_SCOPE_CACHE_DIR"
+            ) from exc
+
+        targets = (index_path, Path(f"{index_path}.building"))
+        removed: list[str] = []
+        released_bytes = 0
+        with _exclusive_build_lock(index_path):
+            for target in targets:
+                if not target.is_file():
+                    continue
+                released_bytes += target.stat().st_size
+                target.unlink()
+                removed.append(str(target))
+        return {
+            "kind": "event",
+            "index_path": str(index_path),
+            "removed": removed,
+            "released_bytes": released_bytes,
+        }
 
 
 EVENT_EVIDENCE_STORE = EventEvidenceStore()

@@ -265,3 +265,18 @@ def test_event_builder_rejects_decreasing_molecule_timesteps(
 
     with pytest.raises(RngEventDataError, match="sorted"):
         EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+
+def test_event_store_clear_removes_only_cache_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+    cleared = EVENT_EVIDENCE_STORE.clear(str(reactionevent), str(molecules))
+
+    assert cleared["kind"] == "event"
+    assert built["index_path"] in cleared["removed"]
+    assert cleared["released_bytes"] > 0
+    assert not Path(built["index_path"]).exists()
+    assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from reacnet_scope.indexes import ROUTE_INDEX_STORE
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+from reacnet_scope.indexes import ROUTE_INDEX_STORE, resolve_dataset_paths
+from reacnet_scope import prepare
 from scripts.webapp_dash import services as svc
 
 
@@ -36,3 +39,84 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     assert cleared["released_bytes"] > 0
     assert route.exists()
     assert ROUTE_INDEX_STORE.status(str(route))["state"] == "missing"
+
+
+def _event_only_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionabcd").write_text("1 [H]+[O]->[H][O]\n", encoding="utf-8")
+    reactionevent = Path(f"{base}.reactionevent.csv")
+    molecules = Path(f"{base}.molecules.csv")
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n0,[H]+[O],[H][O]\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "0,[H],0,\n"
+        "0,[O],1,\n"
+        "10,[H][O],0;1,0-1-1\n",
+        encoding="utf-8",
+    )
+    return base, reactionevent, molecules
+
+
+def test_prepare_event_only_builds_manifest_v2_and_safe_clear(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+
+    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
+    assert manifest["manifest_version"] == 2
+    assert manifest["indexes"]["event"]["state"] == "ready"
+    assert manifest["settings"] == {
+        "path": str(paths.cache_dir / "dataset-settings.json"),
+        "exists": False,
+    }
+
+    source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
+    assert prepare.main([str(tmp_path), "--clear", "event"]) == 0
+    assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes
+    assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
+        "state"
+    ] == "missing"
+
+
+def test_default_preparation_builds_available_event_index(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    _base, reactionevent, molecules = _event_only_dataset(tmp_path)
+
+    assert prepare.main([str(tmp_path)]) == 0
+
+    assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
+        "state"
+    ] == "ready"
+
+
+def test_scan_dataset_reads_version_one_manifest(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    paths.cache_dir.mkdir(parents=True)
+    paths.manifest.write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "dataset_id": paths.dataset_id,
+                "base": str(base),
+                "artifacts": {},
+                "indexes": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = svc.scan_dataset(str(tmp_path))
+
+    assert status["dataset"]["manifest"]["found"] is True
+    assert status["dataset"]["manifest"]["dataset_id"] == paths.dataset_id
