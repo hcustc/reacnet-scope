@@ -13,6 +13,9 @@ This module never reimplements analysis logic.  It only:
 from __future__ import annotations
 
 import base64
+import csv
+import io
+import json
 import os
 import re
 import shlex
@@ -34,6 +37,11 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from rng_tools.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
+from rng_tools.mechanism_graph import (  # noqa: E402
+    build_mechanism_network,
+    serialize_mechanism_graph,
+    to_networkx_mechanism_graph,
+)
 from rng_tools.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -2245,6 +2253,316 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Mechanism network (reactionabcd, Cytoscape, and exports)
+# ---------------------------------------------------------------------------
+
+
+_MECHANISM_QUERY_KEYS = {
+    "anchor_smiles",
+    "direction",
+    "max_depth",
+    "min_net_tp",
+    "max_nodes",
+}
+_MECHANISM_EXPORT_FORMATS = (
+    "cytoscape-json",
+    "graphml",
+    "gexf",
+    "node-csv",
+    "edge-csv",
+)
+_MECHANISM_NODE_CSV_COLUMNS = (
+    "id",
+    "kind",
+    "label",
+    "smiles",
+    "formula",
+    "reaction_key",
+    "reactants_json",
+    "products_json",
+    "forward_tp",
+    "reverse_tp",
+    "net_tp",
+    "event_total",
+    "matched_event_total",
+    "event_coverage",
+    "evidence_status",
+)
+_MECHANISM_EDGE_CSV_COLUMNS = (
+    "id",
+    "source",
+    "target",
+    "role",
+    "species_smiles",
+    "coefficient",
+    "reaction_key",
+)
+
+
+def _mechanism_cytoscape_elements(
+    payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Project a mechanism payload through the shared NetworkX adapter."""
+    graph = to_networkx_mechanism_graph(payload)
+    document = serialize_mechanism_graph(graph, format="cytoscape-json")
+    if not isinstance(document, Mapping):
+        raise ValueError("mechanism Cytoscape serialization is invalid")
+    raw_elements = document.get("elements")
+    if not isinstance(raw_elements, Mapping):
+        raise ValueError("mechanism Cytoscape elements are invalid")
+
+    elements: list[dict[str, Any]] = []
+    for raw in raw_elements.get("nodes") or []:
+        item = dict(raw)
+        data = dict(item.get("data") or {})
+        item["data"] = data
+        item["classes"] = str(data.get("kind") or "")
+        elements.append(item)
+    for raw in raw_elements.get("edges") or []:
+        item = dict(raw)
+        data = dict(item.get("data") or {})
+        item["data"] = data
+        role = str(data.get("role") or "")
+        if role:
+            item["classes"] = role
+        elements.append(item)
+    return elements
+
+
+def build_mechanism_elements(
+    artifacts: dict[str, str],
+    **query: Any,
+) -> dict[str, Any]:
+    """Build a bounded reaction-passage mechanism snapshot for the Dash UI.
+
+    Event enrichment is strictly read-only: a ready SQLite index is opened,
+    queried once through ``EventIndexEvidenceProvider``, and revalidated before
+    the snapshot is returned.  Missing or invalid evidence degrades to the
+    reaction-passage payload and an offline preparation command.
+    """
+    reaction_path = str(artifacts.get("reaction") or "").strip()
+    if (
+        not reaction_path.lower().endswith(".reactionabcd")
+        or not Path(reaction_path).is_file()
+    ):
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        )
+
+    unknown = sorted(set(query) - _MECHANISM_QUERY_KEYS)
+    if unknown:
+        raise ServiceError(
+            f"无效的机制网络查询参数: {', '.join(unknown)}",
+            reason="bad_mechanism_query",
+        )
+    anchor_smiles = query.get("anchor_smiles")
+    limits = {
+        key: value
+        for key, value in query.items()
+        if key != "anchor_smiles"
+    }
+
+    try:
+        reaction_signature, reaction_identity = _pathway_source_snapshot(
+            reaction_path
+        )
+        network = STORE.get(reaction_path, 1)
+        _pathway_assert_source_current(reaction_path, reaction_identity)
+    except ServiceError:
+        raise
+    except FileNotFoundError as exc:
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        ) from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无法加载反应网络: {exc}",
+            reason="bad_reac",
+        ) from exc
+
+    reactionevent_path = str(
+        artifacts.get("reactionevent") or ""
+    ).strip()
+    molecules_path = str(artifacts.get("molecules") or "").strip()
+    evidence_provider: EventIndexEvidenceProvider | None = None
+    rebuild_event_index = False
+    if (
+        reactionevent_path
+        and molecules_path
+        and Path(reactionevent_path).is_file()
+        and Path(molecules_path).is_file()
+    ):
+        try:
+            opened = EVENT_EVIDENCE_STORE.open_required(
+                reactionevent_path,
+                molecules_path,
+            )
+            evidence_provider = EventIndexEvidenceProvider(
+                reactionevent_path,
+                molecules_path,
+                store=EVENT_EVIDENCE_STORE,
+                opened=opened,
+            )
+        except (IndexStaleError, IndexInvalidError):
+            rebuild_event_index = True
+        except IndexNotReadyError:
+            rebuild_event_index = False
+
+    try:
+        try:
+            payload = build_mechanism_network(
+                network,
+                anchor_smiles=anchor_smiles,
+                evidence_provider=evidence_provider,
+                **limits,
+            )
+            if evidence_provider is not None:
+                evidence_provider.assert_current()
+        except IndexNotReadyError:
+            evidence_provider = None
+            rebuild_event_index = True
+            payload = build_mechanism_network(
+                network,
+                anchor_smiles=anchor_smiles,
+                evidence_provider=None,
+                **limits,
+            )
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无效的机制网络查询参数: {exc}",
+            reason="bad_mechanism_query",
+        ) from exc
+
+    _pathway_assert_source_current(reaction_path, reaction_identity)
+    payload["source_signatures"] = {
+        "reactionabcd": reaction_signature,
+        **(
+            evidence_provider.source_signatures
+            if evidence_provider is not None
+            else {}
+        ),
+    }
+    if evidence_provider is not None:
+        # A ready index is part of the query snapshot even when the bounded
+        # neighborhood contains no reaction node to annotate.
+        payload["evidence_level"] = "event_evidence_linked"
+        payload["evidence_status"] = "evidence_linked"
+    else:
+        payload["evidence_level"] = "reaction_passage_counts"
+        payload["evidence_status"] = "network_only"
+        payload["preparation_command"] = _pathway_preparation_command(
+            reaction_path,
+            reactionevent_path,
+            rebuild=rebuild_event_index,
+        )
+    payload["ok"] = True
+    payload["elements"] = _mechanism_cytoscape_elements(payload)
+    return payload
+
+
+def _mechanism_csv_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return int(value)
+    return value
+
+
+def _mechanism_compact_json(value: Any) -> str:
+    if value is None:
+        return ""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _mechanism_csv(
+    records: Any,
+    columns: tuple[str, ...],
+    *,
+    node_rows: bool,
+) -> str:
+    if not isinstance(records, (list, tuple)):
+        raise ValueError("mechanism export records must be a sequence")
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=columns,
+        extrasaction="ignore",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            raise ValueError("mechanism export record must be a mapping")
+        row = {
+            key: _mechanism_csv_value(raw.get(key))
+            for key in columns
+        }
+        if node_rows:
+            row["reactants_json"] = _mechanism_compact_json(
+                raw.get("reactants")
+            )
+            row["products_json"] = _mechanism_compact_json(
+                raw.get("products")
+            )
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def export_mechanism_graph(
+    payload: Mapping[str, Any],
+    format: str,
+) -> dict[str, Any] | str | bytes:
+    """Export one already-computed mechanism payload without source I/O."""
+    if format not in _MECHANISM_EXPORT_FORMATS:
+        supported = ", ".join(_MECHANISM_EXPORT_FORMATS)
+        raise ValueError(
+            f"unknown mechanism graph format {format!r}; "
+            f"valid formats: {supported}"
+        )
+
+    if format == "node-csv":
+        return _mechanism_csv(
+            payload.get("nodes"),
+            _MECHANISM_NODE_CSV_COLUMNS,
+            node_rows=True,
+        )
+    if format == "edge-csv":
+        return _mechanism_csv(
+            payload.get("edges"),
+            _MECHANISM_EDGE_CSV_COLUMNS,
+            node_rows=False,
+        )
+
+    graph = to_networkx_mechanism_graph(payload)
+    serialized = serialize_mechanism_graph(graph, format=format)
+    if format != "cytoscape-json":
+        return serialized
+    if not isinstance(serialized, dict):
+        raise ValueError("mechanism Cytoscape export is invalid")
+    document = dict(serialized)
+    raw_data = document.get("data")
+    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
+    data.update(
+        schema_version=payload.get("schema_version"),
+        network_semantics=payload.get("network_semantics"),
+        evidence_level=payload.get("evidence_level"),
+        anchor_smiles=payload.get("anchor_smiles"),
+        query=dict(payload.get("query") or {}),
+        source_signatures=dict(payload.get("source_signatures") or {}),
+    )
+    document["data"] = data
+    return document
+
+
+# ---------------------------------------------------------------------------
 # Observation network (Cytoscape)
 # ---------------------------------------------------------------------------
 
@@ -2315,6 +2633,8 @@ def build_observation_elements(
         )
     return {
         "ok": True,
+        "network_semantics": "event_transfer",
+        "evidence_level": "aggregate_observation",
         "elements": elements,
         "species_smiles": [n.get("smiles", "") for n in species_nodes],
         "meta": payload.get("meta", {}),

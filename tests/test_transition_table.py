@@ -9,6 +9,7 @@ import rng_tools.dir_browser as dir_browser
 from rng_tools.dir_browser import DirBrowserError
 from rng_tools.io import load_transition_table
 from scripts.webapp.server import build_dataset_status_payload, build_transition_table_payload, pick_folder_with_system
+from scripts.webapp_dash import services as dash_services
 
 
 class TransitionTableTests(unittest.TestCase):
@@ -61,6 +62,60 @@ class TransitionTableTests(unittest.TestCase):
         self.assertIn("carbon_flux", network["weights"])
         self.assertIn("net_event_count", network["observed_transitions"][0])
         self.assertIsNone(network["observed_transitions"][0]["atom_transfer_count"])
+
+    def test_observation_elements_add_only_semantic_labels(self) -> None:
+        payload = dash_services.build_observation_elements(
+            {"table": str(self.path)},
+            min_count=2,
+            max_species=2,
+            top_edges=5,
+        )
+
+        self.assertEqual(payload["network_semantics"], "event_transfer")
+        self.assertEqual(payload["evidence_level"], "aggregate_observation")
+        self.assertNotIn("kinetic_flux", str(payload))
+        species = next(
+            item for item in payload["elements"]
+            if item["data"].get("kind") == "species"
+        )
+        reaction = next(
+            item for item in payload["elements"]
+            if item["data"].get("kind") == "reaction"
+        )
+        edge = next(
+            item for item in payload["elements"]
+            if "source" in item["data"]
+        )
+        self.assertEqual(
+            set(species["data"]),
+            {
+                "id",
+                "label",
+                "kind",
+                "smiles",
+                "formula",
+                "rank",
+                "incoming",
+                "outgoing",
+                "total",
+            },
+        )
+        self.assertEqual(
+            set(reaction["data"]),
+            {
+                "id",
+                "label",
+                "kind",
+                "reaction_type",
+                "event_count",
+                "net_event_count",
+                "ordinal",
+            },
+        )
+        self.assertEqual(
+            set(edge["data"]),
+            {"id", "source", "target", "kind", "event_count"},
+        )
 
     def test_rejects_non_square_matrix(self) -> None:
         self.path.write_text("[H] [O]\n[H] 0 1\n", encoding="utf-8")
