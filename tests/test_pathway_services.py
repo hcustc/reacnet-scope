@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import os
 import shlex
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,106 @@ def test_invalid_event_index_degrades_with_exact_rebuild_command(
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("total_events", "broken"),
+        ("distinct_intervals", 11),
+    ],
+)
+def test_corrupt_summary_discovered_during_batch_degrades_to_network_only(
+    indexed_artifacts: dict[str, str],
+    column: str,
+    value: Any,
+) -> None:
+    index_path = EVENT_EVIDENCE_STORE.open_required(
+        indexed_artifacts["reactionevent"],
+        indexed_artifacts["molecules"],
+    )["index_path"]
+    connection = sqlite3.connect(index_path)
+    try:
+        connection.execute(
+            f"UPDATE reaction_summary SET {column}=? WHERE reaction_key=?",
+            (value, REACTION_KEY),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
+
+    assert payload["evidence_status"] == "network_only"
+    assert payload["preparation_command"].endswith("--rebuild event")
+    step = payload["paths"][0]["steps"][0]
+    assert step["event_coverage"] is None
+    assert step["time_coverage"] is None
+
+
+def test_atomic_event_index_replacement_during_batch_degrades_to_network_only(
+    indexed_artifacts: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    index_path = Path(
+        EVENT_EVIDENCE_STORE.open_required(
+            indexed_artifacts["reactionevent"],
+            indexed_artifacts["molecules"],
+        )["index_path"]
+    )
+    replacement = tmp_path / "replacement.sqlite3"
+    shutil.copy2(index_path, replacement)
+    real_summary = EVENT_EVIDENCE_STORE.reaction_summary
+
+    def replacing_summary(
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_keys: Any,
+    ) -> dict[str, dict[str, Any]]:
+        rows = real_summary(
+            reactionevent_file,
+            molecules_file,
+            reaction_keys,
+        )
+        os.replace(replacement, index_path)
+        return rows
+
+    monkeypatch.setattr(
+        EVENT_EVIDENCE_STORE,
+        "reaction_summary",
+        replacing_summary,
+    )
+
+    payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
+
+    assert payload["evidence_status"] == "network_only"
+    assert payload["preparation_command"].endswith("--rebuild event")
+    assert payload["paths"][0]["steps"][0]["event_coverage"] is None
+
+
+def test_reaction_source_replacement_after_network_load_is_not_returned(
+    reaction_only_artifacts: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reaction_path = Path(reaction_only_artifacts["reaction"])
+    replacement = tmp_path / "replacement.reactionabcd"
+    replacement.write_text("9 [H] -> [H][H]\n", encoding="utf-8")
+    real_get = svc.STORE.get
+
+    class ReplacingNetworkStore:
+        def get(self, path: str, min_tp: int) -> ReactionNetwork:
+            network = real_get(path, min_tp)
+            os.replace(replacement, reaction_path)
+            return network
+
+    monkeypatch.setattr(svc, "STORE", ReplacingNetworkStore())
+
+    with pytest.raises(svc.ServiceError) as caught:
+        svc.find_pathways(reaction_only_artifacts, "[H]", max_depth=1)
+
+    assert caught.value.reason == "reaction_source_stale"
 
 
 def test_ready_index_missing_summary_returns_linked_zero_counts(

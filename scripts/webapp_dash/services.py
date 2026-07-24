@@ -554,13 +554,42 @@ def _pathway_formula(smiles: str) -> str:
     return formula_from_counts(count_atoms_fast(smiles))
 
 
-def _pathway_source_signature(path_text: str) -> dict[str, Any]:
-    path, size, mtime_ns = _file_signature(path_text)
-    return {
-        "path": path,
-        "size": size,
-        "mtime_ns": mtime_ns,
-    }
+def _pathway_source_snapshot(
+    path_text: str,
+) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
+    path = Path(path_text).expanduser().resolve()
+    stat = path.stat()
+    return (
+        {
+            "path": str(path),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        },
+        (
+            int(stat.st_dev),
+            int(stat.st_ino),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        ),
+    )
+
+
+def _pathway_assert_source_current(
+    path_text: str,
+    expected: tuple[int, int, int, int],
+) -> None:
+    try:
+        _signature, actual = _pathway_source_snapshot(path_text)
+    except OSError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    if actual != expected:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        )
 
 
 def _pathway_preparation_command(
@@ -613,7 +642,11 @@ def find_pathways(
         )
 
     try:
+        reaction_signature, reaction_identity = _pathway_source_snapshot(
+            reaction_path
+        )
         network = STORE.get(reaction_path, 1)
+        _pathway_assert_source_current(reaction_path, reaction_identity)
     except FileNotFoundError as exc:
         raise ServiceError(
             "需要 .reactionabcd 文件",
@@ -652,12 +685,24 @@ def find_pathways(
             rebuild_event_index = False
 
     try:
-        result = find_candidate_paths(
-            network,
-            start_smiles,
-            evidence_provider=evidence_provider,
-            **limits,
-        )
+        try:
+            result = find_candidate_paths(
+                network,
+                start_smiles,
+                evidence_provider=evidence_provider,
+                **limits,
+            )
+            if evidence_provider is not None:
+                evidence_provider.assert_current()
+        except IndexNotReadyError:
+            evidence_provider = None
+            rebuild_event_index = True
+            result = find_candidate_paths(
+                network,
+                start_smiles,
+                evidence_provider=None,
+                **limits,
+            )
     except (TypeError, ValueError) as exc:
         message = str(exc)
         if isinstance(exc, TypeError) or any(
@@ -669,6 +714,7 @@ def find_pathways(
             ) from exc
         raise
 
+    _pathway_assert_source_current(reaction_path, reaction_identity)
     payload = result.as_dict()
     for path in payload["paths"]:
         path["formulas"] = [
@@ -692,7 +738,7 @@ def find_pathways(
             ]
 
     payload["source_signatures"] = {
-        "reactionabcd": _pathway_source_signature(reaction_path),
+        "reactionabcd": reaction_signature,
         **dict(payload["source_signatures"]),
     }
     if evidence_provider is None:
