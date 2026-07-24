@@ -52,6 +52,25 @@ def _write_reaction_file(tmp_path: Path, text: str | None = None) -> Path:
     return reaction
 
 
+def _atomic_replace_preserving_size_and_mtime(
+    path: Path,
+    text: str,
+) -> None:
+    before = path.stat()
+    replacement = path.with_name(f"{path.name}.replacement")
+    replacement.write_text(text, encoding="utf-8")
+    assert replacement.stat().st_size == before.st_size
+    os.utime(
+        replacement,
+        ns=(before.st_atime_ns, before.st_mtime_ns),
+    )
+    os.replace(replacement, path)
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+
+
 @pytest.fixture
 def indexed_artifacts(
     tmp_path: Path,
@@ -434,6 +453,25 @@ def test_reaction_source_replacement_after_network_load_is_not_returned(
         svc.find_pathways(reaction_only_artifacts, "[H]", max_depth=1)
 
     assert caught.value.reason == "reaction_source_stale"
+
+
+def test_same_metadata_atomic_replacement_invalidates_shared_pathway_cache(
+    tmp_path: Path,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    artifacts = {"reaction": str(reaction)}
+
+    first = svc.find_pathways(artifacts, "[H]", max_depth=1)
+    _atomic_replace_preserving_size_and_mtime(
+        reaction,
+        "4 [H] -> [C]\n",
+    )
+    second = svc.find_pathways(artifacts, "[H]", max_depth=1)
+
+    assert first["paths"][0]["species"] == ["[H]", "[O]"]
+    assert second["paths"][0]["species"] == ["[H]", "[C]"]
+    # Reproducible source signatures intentionally exclude inode/ctime.
+    assert first["source_signatures"] == second["source_signatures"]
 
 
 def test_ready_index_missing_summary_returns_linked_zero_counts(

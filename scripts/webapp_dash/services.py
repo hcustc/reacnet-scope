@@ -41,6 +41,7 @@ from rng_tools.mechanism_graph import (  # noqa: E402
     build_mechanism_network,
     serialize_mechanism_graph,
     to_networkx_mechanism_graph,
+    validate_mechanism_payload,
 )
 from rng_tools.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
@@ -66,6 +67,7 @@ from reacnet_scope.datasets import (  # noqa: E402
     discover_dataset_candidates,
 )
 from scripts.webapp.server import (  # noqa: E402
+    ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
     build_carbon_plot_payload,
@@ -565,7 +567,7 @@ def _pathway_formula(smiles: str) -> str:
 
 def _pathway_source_snapshot(
     path_text: str,
-) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
+) -> tuple[dict[str, Any], tuple[int, int, int, int, int]]:
     path = Path(path_text).expanduser().resolve()
     stat = path.stat()
     return (
@@ -579,13 +581,14 @@ def _pathway_source_snapshot(
             int(stat.st_ino),
             int(stat.st_size),
             int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns),
         ),
     )
 
 
 def _pathway_assert_source_current(
     path_text: str,
-    expected: tuple[int, int, int, int],
+    expected: tuple[int, int, int, int, int],
 ) -> None:
     try:
         _signature, actual = _pathway_source_snapshot(path_text)
@@ -660,6 +663,11 @@ def find_pathways(
         raise ServiceError(
             "需要 .reactionabcd 文件",
             reason="missing_reac",
+        ) from exc
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
         ) from exc
     except RuntimeError as exc:
         raise ServiceError(
@@ -2376,6 +2384,11 @@ def build_mechanism_elements(
             "需要 .reactionabcd 文件",
             reason="missing_reac",
         ) from exc
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在机制网络查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ServiceError(
             f"无法加载反应网络: {exc}",
@@ -2467,6 +2480,27 @@ def _mechanism_csv_value(value: Any) -> Any:
         return ""
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, str):
+        return _spreadsheet_safe_mechanism_text(value)
+    return value
+
+
+def _spreadsheet_safe_mechanism_text(value: str) -> str:
+    """Neutralize formula-like CSV text without changing numeric cells."""
+    if not value:
+        return value
+    index = 0
+    has_control_prefix = False
+    while index < len(value) and (
+        value[index].isspace() or ord(value[index]) < 32
+    ):
+        has_control_prefix = has_control_prefix or (
+            ord(value[index]) < 32
+        )
+        index += 1
+    formula_prefix = index < len(value) and value[index] in "=+-@"
+    if has_control_prefix or formula_prefix:
+        return "'" + value
     return value
 
 
@@ -2528,20 +2562,21 @@ def export_mechanism_graph(
             f"valid formats: {supported}"
         )
 
+    validated = validate_mechanism_payload(payload)
     if format == "node-csv":
         return _mechanism_csv(
-            payload.get("nodes"),
+            validated["nodes"],
             _MECHANISM_NODE_CSV_COLUMNS,
             node_rows=True,
         )
     if format == "edge-csv":
         return _mechanism_csv(
-            payload.get("edges"),
+            validated["edges"],
             _MECHANISM_EDGE_CSV_COLUMNS,
             node_rows=False,
         )
 
-    graph = to_networkx_mechanism_graph(payload)
+    graph = to_networkx_mechanism_graph(validated)
     serialized = serialize_mechanism_graph(graph, format=format)
     if format != "cytoscape-json":
         return serialized
@@ -2551,12 +2586,12 @@ def export_mechanism_graph(
     raw_data = document.get("data")
     data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
     data.update(
-        schema_version=payload.get("schema_version"),
-        network_semantics=payload.get("network_semantics"),
-        evidence_level=payload.get("evidence_level"),
-        anchor_smiles=payload.get("anchor_smiles"),
-        query=dict(payload.get("query") or {}),
-        source_signatures=dict(payload.get("source_signatures") or {}),
+        schema_version=validated.get("schema_version"),
+        network_semantics=validated.get("network_semantics"),
+        evidence_level=validated.get("evidence_level"),
+        anchor_smiles=validated.get("anchor_smiles"),
+        query=dict(validated.get("query") or {}),
+        source_signatures=dict(validated.get("source_signatures") or {}),
     )
     document["data"] = data
     return document

@@ -6840,10 +6840,28 @@ class SpeciesFrameIndex:
     frames: list[int]
 
 
+class ReactionSourceChangedError(RuntimeError):
+    """Raised when a reaction source changes across one cache read."""
+
+
+def _reaction_source_identity(path: str) -> tuple[int, int, int, int, int]:
+    stat = os.stat(path)
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
 class NetworkStore:
     def __init__(self, max_entries: int = 8) -> None:
         self._lock = threading.Lock()
-        self._cache: OrderedDict[tuple[str, int], tuple[float, ReactionNetwork]] = OrderedDict()
+        self._cache: OrderedDict[
+            tuple[str, int],
+            tuple[tuple[int, int, int, int, int], ReactionNetwork],
+        ] = OrderedDict()
         self._max_entries = max(2, int(max_entries))
 
     def get(self, reac_file: str, min_tp: int) -> ReactionNetwork:
@@ -6851,19 +6869,27 @@ class NetworkStore:
         if not os.path.exists(path):
             raise FileNotFoundError(f"reaction file not found: {path}")
         key = (path, min_tp)
-        mtime = os.path.getmtime(path)
 
         with self._lock:
+            identity = _reaction_source_identity(path)
             cached = self._cache.get(key)
-            if cached and cached[0] == mtime:
+            if cached and cached[0] == identity:
+                if _reaction_source_identity(path) != identity:
+                    raise ReactionSourceChangedError(
+                        f"reaction file changed while loading: {path}"
+                    )
                 self._cache.move_to_end(key)
                 return cached[1]
 
             reactions = parse_reactionabcd(path, min_tp=min_tp)
+            if _reaction_source_identity(path) != identity:
+                raise ReactionSourceChangedError(
+                    f"reaction file changed while loading: {path}"
+                )
             if not reactions:
                 raise RuntimeError(f"no reactions loaded from: {path}")
             net = ReactionNetwork(reactions)
-            self._cache[key] = (mtime, net)
+            self._cache[key] = (identity, net)
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)

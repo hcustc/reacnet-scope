@@ -51,6 +51,19 @@ def to_networkx_mechanism_graph(
     payload: Mapping[str, Any],
 ) -> nx.MultiDiGraph:
     """Project a mechanism payload into a stable bipartite multigraph."""
+    validated = validate_mechanism_payload(payload)
+    return _to_networkx_validated_mechanism_graph(validated)
+
+
+def validate_mechanism_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and copy one complete mechanism-network payload.
+
+    This is the semantic firewall shared by every graph and tabular export.
+    It deliberately validates plain records without routing them through
+    NetworkX, so CSV serialization cannot silently reshape client-held data.
+    """
     if not isinstance(payload, Mapping):
         raise ValueError("mechanism payload must be a mapping")
     required = (
@@ -68,11 +81,7 @@ def to_networkx_mechanism_graph(
         raise ValueError(
             "mechanism payload network_semantics must be 'mechanism'"
         )
-    for name in (
-        "schema_version",
-        "evidence_level",
-        "anchor_smiles",
-    ):
+    for name in ("schema_version", "evidence_level", "anchor_smiles"):
         if not isinstance(payload[name], str):
             raise ValueError(f"mechanism payload {name} must be a string")
 
@@ -83,14 +92,8 @@ def to_networkx_mechanism_graph(
     if not _is_record_sequence(raw_edges):
         raise ValueError("mechanism payload edges must be a sequence")
 
-    graph = nx.MultiDiGraph()
-    graph.graph.update(
-        schema_version=payload["schema_version"],
-        network_semantics="mechanism",
-        evidence_level=payload["evidence_level"],
-        anchor_smiles=payload["anchor_smiles"],
-    )
-
+    nodes: list[dict[str, Any]] = []
+    node_by_id: dict[str, dict[str, Any]] = {}
     for index, raw_node in enumerate(raw_nodes):
         if not isinstance(raw_node, Mapping):
             raise ValueError(f"mechanism payload node {index} must be a mapping")
@@ -101,10 +104,13 @@ def to_networkx_mechanism_graph(
             raise ValueError(
                 f"mechanism payload node {node_id} has invalid kind {kind!r}"
             )
-        if node_id in graph:
+        if node_id in node_by_id:
             raise ValueError(f"mechanism payload has duplicate node ID {node_id}")
-        graph.add_node(node_id, **node)
+        node_by_id[node_id] = node
+        nodes.append(node)
 
+    edges: list[dict[str, Any]] = []
+    semantic_edge_keys: set[tuple[str, str, str]] = set()
     edge_ids: set[str] = set()
     for index, raw_edge in enumerate(raw_edges):
         if not isinstance(raw_edge, Mapping):
@@ -117,12 +123,12 @@ def to_networkx_mechanism_graph(
         source = _required_nonempty_string(edge, "source", f"edge {edge_id}")
         target = _required_nonempty_string(edge, "target", f"edge {edge_id}")
         role = _required_nonempty_string(edge, "role", f"edge {edge_id}")
-        if source not in graph:
+        if source not in node_by_id:
             raise ValueError(
                 f"mechanism payload edge {edge_id} references unknown source "
                 f"{source}"
             )
-        if target not in graph:
+        if target not in node_by_id:
             raise ValueError(
                 f"mechanism payload edge {edge_id} references unknown target "
                 f"{target}"
@@ -135,22 +141,168 @@ def to_networkx_mechanism_graph(
             raise ValueError(
                 f"mechanism payload edge {edge_id} has invalid role {role!r}"
             )
-        if graph.nodes[species_id]["kind"] != "species":
+        if node_by_id[species_id]["kind"] != "species":
             raise ValueError(
                 f"mechanism payload edge {edge_id} {role} species endpoint "
                 "must have kind 'species'"
             )
-        if graph.nodes[reaction_id]["kind"] != "reaction":
+        if node_by_id[reaction_id]["kind"] != "reaction":
             raise ValueError(
                 f"mechanism payload edge {edge_id} {role} reaction endpoint "
                 "must have kind 'reaction'"
             )
-        key = f"{role}:{reaction_id}:{species_id}"
-        if graph.has_edge(source, target, key):
+        semantic_key = (role, reaction_id, species_id)
+        if semantic_key in semantic_edge_keys:
             raise ValueError(
-                f"mechanism payload has duplicate semantic edge key {key}"
+                "mechanism payload has duplicate semantic edge key "
+                f"{role}:{reaction_id}:{species_id}"
             )
-        graph.add_edge(source, target, key=key, **edge)
+        semantic_edge_keys.add(semantic_key)
+        edges.append(edge)
+
+    if payload["schema_version"] != SCHEMA_VERSION:
+        raise ValueError(
+            "mechanism payload schema_version must be "
+            f"{SCHEMA_VERSION!r}"
+        )
+    if payload["evidence_level"] not in {
+        "reaction_passage_counts",
+        "event_evidence_linked",
+    }:
+        raise ValueError(
+            "mechanism payload evidence_level is unsupported"
+        )
+    if not payload["anchor_smiles"]:
+        raise ValueError(
+            "mechanism payload anchor_smiles must be a non-empty string"
+        )
+
+    for node in nodes:
+        node_id = node["id"]
+        kind = node["kind"]
+        _required_nonempty_string(node, "label", f"node {node_id}")
+        if kind == "species":
+            _required_nonempty_string(node, "smiles", f"node {node_id}")
+            _required_nullable_string(node, "formula", f"node {node_id}")
+            continue
+        _required_nullable_string(node, "formula", f"node {node_id}")
+        _required_nonempty_string(
+            node,
+            "reaction_key",
+            f"node {node_id}",
+        )
+        reactants = _required_string_sequence(
+            node,
+            "reactants",
+            f"node {node_id}",
+        )
+        products = _required_string_sequence(
+            node,
+            "products",
+            f"node {node_id}",
+        )
+        if not reactants or not products:
+            raise ValueError(
+                f"mechanism payload node {node_id} reaction sides "
+                "must not be empty"
+            )
+        forward_tp = _required_nonnegative_int(
+            node,
+            "forward_tp",
+            f"node {node_id}",
+        )
+        reverse_tp = _required_nonnegative_int(
+            node,
+            "reverse_tp",
+            f"node {node_id}",
+        )
+        net_tp = _required_nonnegative_int(
+            node,
+            "net_tp",
+            f"node {node_id}",
+        )
+        if net_tp != forward_tp - reverse_tp or net_tp < 1:
+            raise ValueError(
+                f"mechanism payload node {node_id} net_tp is inconsistent"
+            )
+        evidence_status = _required_nonempty_string(
+            node,
+            "evidence_status",
+            f"node {node_id}",
+        )
+        if evidence_status not in {"network_only", "evidence_linked"}:
+            raise ValueError(
+                f"mechanism payload node {node_id} has invalid "
+                "evidence_status"
+            )
+        _validate_reaction_evidence(node, node_id, evidence_status)
+
+    for edge in edges:
+        edge_id = edge["id"]
+        species_smiles = _required_nonempty_string(
+            edge,
+            "species_smiles",
+            f"edge {edge_id}",
+        )
+        reaction_key = _required_nonempty_string(
+            edge,
+            "reaction_key",
+            f"edge {edge_id}",
+        )
+        coefficient = _required_positive_int(
+            edge,
+            "coefficient",
+            f"edge {edge_id}",
+        )
+        role = edge["role"]
+        species_id = edge["source"] if role == "reactant" else edge["target"]
+        reaction_id = edge["target"] if role == "reactant" else edge["source"]
+        if node_by_id[species_id]["smiles"] != species_smiles:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} species_smiles "
+                "does not match its species node"
+            )
+        reaction_node = node_by_id[reaction_id]
+        if reaction_node["reaction_key"] != reaction_key:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} reaction_key "
+                "does not match its reaction node"
+            )
+        expected_coefficient = Counter(
+            reaction_node[
+                "reactants" if role == "reactant" else "products"
+            ]
+        )[species_smiles]
+        if coefficient != expected_coefficient:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} coefficient "
+                "does not match its reaction side"
+            )
+
+    validated = dict(payload)
+    validated["nodes"] = nodes
+    validated["edges"] = edges
+    return validated
+
+
+def _to_networkx_validated_mechanism_graph(
+    payload: Mapping[str, Any],
+) -> nx.MultiDiGraph:
+    graph = nx.MultiDiGraph()
+    graph.graph.update(
+        schema_version=payload["schema_version"],
+        network_semantics="mechanism",
+        evidence_level=payload["evidence_level"],
+        anchor_smiles=payload["anchor_smiles"],
+    )
+    for node in payload["nodes"]:
+        graph.add_node(node["id"], **node)
+    for edge in payload["edges"]:
+        role = edge["role"]
+        reaction_id = edge["target"] if role == "reactant" else edge["source"]
+        species_id = edge["source"] if role == "reactant" else edge["target"]
+        key = f"{role}:{reaction_id}:{species_id}"
+        graph.add_edge(edge["source"], edge["target"], key=key, **edge)
     return graph
 
 
@@ -272,6 +424,115 @@ def _required_nonempty_string(
             f"mechanism payload {context} {name} must be a non-empty string"
         )
     return value
+
+
+def _required_nullable_string(
+    record: Mapping[str, Any],
+    name: str,
+    context: str,
+) -> str | None:
+    if name not in record:
+        raise ValueError(f"mechanism payload {context} is missing {name}")
+    value = record[name]
+    if value is not None and not isinstance(value, str):
+        raise ValueError(
+            f"mechanism payload {context} {name} must be a string or null"
+        )
+    return value
+
+
+def _required_string_sequence(
+    record: Mapping[str, Any],
+    name: str,
+    context: str,
+) -> tuple[str, ...]:
+    if name not in record:
+        raise ValueError(f"mechanism payload {context} is missing {name}")
+    value = record[name]
+    if not _is_record_sequence(value) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ValueError(
+            f"mechanism payload {context} {name} must be a sequence "
+            "of non-empty strings"
+        )
+    return tuple(value)
+
+
+def _required_nonnegative_int(
+    record: Mapping[str, Any],
+    name: str,
+    context: str,
+) -> int:
+    if name not in record:
+        raise ValueError(f"mechanism payload {context} is missing {name}")
+    value = record[name]
+    if not isinstance(value, Integral) or isinstance(value, bool) or value < 0:
+        raise ValueError(
+            f"mechanism payload {context} {name} must be a "
+            "nonnegative integer"
+        )
+    return int(value)
+
+
+def _required_positive_int(
+    record: Mapping[str, Any],
+    name: str,
+    context: str,
+) -> int:
+    value = _required_nonnegative_int(record, name, context)
+    if value < 1:
+        raise ValueError(
+            f"mechanism payload {context} {name} must be a positive integer"
+        )
+    return value
+
+
+def _validate_reaction_evidence(
+    node: Mapping[str, Any],
+    node_id: str,
+    evidence_status: str,
+) -> None:
+    context = f"node {node_id}"
+    fields = ("event_total", "matched_event_total", "event_coverage")
+    for name in fields:
+        if name not in node:
+            raise ValueError(f"mechanism payload {context} is missing {name}")
+    if evidence_status == "network_only":
+        if any(node[name] is not None for name in fields):
+            raise ValueError(
+                f"mechanism payload {context} network-only evidence "
+                "fields must be null"
+            )
+        return
+
+    event_total = _required_nonnegative_int(node, "event_total", context)
+    matched_event_total = _required_nonnegative_int(
+        node,
+        "matched_event_total",
+        context,
+    )
+    if matched_event_total > event_total:
+        raise ValueError(
+            f"mechanism payload {context} matched_event_total "
+            "must not exceed event_total"
+        )
+    coverage = node["event_coverage"]
+    if (
+        not isinstance(coverage, Real)
+        or isinstance(coverage, bool)
+        or not math.isfinite(float(coverage))
+        or not 0.0 <= float(coverage) <= 1.0
+    ):
+        raise ValueError(
+            f"mechanism payload {context} event_coverage must be "
+            "a finite value from 0 to 1"
+        )
+    expected = matched_event_total / event_total if event_total else 0.0
+    if not math.isclose(float(coverage), expected, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(
+            f"mechanism payload {context} event_coverage is inconsistent"
+        )
 
 
 def _xml_safe_graph_copy(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:

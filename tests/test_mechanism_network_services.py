@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import copy
 import csv
 import io
 import json
@@ -15,6 +16,7 @@ import pytest
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from rng_tools.network import Reaction, ReactionNetwork
+from scripts.webapp import server as legacy_server
 from scripts.webapp_dash import services as svc
 
 
@@ -72,6 +74,25 @@ def _write_rng_sources(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return reactionevent, molecules
+
+
+def _atomic_replace_preserving_size_and_mtime(
+    path: Path,
+    text: str,
+) -> None:
+    before = path.stat()
+    replacement = path.with_name(f"{path.name}.replacement")
+    replacement.write_text(text, encoding="utf-8")
+    assert replacement.stat().st_size == before.st_size
+    os.utime(
+        replacement,
+        ns=(before.st_atime_ns, before.st_mtime_ns),
+    )
+    os.replace(replacement, path)
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
 
 
 @pytest.fixture
@@ -348,6 +369,72 @@ def test_reaction_source_replacement_after_cache_load_is_rejected(
     assert caught.value.reason == "reaction_source_stale"
 
 
+def test_same_metadata_atomic_replacement_invalidates_mechanism_cache(
+    tmp_path: Path,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    artifacts = {"reaction": str(reaction)}
+
+    first = svc.build_mechanism_elements(
+        artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+    _atomic_replace_preserving_size_and_mtime(
+        reaction,
+        "4 [H] -> [C]\n",
+    )
+    second = svc.build_mechanism_elements(
+        artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+
+    first_species = {
+        node["smiles"]
+        for node in first["nodes"]
+        if node["kind"] == "species"
+    }
+    second_species = {
+        node["smiles"]
+        for node in second["nodes"]
+        if node["kind"] == "species"
+    }
+    assert first_species == {"[H]", "[O]"}
+    assert second_species == {"[C]", "[H]"}
+    # Reproducible source signatures intentionally exclude inode/ctime.
+    assert first["source_signatures"] == second["source_signatures"]
+
+
+def test_reaction_replacement_during_store_load_is_exact_stale_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    replacement = tmp_path / "replacement.reactionabcd"
+    replacement.write_text("4 [H] -> [C]\n", encoding="utf-8")
+    before = reaction.stat()
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    real_parse = legacy_server.parse_reactionabcd
+
+    def replacing_parse(path: str, *, min_tp: int) -> list[Reaction]:
+        parsed = real_parse(path, min_tp=min_tp)
+        os.replace(replacement, reaction)
+        return parsed
+
+    monkeypatch.setattr(legacy_server, "parse_reactionabcd", replacing_parse)
+    monkeypatch.setattr(svc, "STORE", legacy_server.NetworkStore())
+
+    with pytest.raises(svc.ServiceError) as caught:
+        svc.build_mechanism_elements(
+            {"reaction": str(reaction)},
+            anchor_smiles="[H]",
+            max_depth=1,
+        )
+
+    assert caught.value.reason == "reaction_source_stale"
+
+
 def test_csv_exports_have_exact_columns_and_round_trip_structured_cells(
     indexed_artifacts: dict[str, str],
 ) -> None:
@@ -399,9 +486,126 @@ def test_csv_export_quotes_delimiters_newlines_and_unicode() -> None:
     exported = svc.export_mechanism_graph(payload, "node-csv")
     restored = list(csv.DictReader(io.StringIO(exported)))
 
-    assert restored[0]["label"] == "=A,一\n二"
-    assert restored[0]["smiles"] == "=A,一\n二"
+    assert restored[0]["label"] == "'=A,一\n二"
+    assert restored[0]["smiles"] == "'=A,一\n二"
     assert restored[0]["formula"] == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("=1+1", "'=1+1"),
+        ("+SUM(A1:A2)", "'+SUM(A1:A2)"),
+        ("-2+3", "'-2+3"),
+        ("@SUM(A1:A2)", "'@SUM(A1:A2)"),
+        (" =1+1", "' =1+1"),
+        ("\t=1+1", "'\t=1+1"),
+        ("\r=1+1", "'\r=1+1"),
+        ("\n=1+1", "'\n=1+1"),
+        ("普通文本", "普通文本"),
+    ],
+)
+def test_csv_export_neutralizes_spreadsheet_formulas(
+    value: str,
+    expected: str,
+) -> None:
+    payload = {
+        "schema_version": "reacnet-scope/mechanism-network/v1",
+        "network_semantics": "mechanism",
+        "evidence_level": "reaction_passage_counts",
+        "anchor_smiles": "A",
+        "query": {},
+        "source_signatures": {},
+        "nodes": [
+            {
+                "id": "species:1",
+                "kind": "species",
+                "label": value,
+                "smiles": value,
+                "formula": value,
+            }
+        ],
+        "edges": [],
+        "meta": {},
+    }
+    before = copy.deepcopy(payload)
+
+    exported = svc.export_mechanism_graph(payload, "node-csv")
+    restored = list(csv.DictReader(io.StringIO(exported)))
+
+    assert restored[0]["label"] == expected
+    assert restored[0]["smiles"] == expected
+    assert restored[0]["formula"] == expected
+    assert payload == before
+
+
+def test_csv_export_preserves_numeric_negative_values() -> None:
+    payload = {
+        "schema_version": "reacnet-scope/mechanism-network/v1",
+        "network_semantics": "mechanism",
+        "evidence_level": "reaction_passage_counts",
+        "anchor_smiles": "A",
+        "query": {},
+        "source_signatures": {},
+        "nodes": [
+            {
+                "id": "species:1",
+                "kind": "species",
+                "label": "A",
+                "smiles": "A",
+                "formula": "A",
+                "forward_tp": -1,
+            }
+        ],
+        "edges": [],
+        "meta": {},
+    }
+
+    exported = svc.export_mechanism_graph(payload, "node-csv")
+    restored = list(csv.DictReader(io.StringIO(exported)))
+
+    assert restored[0]["forward_tp"] == "-1"
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["cytoscape-json", "graphml", "gexf", "node-csv", "edge-csv"],
+)
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_schema", "schema_version"),
+        ("event_transfer", "network_semantics"),
+        ("missing_node_field", "label"),
+        ("dangling_edge", "unknown target"),
+        ("missing_edge_field", "coefficient"),
+    ],
+)
+def test_all_exports_share_complete_mechanism_payload_validation(
+    reaction_artifacts: dict[str, str],
+    format_name: str,
+    mutation: str,
+    message: str,
+) -> None:
+    payload = svc.build_mechanism_elements(
+        reaction_artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+    tampered = copy.deepcopy(payload)
+    if mutation == "missing_schema":
+        tampered.pop("schema_version")
+    elif mutation == "event_transfer":
+        tampered["network_semantics"] = "event_transfer"
+    elif mutation == "missing_node_field":
+        tampered["nodes"][0].pop("label")
+    elif mutation == "dangling_edge":
+        tampered["edges"][0]["target"] = "reaction:missing"
+    else:
+        tampered["edges"][0].pop("coefficient")
+
+    with pytest.raises(ValueError, match=message):
+        svc.export_mechanism_graph(tampered, format_name)
 
 
 def test_graph_exports_use_stored_payload_and_retain_metadata(
