@@ -751,6 +751,10 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "reactionevent": (params.get("reactionevent_file", [""])[0] or "").strip(),
         "molecules": (params.get("molecules_file", [""])[0] or "").strip(),
     }
+    explicit = {
+        key: str(validate_browse_path(path)) if path else ""
+        for key, path in explicit.items()
+    }
     folder = (params.get("dataset_dir", [""])[0] or "").strip()
     folder_base = ""
     folder_files: dict[str, str] = {}

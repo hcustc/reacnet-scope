@@ -124,6 +124,27 @@ class TransitionTableTests(unittest.TestCase):
                 with self.assertRaisesRegex(DirBrowserError, "路径超出允许范围"):
                     build_dataset_status_payload({"dataset_dir": [outside_directory]})
 
+    def test_dataset_status_rejects_explicit_artifacts_outside_allowed_roots(self) -> None:
+        explicit_params = (
+            "reac",
+            "species_file",
+            "moname_file",
+            "trajectory_file",
+            "route_file",
+            "table_file",
+            "reactionevent_file",
+            "molecules_file",
+        )
+        with tempfile.TemporaryDirectory() as allowed_directory, tempfile.TemporaryDirectory() as outside_directory:
+            outside_path = Path(outside_directory) / "private.artifact"
+            outside_path.write_text("fixture", encoding="utf-8")
+
+            with patch.object(dir_browser, "ALLOWED_ROOTS", [Path(allowed_directory)]):
+                for param in explicit_params:
+                    with self.subTest(param=param):
+                        with self.assertRaisesRegex(DirBrowserError, "路径超出允许范围"):
+                            build_dataset_status_payload({param: [str(outside_path)]})
+
     def test_dataset_status_can_select_a_specific_folder_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
