@@ -1263,6 +1263,128 @@ html, body {
     }
 }
 
+/* Dual-semantics network workspace */
+.rs-network-query {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.rs-network-semantics-control {
+  flex: 1 0 100%;
+}
+
+.rs-network-controls {
+  display: flex;
+  align-items: end;
+  flex: 1 1 720px;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.rs-network-controls > input {
+  width: 88px;
+}
+
+.rs-network-controls > .rs-grow {
+  min-width: 240px;
+  flex: 1 1 320px;
+}
+
+.rs-network-field {
+  min-width: 108px;
+}
+
+.rs-network-field label,
+.rs-network-layout-control label {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--rs-muted);
+}
+
+.rs-network-field input,
+.rs-network-field .Select,
+.rs-network-field .dash-dropdown {
+  width: 100%;
+}
+
+.rs-network-anchor {
+  flex: 1 1 300px;
+}
+
+.rs-network-layout-control {
+  width: 120px;
+}
+
+.rs-network-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+
+.rs-network-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2rem;
+}
+
+.rs-network-semantics-badge {
+  flex: 0 0 auto;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.rs-network-detail {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--rs-border);
+  border-radius: 0.5rem;
+  background: #f8fafc;
+}
+
+.rs-network-detail-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rs-network-detail-title {
+  margin-bottom: 0.45rem;
+  overflow-wrap: anywhere;
+  color: var(--rs-ink);
+  font-weight: 600;
+}
+
+.rs-network-detail dl {
+  display: grid;
+  grid-template-columns: max-content minmax(4rem, 1fr);
+  gap: 0.2rem 0.7rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.rs-network-detail dt {
+  color: var(--rs-muted);
+  font-weight: 500;
+}
+
+.rs-network-detail dd {
+  margin: 0;
+}
+
 @media (max-width: 520px) {
     .rs-brand-subtitle,
     .rs-page-eyebrow {

@@ -49,7 +49,7 @@ PAGE_LABELS = {
     "evolution": "时间演化",
     "carbon": "C/O/Cl 组成演化",
     "events": "事件证据",
-    "network": "观察网络",
+    "network": "反应网络",
     "literature": "文献验证",
     "batch-compare": "批量对比",
 }
@@ -63,7 +63,7 @@ PAGE_DESCRIPTIONS = {
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "选择 O/Cl 条件，查看碳数随时间变化，再点击曲线查看代表物种。",
     "events": "检索 ReacNetGenerator 事件输出，并按参与原子查看局部轨迹。",
-    "network": "从观测表构建可交互的全局物种-反应网络。",
+    "network": "在 reactionabcd 机制网络与 table 观察网络之间明确切换。",
     "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
     "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
 }
@@ -125,7 +125,7 @@ def _topbar() -> dbc.Container:
                             dbc.DropdownMenuItem("中间体筛选", id="nav-intermediate"),
                             dbc.DropdownMenuItem("时间演化", id="nav-evolution"),
                             dbc.DropdownMenuItem("C/O/Cl 组成演化", id="nav-carbon"),
-                            dbc.DropdownMenuItem("观察网络", id="nav-network"),
+                            dbc.DropdownMenuItem("反应网络", id="nav-network"),
                             dbc.DropdownMenuItem("文献验证", id="nav-literature"),
                             dbc.DropdownMenuItem("批量对比", id="nav-batch-compare"),
                         ],
@@ -1044,38 +1044,155 @@ def _network_page() -> html.Div:
                 [
                     html.Div(
                         [
-                            dbc.Label("观察网络", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(
-                                id="network-smiles",
-                                value="",
-                                placeholder="使用 .lammpstrj.table 构建全局观察网络",
-                                className="rs-grow",
-                                readOnly=True,
-                            ),
-                            dbc.Label("最小次数", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(id="network-min-count", value="1", type="number", style={"width": 76}),
-                            dbc.Label("显示物种数", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(id="network-max-species", value="60", type="number", style={"width": 80}),
-                            dbc.Label("边数", className="mb-0", style={"fontSize": 12}),
-                            dcc.Input(id="network-top-edges", value="40", type="number", style={"width": 70}),
-                            dbc.Label("布局", className="mb-0", style={"fontSize": 12}),
-                            dcc.Dropdown(
-                                id="network-layout",
-                                options=[
-                                    {"label": "同心圆", "value": "concentric"},
-                                    {"label": "力导向", "value": "cose"},
-                                    {"label": "网格", "value": "grid"},
-                                    {"label": "圆形", "value": "circle"},
-                                    {"label": "树形", "value": "breadthfirst"},
+                            html.Div(
+                                [
+                                    dbc.Label("网络语义"),
+                                    dcc.RadioItems(
+                                        id="network-semantics",
+                                        options=[
+                                            {
+                                                "label": "机制网络（reactionabcd）",
+                                                "value": "mechanism",
+                                            },
+                                            {
+                                                "label": "观察网络（table）",
+                                                "value": "event_transfer",
+                                            },
+                                        ],
+                                        value="event_transfer",
+                                        inline=True,
+                                        className="rs-compact-radio",
+                                    ),
                                 ],
-                                value="concentric",
-                                clearable=False,
-                                style={"width": 120},
+                                className="rs-network-semantics-control",
+                            ),
+                            html.Div(
+                                [
+                                    dcc.Input(
+                                        id="network-smiles",
+                                        value="",
+                                        placeholder="使用 .lammpstrj.table 构建全局观察网络",
+                                        className="rs-grow",
+                                        readOnly=True,
+                                    ),
+                                    dbc.Label("最小次数", className="mb-0"),
+                                    dcc.Input(id="network-min-count", value=1, type="number"),
+                                    dbc.Label("显示物种数", className="mb-0"),
+                                    dcc.Input(id="network-max-species", value=60, type="number"),
+                                    dbc.Label("边数", className="mb-0"),
+                                    dcc.Input(id="network-top-edges", value=40, type="number"),
+                                ],
+                                id="network-observation-controls",
+                                className="rs-network-controls",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            dbc.Label("锚点物种（精确 SMILES）"),
+                                            dcc.Input(
+                                                id="network-anchor-smiles",
+                                                value="",
+                                                placeholder="例如 [CH3]",
+                                            ),
+                                        ],
+                                        className="rs-network-field rs-network-anchor",
+                                    ),
+                                    html.Div(
+                                        [
+                                            dbc.Label("方向"),
+                                            dcc.Dropdown(
+                                                id="network-direction",
+                                                options=[
+                                                    {"label": "双向", "value": "both"},
+                                                    {"label": "下游", "value": "downstream"},
+                                                    {"label": "上游", "value": "upstream"},
+                                                ],
+                                                value="both",
+                                                clearable=False,
+                                            ),
+                                        ],
+                                        className="rs-network-field",
+                                    ),
+                                    html.Div(
+                                        [
+                                            dbc.Label("深度"),
+                                            dcc.Input(id="network-depth", value=2, type="number", min=0),
+                                        ],
+                                        className="rs-network-field",
+                                    ),
+                                    html.Div(
+                                        [
+                                            dbc.Label("最小净 TP"),
+                                            dcc.Input(id="network-min-net-tp", value=1, type="number", min=0),
+                                        ],
+                                        className="rs-network-field",
+                                    ),
+                                    html.Div(
+                                        [
+                                            dbc.Label("节点上限"),
+                                            dcc.Input(id="network-max-nodes", value=200, type="number", min=1),
+                                        ],
+                                        className="rs-network-field",
+                                    ),
+                                    html.Div(
+                                        [
+                                            dbc.Label("事件证据"),
+                                            dcc.Dropdown(
+                                                id="network-evidence-filter",
+                                                options=[
+                                                    {"label": "全部", "value": "all"},
+                                                    {"label": "已关联", "value": "evidence_linked"},
+                                                    {"label": "仅网络", "value": "network_only"},
+                                                ],
+                                                value="all",
+                                                clearable=False,
+                                            ),
+                                        ],
+                                        className="rs-network-field",
+                                    ),
+                                ],
+                                id="network-mechanism-controls",
+                                className="rs-network-controls",
+                                style={"display": "none"},
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Label("布局", className="mb-0"),
+                                    dcc.Dropdown(
+                                        id="network-layout",
+                                        options=[
+                                            {"label": "同心圆", "value": "concentric"},
+                                            {"label": "力导向", "value": "cose"},
+                                            {"label": "网格", "value": "grid"},
+                                            {"label": "圆形", "value": "circle"},
+                                            {"label": "树形", "value": "breadthfirst"},
+                                        ],
+                                        value="concentric",
+                                        clearable=False,
+                                    ),
+                                ],
+                                className="rs-network-layout-control",
                             ),
                             dbc.Button("构建", id="network-search-btn", color="primary", size="sm"),
                             dbc.Button("导出 PNG", id="network-png-btn", color="secondary", size="sm", outline=True),
                         ],
-                        className="rs-query-row",
+                        className="rs-network-query",
+                    ),
+                    html.Div(
+                        [
+                            dbc.Button("JSON", id="network-json-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dbc.Button("GraphML", id="network-graphml-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dbc.Button("GEXF", id="network-gexf-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dbc.Button("节点 CSV", id="network-node-csv-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dbc.Button("边 CSV", id="network-edge-csv-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dcc.Download(id="network-json-download"),
+                            dcc.Download(id="network-graphml-download"),
+                            dcc.Download(id="network-gexf-download"),
+                            dcc.Download(id="network-node-csv-download"),
+                            dcc.Download(id="network-edge-csv-download"),
+                        ],
+                        className="rs-network-downloads",
                     ),
                 ],
                 className="p-2",
@@ -1088,7 +1205,17 @@ def _network_page() -> html.Div:
         [
             dbc.CardBody(
                 [
-                    html.Div(id="network-alert"),
+                    html.Div(
+                        [
+                            html.Div(id="network-alert"),
+                            html.Span(
+                                "尚未构建网络",
+                                id="network-semantics-badge",
+                                className="rs-network-semantics-badge",
+                            ),
+                        ],
+                        className="rs-network-result-head",
+                    ),
                     dcc.Loading(
                         html.Div(
                             cyto.Cytoscape(
@@ -1097,55 +1224,29 @@ def _network_page() -> html.Div:
                                 elements=[],
                                 style={"width": "100%", "height": "100%"},
                                 className="rs-cytoscape",
-                                stylesheet=[
-                                    {
-                                        "selector": "node",
-                                        "style": {
-                                            "label": "data(label)",
-                                            "text-valign": "center",
-                                            "text-halign": "center",
-                                            "font-size": 8,
-                                            "width": 28,
-                                            "height": 28,
-                                            "background-color": "#dbeafe",
-                                            "border-color": "#93c5fd",
-                                            "border-width": 1,
-                                        },
-                                    },
-                                    {
-                                        "selector": "node.reaction",
-                                        "style": {
-                                            "background-color": "#fde68a",
-                                            "border-color": "#f59e0b",
-                                            "shape": "rectangle",
-                                            "width": 18,
-                                            "height": 18,
-                                            "font-size": 6,
-                                        },
-                                    },
-                                    {
-                                        "selector": "node[selected]",
-                                        "style": {
-                                            "border-width": 3,
-                                            "border-color": "#2563eb",
-                                        },
-                                    },
-                                    {
-                                        "selector": "edge",
-                                        "style": {
-                                            "curve-style": "bezier",
-                                            "target-arrow-shape": "triangle",
-                                            "arrow-scale": 0.8,
-                                            "line-color": "#9ca3af",
-                                            "target-arrow-color": "#9ca3af",
-                                            "width": 1,
-                                        },
-                                    },
-                                ],
+                                stylesheet=cb.NETWORK_STYLESHEET,
                             ),
                             className="rs-grid-wrap",
                         ),
                         type="circle",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                "选择一个物种或反应节点查看详情。",
+                                id="network-detail-panel",
+                                className="rs-network-detail-body",
+                            ),
+                            dbc.Button(
+                                "查看该反应事件",
+                                id="network-open-events-btn",
+                                color="primary",
+                                size="sm",
+                                outline=True,
+                                disabled=True,
+                            ),
+                        ],
+                        className="rs-network-detail",
                     ),
                 ],
                 className="p-2 rs-flex-fill",

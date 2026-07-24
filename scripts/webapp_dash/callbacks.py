@@ -21,6 +21,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from rng_tools.pathway_export import pathway_csv_text, pathway_document
+from reacnet_scope.indexes import dataset_id_for_source
 from scripts.webapp_dash import services as svc
 
 
@@ -35,7 +36,7 @@ PAGE_LABELS = {
     "evolution": "时间演化",
     "carbon": "C/O/Cl 组成演化",
     "events": "事件证据",
-    "network": "观察网络",
+    "network": "反应网络",
     "literature": "文献验证",
     "batch-compare": "批量对比",
 }
@@ -49,7 +50,7 @@ PAGE_DESCRIPTIONS = {
     "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
     "carbon": "选择 O/Cl 条件，查看碳数随时间变化，再点击曲线查看代表物种。",
     "events": "检索 ReacNetGenerator 事件输出，并按参与原子查看局部轨迹。",
-    "network": "从观测表构建可交互的全局物种-反应网络。",
+    "network": "在 reactionabcd 机制网络与 table 观察网络之间明确切换。",
     "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
     "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
 }
@@ -66,11 +67,69 @@ PAGE_DATA_REQUIREMENTS = {
     "literature": ("reaction", "reactionabcd"),
 }
 
+NETWORK_STYLESHEET = [
+    {
+        "selector": "node",
+        "style": {
+            "label": "data(label)",
+            "text-valign": "center",
+            "text-halign": "center",
+            "font-size": 8,
+            "width": 28,
+            "height": 28,
+            "background-color": "#dbeafe",
+            "border-color": "#93c5fd",
+            "border-width": 1,
+        },
+    },
+    {
+        "selector": "node.reaction",
+        "style": {
+            "background-color": "#fde68a",
+            "border-color": "#f59e0b",
+            "shape": "rectangle",
+            "width": 18,
+            "height": 18,
+            "font-size": 6,
+        },
+    },
+    {
+        "selector": "node[selected]",
+        "style": {
+            "border-width": 3,
+            "border-color": "#2563eb",
+        },
+    },
+    {
+        "selector": "edge",
+        "style": {
+            "curve-style": "bezier",
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 0.8,
+            "line-color": "#9ca3af",
+            "target-arrow-color": "#9ca3af",
+            "width": 1,
+        },
+    },
+    {
+        "selector": ".is-path-highlight",
+        "style": {
+            "border-color": "#2563eb",
+            "border-width": 4,
+            "line-color": "#2563eb",
+            "target-arrow-color": "#2563eb",
+            "width": 3,
+            "z-index": 10,
+        },
+    },
+]
+
 
 def initial_store() -> dict[str, Any]:
     return {
         "folder": "",
         "base": "",
+        "dataset_id": "",
         "label": "未选择",
         "ready_count": 0,
         "capabilities": {},
@@ -323,12 +382,19 @@ def register_callbacks(app: Any) -> None:
         Input("rxn-to-pathway-btn", "n_clicks"),
         Input("pathway-open-events-btn", "n_clicks"),
         Input("pathway-highlight-network-btn", "n_clicks"),
+        Input("network-open-events-btn", "n_clicks"),
         State("page-store", "data"),
     )
     def _navigate(*_args):
         triggered_id = ctx.triggered_id
         stored_page = (_args[-1] or {}).get("page") if _args else None
-        if triggered_id in {"species-to-event-btn", "rxn-to-event-btn", "transitions-to-event-btn", "pathway-open-events-btn"}:
+        if triggered_id in {
+            "species-to-event-btn",
+            "rxn-to-event-btn",
+            "transitions-to-event-btn",
+            "pathway-open-events-btn",
+            "network-open-events-btn",
+        }:
             page_id = "events"
         elif triggered_id in {"species-to-pathway-btn", "rxn-to-pathway-btn"}:
             page_id = "pathway"
@@ -359,8 +425,9 @@ def register_callbacks(app: Any) -> None:
         Output("page-data-status", "className"),
         Input("page-store", "data"),
         Input("app-store", "data"),
+        Input("network-semantics", "value"),
     )
-    def _update_page_data_status(page_store, app_store):
+    def _update_page_data_status(page_store, app_store, network_semantics):
         page_id = (page_store or {}).get("page") or "species"
         if page_id == "batch-compare":
             return "独立目录分析", "rs-page-status is-independent"
@@ -371,7 +438,13 @@ def register_callbacks(app: Any) -> None:
                 if event_ready
                 else ("需要 reactionevent.csv + molecules.csv", "rs-page-status is-blocked")
             )
-        artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(page_id, ("", ""))
+        if page_id == "network" and network_semantics == "mechanism":
+            artifact_key, artifact_label = "reaction", "reactionabcd"
+        else:
+            artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(
+                page_id,
+                ("", ""),
+            )
         artifacts = (app_store or {}).get("artifacts") or {}
         if artifact_key and artifacts.get(artifact_key):
             return f"{artifact_label} 已就绪", "rs-page-status is-ready"
@@ -389,8 +462,9 @@ def register_callbacks(app: Any) -> None:
         Output("network-search-btn", "disabled"),
         Output("literature-verify-btn", "disabled"),
         Input("app-store", "data"),
+        Input("network-semantics", "value"),
     )
-    def _update_data_dependent_actions(app_store):
+    def _update_data_dependent_actions(app_store, network_semantics):
         artifacts = (app_store or {}).get("artifacts") or {}
         readiness = (app_store or {}).get("readiness") or {}
         no_reaction = not bool(artifacts.get("reaction"))
@@ -407,7 +481,9 @@ def register_callbacks(app: Any) -> None:
             no_species,
             no_reaction_events,
             no_trajectory,
-            no_table,
+            no_reaction
+            if network_semantics == "mechanism"
+            else no_table,
             no_reaction,
         )
 
@@ -881,6 +957,7 @@ def register_callbacks(app: Any) -> None:
             **store,
             "folder": folder,
             "base": selected_base_new,
+            "dataset_id": dataset_id_for_source(selected_base_new),
             "label": label,
             "ready_count": ready,
             "capabilities": capabilities,
@@ -2413,38 +2490,418 @@ def register_callbacks(app: Any) -> None:
             "candidate_pathways.csv",
         )
 
-    # ── Observation network ─────────────────────────────────────────
+    # ── Dual-semantics network workspace ────────────────────────────
 
     @app.callback(
-        Output("network-cytoscape", "elements"),
-        Output("network-cytoscape", "layout"),
+        Output("network-observation-controls", "style"),
+        Output("network-mechanism-controls", "style"),
+        Output("network-json-btn", "disabled"),
+        Output("network-graphml-btn", "disabled"),
+        Output("network-gexf-btn", "disabled"),
+        Output("network-node-csv-btn", "disabled"),
+        Output("network-edge-csv-btn", "disabled"),
+        Input("network-semantics", "value"),
+    )
+    def _switch_network_semantics(semantics):
+        mechanism = semantics == "mechanism"
+        return (
+            {"display": "none"} if mechanism else {"display": "flex"},
+            {"display": "flex"} if mechanism else {"display": "none"},
+            not mechanism,
+            not mechanism,
+            not mechanism,
+            not mechanism,
+            not mechanism,
+        )
+
+    @app.callback(
+        Output("network-anchor-smiles", "value"),
+        Output("network-semantics", "value"),
+        Input("app-store", "data"),
+        Input("pathway-highlight-store", "data"),
+    )
+    def _network_anchor_handoff(app_store, pathway_handoff):
+        if (
+            ctx.triggered_id == "pathway-highlight-store"
+            and isinstance(pathway_handoff, dict)
+        ):
+            species_ids = pathway_handoff.get("species_ids") or []
+            if species_ids:
+                return str(species_ids[0]), "mechanism"
+        selected = str((app_store or {}).get("selected_smiles") or "")
+        return selected, ("mechanism" if selected else no_update)
+
+    @app.callback(
         Output("network-alert", "children"),
         Output("network-store", "data"),
+        Output("network-cytoscape", "tapNodeData"),
         Input("network-search-btn", "n_clicks"),
+        State("network-semantics", "value"),
         State("network-min-count", "value"),
         State("network-max-species", "value"),
         State("network-top-edges", "value"),
+        State("network-anchor-smiles", "value"),
+        State("network-direction", "value"),
+        State("network-depth", "value"),
+        State("network-min-net-tp", "value"),
+        State("network-max-nodes", "value"),
+        State("network-evidence-filter", "value"),
         State("network-layout", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _build_network(n_clicks, min_count, max_species, top_edges, layout_name, store):
+    def _build_network(
+        n_clicks,
+        semantics,
+        min_count,
+        max_species,
+        top_edges,
+        anchor_smiles,
+        direction,
+        max_depth,
+        min_net_tp,
+        max_nodes,
+        evidence_filter,
+        layout_name,
+        store,
+    ):
         if n_clicks is None:
             raise PreventUpdate
         store = store or {}
         artifacts = store.get("artifacts", {}) or {}
         try:
-            result = svc.build_observation_elements(
-                artifacts,
-                min_count=int(min_count or 1),
-                max_species=int(max_species or 60),
-                top_edges=int(top_edges or 40),
-            )
+            if semantics == "mechanism":
+                result = svc.build_mechanism_elements(
+                    artifacts,
+                    anchor_smiles=str(anchor_smiles or ""),
+                    direction=(
+                        "both"
+                        if direction is None
+                        else str(direction)
+                    ),
+                    max_depth=int(2 if max_depth is None else max_depth),
+                    min_net_tp=int(
+                        1 if min_net_tp is None else min_net_tp
+                    ),
+                    max_nodes=int(200 if max_nodes is None else max_nodes),
+                )
+            else:
+                result = svc.build_observation_elements(
+                    artifacts,
+                    min_count=int(1 if min_count is None else min_count),
+                    max_species=int(
+                        60 if max_species is None else max_species
+                    ),
+                    top_edges=int(40 if top_edges is None else top_edges),
+                )
+        except (TypeError, ValueError) as exc:
+            return str(exc), None, None
         except svc.ServiceError as exc:
-            return [], {"name": "concentric"}, str(exc.message), None
-        elements = result.get("elements") or []
-        layout = {"name": layout_name if layout_name in {"concentric", "cose", "grid", "circle", "breadthfirst"} else "concentric"}
-        return elements, layout, None, result
+            return str(exc.message), None, None
+
+        dataset_id = str(
+            store.get("dataset_id")
+            or store.get("base")
+            or store.get("label")
+            or "dataset"
+        )
+        payload = {
+            **result,
+            "dataset_id": dataset_id,
+            "_ui_evidence_filter": str(evidence_filter or "all"),
+            "_ui_layout": str(layout_name or "concentric"),
+        }
+        meta = payload.get("meta") or {}
+        count = meta.get("node_count")
+        if count is None:
+            count = len(payload.get("elements") or [])
+        return f"网络已构建 · {int(count or 0)} 个节点", payload, None
+
+    @app.callback(
+        Output("network-cytoscape", "elements"),
+        Output("network-cytoscape", "layout"),
+        Output("network-cytoscape", "stylesheet"),
+        Output("network-semantics-badge", "children"),
+        Input("network-store", "data"),
+        Input("pathway-highlight-store", "data"),
+        Input("network-layout", "value"),
+    )
+    def _render_network(payload, pathway_handoff, layout_name):
+        payload = payload or {}
+        elements = [
+            {
+                **item,
+                "data": dict(item.get("data") or {}),
+                "classes": str(item.get("classes") or ""),
+            }
+            for item in payload.get("elements") or []
+            if isinstance(item, dict)
+        ]
+        if (
+            payload.get("network_semantics") == "mechanism"
+            and payload.get("_ui_evidence_filter") in {
+                "evidence_linked",
+                "network_only",
+            }
+        ):
+            expected = payload["_ui_evidence_filter"]
+            kept_reactions = {
+                str(item["data"].get("id") or "")
+                for item in elements
+                if item["data"].get("kind") == "reaction"
+                and item["data"].get("evidence_status") == expected
+            }
+            kept_edges = [
+                item
+                for item in elements
+                if item["data"].get("source") in kept_reactions
+                or item["data"].get("target") in kept_reactions
+            ]
+            kept_species = {
+                str(endpoint)
+                for item in kept_edges
+                for endpoint in (
+                    item["data"].get("source"),
+                    item["data"].get("target"),
+                )
+                if endpoint not in kept_reactions
+            }
+            kept_ids = kept_reactions | kept_species | {
+                str(item["data"].get("id") or "")
+                for item in kept_edges
+            }
+            elements = [
+                item
+                for item in elements
+                if str(item["data"].get("id") or "") in kept_ids
+            ]
+
+        handoff = (
+            pathway_handoff
+            if isinstance(pathway_handoff, dict)
+            else {}
+        )
+        species_ids = {
+            str(value) for value in handoff.get("species_ids") or []
+        }
+        reaction_keys = {
+            str(value) for value in handoff.get("reaction_keys") or []
+        }
+        for item in elements:
+            data = item["data"]
+            matched = (
+                str(data.get("smiles") or "") in species_ids
+                or str(data.get("reaction_key") or "") in reaction_keys
+            )
+            if matched:
+                classes = {
+                    value
+                    for value in str(item.get("classes") or "").split()
+                    if value
+                }
+                classes.add("is-path-highlight")
+                item["classes"] = " ".join(sorted(classes))
+
+        selected_layout = (
+            layout_name
+            if layout_name
+            in {"concentric", "cose", "grid", "circle", "breadthfirst"}
+            else "concentric"
+        )
+        semantics = str(payload.get("network_semantics") or "")
+        if semantics == "mechanism":
+            badge = "mechanism · reaction passage counts"
+        elif semantics == "event_transfer":
+            badge = "event_transfer · aggregate observation"
+        else:
+            badge = "尚未构建网络"
+        return elements, {"name": selected_layout}, NETWORK_STYLESHEET, badge
+
+    @app.callback(
+        Output("network-detail-panel", "children"),
+        Output("network-open-events-btn", "disabled"),
+        Input("network-cytoscape", "tapNodeData"),
+        Input("network-store", "data"),
+    )
+    def _network_node_detail(node_data, payload):
+        if (
+            ctx.triggered_id == "network-store"
+            or not isinstance(node_data, dict)
+        ):
+            return "选择一个物种或反应节点查看详情。", True
+        node_id = str(node_data.get("id") or "")
+        canonical = next(
+            (
+                node
+                for node in (payload or {}).get("nodes") or []
+                if str(node.get("id") or "") == node_id
+            ),
+            node_data,
+        )
+        if canonical.get("kind") == "reaction":
+            reactants = [
+                str(value) for value in canonical.get("reactants") or []
+            ]
+            products = [
+                str(value) for value in canonical.get("products") or []
+            ]
+            reaction_text = (
+                f"{' + '.join(reactants)} → {' + '.join(products)}"
+            )
+            metrics = [
+                ("正向 TP", canonical.get("forward_tp")),
+                ("反向 TP", canonical.get("reverse_tp")),
+                ("净 TP", canonical.get("net_tp")),
+                ("事件总数", canonical.get("event_total")),
+                ("匹配事件", canonical.get("matched_event_total")),
+                ("事件覆盖率", canonical.get("event_coverage")),
+                ("证据状态", canonical.get("evidence_status")),
+            ]
+            return (
+                html.Div(
+                    [
+                        html.Div(reaction_text, className="rs-network-detail-title"),
+                        html.Dl(
+                            [
+                                item
+                                for label, value in metrics
+                                for item in (
+                                    html.Dt(label),
+                                    html.Dd("—" if value is None else str(value)),
+                                )
+                            ]
+                        ),
+                    ]
+                ),
+                not bool(reactants or products),
+            )
+        return (
+            html.Div(
+                [
+                    html.Div(
+                        str(canonical.get("formula") or canonical.get("label") or ""),
+                        className="rs-network-detail-title",
+                    ),
+                    html.Code(str(canonical.get("smiles") or "")),
+                ]
+            ),
+            True,
+        )
+
+    @app.callback(
+        Output("event-reaction-text", "value", allow_duplicate=True),
+        Input("network-open-events-btn", "n_clicks"),
+        State("network-cytoscape", "tapNodeData"),
+        prevent_initial_call=True,
+    )
+    def _send_network_reaction_to_events(n_clicks, node_data):
+        if n_clicks is None or not isinstance(node_data, dict):
+            raise PreventUpdate
+        reactants = [str(value) for value in node_data.get("reactants") or []]
+        products = [str(value) for value in node_data.get("products") or []]
+        if not reactants and not products:
+            raise PreventUpdate
+        return f"{' + '.join(reactants)} -> {' + '.join(products)}"
+
+    def _network_export_name(payload, suffix):
+        dataset_id = str((payload or {}).get("dataset_id") or "dataset")
+        semantics = str(
+            (payload or {}).get("network_semantics") or "network"
+        )
+        schema = str(
+            (payload or {}).get("schema_version")
+            or "reacnet-scope/mechanism-network/v1"
+        )
+        safe = lambda value: re.sub(  # noqa: E731
+            r"[^\w.-]+",
+            "-",
+            value,
+            flags=re.UNICODE,
+        ).strip("-._") or "unknown"
+        return (
+            f"{safe(dataset_id)}_{safe(semantics)}_"
+            f"{safe(schema.replace('/', '-'))}{suffix}"
+        )
+
+    def _network_export(payload, format_name, suffix):
+        if (
+            not isinstance(payload, dict)
+            or payload.get("network_semantics") != "mechanism"
+        ):
+            return no_update
+        try:
+            exported = svc.export_mechanism_graph(payload, format_name)
+        except (TypeError, ValueError):
+            return no_update
+        filename = _network_export_name(payload, suffix)
+        if format_name == "cytoscape-json":
+            return dcc.send_string(
+                json.dumps(
+                    exported,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                filename,
+            )
+        if format_name in {"graphml", "gexf"}:
+            return dcc.send_bytes(exported, filename)
+        return dcc.send_string(str(exported), filename)
+
+    @app.callback(
+        Output("network-json-download", "data"),
+        Input("network-json-btn", "n_clicks"),
+        State("network-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_network_json(n_clicks, payload):
+        if n_clicks is None:
+            raise PreventUpdate
+        return _network_export(payload, "cytoscape-json", ".json")
+
+    @app.callback(
+        Output("network-graphml-download", "data"),
+        Input("network-graphml-btn", "n_clicks"),
+        State("network-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_network_graphml(n_clicks, payload):
+        if n_clicks is None:
+            raise PreventUpdate
+        return _network_export(payload, "graphml", ".graphml")
+
+    @app.callback(
+        Output("network-gexf-download", "data"),
+        Input("network-gexf-btn", "n_clicks"),
+        State("network-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_network_gexf(n_clicks, payload):
+        if n_clicks is None:
+            raise PreventUpdate
+        return _network_export(payload, "gexf", ".gexf")
+
+    @app.callback(
+        Output("network-node-csv-download", "data"),
+        Input("network-node-csv-btn", "n_clicks"),
+        State("network-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_network_node_csv(n_clicks, payload):
+        if n_clicks is None:
+            raise PreventUpdate
+        return _network_export(payload, "node-csv", "_nodes.csv")
+
+    @app.callback(
+        Output("network-edge-csv-download", "data"),
+        Input("network-edge-csv-btn", "n_clicks"),
+        State("network-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_network_edge_csv(n_clicks, payload):
+        if n_clicks is None:
+            raise PreventUpdate
+        return _network_export(payload, "edge-csv", "_edges.csv")
 
     @app.callback(
         Output("network-cytoscape", "generateImage"),

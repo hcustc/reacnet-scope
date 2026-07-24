@@ -103,6 +103,31 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-highlight-store",
     }:
         assert pathway_id in layout_ids
+    for network_id in {
+        "network-semantics",
+        "network-observation-controls",
+        "network-mechanism-controls",
+        "network-anchor-smiles",
+        "network-direction",
+        "network-depth",
+        "network-min-net-tp",
+        "network-max-nodes",
+        "network-evidence-filter",
+        "network-semantics-badge",
+        "network-json-btn",
+        "network-json-download",
+        "network-graphml-btn",
+        "network-graphml-download",
+        "network-gexf-btn",
+        "network-gexf-download",
+        "network-node-csv-btn",
+        "network-node-csv-download",
+        "network-edge-csv-btn",
+        "network-edge-csv-download",
+        "network-detail-panel",
+        "network-open-events-btn",
+    }:
+        assert network_id in layout_ids
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -574,6 +599,422 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
     cleared = clear_response.get_json()["response"]
     assert cleared["pathway-selected-path"]["data"] is None
     assert cleared["pathway-highlight-store"]["data"] is None
+
+
+def _mechanism_network_payload() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schema_version": "reacnet-scope/mechanism-network/v1",
+        "network_semantics": "mechanism",
+        "evidence_level": "event_evidence_linked",
+        "evidence_status": "evidence_linked",
+        "anchor_smiles": "[H]",
+        "query": {
+            "direction": "both",
+            "max_depth": 2,
+            "min_net_tp": 1,
+            "max_nodes": 200,
+        },
+        "source_signatures": {},
+        "dataset_id": "数据集 甲/1",
+        "nodes": [
+            {
+                "id": "species:h",
+                "kind": "species",
+                "label": "H",
+                "smiles": "[H]",
+                "formula": "H",
+            },
+            {
+                "id": "species:ho",
+                "kind": "species",
+                "label": "HO",
+                "smiles": "[H][O]",
+                "formula": "HO",
+            },
+            {
+                "id": "reaction:one",
+                "kind": "reaction",
+                "label": "H+O+O → HO+O",
+                "formula": "H+O+O->HO+O",
+                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                "reactants": ["[H]", "[O]", "[O]"],
+                "products": ["[H][O]", "[O]"],
+                "forward_tp": 9,
+                "reverse_tp": 2,
+                "net_tp": 7,
+                "event_total": 5,
+                "matched_event_total": 4,
+                "event_coverage": 0.8,
+                "evidence_status": "evidence_linked",
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge:h",
+                "source": "species:h",
+                "target": "reaction:one",
+                "role": "reactant",
+                "species_smiles": "[H]",
+                "coefficient": 1,
+                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+            },
+            {
+                "id": "edge:ho",
+                "source": "reaction:one",
+                "target": "species:ho",
+                "role": "product",
+                "species_smiles": "[H][O]",
+                "coefficient": 1,
+                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+            },
+        ],
+        "elements": [
+            {
+                "data": {
+                    "id": "species:h",
+                    "kind": "species",
+                    "label": "H",
+                    "smiles": "[H]",
+                    "formula": "H",
+                },
+                "classes": "species",
+            },
+            {
+                "data": {
+                    "id": "species:ho",
+                    "kind": "species",
+                    "label": "HO",
+                    "smiles": "[H][O]",
+                    "formula": "HO",
+                },
+                "classes": "species",
+            },
+            {
+                "data": {
+                    "id": "reaction:one",
+                    "kind": "reaction",
+                    "label": "H+O+O → HO+O",
+                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                    "reactants": ["[H]", "[O]", "[O]"],
+                    "products": ["[H][O]", "[O]"],
+                    "forward_tp": 9,
+                    "reverse_tp": 2,
+                    "net_tp": 7,
+                    "event_total": 5,
+                    "matched_event_total": 4,
+                    "event_coverage": 0.8,
+                    "evidence_status": "evidence_linked",
+                },
+                "classes": "reaction",
+            },
+            {
+                "data": {
+                    "id": "edge:h",
+                    "source": "species:h",
+                    "target": "reaction:one",
+                    "role": "reactant",
+                    "species_smiles": "[H]",
+                    "coefficient": 1,
+                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                },
+                "classes": "reactant",
+            },
+            {
+                "data": {
+                    "id": "edge:ho",
+                    "source": "reaction:one",
+                    "target": "species:ho",
+                    "role": "product",
+                    "species_smiles": "[H][O]",
+                    "coefficient": 1,
+                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
+                },
+                "classes": "product",
+            },
+        ],
+        "meta": {
+            "node_count": 3,
+            "edge_count": 2,
+            "reaction_count": 1,
+            "truncated": False,
+            "reason": "ok",
+        },
+    }
+
+
+def test_network_build_dispatches_exclusively_and_preserves_zero_values(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    mechanism = _mechanism_network_payload()
+    observation = {
+        "ok": True,
+        "network_semantics": "event_transfer",
+        "evidence_level": "aggregate_observation",
+        "elements": [{"data": {"id": "observed"}}],
+        "meta": {},
+        "network": {},
+    }
+
+    def fake_mechanism(_artifacts, **query):
+        calls.append(("mechanism", query))
+        return mechanism
+
+    def fake_observation(_artifacts, **query):
+        calls.append(("observation", query))
+        return observation
+
+    monkeypatch.setattr(svc, "build_mechanism_elements", fake_mechanism)
+    monkeypatch.setattr(svc, "build_observation_elements", fake_observation)
+    app = create_app()
+    client = app.server.test_client()
+
+    def invoke(semantics: str, **overrides: Any) -> dict[str, Any]:
+        states = {
+            "network-semantics": semantics,
+            "network-min-count": 0,
+            "network-max-species": 0,
+            "network-top-edges": 0,
+            "network-anchor-smiles": "[H]",
+            "network-direction": "both",
+            "network-depth": 0,
+            "network-min-net-tp": 0,
+            "network-max-nodes": 1,
+            "network-evidence-filter": "all",
+            "network-layout": "grid",
+            "app-store": {
+                "base": "run.lammpstrj",
+                "artifacts": {
+                    "reaction": "/data/run.reactionabcd",
+                    "table": "/data/run.lammpstrj.table",
+                },
+            },
+        }
+        states.update(overrides)
+        response = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=["network-search-btn"],
+                changed="network-search-btn.n_clicks",
+                input_values={"network-search-btn": 1},
+                state_values=states,
+            ),
+        )
+        assert response.status_code == 200
+        return response.get_json()["response"]
+
+    mechanism_result = invoke("mechanism")
+    assert calls == [
+        (
+            "mechanism",
+            {
+                "anchor_smiles": "[H]",
+                "direction": "both",
+                "max_depth": 0,
+                "min_net_tp": 0,
+                "max_nodes": 1,
+            },
+        )
+    ]
+    assert mechanism_result["network-store"]["data"]["dataset_id"] == "run.lammpstrj"
+    assert mechanism_result["network-cytoscape"]["tapNodeData"] is None
+
+    observation_result = invoke("event_transfer")
+    assert calls[-1] == (
+        "observation",
+        {"min_count": 0, "max_species": 0, "top_edges": 0},
+    )
+    assert observation_result["network-store"]["data"]["network_semantics"] == "event_transfer"
+
+
+def test_network_controls_switch_by_semantics_and_handoff_exact_anchor() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    controls = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["network-semantics"],
+            changed="network-semantics.value",
+            input_values={"network-semantics": "mechanism"},
+            state_values={},
+        ),
+    )
+    assert controls.status_code == 200
+    control_result = controls.get_json()["response"]
+    assert control_result["network-mechanism-controls"]["style"]["display"] != "none"
+    assert control_result["network-observation-controls"]["style"]["display"] == "none"
+    assert control_result["network-json-btn"]["disabled"] is False
+
+    handoff = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store", "pathway-highlight-store"],
+            changed="pathway-highlight-store.data",
+            input_values={
+                "app-store": {"selected_smiles": "[13CH3]"},
+                "pathway-highlight-store": {
+                    "species_ids": ["[H][O]", "[H]"],
+                },
+            },
+            state_values={},
+        ),
+    )
+    assert handoff.status_code == 200
+    assert (
+        handoff.get_json()["response"]["network-anchor-smiles"]["value"]
+        == "[H][O]"
+    )
+    assert (
+        handoff.get_json()["response"]["network-semantics"]["value"]
+        == "mechanism"
+    )
+
+
+def test_network_highlight_uses_exact_ids_without_removing_elements() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    payload = _mechanism_network_payload()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "network-store",
+                "pathway-highlight-store",
+                "network-layout",
+            ],
+            changed="pathway-highlight-store.data",
+            input_values={
+                "network-store": payload,
+                "pathway-highlight-store": {
+                    "species_ids": ["[H]"],
+                    "reaction_keys": ["[H]+[O]+[O]->[H][O]+[O]"],
+                },
+                "network-layout": "grid",
+            },
+            state_values={},
+        ),
+    )
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    elements = result["network-cytoscape"]["elements"]
+    assert len(elements) == len(payload["elements"])
+    by_id = {item["data"]["id"]: item for item in elements}
+    assert "is-path-highlight" in by_id["species:h"]["classes"]
+    assert "is-path-highlight" in by_id["reaction:one"]["classes"]
+    assert "is-path-highlight" not in by_id["species:ho"]["classes"]
+    assert by_id["edge:ho"]["data"] == payload["elements"][4]["data"]
+    assert result["network-cytoscape"]["layout"] == {"name": "grid"}
+    assert "kinetic flux" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_network_reaction_detail_and_event_handoff_keep_repeated_sides() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    payload = _mechanism_network_payload()
+    reaction_data = payload["elements"][2]["data"]
+    detail_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["network-cytoscape", "network-store"],
+            changed="network-cytoscape.tapNodeData",
+            input_values={
+                "network-cytoscape": reaction_data,
+                "network-store": payload,
+            },
+            state_values={},
+        ),
+    )
+    assert detail_response.status_code == 200
+    detail_text = json.dumps(
+        detail_response.get_json()["response"]["network-detail-panel"]["children"],
+        ensure_ascii=False,
+    )
+    assert "[H] + [O] + [O] → [H][O] + [O]" in detail_text
+    for value in ("9", "2", "7", "5", "4", "0.8"):
+        assert value in detail_text
+    assert (
+        detail_response.get_json()["response"]["network-open-events-btn"]["disabled"]
+        is False
+    )
+
+    handoff_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["network-open-events-btn"],
+            changed="network-open-events-btn.n_clicks",
+            input_values={"network-open-events-btn": 1},
+            state_values={"network-cytoscape": reaction_data},
+        ),
+    )
+    assert handoff_response.status_code == 200
+    assert (
+        handoff_response.get_json()["response"]["event-reaction-text"]["value"]
+        == "[H] + [O] + [O] -> [H][O] + [O]"
+    )
+
+
+def test_network_exports_are_store_only_and_have_safe_traceable_names(
+    monkeypatch,
+) -> None:
+    payload = _mechanism_network_payload()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("download must not rebuild a network")
+
+    monkeypatch.setattr(svc, "build_mechanism_elements", forbidden)
+    monkeypatch.setattr(svc, "build_observation_elements", forbidden)
+    export_calls: list[str] = []
+
+    def fake_export(_payload, format_name):
+        export_calls.append(format_name)
+        if format_name == "cytoscape-json":
+            return {"data": {"网络": "机制"}}
+        if format_name in {"graphml", "gexf"}:
+            return "<graph>机制</graph>".encode()
+        return "id,label\n1,机制\n"
+
+    monkeypatch.setattr(svc, "export_mechanism_graph", fake_export)
+    app = create_app()
+    client = app.server.test_client()
+    expected = {
+        "network-json-btn": ("network-json-download", ".json"),
+        "network-graphml-btn": ("network-graphml-download", ".graphml"),
+        "network-gexf-btn": ("network-gexf-download", ".gexf"),
+        "network-node-csv-btn": ("network-node-csv-download", "_nodes.csv"),
+        "network-edge-csv-btn": ("network-edge-csv-download", "_edges.csv"),
+    }
+    for button_id, (download_id, suffix) in expected.items():
+        response = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=[button_id],
+                changed=f"{button_id}.n_clicks",
+                input_values={button_id: 1},
+                state_values={"network-store": payload},
+            ),
+        )
+        assert response.status_code == 200
+        download = response.get_json()["response"][download_id]["data"]
+        filename = download["filename"]
+        assert "mechanism" in filename
+        assert "mechanism-network-v1" in filename
+        assert "/" not in filename
+        assert filename.endswith(suffix)
+    assert export_calls == [
+        "cytoscape-json",
+        "graphml",
+        "gexf",
+        "node-csv",
+        "edge-csv",
+    ]
 
 
 def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:

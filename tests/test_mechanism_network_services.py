@@ -871,3 +871,34 @@ def test_export_rejects_unknown_format_with_all_supported_names(
             "edge-csv",
         )
     )
+
+
+def test_mechanism_cytoscape_reaction_retains_dash_detail_fields(
+    tmp_path: Path,
+) -> None:
+    reaction = _write_reaction_file(
+        tmp_path,
+        "9 [H] + [O] + [O] -> [H][O] + [O]\n"
+        "2 [H][O] + [O] -> [H] + [O] + [O]\n",
+    )
+
+    payload = svc.build_mechanism_elements(
+        {"reaction": str(reaction)},
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+
+    node = next(
+        item["data"]
+        for item in payload["elements"]
+        if item["data"].get("kind") == "reaction"
+    )
+    assert node["reactants"] == ["[H]", "[O]", "[O]"]
+    assert node["products"] == ["[H][O]", "[O]"]
+    assert node["forward_tp"] == 9
+    assert node["reverse_tp"] == 2
+    assert node["net_tp"] == 7
+    assert node["evidence_status"] == "network_only"
+    assert node["event_total"] is None
+    assert node["matched_event_total"] is None
+    assert node["event_coverage"] is None
