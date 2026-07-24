@@ -154,12 +154,25 @@ def _validate_mechanism_graph_contract(
         raise ValueError("mechanism graph must be a directed NetworkX graph")
 
     metadata = dict(graph.graph)
-    if (
+    needs_gexf_metadata = (
         "network_semantics" not in metadata
         or "anchor_smiles" not in metadata
+    )
+    needs_gexf_node_identity = any(
+        "id" not in attributes
+        for _node_id, attributes in graph.nodes(data=True)
+    )
+    gexf_metadata: dict[str, str] | None = None
+    if (
+        needs_gexf_metadata or needs_gexf_node_identity
     ) and "name" in metadata:
-        for name, value in decode_gexf_mechanism_metadata(graph).items():
-            metadata.setdefault(name, value)
+        gexf_metadata = decode_gexf_mechanism_metadata(graph)
+        for name, value in gexf_metadata.items():
+            if name in metadata and metadata[name] != value:
+                raise ValueError(
+                    f"mechanism graph {name} conflicts with GEXF metadata"
+                )
+            metadata[name] = value
 
     if metadata.get("network_semantics") != "mechanism":
         raise ValueError(
@@ -176,8 +189,15 @@ def _validate_mechanism_graph_contract(
             raise ValueError(
                 "mechanism graph node IDs must be non-empty strings"
             )
-        attribute_id = attributes.get("id")
-        if attribute_id is not None and attribute_id != node_id:
+        if "id" not in attributes:
+            if gexf_metadata is None:
+                raise ValueError(
+                    f"mechanism graph node {node_id!r} id must match its key"
+                )
+        elif (
+            not isinstance(attributes["id"], str)
+            or attributes["id"] != node_id
+        ):
             raise ValueError(
                 f"mechanism graph node {node_id!r} id must match its key"
             )
@@ -670,6 +690,10 @@ def decode_gexf_mechanism_metadata(
         ) from error
     if not isinstance(envelope, Mapping):
         raise ValueError("GEXF graph metadata envelope must be a mapping")
+    if not {"format", "metadata"}.issubset(envelope):
+        raise ValueError(
+            "GEXF graph metadata envelope is incomplete"
+        )
     if envelope.get("format") != _GEXF_METADATA_FORMAT:
         raise ValueError(
             "GEXF graph metadata envelope has unsupported format"
@@ -677,14 +701,27 @@ def decode_gexf_mechanism_metadata(
     metadata = envelope.get("metadata")
     if not isinstance(metadata, Mapping):
         raise ValueError("GEXF graph metadata envelope is missing metadata")
+    if not set(_MECHANISM_METADATA_FIELDS).issubset(metadata):
+        raise ValueError(
+            "GEXF graph metadata envelope has incomplete metadata"
+        )
     decoded: dict[str, str] = {}
     for field in _MECHANISM_METADATA_FIELDS:
         value = metadata.get(field)
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not value:
             raise ValueError(
-                f"GEXF graph metadata {field} must be a string"
+                f"GEXF graph metadata {field} must be a non-empty string"
             )
         decoded[field] = value
+    if decoded["schema_version"] != SCHEMA_VERSION:
+        raise ValueError(
+            "GEXF graph metadata schema_version must be "
+            f"{SCHEMA_VERSION!r}"
+        )
+    if decoded["network_semantics"] != "mechanism":
+        raise ValueError(
+            "GEXF graph metadata network_semantics must be 'mechanism'"
+        )
     return decoded
 
 

@@ -1170,6 +1170,108 @@ def test_mechanism_graph_metrics_accepts_directed_graph_subclasses() -> None:
     assert mechanism_graph_metrics(graph)["anchor_id"] == species_a
 
 
+@pytest.mark.parametrize("graph_type", [nx.DiGraph, nx.MultiDiGraph])
+def test_mechanism_graph_metrics_requires_node_id_on_native_graphs(
+    graph_type: type[nx.DiGraph],
+) -> None:
+    graph = graph_type(
+        schema_version="reacnet-scope/mechanism-network/v1",
+        network_semantics="mechanism",
+        evidence_level="reaction_passage_counts",
+        anchor_smiles="A",
+    )
+    node_id = stable_mechanism_id("species", "A")
+    graph.add_node(node_id, kind="species", smiles="A")
+
+    with pytest.raises(ValueError, match="id must match its key"):
+        mechanism_graph_metrics(graph)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ordinary user graph name",
+        json.dumps(
+            {
+                "format": "reacnet-scope/gexf-metadata/v1",
+                "metadata": {
+                    "schema_version": "reacnet-scope/mechanism-network/v0",
+                    "network_semantics": "mechanism",
+                    "evidence_level": "reaction_passage_counts",
+                    "anchor_smiles": "A",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "format": "reacnet-scope/gexf-metadata/v0",
+                "metadata": {
+                    "schema_version": (
+                        "reacnet-scope/mechanism-network/v1"
+                    ),
+                    "network_semantics": "mechanism",
+                    "evidence_level": "reaction_passage_counts",
+                    "anchor_smiles": "A",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "format": "reacnet-scope/gexf-metadata/v1",
+                "metadata": {
+                    "schema_version": (
+                        "reacnet-scope/mechanism-network/v1"
+                    ),
+                    "network_semantics": "event_transfer",
+                    "evidence_level": "reaction_passage_counts",
+                    "anchor_smiles": "A",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "format": "reacnet-scope/gexf-metadata/v1",
+                "metadata": {
+                    "schema_version": (
+                        "reacnet-scope/mechanism-network/v1"
+                    ),
+                    "network_semantics": "mechanism",
+                    "anchor_smiles": "A",
+                },
+            }
+        ),
+    ],
+)
+def test_mechanism_graph_metrics_rejects_invalid_gexf_identity_fallback(
+    name: str,
+) -> None:
+    graph = nx.DiGraph(
+        schema_version="reacnet-scope/mechanism-network/v1",
+        network_semantics="mechanism",
+        evidence_level="reaction_passage_counts",
+        anchor_smiles="A",
+        name=name,
+    )
+    node_id = stable_mechanism_id("species", "A")
+    graph.add_node(node_id, kind="species", smiles="A")
+
+    with pytest.raises(ValueError):
+        mechanism_graph_metrics(graph)
+
+
+def test_mechanism_graph_metrics_rejects_explicit_null_id_after_gexf(
+) -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    restored = nx.read_gexf(
+        io.BytesIO(serialize_mechanism_graph(graph, format="gexf"))
+    )
+    restored.nodes[species_a]["id"] = None
+
+    with pytest.raises(ValueError, match="id must match its key"):
+        mechanism_graph_metrics(restored)
+
+
 @pytest.mark.parametrize(
     ("graph", "message"),
     [
