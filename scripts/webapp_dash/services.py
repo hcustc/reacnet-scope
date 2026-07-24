@@ -22,7 +22,7 @@ from functools import lru_cache
 from bisect import bisect_left
 from pathlib import Path
 from collections import Counter
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import quote
 
 # Ensure the project tool root is importable when this package is loaded
@@ -46,6 +46,10 @@ from reacnet_scope.event_index import EVENT_EVIDENCE_STORE  # noqa: E402
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
+)
+from reacnet_scope.datasets import (  # noqa: E402
+    ARTIFACT_SUFFIXES,
+    discover_dataset_candidates,
 )
 from scripts.webapp.server import (  # noqa: E402
     STORE,
@@ -195,6 +199,95 @@ def list_directory(path_str: str) -> dict[str, Any]:
         return _core_list_directory(path_str)
     except DirBrowserError as exc:
         raise ServiceError(exc.message, reason=exc.reason) from exc
+
+
+def _breadcrumbs_within_allowed_root(current: Path) -> list[dict[str, str]]:
+    """Return breadcrumbs starting at the most-specific permitted root."""
+    containing = [
+        root.resolve()
+        for root in ALLOWED_ROOTS
+        if current.is_relative_to(root.resolve())
+    ]
+    if not containing:
+        raise ServiceError("路径超出允许范围", reason="path_out_of_bounds")
+    root = max(containing, key=lambda item: len(item.parts))
+    crumbs = [{"label": root.name or str(root), "path": str(root)}]
+    cursor = root
+    for part in current.relative_to(root).parts:
+        cursor = cursor / part
+        crumbs.append({"label": part, "path": str(cursor)})
+    return crumbs
+
+
+def browse_dataset_location(path: str) -> dict[str, Any]:
+    """Build a read-only directory and dataset-discovery browser snapshot."""
+    current = validate_browse_path(path)
+    try:
+        listing = _core_list_directory(str(current))
+        candidates = discover_dataset_candidates(current)
+    except DirBrowserError as exc:
+        raise ServiceError(exc.message, reason=exc.reason) from exc
+    except OSError as exc:
+        raise ServiceError(f"读取数据集目录失败: {exc}", reason="read_error") from exc
+
+    datasets: list[dict[str, Any]] = []
+    for candidate in candidates:
+        preparation = dataset_preparation_status(
+            candidate["folder"],
+            base=candidate["base"],
+        )
+        datasets.append(
+            {
+                **candidate,
+                "auto_selected": len(candidates) == 1,
+                "completeness": f"{candidate['score']}/{len(ARTIFACT_SUFFIXES)}",
+                "index_states": {
+                    "event": preparation["events"]["state"],
+                    "trajectory": preparation["trajectory"]["state"],
+                    "composition": preparation["composition"]["state"],
+                },
+            }
+        )
+    return {
+        **listing,
+        "breadcrumbs": _breadcrumbs_within_allowed_root(current),
+        "datasets": datasets,
+    }
+
+
+def resolve_dataset_input(path: str) -> dict[str, str]:
+    """Normalise a selected directory or manually entered dataset prefix."""
+    raw = Path(str(path or "").strip()).expanduser()
+    if raw.is_dir():
+        folder = validate_browse_path(str(raw))
+        return {"folder": str(folder), "preferred_base": ""}
+    folder = validate_browse_path(str(raw.parent))
+    if not folder.is_dir():
+        raise ServiceError("数据集父目录不存在", reason="missing_folder")
+    return {
+        "folder": str(folder),
+        "preferred_base": str(raw.resolve()),
+    }
+
+
+def normalise_recent_datasets(
+    records: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate, deduplicate, and cap persisted recent-dataset records."""
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in records or []:
+        folder = str(raw.get("folder") or "").strip()
+        base = str(raw.get("base") or "").strip()
+        if not folder or not base:
+            continue
+        key = (os.path.abspath(folder), os.path.abspath(base))
+        deduped[key] = {
+            "folder": key[0],
+            "base": key[1],
+            "label": str(raw.get("label") or Path(base).name),
+            "loaded_at": int(raw.get("loaded_at") or 0),
+        }
+    return sorted(deduped.values(), key=lambda item: -item["loaded_at"])[:10]
 
 
 # ---------------------------------------------------------------------------
@@ -2065,7 +2158,10 @@ def run_batch_comparison(
 __all__ = [
     "ALLOWED_ROOTS",
     "ServiceError",
+    "browse_dataset_location",
     "list_directory",
+    "normalise_recent_datasets",
+    "resolve_dataset_input",
     "scan_dataset",
     "validate_browse_path",
     "artifacts_from_status",

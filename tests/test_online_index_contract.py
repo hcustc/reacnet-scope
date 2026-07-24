@@ -229,12 +229,60 @@ class OnlineIndexContractTests(unittest.TestCase):
                 raise AssertionError("dataset scan opened an RNG source CSV")
             return real_path_open(path, *args, **kwargs)
 
-        with mock.patch("pathlib.Path.open", new=guarded_path_open):
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(dir_browser, "ALLOWED_ROOTS", [self.root]), mock.patch(
+            "pathlib.Path.open", new=guarded_path_open
+        ):
             result = dash_services.scan_dataset(str(self.root))
 
         self.assertTrue(
             result["dataset"]["readiness"]["event_search"]["ready"]
         )
+
+    def test_browser_snapshot_never_opens_reacnet_source_artifacts(self) -> None:
+        base = self.root / "run.lammpstrj"
+        source_paths = [
+            Path(f"{base}.reactionabcd"),
+            Path(f"{base}.species"),
+            Path(f"{base}.moname"),
+            base,
+            Path(f"{base}.route"),
+            Path(f"{base}.table"),
+            Path(f"{base}.reactionevent.csv"),
+            Path(f"{base}.molecules.csv"),
+        ]
+        for path in source_paths:
+            path.touch()
+        protected = {os.path.abspath(path) for path in source_paths}
+        real_open = builtins.open
+        real_path_open = Path.open
+
+        def guarded_open(file, *args, **kwargs):
+            try:
+                candidate = os.path.abspath(os.fspath(file))
+            except TypeError:
+                candidate = ""
+            if candidate in protected:
+                raise AssertionError("browser snapshot opened a ReacNet source artifact")
+            return real_open(file, *args, **kwargs)
+
+        def guarded_path_open(path, *args, **kwargs):
+            if os.path.abspath(path) in protected:
+                raise AssertionError("browser snapshot opened a ReacNet source artifact")
+            return real_path_open(path, *args, **kwargs)
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(dash_services, "ALLOWED_ROOTS", [self.root]), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch("builtins.open", side_effect=guarded_open), mock.patch(
+            "pathlib.Path.open", new=guarded_path_open
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(len(snapshot["datasets"]), 1)
+        self.assertEqual(snapshot["datasets"][0]["score"], len(source_paths))
 
 
 if __name__ == "__main__":

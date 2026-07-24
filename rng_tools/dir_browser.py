@@ -75,7 +75,14 @@ def validate_browse_path(path_str: str) -> Path:
     except (RuntimeError, OSError) as exc:
         raise DirBrowserError(f"无法解析路径: {raw}", reason="invalid_path") from exc
 
-    existing_roots = [r for r in ALLOWED_ROOTS if r.exists()]
+    existing_roots: list[Path] = []
+    for configured_root in ALLOWED_ROOTS:
+        try:
+            root = configured_root.expanduser().resolve()
+        except (RuntimeError, OSError):
+            continue
+        if root.is_dir():
+            existing_roots.append(root)
     if not existing_roots:
         raise DirBrowserError("没有可用的允许根目录", reason="no_roots")
 

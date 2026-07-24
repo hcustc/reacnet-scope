@@ -13,6 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
+import rng_tools.dir_browser as dir_browser
 from rng_tools.dir_browser import (
     ALLOWED_ROOTS,
     DirBrowserError,
@@ -20,6 +23,7 @@ from rng_tools.dir_browser import (
     list_directory,
     validate_browse_path,
 )
+from scripts.webapp_dash import services as svc
 
 
 # ======================================================================
@@ -50,15 +54,23 @@ class ValidateBrowsePathTests(unittest.TestCase):
 
     def test_rejects_symlink_escaping_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "target"
+            tmp_path = Path(tmp)
+            root = tmp_path / "allowed"
+            target = tmp_path / "target"
+            root.mkdir()
             target.mkdir()
-            link = Path.home() / f".reacnet_test_link_{os.getpid()}"
+            link = root / f"escape_{os.getpid()}"
+            import rng_tools.dir_browser as _db
+
+            old_roots = list(_db.ALLOWED_ROOTS)
+            _db.ALLOWED_ROOTS = [root]
             try:
                 link.symlink_to(target)
                 with self.assertRaisesRegex(DirBrowserError, "路径超出允许范围"):
                     validate_browse_path(str(link))
             finally:
                 link.unlink(missing_ok=True)
+                _db.ALLOWED_ROOTS = old_roots
 
 
 # ======================================================================
@@ -314,3 +326,140 @@ class AllowedRootsTests(unittest.TestCase):
         roots = get_allowed_roots()
         for r in roots:
             self.assertTrue(r.exists(), f"Root {r} should exist")
+
+
+# ======================================================================
+# Dataset-aware browser facade
+# ======================================================================
+
+
+def _allow_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+
+
+def test_browser_snapshot_exposes_breadcrumbs_and_one_dataset(tmp_path, monkeypatch):
+    _allow_only(tmp_path, monkeypatch)
+    data_dir = tmp_path / "case"
+    data_dir.mkdir()
+    Path(f"{data_dir / 'rp3.lammpstrj'}.reactionabcd").touch()
+    Path(f"{data_dir / 'rp3.lammpstrj'}.species").touch()
+
+    snapshot = svc.browse_dataset_location(str(data_dir))
+
+    assert snapshot["current_path"] == str(data_dir)
+    assert snapshot["breadcrumbs"][-1] == {
+        "label": "case",
+        "path": str(data_dir),
+    }
+    assert snapshot["datasets"][0]["auto_selected"] is True
+    assert snapshot["datasets"][0]["completeness"] == "2/8"
+    assert set(snapshot["datasets"][0]["index_states"]) == {
+        "event",
+        "trajectory",
+        "composition",
+    }
+
+
+def test_browser_snapshot_exposes_empty_and_ambiguous_dataset_states(
+    tmp_path, monkeypatch
+):
+    _allow_only(tmp_path, monkeypatch)
+    empty_dir = tmp_path / "empty"
+    data_dir = tmp_path / "case"
+    empty_dir.mkdir()
+    data_dir.mkdir()
+    for name in ("first.lammpstrj", "second.lammpstrj"):
+        Path(f"{data_dir / name}.species").touch()
+
+    assert svc.browse_dataset_location(str(empty_dir))["datasets"] == []
+    datasets = svc.browse_dataset_location(str(data_dir))["datasets"]
+    assert len(datasets) == 2
+    assert {item["auto_selected"] for item in datasets} == {False}
+
+
+def test_browser_snapshot_rejects_invalid_paths_and_keeps_breadcrumbs_in_root(
+    tmp_path, monkeypatch
+):
+    _allow_only(tmp_path, monkeypatch)
+    nested = tmp_path / "case" / "nested"
+    nested.mkdir(parents=True)
+
+    snapshot = svc.browse_dataset_location(str(nested))
+
+    assert snapshot["breadcrumbs"] == [
+        {"label": tmp_path.name, "path": str(tmp_path)},
+        {"label": "case", "path": str(tmp_path / "case")},
+        {"label": "nested", "path": str(nested)},
+    ]
+    assert all(Path(item["path"]).is_relative_to(tmp_path) for item in snapshot["breadcrumbs"])
+    with pytest.raises(svc.ServiceError, match="路径超出允许范围"):
+        svc.browse_dataset_location(str(tmp_path.parent))
+
+
+def test_browser_snapshot_marks_inaccessible_subdirectories(tmp_path, monkeypatch):
+    _allow_only(tmp_path, monkeypatch)
+    (tmp_path / "available").mkdir()
+    (tmp_path / "denied").mkdir()
+
+    monkeypatch.setattr(
+        dir_browser.os,
+        "access",
+        lambda path, _mode: Path(path).name != "denied",
+    )
+
+    subdirs = svc.browse_dataset_location(str(tmp_path))["subdirs"]
+
+    assert {item["name"] for item in subdirs} == {"available", "denied"}
+    assert next(item for item in subdirs if item["name"] == "denied")["accessible"] is False
+
+
+def test_resolve_dataset_input_accepts_directories_and_dataset_prefixes(
+    tmp_path, monkeypatch
+):
+    _allow_only(tmp_path, monkeypatch)
+    data_dir = tmp_path / "case"
+    data_dir.mkdir()
+    base = data_dir / "rp3.lammpstrj"
+
+    assert svc.resolve_dataset_input(str(data_dir)) == {
+        "folder": str(data_dir),
+        "preferred_base": "",
+    }
+    assert svc.resolve_dataset_input(str(base)) == {
+        "folder": str(data_dir),
+        "preferred_base": str(base),
+    }
+    with pytest.raises(svc.ServiceError, match="路径超出允许范围"):
+        svc.resolve_dataset_input(str(tmp_path.parent / "outside" / "rp3.lammpstrj"))
+
+
+def test_normalise_recent_datasets_deduplicates_sorts_and_limits():
+    records = [
+        {"folder": "/data/case", "base": "/data/case/old", "loaded_at": 1},
+        {"folder": "/data/case", "base": "/data/case/new", "loaded_at": 5},
+        {
+            "folder": "/data/case",
+            "base": "/data/case/old",
+            "label": "newer copy",
+            "loaded_at": 3,
+        },
+        {"folder": "/data/case", "loaded_at": 9},
+    ]
+
+    result = svc.normalise_recent_datasets(records)
+
+    assert result == [
+        {
+            "folder": "/data/case",
+            "base": "/data/case/new",
+            "label": "new",
+            "loaded_at": 5,
+        },
+        {
+            "folder": "/data/case",
+            "base": "/data/case/old",
+            "label": "newer copy",
+            "loaded_at": 3,
+        },
+    ]
