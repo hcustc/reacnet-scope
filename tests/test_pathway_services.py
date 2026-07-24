@@ -17,6 +17,7 @@ from reacnet_scope.event_index import (
 )
 from rng_tools.network import Reaction, ReactionNetwork
 from rng_tools.pathways import find_candidate_paths
+from scripts.webapp import server as legacy_server
 from scripts.webapp_dash import services as svc
 
 
@@ -442,10 +443,15 @@ def test_reaction_source_replacement_after_network_load_is_not_returned(
     real_get = svc.STORE.get
 
     class ReplacingNetworkStore:
-        def get(self, path: str, min_tp: int) -> ReactionNetwork:
+        def get_with_signature(
+            self,
+            path: str,
+            min_tp: int,
+        ) -> tuple[ReactionNetwork, dict[str, Any]]:
             network = real_get(path, min_tp)
+            signature = legacy_server.reaction_source_signature(path)
             os.replace(replacement, reaction_path)
-            return network
+            return network, signature
 
     monkeypatch.setattr(svc, "STORE", ReplacingNetworkStore())
 
@@ -641,9 +647,13 @@ def test_pathway_service_uses_existing_network_cache(
     calls: list[tuple[str, int]] = []
 
     class RecordingNetworkStore:
-        def get(self, path: str, min_tp: int) -> ReactionNetwork:
+        def get_with_signature(
+            self,
+            path: str,
+            min_tp: int,
+        ) -> tuple[ReactionNetwork, dict[str, Any]]:
             calls.append((path, min_tp))
-            return network
+            return network, legacy_server.reaction_source_signature(path)
 
     monkeypatch.setattr(svc, "STORE", RecordingNetworkStore())
 

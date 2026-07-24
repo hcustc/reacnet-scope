@@ -81,6 +81,7 @@ from scripts.webapp.server import (  # noqa: E402
     looks_like_formula,
     match_formula_reaction,
     net_flux,
+    load_reaction_network_snapshot,
     reaction_source_signature,
     reaction_formula_str,
     reaction_mass_fields,
@@ -609,17 +610,10 @@ def _load_reaction_network_snapshot(
             raise RuntimeError("reaction source signature is invalid")
         return network, dict(signature)
 
-    # Compatibility for test/delivery stores implementing the historical
-    # ``get`` interface. Hash both sides so an object can never be paired with
-    # a signature from different content.
-    before = _pathway_source_snapshot(reaction_path)
-    network = STORE.get(reaction_path, min_tp)
-    after = _pathway_source_snapshot(reaction_path)
-    if before.get("sha256") != after.get("sha256"):
-        raise ReactionSourceChangedError(
-            f"reaction file changed while loading: {reaction_path}"
-        )
-    return network, after
+    # A historical ``get`` result has no verifiable content provenance.  Parse
+    # a fresh captured byte snapshot instead of pairing an opaque cached object
+    # with the digest of whatever happens to be at the path now.
+    return load_reaction_network_snapshot(reaction_path, min_tp)
 
 
 def _pathway_preparation_command(
@@ -687,7 +681,7 @@ def find_pathways(
             "reactionabcd 文件在路径查询期间发生变化，请重试",
             reason="reaction_source_stale",
         ) from exc
-    except RuntimeError as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ServiceError(
             f"无法加载反应网络: {exc}",
             reason="bad_reac",

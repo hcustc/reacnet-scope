@@ -158,9 +158,13 @@ def test_build_mechanism_elements_uses_cached_network_and_keeps_raw_payload(
     calls: list[tuple[str, int]] = []
 
     class RecordingStore:
-        def get(self, path: str, min_tp: int) -> ReactionNetwork:
+        def get_with_signature(
+            self,
+            path: str,
+            min_tp: int,
+        ) -> tuple[ReactionNetwork, dict[str, Any]]:
             calls.append((path, min_tp))
-            return network
+            return network, legacy_server.reaction_source_signature(path)
 
     monkeypatch.setattr(svc, "STORE", RecordingStore())
 
@@ -186,6 +190,77 @@ def test_build_mechanism_elements_uses_cached_network_and_keeps_raw_payload(
         item["id"] for item in [*payload["nodes"], *payload["edges"]]
     }
     assert "kinetic_flux" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("service_name", ["mechanism", "pathway"])
+def test_get_only_store_cannot_pair_stale_network_with_current_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_name: str,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [C]\n")
+    stale_network = ReactionNetwork(
+        [Reaction(("[H]",), ("[O]",), 4)]
+    )
+
+    class StaleLegacyStore:
+        def get(self, _path: str, _min_tp: int) -> ReactionNetwork:
+            return stale_network
+
+    monkeypatch.setattr(svc, "STORE", StaleLegacyStore())
+    artifacts = {"reaction": str(reaction)}
+    if service_name == "mechanism":
+        payload = svc.build_mechanism_elements(
+            artifacts,
+            anchor_smiles="[H]",
+            max_depth=1,
+        )
+        species = {
+            node["smiles"]
+            for node in payload["nodes"]
+            if node["kind"] == "species"
+        }
+    else:
+        payload = svc.find_pathways(
+            artifacts,
+            "[H]",
+            max_depth=1,
+        )
+        species = set(payload["paths"][0]["species"])
+
+    assert species == {"[H]", "[C]"}
+    assert payload["source_signatures"]["reactionabcd"] == (
+        legacy_server.reaction_source_signature(str(reaction))
+    )
+
+
+@pytest.mark.parametrize("service_name", ["mechanism", "pathway"])
+def test_get_only_store_invalid_utf8_maps_to_bad_reac(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_name: str,
+) -> None:
+    reaction = tmp_path / "run.reactionabcd"
+    reaction.write_bytes(b"4 A -> B\n\xff")
+
+    class ForbiddenLegacyStore:
+        def get(self, *_args: Any) -> ReactionNetwork:
+            raise AssertionError("unverifiable get must not be called")
+
+    monkeypatch.setattr(svc, "STORE", ForbiddenLegacyStore())
+    with pytest.raises(svc.ServiceError) as caught:
+        if service_name == "mechanism":
+            svc.build_mechanism_elements(
+                {"reaction": str(reaction)},
+                anchor_smiles="A",
+            )
+        else:
+            svc.find_pathways(
+                {"reaction": str(reaction)},
+                "A",
+            )
+
+    assert caught.value.reason == "bad_reac"
 
 
 def test_ready_event_index_is_batched_and_never_reads_event_csv(
@@ -374,9 +449,16 @@ def test_reaction_source_replacement_after_cache_load_is_rejected(
     network = ReactionNetwork([Reaction(("A",), ("B",), 4)])
 
     class ReplacingStore:
-        def get(self, _path: str, _min_tp: int) -> ReactionNetwork:
+        def get_with_signature(
+            self,
+            _path: str,
+            _min_tp: int,
+        ) -> tuple[ReactionNetwork, dict[str, Any]]:
+            signature = legacy_server.reaction_source_signature(
+                str(reaction_path)
+            )
             os.replace(replacement, reaction_path)
-            return network
+            return network, signature
 
     monkeypatch.setattr(svc, "STORE", ReplacingStore())
 
@@ -594,32 +676,28 @@ def test_csv_exports_have_exact_columns_and_round_trip_structured_cells(
 
 
 def test_csv_export_quotes_delimiters_newlines_and_unicode() -> None:
-    payload = {
-        "schema_version": "reacnet-scope/mechanism-network/v1",
-        "network_semantics": "mechanism",
-        "evidence_level": "reaction_passage_counts",
-        "anchor_smiles": "=A,一\n二",
-        "query": {},
-        "source_signatures": {},
-        "nodes": [
-            {
-                "id": "species:1",
-                "kind": "species",
-                "label": "=A,一\n二",
-                "smiles": "=A,一\n二",
-                "formula": None,
-            }
-        ],
-        "edges": [],
-        "meta": {},
-    }
+    payload = svc.build_mechanism_network(
+        ReactionNetwork(
+            [Reaction(("=A,一\n二",), ("终点",), 1)]
+        ),
+        anchor_smiles="=A,一\n二",
+        max_depth=1,
+    )
+    species = next(
+        node
+        for node in payload["nodes"]
+        if node.get("smiles") == "=A,一\n二"
+    )
+    species["label"] = "=A,一\n二"
+    species["formula"] = None
 
     exported = svc.export_mechanism_graph(payload, "node-csv")
     restored = list(csv.DictReader(io.StringIO(exported)))
+    row = next(item for item in restored if "=A,一\n二" in item["smiles"])
 
-    assert restored[0]["label"] == "'=A,一\n二"
-    assert restored[0]["smiles"] == "'=A,一\n二"
-    assert restored[0]["formula"] == ""
+    assert row["label"] == "'=A,一\n二"
+    assert row["smiles"] == "'=A,一\n二"
+    assert row["formula"] == ""
 
 
 @pytest.mark.parametrize(
@@ -640,33 +718,27 @@ def test_csv_export_neutralizes_spreadsheet_formulas(
     value: str,
     expected: str,
 ) -> None:
-    payload = {
-        "schema_version": "reacnet-scope/mechanism-network/v1",
-        "network_semantics": "mechanism",
-        "evidence_level": "reaction_passage_counts",
-        "anchor_smiles": "A",
-        "query": {},
-        "source_signatures": {},
-        "nodes": [
-            {
-                "id": "species:1",
-                "kind": "species",
-                "label": value,
-                "smiles": value,
-                "formula": value,
-            }
-        ],
-        "edges": [],
-        "meta": {},
-    }
+    payload = svc.build_mechanism_network(
+        ReactionNetwork([Reaction((value,), ("终点",), 1)]),
+        anchor_smiles=value,
+        max_depth=1,
+    )
+    species = next(
+        node
+        for node in payload["nodes"]
+        if node.get("smiles") == value
+    )
+    species["label"] = value
+    species["formula"] = value
     before = copy.deepcopy(payload)
 
     exported = svc.export_mechanism_graph(payload, "node-csv")
     restored = list(csv.DictReader(io.StringIO(exported)))
+    row = next(item for item in restored if item["smiles"] == expected)
 
-    assert restored[0]["label"] == expected
-    assert restored[0]["smiles"] == expected
-    assert restored[0]["formula"] == expected
+    assert row["label"] == expected
+    assert row["smiles"] == expected
+    assert row["formula"] == expected
     assert payload == before
 
 
@@ -720,6 +792,30 @@ def test_all_exports_share_complete_mechanism_payload_validation(
         tampered["edges"].pop()
 
     with pytest.raises(ValueError, match=message):
+        svc.export_mechanism_graph(tampered, format_name)
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["cytoscape-json", "graphml", "gexf", "node-csv", "edge-csv"],
+)
+def test_all_exports_reject_relabelled_species_with_old_stable_id(
+    reaction_artifacts: dict[str, str],
+    format_name: str,
+) -> None:
+    payload = svc.build_mechanism_elements(
+        reaction_artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+    tampered = copy.deepcopy(payload)
+    species = next(
+        node for node in tampered["nodes"]
+        if node["kind"] == "species"
+    )
+    species["smiles"] = "整体改标"
+
+    with pytest.raises(ValueError, match="stable identity"):
         svc.export_mechanism_graph(tampered, format_name)
 
 

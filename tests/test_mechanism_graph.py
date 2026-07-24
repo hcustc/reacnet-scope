@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import copy
 from decimal import Decimal
+import hashlib
 import io
 import json
 
@@ -12,8 +13,11 @@ import pytest
 import rng_tools.mechanism_graph as mechanism_graph
 from rng_tools.mechanism_graph import (
     build_mechanism_network,
+    canonical_mechanism_reaction_key,
     decode_gexf_mechanism_metadata,
     serialize_mechanism_graph,
+    stable_mechanism_edge_id,
+    stable_mechanism_id,
     to_networkx_mechanism_graph,
     validate_mechanism_payload,
 )
@@ -846,3 +850,123 @@ def test_validator_allows_catalyst_on_both_semantic_roles() -> None:
         (edge["role"], edge["coefficient"])
         for edge in catalyst_edges
     } == {("reactant", 1), ("product", 1)}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "species_id",
+        "reaction_key",
+        "reaction_sides",
+        "reaction_id",
+        "edge_id",
+    ],
+)
+def test_validator_rejects_tampered_stable_identities(
+    mechanism_payload: dict[str, object],
+    mutation: str,
+) -> None:
+    payload = copy.deepcopy(mechanism_payload)
+    reaction = _reaction_nodes(payload)[0]
+    species = next(
+        node for node in payload["nodes"]  # type: ignore[index]
+        if node["kind"] == "species"
+    )
+    edge = payload["edges"][0]  # type: ignore[index]
+
+    if mutation == "species_id":
+        old_id = species["id"]
+        species["id"] = "species:" + "0" * 20
+        for candidate in payload["edges"]:  # type: ignore[index]
+            if candidate["source"] == old_id:
+                candidate["source"] = species["id"]
+            if candidate["target"] == old_id:
+                candidate["target"] = species["id"]
+    elif mutation == "reaction_key":
+        reaction["reaction_key"] = "X->Y"
+        for candidate in payload["edges"]:  # type: ignore[index]
+            candidate["reaction_key"] = "X->Y"
+    elif mutation == "reaction_sides":
+        reaction["reactants"] = ["X", "X", "Y"]
+        reaction["products"] = ["Z", "Ω"]
+    elif mutation == "reaction_id":
+        old_id = reaction["id"]
+        reaction["id"] = "reaction:" + "0" * 20
+        for candidate in payload["edges"]:  # type: ignore[index]
+            if candidate["source"] == old_id:
+                candidate["source"] = reaction["id"]
+            if candidate["target"] == old_id:
+                candidate["target"] = reaction["id"]
+    else:
+        edge["id"] = "edge:" + "0" * 20
+
+    with pytest.raises(ValueError, match="stable|canonical"):
+        validate_mechanism_payload(payload)
+
+
+def test_validator_rejects_fully_relabelled_payload_with_old_ids(
+    mechanism_payload: dict[str, object],
+) -> None:
+    payload = copy.deepcopy(mechanism_payload)
+    replacements = {"A": "X", "B": "Y", "C": "Ω", "X": "催化剂"}
+    for node in payload["nodes"]:  # type: ignore[index]
+        if node["kind"] == "species":
+            node["smiles"] = replacements[node["smiles"]]
+        else:
+            node["reactants"] = [
+                replacements[item] for item in node["reactants"]
+            ]
+            node["products"] = [
+                replacements[item] for item in node["products"]
+            ]
+            node["reaction_key"] = (
+                "+".join(sorted(node["reactants"]))
+                + "->"
+                + "+".join(sorted(node["products"]))
+            )
+    for edge in payload["edges"]:  # type: ignore[index]
+        edge["species_smiles"] = replacements[edge["species_smiles"]]
+        edge["reaction_key"] = _reaction_nodes(payload)[0]["reaction_key"]
+
+    with pytest.raises(ValueError, match="stable"):
+        validate_mechanism_payload(payload)
+
+
+def test_validator_accepts_unicode_repeated_stoichiometry_and_catalyst() -> None:
+    payload = build_mechanism_network(
+        ReactionNetwork(
+            [
+                Reaction(
+                    ("α", "α", "催化剂"),
+                    ("β", "催化剂"),
+                    9,
+                )
+            ]
+        ),
+        anchor_smiles="α",
+        max_depth=1,
+    )
+
+    assert validate_mechanism_payload(payload) == payload
+
+
+def test_public_identity_helpers_lock_version_one_hash_contract() -> None:
+    smiles = "催化剂"
+    reaction_key = "A+A+催化剂->B+催化剂"
+    assert canonical_mechanism_reaction_key(
+        ("催化剂", "A", "A"),
+        ("催化剂", "B"),
+    ) == reaction_key
+    assert stable_mechanism_id("species", smiles) == (
+        "species:"
+        + hashlib.sha256(smiles.encode("utf-8")).hexdigest()[:20]
+    )
+    edge_seed = "\0".join(("reactant", reaction_key, smiles))
+    assert stable_mechanism_edge_id(
+        "reactant",
+        reaction_key,
+        smiles,
+    ) == (
+        "edge:"
+        + hashlib.sha256(edge_seed.encode("utf-8")).hexdigest()[:20]
+    )

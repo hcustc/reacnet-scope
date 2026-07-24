@@ -6918,6 +6918,56 @@ def reaction_source_signature(path: str) -> dict[str, Any]:
     return signature
 
 
+def _parse_reaction_source_snapshot(
+    snapshot: tempfile.SpooledTemporaryFile[bytes],
+    *,
+    path: str,
+    min_tp: int,
+) -> ReactionNetwork:
+    """Parse an owned byte snapshot and always close its backing spool."""
+    try:
+        with io.TextIOWrapper(snapshot, encoding="utf-8") as text_snapshot:
+            reactions = parse_reactionabcd(
+                text_snapshot,
+                min_tp=min_tp,
+            )
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"reaction file is not valid UTF-8: {path}"
+        ) from exc
+    if not reactions:
+        raise RuntimeError(f"no reactions loaded from: {path}")
+    return ReactionNetwork(reactions)
+
+
+def load_reaction_network_snapshot(
+    reac_file: str,
+    min_tp: int,
+) -> tuple[ReactionNetwork, dict[str, Any]]:
+    """Parse and sign exactly one captured ``reactionabcd`` byte snapshot.
+
+    This uncached public loader is the safe compatibility boundary for
+    callers whose injected store does not implement ``get_with_signature``.
+    The returned digest can never describe bytes other than those parsed into
+    the returned network.
+    """
+    path = os.path.abspath(reac_file)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"reaction file not found: {path}")
+    snapshot, captured_signature = _capture_reaction_source(path)
+    network = _parse_reaction_source_snapshot(
+        snapshot,
+        path=path,
+        min_tp=min_tp,
+    )
+    current_signature = reaction_source_signature(path)
+    if current_signature["sha256"] != captured_signature["sha256"]:
+        raise ReactionSourceChangedError(
+            f"reaction file changed while loading: {path}"
+        )
+    return network, current_signature
+
+
 class NetworkStore:
     def __init__(self, max_entries: int = 8) -> None:
         self._lock = threading.Lock()
@@ -6950,27 +7000,16 @@ class NetworkStore:
                 self._cache.move_to_end(key)
                 return cached[1], dict(signature)
 
-            try:
-                with io.TextIOWrapper(
-                    snapshot,
-                    encoding="utf-8",
-                ) as text_snapshot:
-                    reactions = parse_reactionabcd(
-                        text_snapshot,
-                        min_tp=min_tp,
-                    )
-            except UnicodeDecodeError as exc:
-                raise RuntimeError(
-                    f"reaction file is not valid UTF-8: {path}"
-                ) from exc
+            net = _parse_reaction_source_snapshot(
+                snapshot,
+                path=path,
+                min_tp=min_tp,
+            )
             current_signature = reaction_source_signature(path)
             if current_signature["sha256"] != digest:
                 raise ReactionSourceChangedError(
                     f"reaction file changed while loading: {path}"
                 )
-            if not reactions:
-                raise RuntimeError(f"no reactions loaded from: {path}")
-            net = ReactionNetwork(reactions)
             self._cache[key] = (digest, net)
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_entries:

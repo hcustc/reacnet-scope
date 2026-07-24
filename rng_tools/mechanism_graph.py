@@ -8,7 +8,7 @@ kinetic rates or atom-transfer fluxes.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
@@ -45,6 +45,34 @@ class _OrientedReaction:
     forward_tp: int
     reverse_tp: int
     net_tp: int
+
+
+def canonical_mechanism_reaction_key(
+    reactants: Iterable[str],
+    products: Iterable[str],
+) -> str:
+    """Return the builder's multiplicity-preserving canonical reaction key."""
+    return (
+        "+".join(sorted(reactants))
+        + "->"
+        + "+".join(sorted(products))
+    )
+
+
+def stable_mechanism_id(kind: str, value: str) -> str:
+    """Return the version-one stable identity for one semantic value."""
+    digest = sha256(value.encode("utf-8")).hexdigest()[:20]
+    return f"{kind}:{digest}"
+
+
+def stable_mechanism_edge_id(
+    role: str,
+    reaction_key: str,
+    species_smiles: str,
+) -> str:
+    """Return the stable identity of one reaction/species semantic edge."""
+    edge_seed = "\0".join((role, reaction_key, species_smiles))
+    return stable_mechanism_id("edge", edge_seed)
 
 
 def to_networkx_mechanism_graph(
@@ -198,6 +226,12 @@ def validate_mechanism_payload(
                 "smiles",
                 f"node {node_id}",
             )
+            expected_node_id = stable_mechanism_id("species", smiles)
+            if node_id != expected_node_id:
+                raise ValueError(
+                    f"mechanism payload species node {node_id} does not "
+                    f"match stable identity {expected_node_id}"
+                )
             _required_nullable_string(node, "formula", f"node {node_id}")
             existing_species_id = species_ids_by_smiles.get(smiles)
             if existing_species_id is not None:
@@ -230,13 +264,6 @@ def validate_mechanism_payload(
             "reaction_key",
             f"node {node_id}",
         )
-        existing_reaction_id = reaction_ids_by_key.get(reaction_key)
-        if existing_reaction_id is not None:
-            raise ValueError(
-                "mechanism payload has duplicate reaction identity "
-                f"{reaction_key!r} in {existing_reaction_id} and {node_id}"
-            )
-        reaction_ids_by_key[reaction_key] = node_id
         reactants = _required_string_sequence(
             node,
             "reactants",
@@ -252,6 +279,28 @@ def validate_mechanism_payload(
                 f"mechanism payload node {node_id} reaction sides "
                 "must not be empty"
             )
+        canonical_key = canonical_mechanism_reaction_key(
+            reactants,
+            products,
+        )
+        if reaction_key != canonical_key:
+            raise ValueError(
+                f"mechanism payload node {node_id} reaction_key is not "
+                f"canonical for its reaction sides"
+            )
+        expected_node_id = stable_mechanism_id("reaction", reaction_key)
+        if node_id != expected_node_id:
+            raise ValueError(
+                f"mechanism payload reaction node {node_id} does not match "
+                f"stable identity {expected_node_id}"
+            )
+        existing_reaction_id = reaction_ids_by_key.get(reaction_key)
+        if existing_reaction_id is not None:
+            raise ValueError(
+                "mechanism payload has duplicate reaction identity "
+                f"{reaction_key!r} in {existing_reaction_id} and {node_id}"
+            )
+        reaction_ids_by_key[reaction_key] = node_id
         forward_tp = _required_nonnegative_int(
             node,
             "forward_tp",
@@ -327,6 +376,16 @@ def validate_mechanism_payload(
             raise ValueError(
                 f"mechanism payload edge {edge_id} reaction_key "
                 "does not match its reaction node"
+            )
+        expected_edge_id = stable_mechanism_edge_id(
+            role,
+            reaction_key,
+            species_smiles,
+        )
+        if edge_id != expected_edge_id:
+            raise ValueError(
+                f"mechanism payload edge {edge_id} does not match stable "
+                f"identity {expected_edge_id}"
             )
         expected_coefficient = Counter(
             reaction_node[
@@ -930,10 +989,9 @@ def _validate_positive_int(name: str, value: object) -> None:
 
 
 def _reverse_key(reaction: Reaction) -> str:
-    return (
-        "+".join(sorted(reaction.product_smiles))
-        + "->"
-        + "+".join(sorted(reaction.reactant_smiles))
+    return canonical_mechanism_reaction_key(
+        reaction.product_smiles,
+        reaction.reactant_smiles,
     )
 
 
@@ -964,7 +1022,10 @@ def _normalize_reversible_pairs(
 
         normalized.append(
             _OrientedReaction(
-                reaction_key=oriented.key,
+                reaction_key=canonical_mechanism_reaction_key(
+                    oriented.reactant_smiles,
+                    oriented.product_smiles,
+                ),
                 reactants=tuple(sorted(oriented.reactant_smiles)),
                 products=tuple(sorted(oriented.product_smiles)),
                 forward_tp=forward_tp,
@@ -1038,15 +1099,10 @@ def _continuations(
     return tuple(sorted(continuations))
 
 
-def _stable_id(kind: str, value: str) -> str:
-    digest = sha256(value.encode("utf-8")).hexdigest()[:20]
-    return f"{kind}:{digest}"
-
-
 def _species_node(smiles: str) -> dict[str, Any]:
     formula = smiles_to_formula_fast(smiles)
     return {
-        "id": _stable_id("species", smiles),
+        "id": stable_mechanism_id("species", smiles),
         "kind": "species",
         "label": formula or smiles,
         "smiles": smiles,
@@ -1062,7 +1118,7 @@ def _reaction_node(reaction: _OrientedReaction) -> dict[str, Any]:
         smiles_to_formula_fast(smiles) or smiles for smiles in reaction.products
     ]
     return {
-        "id": _stable_id("reaction", reaction.reaction_key),
+        "id": stable_mechanism_id("reaction", reaction.reaction_key),
         "kind": "reaction",
         "label": "+".join(reactant_formulas) + " → " + "+".join(product_formulas),
         "formula": "+".join(reactant_formulas)
@@ -1091,17 +1147,18 @@ def _reaction_edges(
         ("product", reaction.products),
     ):
         for species_smiles, coefficient in sorted(Counter(side).items()):
-            species_id = _stable_id("species", species_smiles)
+            species_id = stable_mechanism_id("species", species_smiles)
             if role == "reactant":
                 source, target = species_id, reaction_id
             else:
                 source, target = reaction_id, species_id
-            edge_seed = "\0".join(
-                (role, reaction.reaction_key, species_smiles)
-            )
             edges.append(
                 {
-                    "id": _stable_id("edge", edge_seed),
+                    "id": stable_mechanism_edge_id(
+                        role,
+                        reaction.reaction_key,
+                        species_smiles,
+                    ),
                     "source": source,
                     "target": target,
                     "role": role,
