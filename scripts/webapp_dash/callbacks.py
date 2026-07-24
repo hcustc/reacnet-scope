@@ -14,6 +14,7 @@ import csv
 import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import dash_bootstrap_components as dbc
@@ -154,12 +155,26 @@ def initial_workflow_store() -> dict[str, Any]:
 
 def _network_dataset_id(store: dict[str, Any] | None) -> str:
     value = store or {}
-    return str(
-        value.get("dataset_id")
-        or value.get("base")
-        or value.get("label")
-        or ""
-    )
+    dataset_id = str(value.get("dataset_id") or "")
+    if dataset_id:
+        return dataset_id
+    folder = str(value.get("folder") or "")
+    base = str(value.get("base") or "")
+    if folder and base:
+        return _dataset_id_from_selection(folder, base)
+    return str(base or value.get("label") or "")
+
+
+def _dataset_id_from_selection(folder: str, base: str) -> str:
+    """Return the cache-compatible ID for one fully qualified dataset base."""
+    source = Path(str(base or "")).expanduser()
+    if not source.is_absolute():
+        source = Path(str(folder or "")).expanduser() / source
+    try:
+        source = source.resolve(strict=False)
+    except (OSError, RuntimeError):
+        source = source.absolute()
+    return dataset_id_for_source(str(source))
 
 
 def _network_status_alert(payload: dict[str, Any] | None) -> Any:
@@ -1060,7 +1075,10 @@ def register_callbacks(app: Any) -> None:
             **initial_store(),
             "folder": folder,
             "base": selected_base_new,
-            "dataset_id": dataset_id_for_source(selected_base_new),
+            "dataset_id": _dataset_id_from_selection(
+                folder,
+                selected_base_new,
+            ),
             "label": label,
             "ready_count": ready,
             "capabilities": capabilities,
@@ -2357,6 +2375,7 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-cytoscape", "elements"),
         Output("pathway-alert", "children"),
         Output("pathway-store", "data"),
+        Output("pathway-context-store", "data"),
         Output("pathway-grid", "selected_rows"),
         Input("pathway-search-btn", "n_clicks"),
         State("pathway-start-smiles", "value"),
@@ -2400,9 +2419,9 @@ def register_callbacks(app: Any) -> None:
                 ),
             )
         except (TypeError, ValueError) as exc:
-            return [], _pathway_columns(), [], str(exc), None, []
+            return [], _pathway_columns(), [], str(exc), None, None, []
         except svc.ServiceError as exc:
-            return [], _pathway_columns(), [], str(exc.message), None, []
+            return [], _pathway_columns(), [], str(exc.message), None, None, []
 
         rows = _pathway_rows(payload)
         elements = svc.build_pathway_elements(payload)
@@ -2423,7 +2442,22 @@ def register_callbacks(app: Any) -> None:
                 f" 搜索达到展开上限，结果已截断（expansions="
                 f"{int(payload.get('expansions') or 0)}）。"
             )
-        return rows, _pathway_columns(), elements, message, payload, []
+        pathway_context = {
+            "schema_version": "reacnet-scope/pathway-context/v1",
+            "dataset_id": _network_dataset_id(store),
+            "source_signatures": dict(
+                payload.get("source_signatures") or {}
+            ),
+        }
+        return (
+            rows,
+            _pathway_columns(),
+            elements,
+            message,
+            payload,
+            pathway_context,
+            [],
+        )
 
     @app.callback(
         Output("pathway-selected-path", "data"),
@@ -2545,22 +2579,52 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("pathway-highlight-store", "data", allow_duplicate=True),
+        Output("network-anchor-smiles", "value", allow_duplicate=True),
+        Output("network-semantics", "value", allow_duplicate=True),
         Input("pathway-highlight-network-btn", "n_clicks"),
         State("pathway-selected-path", "data"),
+        State("pathway-context-store", "data"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _send_pathway_to_network(n_clicks, selected_path, app_store):
+    def _send_pathway_to_network(
+        n_clicks,
+        selected_path,
+        pathway_context,
+        app_store,
+    ):
         if n_clicks is None or not selected_path:
             raise PreventUpdate
-        return {
+        context = (
+            pathway_context
+            if isinstance(pathway_context, dict)
+            else {}
+        )
+        source_dataset_id = str(context.get("dataset_id") or "")
+        current_dataset_id = _network_dataset_id(app_store)
+        if (
+            context.get("schema_version")
+            != "reacnet-scope/pathway-context/v1"
+            or not source_dataset_id
+            or source_dataset_id != current_dataset_id
+        ):
+            return None, "", no_update
+        species_ids = list(selected_path.get("species_ids") or [])
+        if not species_ids:
+            return None, "", no_update
+        handoff = {
             "schema_version": "reacnet-scope/pathway-highlight/v1",
             "source": "pathway",
-            "dataset_id": _network_dataset_id(app_store),
+            "pending": True,
+            "dataset_id": source_dataset_id,
+            "source_signatures": dict(
+                context.get("source_signatures") or {}
+            ),
             "path_rank": selected_path.get("path_rank"),
-            "species_ids": list(selected_path.get("species_ids") or []),
+            "species_ids": species_ids,
             "reaction_keys": list(selected_path.get("reaction_keys") or []),
         }
+        return handoff, str(species_ids[0]), "mechanism"
 
     @app.callback(
         Output("pathway-json-download", "data"),
@@ -2632,18 +2696,90 @@ def register_callbacks(app: Any) -> None:
         Output("network-anchor-smiles", "value"),
         Output("network-semantics", "value"),
         Input("app-store", "data"),
-        Input("pathway-highlight-store", "data"),
     )
-    def _network_anchor_handoff(app_store, pathway_handoff):
-        if (
-            ctx.triggered_id == "pathway-highlight-store"
-            and isinstance(pathway_handoff, dict)
-        ):
-            species_ids = pathway_handoff.get("species_ids") or []
-            if species_ids:
-                return str(species_ids[0]), "mechanism"
+    def _network_anchor_from_dataset(app_store):
         selected = str((app_store or {}).get("selected_smiles") or "")
         return selected, ("mechanism" if selected else no_update)
+
+    @app.callback(
+        Output("pathway-store", "data", allow_duplicate=True),
+        Output("pathway-context-store", "data", allow_duplicate=True),
+        Output("pathway-selected-path", "data", allow_duplicate=True),
+        Output("pathway-selected-step", "data", allow_duplicate=True),
+        Output("pathway-highlight-store", "data", allow_duplicate=True),
+        Output("pathway-grid", "selected_rows", allow_duplicate=True),
+        Output("pathway-grid", "data", allow_duplicate=True),
+        Output("pathway-cytoscape", "elements", allow_duplicate=True),
+        Output("pathway-cytoscape", "tapNodeData", allow_duplicate=True),
+        Output("pathway-selection-summary", "children", allow_duplicate=True),
+        Output("pathway-open-events-btn", "disabled", allow_duplicate=True),
+        Output("pathway-highlight-network-btn", "disabled", allow_duplicate=True),
+        Output("pathway-alert", "children", allow_duplicate=True),
+        Input("app-store", "data"),
+        Input("network-semantics", "value"),
+        State("pathway-context-store", "data"),
+        State("pathway-highlight-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _reset_cross_context_pathway_state(
+        app_store,
+        network_semantics,
+        pathway_context,
+        pathway_handoff,
+    ):
+        if ctx.triggered_id == "app-store":
+            current_dataset_id = _network_dataset_id(app_store)
+            source_dataset_id = str(
+                (pathway_context or {}).get("dataset_id") or ""
+            )
+            if (
+                source_dataset_id
+                and source_dataset_id == current_dataset_id
+            ):
+                raise PreventUpdate
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                [],
+                [],
+                [],
+                None,
+                "选择一条路径或一个反应节点。",
+                True,
+                True,
+                "",
+            )
+        if ctx.triggered_id == "network-semantics":
+            handoff = (
+                pathway_handoff
+                if isinstance(pathway_handoff, dict)
+                else {}
+            )
+            preserve_pending_handoff = (
+                network_semantics == "mechanism"
+                and handoff.get("pending") is True
+                and str(handoff.get("dataset_id") or "")
+                == _network_dataset_id(app_store)
+            )
+            return (
+                no_update,
+                no_update,
+                None,
+                None,
+                no_update if preserve_pending_handoff else None,
+                [],
+                no_update,
+                no_update,
+                None,
+                "选择一条路径或一个反应节点。",
+                True,
+                True,
+                no_update,
+            )
+        raise PreventUpdate
 
     @app.callback(
         Output("network-alert", "children"),
@@ -2816,7 +2952,8 @@ def register_callbacks(app: Any) -> None:
             semantics == "mechanism"
             and species_ids
             and anchor_smiles in species_ids
-            and (not handoff_dataset or handoff_dataset == dataset_id)
+            and handoff_dataset
+            and handoff_dataset == dataset_id
         ):
             raw["_ui_pathway_highlight"] = {
                 "path_rank": handoff.get("path_rank"),

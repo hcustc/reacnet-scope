@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+from reacnet_scope.indexes import dataset_id_for_source
 from rng_tools import dir_browser
 from scripts import rng_query_cli as cli
 from scripts.webapp_dash.app import create_app
@@ -100,6 +101,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-open-events-btn",
         "pathway-highlight-network-btn",
         "pathway-store",
+        "pathway-context-store",
         "pathway-highlight-store",
     }:
         assert pathway_id in layout_ids
@@ -159,11 +161,16 @@ def _callback_payload(
     changed: str,
     input_values: dict[str, Any],
     state_values: dict[str, Any],
+    output_id: str = "",
 ) -> dict[str, Any]:
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
         if [value["id"] for value in item["inputs"]] == input_ids
+        and (
+            not output_id
+            or f"{output_id}." in str(item.get("output") or "")
+        )
     )
     output_spec = dependency["output"]
     outputs: Any
@@ -274,7 +281,10 @@ def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
         "pathway-max-paths": 7,
         "pathway-min-net-tp": 2,
         "pathway-min-directionality": 0,
-        "app-store": {"artifacts": {"reaction": "/tmp/run.reactionabcd"}},
+        "app-store": {
+            "dataset_id": "dataset-A",
+            "artifacts": {"reaction": "/tmp/run.reactionabcd"},
+        },
     }
 
     response = client.post(
@@ -307,6 +317,11 @@ def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
     assert row["depth"] == 1
     assert row["evidence_badge"] == "事件已关联"
     assert result["pathway-store"]["data"] == _pathway_payload()
+    assert result["pathway-context-store"]["data"] == {
+        "schema_version": "reacnet-scope/pathway-context/v1",
+        "dataset_id": "dataset-A",
+        "source_signatures": {},
+    }
 
 
 def test_pathway_search_reports_distinct_empty_reasons_and_truncation(monkeypatch) -> None:
@@ -552,7 +567,7 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
         "nodes": [{"id": "existing"}],
         "edges": [],
     }
-    highlight_response = client.post(
+    rejected_response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
@@ -561,6 +576,39 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
             input_values={"pathway-highlight-network-btn": 1},
             state_values={
                 "pathway-selected-path": selected,
+                "pathway-context-store": {
+                    "schema_version": "reacnet-scope/pathway-context/v1",
+                    "dataset_id": "dataset-A",
+                    "source_signatures": {"reaction": {"size": 10}},
+                },
+                "app-store": {"dataset_id": "dataset-B"},
+            },
+        ),
+    )
+    assert rejected_response.status_code == 200
+    assert (
+        rejected_response.get_json()["response"]["pathway-highlight-store"]["data"]
+        is None
+    )
+    assert (
+        rejected_response.get_json()["response"]["network-anchor-smiles"]["value"]
+        == ""
+    )
+
+    highlight_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-highlight-network-btn"],
+            changed="pathway-highlight-network-btn.n_clicks",
+            input_values={"pathway-highlight-network-btn": 2},
+            state_values={
+                "pathway-selected-path": selected,
+                "pathway-context-store": {
+                    "schema_version": "reacnet-scope/pathway-context/v1",
+                    "dataset_id": "dataset-A",
+                    "source_signatures": {"reaction": {"size": 10}},
+                },
                 "app-store": {"dataset_id": "dataset-A"},
             },
         ),
@@ -577,11 +625,15 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
     assert handoff == {
         "schema_version": "reacnet-scope/pathway-highlight/v1",
         "source": "pathway",
+        "pending": True,
         "dataset_id": "dataset-A",
+        "source_signatures": {"reaction": {"size": 10}},
         "path_rank": 1,
         "species_ids": ["[H]", "[H][O]"],
         "reaction_keys": ["[H]+[O]->[H][O]"],
     }
+    assert response_payload["network-anchor-smiles"]["value"] == "[H]"
+    assert response_payload["network-semantics"]["value"] == "mechanism"
 
     clear_response = client.post(
         "/_dash-update-component",
@@ -884,12 +936,12 @@ def test_network_controls_switch_by_semantics_and_handoff_exact_anchor() -> None
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["app-store", "pathway-highlight-store"],
-            changed="pathway-highlight-store.data",
+            input_ids=["app-store"],
+            changed="app-store.data",
             input_values={
-                "app-store": {"selected_smiles": "[13CH3]"},
-                "pathway-highlight-store": {
-                    "species_ids": ["[H][O]", "[H]"],
+                "app-store": {
+                    "dataset_id": "dataset-A",
+                    "selected_smiles": "[13CH3]",
                 },
             },
             state_values={},
@@ -898,12 +950,52 @@ def test_network_controls_switch_by_semantics_and_handoff_exact_anchor() -> None
     assert handoff.status_code == 200
     assert (
         handoff.get_json()["response"]["network-anchor-smiles"]["value"]
-        == "[H][O]"
+        == "[13CH3]"
     )
     assert (
         handoff.get_json()["response"]["network-semantics"]["value"]
         == "mechanism"
     )
+
+
+def test_network_anchor_rejects_cross_dataset_or_missing_pathway_provenance() -> None:
+    app = create_app()
+    client = app.server.test_client()
+
+    selected_path = {
+        "path_rank": 1,
+        "species_ids": ["[H][O]"],
+        "reaction_keys": ["[H]+[O]->[H][O]"],
+    }
+    for pathway_context in (
+        None,
+        {
+            "schema_version": "reacnet-scope/pathway-context/v1",
+            "dataset_id": "dataset-A",
+            "source_signatures": {},
+        },
+    ):
+        response = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=["pathway-highlight-network-btn"],
+                changed="pathway-highlight-network-btn.n_clicks",
+                input_values={"pathway-highlight-network-btn": 1},
+                state_values={
+                    "pathway-selected-path": selected_path,
+                    "pathway-context-store": pathway_context,
+                    "app-store": {
+                        "dataset_id": "dataset-B",
+                        "selected_smiles": "[13CH3]",
+                    },
+                },
+            ),
+        )
+        assert response.status_code == 200
+        result = response.get_json()["response"]
+        assert result["network-anchor-smiles"]["value"] == ""
+        assert result["pathway-highlight-store"]["data"] is None
 
 
 def test_network_highlight_uses_exact_ids_without_removing_elements() -> None:
@@ -1366,6 +1458,226 @@ def test_loading_another_dataset_drops_cross_dataset_species_selection(
     store = response.get_json()["response"]["app-store"]["data"]
     assert store["selected_smiles"] == ""
     assert store["selected_formula"] == ""
+
+
+def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    folders = [tmp_path / "run-a", tmp_path / "run-b"]
+    for folder in folders:
+        folder.mkdir()
+    alias = tmp_path / "run-a-alias"
+    alias.symlink_to(folders[0], target_is_directory=True)
+
+    monkeypatch.setattr(
+        "scripts.webapp_dash.callbacks._validated_dataset_target",
+        lambda selected: selected,
+    )
+    monkeypatch.setattr(
+        svc,
+        "scan_dataset",
+        lambda folder, *, base: {
+            "dataset": {"selected_base": Path(base).name}
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "artifacts_from_status",
+        lambda _status: {"reaction": "run.lammpstrj.reactionabcd"},
+    )
+    monkeypatch.setattr(svc, "dataset_capabilities", lambda _status: {})
+    monkeypatch.setattr(svc, "dataset_readiness", lambda _status: {})
+    monkeypatch.setattr(svc, "dataset_ready_count", lambda _status: 0)
+    monkeypatch.setattr(svc, "dataset_label", lambda _status: "run")
+    monkeypatch.setattr(
+        svc,
+        "normalise_recent_datasets",
+        lambda records: records,
+    )
+    app = create_app()
+    client = app.server.test_client()
+
+    ids: list[str] = []
+    loaded_stores: list[dict[str, Any]] = []
+    store: dict[str, Any] = {}
+    for folder in (folders[0], folders[0], folders[1], alias):
+        response = client.post(
+            "/_dash-update-component",
+            json=_callback_payload(
+                client,
+                input_ids=["data-apply-btn"],
+                changed="data-apply-btn.n_clicks",
+                input_values={"data-apply-btn": 1},
+                state_values={
+                    "dataset-browser-candidate": {
+                        "folder": str(folder),
+                        "base": "run.lammpstrj",
+                    },
+                    "app-store": store,
+                    "recent-datasets": [],
+                },
+            ),
+        )
+        assert response.status_code == 200
+        store = response.get_json()["response"]["app-store"]["data"]
+        loaded_stores.append(store)
+        ids.append(store["dataset_id"])
+        assert store["selected_smiles"] == ""
+        assert store["dataset_id"] == dataset_id_for_source(
+            str((folder / "run.lammpstrj").resolve(strict=False))
+        )
+
+    assert ids[0] == ids[1]
+    assert ids[0] != ids[2]
+    assert ids[0] == ids[3]
+
+    old_network = {
+        **_mechanism_network_payload(),
+        "dataset_id": ids[0],
+    }
+    reset = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "network-search-btn",
+                "network-semantics",
+                "network-evidence-filter",
+                "app-store",
+            ],
+            changed="app-store.data",
+            input_values={
+                "network-search-btn": None,
+                "network-semantics": "mechanism",
+                "network-evidence-filter": "all",
+                "app-store": loaded_stores[2],
+            },
+            state_values={
+                "network-min-count": 1,
+                "network-max-species": 60,
+                "network-top-edges": 40,
+                "network-anchor-smiles": "[H]",
+                "network-direction": "both",
+                "network-depth": 2,
+                "network-min-net-tp": 1,
+                "network-max-nodes": 200,
+                "network-layout": "grid",
+                "network-raw-store": old_network,
+                "network-context-store": {
+                    "dataset_id": ids[0],
+                    "network_semantics": "mechanism",
+                },
+                "pathway-highlight-store": {
+                    "dataset_id": ids[0],
+                    "species_ids": ["[H]"],
+                },
+            },
+        ),
+    )
+    assert reset.status_code == 200
+    cleared = reset.get_json()["response"]
+    assert cleared["network-raw-store"]["data"] is None
+    assert cleared["network-store"]["data"] is None
+    assert cleared["network-cytoscape"]["tapNodeData"] is None
+    assert cleared["network-context-store"]["data"] == {
+        "dataset_id": ids[2],
+        "network_semantics": "mechanism",
+    }
+
+
+def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    old_context = {
+        "schema_version": "reacnet-scope/pathway-context/v1",
+        "dataset_id": "dataset-A",
+        "source_signatures": {},
+    }
+
+    changed_dataset = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store", "network-semantics"],
+            changed="app-store.data",
+            input_values={
+                "app-store": {"dataset_id": "dataset-B"},
+                "network-semantics": "mechanism",
+            },
+            state_values={
+                "pathway-context-store": old_context,
+                "pathway-highlight-store": {
+                    "dataset_id": "dataset-A",
+                    "pending": False,
+                },
+            },
+            output_id="pathway-context-store",
+        ),
+    )
+    assert changed_dataset.status_code == 200
+    changed = changed_dataset.get_json()["response"]
+    assert changed["pathway-store"]["data"] is None
+    assert changed["pathway-context-store"]["data"] is None
+    assert changed["pathway-selected-path"]["data"] is None
+    assert changed["pathway-selected-step"]["data"] is None
+    assert changed["pathway-highlight-store"]["data"] is None
+    assert changed["pathway-grid"]["selected_rows"] == []
+    assert changed["pathway-grid"]["data"] == []
+    assert changed["pathway-cytoscape"]["elements"] == []
+
+    changed_semantics = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store", "network-semantics"],
+            changed="network-semantics.value",
+            input_values={
+                "app-store": {"dataset_id": "dataset-A"},
+                "network-semantics": "event_transfer",
+            },
+            state_values={
+                "pathway-context-store": old_context,
+                "pathway-highlight-store": {
+                    "dataset_id": "dataset-A",
+                    "pending": False,
+                },
+            },
+            output_id="pathway-context-store",
+        ),
+    )
+    assert changed_semantics.status_code == 200
+    semantics = changed_semantics.get_json()["response"]
+    assert "pathway-store" not in semantics
+    assert "pathway-context-store" not in semantics
+    assert semantics["pathway-selected-path"]["data"] is None
+    assert semantics["pathway-selected-step"]["data"] is None
+    assert semantics["pathway-highlight-store"]["data"] is None
+
+    pending_handoff = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store", "network-semantics"],
+            changed="network-semantics.value",
+            input_values={
+                "app-store": {"dataset_id": "dataset-A"},
+                "network-semantics": "mechanism",
+            },
+            state_values={
+                "pathway-context-store": old_context,
+                "pathway-highlight-store": {
+                    "dataset_id": "dataset-A",
+                    "pending": True,
+                    "species_ids": ["[H]"],
+                },
+            },
+            output_id="pathway-context-store",
+        ),
+    )
+    assert pending_handoff.status_code == 200
+    pending = pending_handoff.get_json()["response"]
+    assert "pathway-highlight-store" not in pending
 
 
 def test_network_reaction_detail_and_event_handoff_keep_repeated_sides() -> None:
