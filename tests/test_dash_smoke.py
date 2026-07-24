@@ -45,6 +45,8 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "dir-browser-recent" in layout_ids
     assert "dataset-browser-candidate" in layout_ids
     assert "recent-datasets" in layout_ids
+    assert "data-rungroup" in layout_ids
+    assert "data-scan-btn" not in layout_ids
     assert "data-prep-status" in layout_ids
     assert "data-prep-refresh-btn" in layout_ids
     assert "data-rng-event-command" in layout_ids
@@ -62,6 +64,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
             if component_id not in layout_ids:
                 missing.append(component_id)
     assert missing == []
+    layout_text = json.dumps(layout_response.get_json(), ensure_ascii=False)
+    assert "运行组 (base)" not in layout_text
+    assert "加载数据集" in layout_text
 
 
 def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:
@@ -212,6 +217,325 @@ def _browser_callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def _load_dataset_callback_payload(
+    client,
+    *,
+    candidate: dict[str, str] | None,
+    store: dict[str, Any],
+    recent_records: Any,
+) -> dict[str, Any]:
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if any(value["id"] == "data-apply-btn" for value in item["inputs"])
+        and "recent-datasets.data" in item["output"]
+    )
+    outputs = [
+        {"id": "app-store", "property": "data"},
+        {"id": "topbar-folder", "property": "children"},
+        {"id": "topbar-rungroup", "property": "children"},
+        {"id": "topbar-status", "property": "children"},
+        {"id": "topbar-status", "property": "className"},
+        {"id": "data-modal", "property": "is_open"},
+        {"id": "recent-datasets", "property": "data"},
+    ]
+    state_values = {
+        "dataset-browser-candidate": candidate,
+        "app-store": store,
+        "recent-datasets": recent_records,
+    }
+    return {
+        "output": dependency["output"],
+        "outputs": outputs,
+        "changedPropIds": ["data-apply-btn.n_clicks"],
+        "inputs": [
+            {"id": item["id"], "property": item["property"], "value": 1}
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": state_values[item["id"]],
+            }
+            for item in dependency["state"]
+        ],
+    }
+
+
+def test_load_selected_dataset_updates_store_closes_modal_and_remembers_it(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = {
+        "folder": str(tmp_path),
+        "base": str(tmp_path / "rp3.lammpstrj"),
+        "label": "rp3.lammpstrj",
+    }
+    captured: dict[str, str] = {}
+
+    def fake_scan(folder: str, *, base: str = "") -> dict[str, Any]:
+        captured.update({"folder": folder, "base": base})
+        return {
+            "dataset": {
+                "selected_base": base,
+                "label": "rp3.lammpstrj",
+                "ready_count": 2,
+                "artifacts": {},
+                "capabilities": {},
+                "readiness": {},
+            }
+        }
+
+    monkeypatch.setattr(svc, "scan_dataset", fake_scan)
+    app = create_app()
+    client = app.server.test_client()
+    old_store = {"folder": "old", "base": "old/base", "label": "old"}
+    response = client.post(
+        "/_dash-update-component",
+        json=_load_dataset_callback_payload(
+            client,
+            candidate=candidate,
+            store=old_store,
+            recent_records=[],
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert captured == {"folder": str(tmp_path), "base": candidate["base"]}
+    assert result["app-store"]["data"]["base"] == candidate["base"]
+    assert result["data-modal"]["is_open"] is False
+    assert result["recent-datasets"]["data"][0]["folder"] == str(tmp_path)
+    assert result["recent-datasets"]["data"][0]["base"] == candidate["base"]
+
+
+def test_load_failure_keeps_current_dataset_modal_and_recents(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc,
+        "scan_dataset",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(svc.ServiceError("已不存在")),
+    )
+    app = create_app()
+    client = app.server.test_client()
+    old_store = {"folder": "old", "base": "old/base", "label": "old"}
+    old_recent = [{"folder": "/old", "base": "/old/run", "label": "run", "loaded_at": 1}]
+    response = client.post(
+        "/_dash-update-component",
+        json=_load_dataset_callback_payload(
+            client,
+            candidate={"folder": "/gone", "base": "/gone/run", "label": "run"},
+            store=old_store,
+            recent_records=old_recent,
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["app-store"]["data"] == old_store
+    assert result["data-modal"]["is_open"] is True
+    assert result["recent-datasets"]["data"] == old_recent
+
+
+def test_manual_dataset_prefix_selects_exact_candidate(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    for name in ("rp3.lammpstrj", "rp4.lammpstrj"):
+        (tmp_path / f"{name}.reactionabcd").touch()
+        (tmp_path / f"{name}.species").touch()
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-folder-input.value",
+            values={"data-folder-input": str(tmp_path / "rp4.lammpstrj")},
+            state_values={
+                "dir-browser-path": str(tmp_path),
+                "data-folder-input": str(tmp_path / "rp4.lammpstrj"),
+                "recent-datasets": [],
+                "dataset-browser-candidate": None,
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["dataset-browser-candidate"]["data"] == {
+        "folder": str(tmp_path),
+        "base": str(tmp_path / "rp4.lammpstrj"),
+        "label": "rp4.lammpstrj",
+    }
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-folder-input.value",
+            values={"data-folder-input": str(tmp_path)},
+            state_values={
+                "dir-browser-path": str(tmp_path),
+                "data-folder-input": str(tmp_path),
+                "recent-datasets": [],
+                "dataset-browser-candidate": None,
+            },
+        ),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dataset-browser-candidate"]["data"] is None
+
+    one_dataset = tmp_path / "only-one"
+    one_dataset.mkdir()
+    (one_dataset / "run.lammpstrj.reactionabcd").touch()
+    (one_dataset / "run.lammpstrj.species").touch()
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-folder-input.value",
+            values={"data-folder-input": str(one_dataset)},
+            state_values={
+                "dir-browser-path": str(tmp_path),
+                "data-folder-input": str(one_dataset),
+                "recent-datasets": [],
+                "dataset-browser-candidate": None,
+            },
+        ),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dataset-browser-candidate"]["data"] == {
+        "folder": str(one_dataset),
+        "base": str(one_dataset / "run.lammpstrj"),
+        "label": "run.lammpstrj",
+    }
+
+
+def test_directory_browser_ignores_corrupt_recent_store_payload(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-pick-btn.n_clicks",
+            values={"data-pick-btn": 1},
+            state_values={
+                "dir-browser-path": "",
+                "data-folder-input": str(tmp_path),
+                "recent-datasets": {"unexpected": "mapping"},
+                "dataset-browser-candidate": None,
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dir-browser-modal"]["is_open"] is True
+
+
+def test_directory_browser_go_subdir_parent_recent_and_revalidates_selection(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    dataset = tmp_path / "case"
+    dataset.mkdir()
+    reaction = dataset / "rp3.lammpstrj.reactionabcd"
+    species = dataset / "rp3.lammpstrj.species"
+    reaction.touch()
+    species.touch()
+    candidate = {
+        "folder": str(dataset),
+        "base": str(dataset / "rp3.lammpstrj"),
+        "label": "rp3.lammpstrj",
+    }
+    app = create_app()
+    client = app.server.test_client()
+    state = {
+        "dir-browser-path": str(tmp_path),
+        "data-folder-input": str(tmp_path),
+        "recent-datasets": [{**candidate, "loaded_at": 1}],
+        "dataset-browser-candidate": None,
+    }
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="dir-browser-go-btn.n_clicks",
+            values={
+                "dir-browser-go-btn": 1,
+                "dir-browser-path-input": str(dataset),
+            },
+            state_values=state,
+        ),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
+
+    entry = {"type": "dir-browser-entry", "path": str(dataset)}
+    payload = _browser_callback_payload(
+        client,
+        changed=f"{json.dumps(entry, sort_keys=True, separators=(',', ':'))}.n_clicks",
+        values={'{"path":["ALL"],"type":"dir-browser-entry"}': [1]},
+        state_values=state,
+    )
+    for item in payload["inputs"]:
+        if item["id"] == '{"path":["ALL"],"type":"dir-browser-entry"}':
+            item["id"] = entry
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="dir-browser-back-btn.n_clicks",
+            values={"dir-browser-back-btn": 1},
+            state_values={**state, "dir-browser-path": str(dataset)},
+        ),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(tmp_path)
+
+    recent = {"type": "dir-browser-recent-entry", "folder": str(dataset), "base": candidate["base"]}
+    payload = _browser_callback_payload(
+        client,
+        changed=f"{json.dumps(recent, sort_keys=True, separators=(',', ':'))}.n_clicks",
+        values={'{"base":["ALL"],"folder":["ALL"],"type":"dir-browser-recent-entry"}': [1]},
+        state_values=state,
+    )
+    for item in payload["inputs"]:
+        if item["id"] == '{"base":["ALL"],"folder":["ALL"],"type":"dir-browser-recent-entry"}':
+            item["id"] = recent
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["dataset-browser-candidate"]["data"] == candidate
+
+    reaction.unlink()
+    species.unlink()
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="dir-browser-select-btn.n_clicks",
+            values={"dir-browser-select-btn": 1},
+            state_values={
+                **state,
+                "dir-browser-path": str(dataset),
+                "dataset-browser-candidate": candidate,
+            },
+        ),
+    )
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["dir-browser-modal"]["is_open"] is True
+    assert result["dataset-browser-candidate"]["data"] is None
 
 
 def test_directory_browser_open_selects_one_dataset_without_applying_it(tmp_path, monkeypatch) -> None:

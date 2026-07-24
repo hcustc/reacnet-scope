@@ -1359,40 +1359,23 @@ def _data_modal() -> dbc.Modal:
             dbc.ModalHeader(dbc.ModalTitle("管理数据")),
             dbc.ModalBody(
                 [
-                    dbc.Row(
+                    html.Div(id="data-candidate-summary", className="mb-2"),
+                    dbc.Button("选择其他数据集", id="data-pick-btn", color="secondary", size="sm", className="mb-2"),
+                    html.Details(
                         [
-                            dbc.Col(
-                                [
-                                    dbc.Label("数据目录"),
-                                    dbc.Input(id="data-folder-input", placeholder="输入或选择数据目录"),
-                                ],
-                                width=True,
-                            ),
-                            dbc.Col(
-                                dbc.Button("浏览服务器目录", id="data-pick-btn", color="secondary", size="sm"),
-                                width="auto",
-                                className="align-self-end",
+                            html.Summary("手动输入服务器路径"),
+                            dbc.Input(
+                                id="data-folder-input",
+                                debounce=True,
+                                placeholder="输入目录或数据集公共前缀",
+                                className="mt-2",
                             ),
                         ],
-                        className="g-2 mb-2",
+                        className="mb-2",
                     ),
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                [
-                                    dbc.Label("运行组 (base)"),
-                                    dcc.Dropdown(
-                                        id="data-rungroup",
-                                        options=[],
-                                        clearable=True,
-                                        placeholder="留空使用默认",
-                                    ),
-                                ],
-                                width=True,
-                            ),
-                        ],
-                        className="g-2 mb-2",
-                    ),
+                    # ``base`` remains an internal compatibility value for
+                    # legacy callbacks while the user chooses dataset cards.
+                    dcc.Dropdown(id="data-rungroup", options=[], style={"display": "none"}),
                     html.Div(id="data-scan-status"),
                     html.Hr(),
                     html.Div(id="data-artifacts", className="small text-muted"),
@@ -1457,8 +1440,7 @@ def _data_modal() -> dbc.Modal:
             ),
             dbc.ModalFooter(
                 [
-                    dbc.Button("扫描", id="data-scan-btn", color="primary", size="sm", className="me-auto"),
-                    dbc.Button("应用", id="data-apply-btn", color="success", size="sm"),
+                    dbc.Button("加载数据集", id="data-apply-btn", color="success", size="sm", disabled=True),
                     dbc.Button("关闭", id="data-close-btn", color="secondary", size="sm", outline=True),
                 ]
             ),

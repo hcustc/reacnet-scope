@@ -398,62 +398,73 @@ def register_callbacks(app: Any) -> None:
         Input("open-data-modal", "n_clicks"),
         Input("species-open-data-modal", "n_clicks"),
         Input("data-close-btn", "n_clicks"),
-        Input("data-apply-btn", "n_clicks"),
         State("data-modal", "is_open"),
-        State("data-folder-input", "value"),
-        State("data-rungroup", "value"),
         prevent_initial_call=True,
     )
-    def _toggle_data_modal(topbar_open, species_open, close_btn, apply_btn, is_open, folder_text, selected_base):
+    def _toggle_data_modal(topbar_open, species_open, close_btn, is_open):
         triggered = ctx.triggered_id
         if triggered in ("open-data-modal", "species-open-data-modal"):
             return True
         if triggered == "data-close-btn":
             return False
-        if triggered == "data-apply-btn":
-            try:
-                status = svc.scan_dataset((folder_text or "").strip(), base=(selected_base or "").strip())
-            except Exception:
-                return True
-            return not bool(svc.dataset_ready_count(status))
         return is_open
 
     @app.callback(
-        Output("data-folder-input", "value"),
-        Output("data-rungroup", "options"),
+        Output("data-candidate-summary", "children"),
         Output("data-scan-status", "children"),
         Output("data-artifacts", "children"),
-        Input("data-scan-btn", "n_clicks"),
-        State("data-folder-input", "value"),
-        prevent_initial_call=True,
+        Output("data-apply-btn", "disabled"),
+        Input("dataset-browser-candidate", "data"),
+        State("app-store", "data"),
     )
-    def _scan_data_folder(n_clicks, folder_text):
-        if n_clicks is None:
-            raise PreventUpdate
-        try:
-            status = svc.scan_dataset(folder_text or "")
-        except svc.ServiceError as exc:
-            artifact_html = _render_artifacts({})
+    def _show_candidate_status(candidate, app_store):
+        selected = candidate if isinstance(candidate, dict) else {}
+        folder = str(selected.get("folder") or "").strip()
+        base = str(selected.get("base") or "").strip()
+        label = str(selected.get("label") or "").strip()
+        if not folder or not base:
+            loaded = app_store or {}
+            current_label = str(loaded.get("label") or "未选择")
             return (
-                no_update,
-                [],
-                f"扫描失败: {exc.message}",
-                artifact_html,
+                html.Span(f"当前已加载：{current_label}；请选择要加载的数据集。", className="text-muted"),
+                "尚未选择待加载数据集。",
+                _render_artifacts(loaded.get("artifacts") or {}),
+                True,
+            )
+        try:
+            status = svc.scan_dataset(folder, base=base)
+        except svc.ServiceError as exc:
+            return (
+                dbc.Alert(f"所选数据集不可用：{exc.message}", color="danger", className="py-2"),
+                f"读取失败: {exc.message}",
+                _render_artifacts({}),
+                True,
             )
         except Exception as exc:
-            artifact_html = _render_artifacts({})
-            return (no_update, [], f"扫描失败: {exc}", artifact_html)
-
-        candidates = svc.candidates_from_status(status)
-        options = [
-            {"label": f"{c.get('label') or c.get('base')} ({c.get('score', 0)}/7)", "value": c.get("base", "")}
-            for c in candidates
-        ]
+            return (
+                dbc.Alert(f"所选数据集不可用：{exc}", color="danger", className="py-2"),
+                f"读取失败: {exc}",
+                _render_artifacts({}),
+                True,
+            )
+        dataset = status.get("dataset") or {}
+        selected_base = str(dataset.get("selected_base") or "")
+        if selected_base != base:
+            return (
+                dbc.Alert("所选数据集已不存在，请重新选择。", color="danger", className="py-2"),
+                "所选数据集已不存在。",
+                _render_artifacts({}),
+                True,
+            )
         artifact_html = _render_artifacts(svc.artifacts_from_status(status))
         ready = svc.dataset_ready_count(status)
-        label = svc.dataset_label(status)
-        scan_msg = f"扫描完成 — {label}，就绪 {ready}/7"
-        return (no_update, options, scan_msg, artifact_html)
+        display_label = label or svc.dataset_label(status)
+        return (
+            html.Div([html.Span("待加载数据集：", className="text-muted"), html.Strong(display_label)]),
+            f"已验证 — {display_label}，就绪 {ready}/7",
+            artifact_html,
+            False,
+        )
 
     @app.callback(
         Output("data-prep-status", "children"),
@@ -466,19 +477,18 @@ def register_callbacks(app: Any) -> None:
         Output("data-clear-trajectory-btn", "disabled"),
         Output("data-prep-refresh", "disabled"),
         Input("data-modal", "is_open"),
-        Input("data-scan-btn", "n_clicks"),
         Input("data-prep-refresh-btn", "n_clicks"),
         Input("data-prep-refresh", "n_intervals"),
-        Input("data-rungroup", "value"),
-        State("data-folder-input", "value"),
+        Input("dataset-browser-candidate", "data"),
         State("app-store", "data"),
     )
-    def _refresh_preparation_status(is_open, _scan_clicks, _refresh_clicks, _tick, selected_base, folder_text, app_store):
+    def _refresh_preparation_status(is_open, _refresh_clicks, _tick, candidate, app_store):
         if not is_open:
             return "", "", "", "", "", "", "", True, True
         store = app_store or {}
-        folder = (folder_text or store.get("folder") or "").strip()
-        base = (selected_base or store.get("base") or "").strip()
+        selected = candidate if isinstance(candidate, dict) else {}
+        folder = str(selected.get("folder") or store.get("folder") or "").strip()
+        base = str(selected.get("base") or store.get("base") or "").strip()
         if not folder:
             return "请选择数据目录后查看准备状态。", "", "", "", "", "", "", True, False
         try:
@@ -509,18 +519,18 @@ def register_callbacks(app: Any) -> None:
         Output("data-prep-clear-alert", "children"),
         Input("data-clear-trajectory-btn", "n_clicks"),
         Input("data-clear-cancel-btn", "n_clicks"),
-        State("data-folder-input", "value"),
-        State("data-rungroup", "value"),
+        State("dataset-browser-candidate", "data"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _confirm_index_clear(trajectory_clicks, cancel_clicks, folder_text, selected_base, app_store):
+    def _confirm_index_clear(trajectory_clicks, cancel_clicks, candidate, app_store):
         if ctx.triggered_id == "data-clear-cancel-btn":
             return False, no_update, {}, None
         kind = "trajectory"
         store = app_store or {}
-        folder = (folder_text or store.get("folder") or "").strip()
-        base = (selected_base or store.get("base") or "").strip()
+        selected = candidate if isinstance(candidate, dict) else {}
+        folder = str(selected.get("folder") or store.get("folder") or "").strip()
+        base = str(selected.get("base") or store.get("base") or "").strip()
         try:
             payload = svc.dataset_preparation_status(folder, base=base)
         except Exception as exc:
@@ -586,6 +596,7 @@ def register_callbacks(app: Any) -> None:
         Output("data-folder-input", "value", allow_duplicate=True),
         Output("data-rungroup", "value", allow_duplicate=True),
         Input("data-pick-btn", "n_clicks"),
+        Input("data-folder-input", "value"),
         Input("dir-browser-path-input", "value"),
         Input("dir-browser-go-btn", "n_clicks"),
         Input({"type": "dir-browser-crumb", "path": ALL}, "n_clicks"),
@@ -603,6 +614,7 @@ def register_callbacks(app: Any) -> None:
     )
     def _handle_dir_browser(
         pick_clicks,
+        manual_dataset_input,
         path_input,
         go_clicks,
         _crumb_clicks,
@@ -619,9 +631,9 @@ def register_callbacks(app: Any) -> None:
     ):
         """Consolidated state machine for the directory browser modal.
 
-        Browser state stays separate from the applied dataset.  Directory
-        navigation can discover or replace a candidate, but only the legacy
-        data-management flow applies it to ``app-store``.
+        Browser state stays separate from the applied dataset. Directory
+        navigation or manual input can choose a candidate, but only the
+        explicit load action applies it to ``app-store``.
         """
         triggered_id = ctx.triggered_id
         if triggered_id is None:
@@ -637,6 +649,62 @@ def register_callbacks(app: Any) -> None:
             initial = (folder_input or "").strip()
             start_path = _resolve_initial_browse_path(initial)
             return _build_dir_browser_response(start_path, recent_records)
+
+        # --- ADVANCED MANUAL INPUT -----------------------------------
+        if triggered_id == "data-folder-input":
+            raw = str(manual_dataset_input or "").strip()
+            if not raw:
+                return (
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    None,
+                    True,
+                    no_update,
+                    no_update,
+                )
+            try:
+                resolved = svc.resolve_dataset_input(raw)
+                snapshot = svc.browse_dataset_location(resolved["folder"])
+            except svc.ServiceError:
+                return (
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    None,
+                    True,
+                    no_update,
+                    no_update,
+                )
+            preferred_base = str(resolved.get("preferred_base") or "")
+            datasets = snapshot.get("datasets") or []
+            actual = (
+                _candidate_for_base(snapshot, preferred_base)
+                if preferred_base
+                else (datasets[0] if len(datasets) == 1 else None)
+            )
+            compact = _compact_browser_candidate(actual) if actual else None
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                compact,
+                compact is None,
+                no_update,
+                compact["base"] if compact else no_update,
+            )
 
         # --- PATH INPUT / GO -----------------------------------------
         if triggered_id == "dir-browser-path-input" or triggered_id == "dir-browser-go-btn":
@@ -739,43 +807,52 @@ def register_callbacks(app: Any) -> None:
         Output("topbar-rungroup", "children"),
         Output("topbar-status", "children"),
         Output("topbar-status", "className"),
+        Output("data-modal", "is_open"),
+        Output("recent-datasets", "data"),
         Input("data-apply-btn", "n_clicks"),
-        State("data-folder-input", "value"),
-        State("data-rungroup", "value"),
+        State("dataset-browser-candidate", "data"),
         State("app-store", "data"),
+        State("recent-datasets", "data"),
         prevent_initial_call=True,
     )
-    def _apply_data_folder(n_clicks, folder_text, selected_base, store):
+    def _apply_data_folder(n_clicks, candidate, store, recent_records):
         if n_clicks is None:
             raise PreventUpdate
         store = store or {}
-        folder = (folder_text or "").strip()
-        base = (selected_base or "").strip()
-        if not folder:
+        selected = candidate if isinstance(candidate, dict) else {}
+        folder = str(selected.get("folder") or "").strip()
+        base = str(selected.get("base") or "").strip()
+        if not folder or not base:
             return (
-                {**store, "folder": "", "base": "", "label": "未选择", "ready_count": 0, "artifacts": {}, "capabilities": {}, "readiness": {}},
-                "未选择",
-                "未选择",
-                "未加载数据",
-                "rs-badge rs-bad",
+                store,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                True,
+                recent_records,
             )
         try:
             status = svc.scan_dataset(folder, base=base)
+            dataset = status.get("dataset", {}) or {}
+            selected_base_new = str(dataset.get("selected_base") or "")
+            if selected_base_new != base:
+                raise svc.ServiceError("所选数据集已不存在，请重新选择。")
         except Exception:
             return (
-                {**store, "folder": folder, "base": base, "label": folder, "ready_count": 0, "artifacts": {}, "capabilities": {}, "readiness": {}},
-                folder,
-                base or folder,
-                "加载失败",
-                "rs-badge rs-bad",
+                store,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                True,
+                recent_records,
             )
-        dataset = status.get("dataset", {}) or {}
         artifacts = svc.artifacts_from_status(status)
         capabilities = svc.dataset_capabilities(status)
         readiness = svc.dataset_readiness(status)
         ready = svc.dataset_ready_count(status)
         label = svc.dataset_label(status)
-        selected_base_new = dataset.get("selected_base") or base
         new_store = {
             **store,
             "folder": folder,
@@ -787,6 +864,17 @@ def register_callbacks(app: Any) -> None:
             "artifacts": artifacts,
         }
         status_class = "rs-badge" if ready >= 3 else ("rs-badge rs-bad" if ready <= 1 else "rs-badge")
+        recent = svc.normalise_recent_datasets(
+            [
+                {
+                    "folder": folder,
+                    "base": selected_base_new,
+                    "label": label,
+                    "loaded_at": int(time.time()),
+                },
+                *(recent_records if isinstance(recent_records, list) else []),
+            ]
+        )
         return (
             new_store,
             folder,
@@ -797,6 +885,8 @@ def register_callbacks(app: Any) -> None:
                 "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
             ),
             status_class,
+            False,
+            recent,
         )
 
     # ── Focused four-step evidence workflow ─────────────────────────
@@ -2252,45 +2342,6 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         return {"content": svc.rows_to_csv(rows), "filename": "batch_comparison.csv", "type": "text/csv"}
 
-    # ── Modal pre-populate on open ──────────────────────────────────
-
-    @app.callback(
-        Output("data-folder-input", "value", allow_duplicate=True),
-        Output("data-rungroup", "options", allow_duplicate=True),
-        Output("data-scan-status", "children", allow_duplicate=True),
-        Output("data-artifacts", "children", allow_duplicate=True),
-        Input("open-data-modal", "n_clicks"),
-        Input("species-open-data-modal", "n_clicks"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _pre_populate_data_modal(topbar_open, species_open, store):
-        if not topbar_open and not species_open:
-            raise PreventUpdate
-        store = store or {}
-        folder = store.get("folder") or ""
-        artifacts = store.get("artifacts", {}) or {}
-        ready = store.get("ready_count") or 0
-        options = []
-        scan_msg = ""
-        if folder:
-            try:
-                status = svc.scan_dataset(folder, base=store.get("base") or "")
-                candidates = svc.candidates_from_status(status)
-                options = [
-                    {"label": f"{c.get('label') or c.get('base')} ({c.get('score', 0)}/5)", "value": c.get("base", "")}
-                    for c in candidates
-                ]
-                artifacts = svc.artifacts_from_status(status)
-                ready = svc.dataset_ready_count(status)
-                label = svc.dataset_label(status)
-                scan_msg = f"已扫描 — {label}，就绪 {ready}/5"
-            except Exception:
-                pass
-        artifact_html = _render_artifacts(artifacts)
-        return (folder or "", options, scan_msg, artifact_html)
-
-
 # ── Directory browser helpers ───────────────────────────────────────
 
 
@@ -2462,11 +2513,11 @@ def _render_dataset_cards(datasets: list[dict[str, Any]]) -> Any:
 
 
 def _render_recent_datasets(records: list[dict[str, Any]] | None) -> Any:
-    """Render recent records without changing their persisted ordering/data."""
+    """Render valid recent records without trusting browser-local storage."""
     from pathlib import Path
 
     entries: list[Any] = []
-    for record in records or []:
+    for record in svc.normalise_recent_datasets(records or []):
         folder = str(record.get("folder") or "")
         base = str(record.get("base") or "")
         try:

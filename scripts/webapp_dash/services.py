@@ -23,7 +23,7 @@ from functools import lru_cache
 from bisect import bisect_left
 from pathlib import Path
 from collections import Counter
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 # Ensure the project tool root is importable when this package is loaded
@@ -311,11 +311,15 @@ def resolve_dataset_input(path: str) -> dict[str, str]:
 
 
 def normalise_recent_datasets(
-    records: Iterable[dict[str, Any]],
+    records: Iterable[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Validate, deduplicate, and cap persisted recent-dataset records."""
     deduped: dict[tuple[str, str], dict[str, Any]] = {}
-    for raw in records or []:
+    if not isinstance(records, (list, tuple)):
+        return []
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            continue
         folder = str(raw.get("folder") or "").strip()
         base = str(raw.get("base") or "").strip()
         if not folder or not base:
