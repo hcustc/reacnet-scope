@@ -1494,33 +1494,50 @@ def _dir_browser_modal() -> dbc.Modal:
         [
             dbc.ModalHeader(dbc.ModalTitle("浏览服务器目录")),
             dbc.ModalBody(
-                html.Div(
-                    id="dir-browser-body",
-                    children=[
-                        # This input must exist in the initial layout.  Dash's
-                        # renderer will not schedule the open callback when an
-                        # explicit callback input is entirely absent.
-                        dbc.Button(
-                            "⬑ 返回上一级",
-                            id="dir-browser-back-btn",
-                            color="secondary",
-                            size="sm",
-                            outline=True,
-                            disabled=True,
-                            className="mb-2",
-                        ),
-                        html.Div("正在加载…", className="text-center text-muted py-4"),
-                    ],
-                )
+                [
+                    dbc.InputGroup(
+                        [
+                            dbc.Input(
+                                id="dir-browser-path-input",
+                                debounce=True,
+                                placeholder="输入服务器目录后按 Enter",
+                            ),
+                            dbc.Button("前往", id="dir-browser-go-btn", color="secondary"),
+                        ],
+                        className="rs-browser-path-control",
+                    ),
+                    html.Div(id="dir-browser-breadcrumbs", className="rs-browser-breadcrumbs"),
+                    html.Div(id="dir-browser-recent", className="rs-browser-recent"),
+                    html.Div(id="dir-browser-datasets", className="rs-browser-datasets"),
+                    html.Div(
+                        id="dir-browser-body",
+                        children=[
+                            # This input must exist in the initial layout. Dash
+                            # can then schedule the consolidated callback before
+                            # the first directory snapshot is rendered.
+                            dbc.Button(
+                                "⬑ 返回上一级",
+                                id="dir-browser-back-btn",
+                                color="secondary",
+                                size="sm",
+                                outline=True,
+                                disabled=True,
+                                className="mb-2",
+                            ),
+                            html.Div("正在加载…", className="text-center text-muted py-4"),
+                        ],
+                    ),
+                ]
             ),
             dbc.ModalFooter(
                 [
                     dbc.Button(
-                        "选择当前目录",
+                        "使用所选数据集",
                         id="dir-browser-select-btn",
                         color="primary",
                         size="sm",
                         className="me-auto",
+                        disabled=True,
                     ),
                     dbc.Button(
                         "取消",
@@ -1574,6 +1591,8 @@ def build_layout() -> html.Div:
             _index_clear_confirm_modal(),
             _dir_browser_modal(),
             dcc.Store(id="dir-browser-path", storage_type="memory", data=""),
+            dcc.Store(id="dataset-browser-candidate", storage_type="memory", data=None),
+            dcc.Store(id="recent-datasets", storage_type="local", data=[]),
             dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
             dcc.Store(id="workflow-store", storage_type="session", data=cb.initial_workflow_store()),
             dcc.Store(id="workflow-viewer-store", storage_type="memory", data=None),

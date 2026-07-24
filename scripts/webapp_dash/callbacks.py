@@ -575,24 +575,53 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("dir-browser-modal", "is_open"),
+        Output("dir-browser-path-input", "value"),
+        Output("dir-browser-breadcrumbs", "children"),
+        Output("dir-browser-recent", "children"),
+        Output("dir-browser-datasets", "children"),
         Output("dir-browser-body", "children"),
         Output("dir-browser-path", "data"),
+        Output("dataset-browser-candidate", "data"),
+        Output("dir-browser-select-btn", "disabled"),
         Output("data-folder-input", "value", allow_duplicate=True),
+        Output("data-rungroup", "value", allow_duplicate=True),
         Input("data-pick-btn", "n_clicks"),
+        Input("dir-browser-path-input", "value"),
+        Input("dir-browser-go-btn", "n_clicks"),
+        Input({"type": "dir-browser-crumb", "path": ALL}, "n_clicks"),
         Input({"type": "dir-browser-entry", "path": ALL}, "n_clicks"),
         Input("dir-browser-back-btn", "n_clicks"),
+        Input({"type": "dir-browser-dataset", "base": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-recent-entry", "folder": ALL, "base": ALL}, "n_clicks"),
         Input("dir-browser-select-btn", "n_clicks"),
         Input("dir-browser-cancel-btn", "n_clicks"),
         State("dir-browser-path", "data"),
         State("data-folder-input", "value"),
+        State("dataset-browser-candidate", "data"),
+        State("recent-datasets", "data"),
         prevent_initial_call=True,
     )
-    def _handle_dir_browser(pick_clicks, _entry_clicks, back_clicks, select_clicks, cancel_clicks, current_path, folder_input):
+    def _handle_dir_browser(
+        pick_clicks,
+        path_input,
+        go_clicks,
+        _crumb_clicks,
+        _entry_clicks,
+        back_clicks,
+        _dataset_clicks,
+        _recent_clicks,
+        select_clicks,
+        cancel_clicks,
+        current_path,
+        folder_input,
+        candidate,
+        recent_records,
+    ):
         """Consolidated state machine for the directory browser modal.
 
-        Dispatches on ``ctx.triggered_id``: open, navigate to subdirectory,
-        go up, select current, or cancel.  A guard filters out spurious
-        firings caused by pattern-matching component replacements.
+        Browser state stays separate from the applied dataset.  Directory
+        navigation can discover or replace a candidate, but only the legacy
+        data-management flow applies it to ``app-store``.
         """
         triggered_id = ctx.triggered_id
         if triggered_id is None:
@@ -600,24 +629,37 @@ def register_callbacks(app: Any) -> None:
 
         # --- CANCEL ---------------------------------------------------
         if triggered_id == "dir-browser-cancel-btn":
-            return False, no_update, no_update, no_update
+            return (False, no_update, no_update, no_update, no_update, no_update,
+                    no_update, no_update, no_update, no_update, no_update)
 
         # --- OPEN -----------------------------------------------------
         if triggered_id == "data-pick-btn":
             initial = (folder_input or "").strip()
             start_path = _resolve_initial_browse_path(initial)
-            return _build_dir_browser_response(start_path)
+            return _build_dir_browser_response(start_path, recent_records)
+
+        # --- PATH INPUT / GO -----------------------------------------
+        if triggered_id == "dir-browser-path-input" or triggered_id == "dir-browser-go-btn":
+            target = (path_input or "").strip()
+            if not target:
+                return _build_dir_browser_response(
+                    current_path or _resolve_initial_browse_path(folder_input or ""),
+                    recent_records,
+                    error="请输入服务器目录后再前往。",
+                )
+            return _build_dir_browser_response(target, recent_records)
+
+        # --- BREADCRUMB ----------------------------------------------
+        if _pattern_trigger_type(triggered_id) == "dir-browser-crumb":
+            if not _triggered_click_value():
+                raise PreventUpdate
+            return _build_dir_browser_response(triggered_id["path"], recent_records)
 
         # --- NAVIGATE TO SUBDIR ---------------------------------------
-        if isinstance(triggered_id, dict) and triggered_id.get("type") == "dir-browser-entry":
-            # Guard against spurious callback invocations caused by
-            # Dash re-creating pattern-matching components after a
-            # body update (n_clicks resets to None in that case).
-            triggered_value = (ctx.triggered or [{}])[0].get("value")
-            if not triggered_value:
+        if _pattern_trigger_type(triggered_id) == "dir-browser-entry":
+            if not _triggered_click_value():
                 raise PreventUpdate
-            target = triggered_id["path"]
-            return _build_dir_browser_response(target)
+            return _build_dir_browser_response(triggered_id["path"], recent_records)
 
         # --- GO UP ----------------------------------------------------
         if triggered_id == "dir-browser-back-btn":
@@ -628,26 +670,66 @@ def register_callbacks(app: Any) -> None:
                 cur = svc.validate_browse_path(stored)
                 parent = str(cur.parent)
                 svc.validate_browse_path(parent)
-                return _build_dir_browser_response(parent)
+                return _build_dir_browser_response(parent, recent_records)
             except svc.ServiceError:
                 return _build_dir_browser_response(
-                    stored, error="已在允许的根目录边界，无法继续返回上一级。"
+                    stored,
+                    recent_records,
+                    error="已在允许的根目录边界，无法继续返回上一级。",
                 )
 
-        # --- SELECT CURRENT DIR ---------------------------------------
-        if triggered_id == "dir-browser-select-btn":
-            stored = (current_path or "").strip()
-            if not stored:
+        # --- SELECT DATASET CARD -------------------------------------
+        if _pattern_trigger_type(triggered_id) == "dir-browser-dataset":
+            if not _triggered_click_value():
                 raise PreventUpdate
-            # Store content is browser-side state, so validate it again
-            # before applying it to the dataset form.
+            return _select_browser_candidate(
+                current_path,
+                triggered_id.get("base", ""),
+                recent_records,
+            )
+
+        # --- SELECT RECENT DATASET -----------------------------------
+        if _pattern_trigger_type(triggered_id) == "dir-browser-recent-entry":
+            if not _triggered_click_value():
+                raise PreventUpdate
+            return _select_browser_candidate(
+                triggered_id.get("folder", ""),
+                triggered_id.get("base", ""),
+                recent_records,
+            )
+
+        # --- USE SELECTED DATASET ------------------------------------
+        if triggered_id == "dir-browser-select-btn":
+            selected = candidate or {}
+            folder = str(selected.get("folder") or "").strip()
+            base = str(selected.get("base") or "").strip()
+            if not folder or not base:
+                raise PreventUpdate
             try:
-                selected = svc.validate_browse_path(stored)
-                if not selected.is_dir():
-                    raise svc.ServiceError("路径不是目录", reason="not_directory")
+                snapshot = svc.browse_dataset_location(folder)
             except svc.ServiceError:
-                return _build_dir_browser_response(stored)
-            return False, no_update, no_update, str(selected)
+                return _build_dir_browser_response(folder, recent_records)
+            actual = _candidate_for_base(snapshot, base)
+            if actual is None:
+                return _build_dir_browser_response(
+                    folder,
+                    recent_records,
+                    error="所选数据集已不存在，请重新选择。",
+                )
+            compact = _compact_browser_candidate(actual)
+            return (
+                False,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                compact,
+                False,
+                compact["folder"],
+                compact["base"],
+            )
 
         raise PreventUpdate
 
@@ -2237,131 +2319,243 @@ def _resolve_initial_browse_path(folder_input: str) -> str:
     return str(Path.home())
 
 
-def _build_dir_browser_response(path_str: str, error: str = "") -> tuple:
-    """Call ``list_directory`` and build the Dash callback response tuple.
+def _triggered_click_value() -> bool:
+    """Ignore Dash's synthetic pattern-input reset events."""
+    return bool((ctx.triggered or [{}])[0].get("value"))
 
-    Returns ``(is_open, body_children, path_data, data_folder_value)``.
-    """
+
+def _pattern_trigger_type(triggered_id: Any) -> str:
+    """Read Dash's pattern ID from either a dict or AttributeDict."""
+    getter = getattr(triggered_id, "get", None)
+    return str(getter("type") or "") if callable(getter) else ""
+
+
+def _compact_browser_candidate(candidate: dict[str, Any]) -> dict[str, str]:
+    """Keep browser selection state independent from index/status payloads."""
+    return {
+        "folder": str(candidate.get("folder") or ""),
+        "base": str(candidate.get("base") or ""),
+        "label": str(candidate.get("label") or ""),
+    }
+
+
+def _candidate_for_base(snapshot: dict[str, Any], base: str) -> dict[str, Any] | None:
+    """Return an exact discovered candidate without trusting client state."""
+    target = str(base or "")
+    return next(
+        (item for item in snapshot.get("datasets") or [] if item.get("base") == target),
+        None,
+    )
+
+
+def _build_dir_browser_response(
+    path_str: str,
+    recent_records: list[dict[str, Any]] | None,
+    error: str = "",
+) -> tuple:
+    """Build a complete browser snapshot response without applying a dataset."""
     try:
-        data = svc.list_directory(path_str)
+        data = svc.browse_dataset_location(path_str)
     except svc.ServiceError as exc:
-        body = _render_dir_browser_error(str(exc.message), path_str)
-        return True, body, path_str, no_update
-    body = _render_dir_browser_body(data, error=error)
-    return True, body, data["current_path"], no_update
+        attempted = str(path_str or "")
+        return (
+            True,
+            attempted,
+            [],
+            _render_recent_datasets(recent_records),
+            _render_dataset_cards([]),
+            _render_dir_browser_error(str(exc.message), attempted),
+            attempted,
+            None,
+            True,
+            no_update,
+            no_update,
+        )
+    datasets = data.get("datasets") or []
+    candidate = _compact_browser_candidate(datasets[0]) if len(datasets) == 1 else None
+    return (
+        True,
+        data["current_path"],
+        _render_breadcrumbs(data.get("breadcrumbs") or []),
+        _render_recent_datasets(recent_records),
+        _render_dataset_cards(datasets),
+        _render_dir_browser_body(data, error=error),
+        data["current_path"],
+        candidate,
+        candidate is None,
+        no_update,
+        no_update,
+    )
+
+
+def _select_browser_candidate(
+    folder: str,
+    base: str,
+    recent_records: list[dict[str, Any]] | None,
+) -> tuple:
+    """Refresh a directory then set its explicitly selected candidate."""
+    response = list(_build_dir_browser_response(folder, recent_records))
+    try:
+        snapshot = svc.browse_dataset_location(folder)
+    except svc.ServiceError:
+        return tuple(response)
+    candidate = _candidate_for_base(snapshot, base)
+    if candidate is None:
+        return _build_dir_browser_response(
+            folder,
+            recent_records,
+            error="该数据集已不存在，请从当前目录重新选择。",
+        )
+    response[7] = _compact_browser_candidate(candidate)
+    response[8] = False
+    return tuple(response)
+
+
+def _render_breadcrumbs(breadcrumbs: list[dict[str, str]]) -> Any:
+    if not breadcrumbs:
+        return None
+    return html.Div(
+        [
+            dbc.Button(
+                item["label"],
+                id={"type": "dir-browser-crumb", "path": item["path"]},
+                color="link",
+                size="sm",
+                className="rs-browser-crumb",
+            )
+            for item in breadcrumbs
+        ],
+        className="rs-browser-crumb-list",
+    )
+
+
+def _render_dataset_cards(datasets: list[dict[str, Any]]) -> Any:
+    """Render discovered datasets separately from filesystem directories."""
+    if not datasets:
+        content: Any = html.Div(
+            "当前目录未发现 ReacNetGenerator 数据集，可继续进入子目录。",
+            className="rs-empty",
+        )
+    else:
+        content = [
+            dbc.Button(
+                [
+                    html.Strong(item["label"]),
+                    html.Span(
+                        f"文件完整度 {item['completeness']}",
+                        className="rs-dataset-meta",
+                    ),
+                    html.Span(
+                        " · ".join(
+                            f"{key}: {value}" for key, value in item["index_states"].items()
+                        ),
+                        className="rs-dataset-index-states",
+                    ),
+                ],
+                id={"type": "dir-browser-dataset", "base": item["base"]},
+                color="light",
+                className="rs-dataset-card",
+            )
+            for item in datasets
+        ]
+    return html.Section([html.H6("发现的数据集"), content])
+
+
+def _render_recent_datasets(records: list[dict[str, Any]] | None) -> Any:
+    """Render recent records without changing their persisted ordering/data."""
+    from pathlib import Path
+
+    entries: list[Any] = []
+    for record in records or []:
+        folder = str(record.get("folder") or "")
+        base = str(record.get("base") or "")
+        try:
+            available = bool(folder and base and svc.validate_browse_path(folder).is_dir())
+        except svc.ServiceError:
+            available = False
+        label = str(record.get("label") or Path(base).name or folder)
+        if available:
+            entries.append(
+                dbc.Button(
+                    label,
+                    id={"type": "dir-browser-recent-entry", "folder": folder, "base": base},
+                    color="link",
+                    size="sm",
+                    className="rs-browser-recent-entry",
+                )
+            )
+        else:
+            entries.append(html.Span(f"{label}（不可用）", className="rs-browser-recent-unavailable"))
+    if not entries:
+        return None
+    return html.Section([html.H6("最近加载"), html.Div(entries, className="rs-browser-recent-list")])
 
 
 def _render_dir_browser_error(message: str, attempted_path: str = "") -> Any:
-    """Render an error state inside the directory browser modal body."""
-    return html.Div(
+    """Render a recoverable error inside the directory-list section."""
+    return html.Section(
         [
             html.Div(
                 [
-                    html.Span("当前位置：", className="text-muted", style={"fontSize": "12px"}),
-                    html.Code(
-                        attempted_path or "—",
-                        style={"fontSize": "13px", "wordBreak": "break-all"},
+                    dbc.Button(
+                        "⬑ 返回上一级",
+                        id="dir-browser-back-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                        disabled=True,
+                        className="mb-2",
                     ),
-                ],
-                className="mb-2",
+                    html.Span(attempted_path or "—", className="rs-browser-error-path"),
+                ]
             ),
-            dbc.Button(
-                "⬑ 返回上一级",
-                id="dir-browser-back-btn",
-                color="secondary",
-                size="sm",
-                outline=True,
-                disabled=True,
-                className="mb-2",
-            ),
-            html.Hr(className="my-2"),
-            html.Div(
-                [
-                    html.Span("⚠ ", style={"fontSize": "16px"}),
-                    html.Span(message),
-                ],
-                className="text-danger py-3 text-center",
-            ),
-        ]
+            html.Div([html.Span("⚠ "), html.Span(message)], className="text-danger py-3 text-center"),
+        ],
+        className="rs-browser-directories",
     )
 
 
 def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
-    """Render the directory browser modal body from *data*."""
-    current_path = data["current_path"]
-    can_go_up = data.get("can_go_up", False)
+    """Render only the subdirectory section for a browser snapshot."""
     subdirs: list[dict[str, Any]] = data.get("subdirs", [])
-
-    # ── Path display + back button ──────────────────────────────────
-    header_children: list[Any] = [
-        html.Div(
-            [
-                html.Span("当前位置：", className="text-muted", style={"fontSize": "12px"}),
-                html.Code(current_path, style={"fontSize": "13px", "wordBreak": "break-all"}),
-            ],
-            className="mb-2",
-        ),
-        dbc.Button(
-            "⬑ 返回上一级",
-            id="dir-browser-back-btn",
-            color="secondary",
-            size="sm",
-            outline=True,
-            disabled=not can_go_up,
-            className="mb-2",
-        ),
-    ]
-
-    # ── Inline error (e.g. "cannot go up further") ──────────────────
-    if error:
-        header_children.append(
-            html.Div(error, className="text-warning small mb-2")
-        )
-
-    # ── Subdirectory list ────────────────────────────────────────────
     if not subdirs:
-        dir_list: Any = html.Div(
-            "当前目录没有子文件夹", className="text-muted text-center py-3"
-        )
+        directory_list: Any = html.Div("当前目录没有子文件夹", className="rs-empty")
     else:
-        items: list[Any] = []
-        for d in subdirs:
-            name: str = d.get("name", "")
-            accessible: bool = bool(d.get("accessible", True))
-            if accessible:
-                items.append(
-                    dbc.Button(
-                        name,
-                        id={"type": "dir-browser-entry", "path": d["path"]},
-                        color="light",
-                        size="sm",
-                        className="d-block w-100 text-start mb-1",
-                        style={
-                            "border": "1px solid #dee2e6",
-                            "textAlign": "left",
-                        },
-                    )
+        directory_list = html.Div(
+            [
+                dbc.Button(
+                    item.get("name", ""),
+                    id={"type": "dir-browser-entry", "path": item["path"]},
+                    color="light",
+                    size="sm",
+                    disabled=not bool(item.get("accessible", True)),
+                    className="rs-browser-directory-entry",
                 )
-            else:
-                items.append(
-                    html.Div(
-                        [
-                            html.Span(name),
-                            html.Span(
-                                " (无权限)", className="text-muted", style={"fontSize": "11px"}
-                            ),
-                        ],
-                        className="text-muted small py-1 px-2",
-                        style={"opacity": "0.45"},
-                    )
-                )
-        dir_list = html.Div(
-            items,
-            style={"maxHeight": "380px", "overflowY": "auto"},
+                for item in subdirs
+            ],
+            className="rs-browser-directory-list",
         )
-
-    return html.Div(
-        [*header_children, html.Hr(className="my-2"), dir_list]
+    alert = html.Div(error, className="text-warning small mb-2") if error else None
+    return html.Section(
+        [
+            html.Div(
+                [
+                    dbc.Button(
+                        "⬑ 返回上一级",
+                        id="dir-browser-back-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                        disabled=not bool(data.get("can_go_up")),
+                    ),
+                    html.H6("子目录"),
+                ],
+                className="rs-browser-directory-heading",
+            ),
+            alert,
+            directory_list,
+        ],
+        className="rs-browser-directories",
     )
 
 
