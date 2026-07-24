@@ -923,6 +923,7 @@ def register_callbacks(app: Any) -> None:
         Output("workflow-species-grid", "data"),
         Output("workflow-species-grid", "columns"),
         Output("workflow-species-alert", "children"),
+        Output("workflow-species-grid", "selected_rows"),
         Input("workflow-species-search", "n_clicks"),
         Input("app-store", "data"),
         State("workflow-species-query", "value"),
@@ -933,7 +934,7 @@ def register_callbacks(app: Any) -> None:
     def _search_workflow_catalog(_clicks, app_store, query, kind, tolerance, mass_mode):
         artifacts = (app_store or {}).get("artifacts") or {}
         if not artifacts.get("species"):
-            return [], _workflow_columns([]), "选择数据集后，可从 .species 建立目标物种目录。"
+            return [], _workflow_columns([]), "选择数据集后，可从 .species 建立目标物种目录。", []
         try:
             payload = svc.search_species_catalog(
                 artifacts,
@@ -943,7 +944,7 @@ def register_callbacks(app: Any) -> None:
                 mass_mode=mass_mode or "exact",
             )
         except svc.ServiceError as exc:
-            return [], _workflow_columns([]), exc.message
+            return [], _workflow_columns([]), exc.message, []
         rows = payload.get("rows") or []
         columns = _workflow_columns(
             [
@@ -954,11 +955,12 @@ def register_callbacks(app: Any) -> None:
         )
         meta = payload.get("meta") or {}
         moname_state = ".moname 已补充结构实例" if meta.get("moname_available") else ".moname 未提供，使用 SMILES 结构"
-        return rows, columns, f"目录含 {meta.get('catalog_size', 0)} 个物种；{moname_state}。"
+        return rows, columns, f"目录含 {meta.get('catalog_size', 0)} 个物种；{moname_state}。", []
 
     @app.callback(
         Output("workflow-store", "data"),
         Input("app-store", "data"),
+        Input("workflow-species-search", "n_clicks"),
         Input("workflow-species-grid", "selected_rows"),
         Input("workflow-species-confirm", "n_clicks"),
         Input("workflow-production-grid", "selected_rows"),
@@ -981,7 +983,7 @@ def register_callbacks(app: Any) -> None:
         prevent_initial_call=False,
     )
     def _advance_workflow(
-        app_store, species_selected, species_confirm, production_selected, consumption_selected, channel_confirm,
+        app_store, _species_search, species_selected, species_confirm, production_selected, consumption_selected, channel_confirm,
         event_selected, event_confirm, validation_save, _step1, _step2, _step3, _step4,
         workflow, species_rows, production_rows, consumption_rows, event_rows, outcome, note,
     ):
@@ -1001,7 +1003,17 @@ def register_callbacks(app: Any) -> None:
             index = int(rows[0])
             return dict(data[index]) if 0 <= index < len(data) else None
 
-        if triggered == "workflow-species-grid":
+        if triggered == "workflow-species-search":
+            state.update(
+                {
+                    "species": None,
+                    "channel": None,
+                    "event": None,
+                    "current_step": 1,
+                    "validation_message": "",
+                }
+            )
+        elif triggered == "workflow-species-grid":
             row = chosen(species_selected, species_rows)
             if row:
                 state.update({"species": row, "channel": None, "event": None, "current_step": 1})

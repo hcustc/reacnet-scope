@@ -152,6 +152,7 @@ def test_species_search_preserves_zero_mass_tolerance(monkeypatch) -> None:
             {"id": "workflow-species-grid", "property": "data"},
             {"id": "workflow-species-grid", "property": "columns"},
             {"id": "workflow-species-alert", "property": "children"},
+            {"id": "workflow-species-grid", "property": "selected_rows"},
         ],
         "changedPropIds": ["workflow-species-search.n_clicks"],
         "inputs": [
@@ -167,6 +168,158 @@ def test_species_search_preserves_zero_mass_tolerance(monkeypatch) -> None:
     response = client.post("/_dash-update-component", json=payload)
     assert response.status_code == 200
     assert captured["mass_tolerance"] == 0
+
+
+def test_species_search_clears_stale_workflow_choices_before_new_selection(monkeypatch) -> None:
+    def fake_search(_artifacts, query, **_kwargs):
+        assert query == "CH3"
+        return {
+            "rows": [{"formula": "CH3", "smiles": "[H][C]([H])[H]"}],
+            "meta": {"catalog_size": 1, "moname_available": False},
+        }
+
+    monkeypatch.setattr(svc, "search_species_catalog", fake_search)
+    app = create_app()
+    client = app.server.test_client()
+    workflow = {
+        "dataset_key": "rp3",
+        "current_step": 2,
+        "species": {"formula": "H2", "smiles": "[H][H]"},
+        "channel": {"reaction_smiles": "[H]+[H]->[H][H]"},
+        "event": {"event_id": "old"},
+        "validations": [],
+    }
+
+    search_dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]]
+        == ["workflow-species-search", "app-store"]
+    )
+    search_payload = {
+        "output": search_dependency["output"],
+        "outputs": [
+            {"id": "workflow-species-grid", "property": "data"},
+            {"id": "workflow-species-grid", "property": "columns"},
+            {"id": "workflow-species-alert", "property": "children"},
+            {"id": "workflow-species-grid", "property": "selected_rows"},
+        ],
+        "changedPropIds": ["workflow-species-search.n_clicks"],
+        "inputs": [
+            {"id": "workflow-species-search", "property": "n_clicks", "value": 1},
+            {"id": "app-store", "property": "data", "value": {"base": "rp3", "artifacts": {"species": "/tmp/example.species"}}},
+        ],
+        "state": [
+            {"id": "workflow-species-query", "property": "value", "value": "CH3"},
+            {"id": "workflow-species-kind", "property": "value", "value": "auto"},
+            {"id": "workflow-mass-tolerance", "property": "value", "value": 0.5},
+            {"id": "workflow-mass-mode", "property": "value", "value": "exact"},
+        ],
+    }
+    search_response = client.post("/_dash-update-component", json=search_payload)
+    assert search_response.status_code == 200
+    search_data = search_response.get_json()["response"]
+    assert search_data["workflow-species-grid"]["selected_rows"] == []
+
+    workflow_dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]][:2]
+        == ["app-store", "workflow-species-search"]
+    )
+    input_values = {
+        "app-store": {"base": "rp3", "artifacts": {"species": "/tmp/example.species"}},
+        "workflow-species-search": 1,
+        "workflow-species-grid": [],
+        "workflow-species-confirm": None,
+        "workflow-production-grid": [],
+        "workflow-consumption-grid": [],
+        "workflow-channel-confirm": None,
+        "workflow-event-grid": [],
+        "workflow-event-confirm": None,
+        "workflow-validation-save": None,
+        "workflow-step-1": None,
+        "workflow-step-2": None,
+        "workflow-step-3": None,
+        "workflow-step-4": None,
+    }
+    state_values = {
+        "workflow-store": workflow,
+        "workflow-species-grid": search_data["workflow-species-grid"]["data"],
+        "workflow-production-grid": [],
+        "workflow-consumption-grid": [],
+        "workflow-event-grid": [],
+        "workflow-validation-outcome": "support",
+        "workflow-validation-note": "",
+    }
+    workflow_payload = {
+        "output": workflow_dependency["output"],
+        "outputs": {"id": "workflow-store", "property": "data"},
+        "changedPropIds": ["workflow-species-search.n_clicks"],
+        "inputs": [
+            {"id": item["id"], "property": item["property"], "value": input_values[item["id"]]}
+            for item in workflow_dependency["inputs"]
+        ],
+        "state": [
+            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
+            for item in workflow_dependency["state"]
+        ],
+    }
+    workflow_response = client.post("/_dash-update-component", json=workflow_payload)
+    assert workflow_response.status_code == 200
+    workflow_data = workflow_response.get_json()["response"]["workflow-store"]["data"]
+    assert workflow_data["species"] is None
+    assert workflow_data["channel"] is None
+    assert workflow_data["event"] is None
+    assert workflow_data["current_step"] == 1
+
+    selection_payload = dict(workflow_payload)
+    selection_payload["changedPropIds"] = ["workflow-species-grid.selected_rows"]
+    selection_inputs = [dict(item) for item in workflow_payload["inputs"]]
+    for item in selection_inputs:
+        if item["id"] == "workflow-species-grid":
+            item["value"] = [0]
+    selection_payload["inputs"] = selection_inputs
+    selection_response = client.post("/_dash-update-component", json=selection_payload)
+    assert selection_response.status_code == 200
+    selection_data = selection_response.get_json()["response"]["workflow-store"]["data"]
+    assert selection_data["species"]["formula"] == "CH3"
+
+    state_dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if [value["id"] for value in item["inputs"]] == ["workflow-store"]
+        and "workflow-species-choice.children" in item["output"]
+    )
+    state_payload = {
+        "output": state_dependency["output"],
+        "outputs": [
+            *[
+                {"id": f"workflow-panel-{number}", "property": "style"}
+                for number in range(1, 5)
+            ],
+            *[
+                {"id": f"workflow-step-{number}", "property": "className"}
+                for number in range(1, 5)
+            ],
+            {"id": "workflow-summary", "property": "children"},
+            {"id": "workflow-species-choice", "property": "children"},
+            {"id": "workflow-channel-choice", "property": "children"},
+            {"id": "workflow-event-choice", "property": "children"},
+            {"id": "workflow-species-confirm", "property": "disabled"},
+            {"id": "workflow-channel-confirm", "property": "disabled"},
+            {"id": "workflow-event-confirm", "property": "disabled"},
+            {"id": "workflow-validation-status", "property": "children"},
+        ],
+        "changedPropIds": ["workflow-store.data"],
+        "inputs": [{"id": "workflow-store", "property": "data", "value": selection_data}],
+        "state": [],
+    }
+    state_response = client.post("/_dash-update-component", json=state_payload)
+    assert state_response.status_code == 200
+    rendered = state_response.get_json()["response"]
+    assert "CH3" in rendered["workflow-species-choice"]["children"]
+    assert rendered["workflow-species-confirm"]["disabled"] is False
 
 
 def _browser_callback_payload(
