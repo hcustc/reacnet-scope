@@ -23,7 +23,7 @@ import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
 from typing import (
-    Dict, List, Set, Tuple, Optional, Sequence, Generator, Any,
+    Dict, List, Set, Tuple, Optional, Sequence, Generator, Any, TextIO,
 )
 
 
@@ -201,20 +201,27 @@ class InitiationChannel:
 #  2.  Reaction file parser
 # ═══════════════════════════════════════════════════════════
 
-def parse_reactionabcd(filepath: str,
+def parse_reactionabcd(filepath: str | os.PathLike[str] | TextIO,
                        *,
                        min_tp: int = 1) -> List[Reaction]:
     """Read a .reactionabcd file and return a list of Reaction objects.
 
     Args:
-        filepath:  Path to the reactionabcd file.
+        filepath:  Path to the reactionabcd file, or an already-open text
+                   snapshot. Caller-owned streams are not closed.
         min_tp:    Minimum tp to keep (default 1).
 
     Returns:
         List of Reaction objects (not yet deduplicated).
     """
     reactions: List[Reaction] = []
-    with open(filepath) as fh:
+    owns_handle = isinstance(filepath, (str, os.PathLike))
+    fh = (
+        open(filepath, encoding="utf-8")
+        if owns_handle
+        else filepath
+    )
+    try:
         for line in fh:
             line = line.strip()
             if not line or '->' not in line:
@@ -234,6 +241,9 @@ def parse_reactionabcd(filepath: str,
             r_smi = tuple(s.strip() for s in lr[0].split('+') if s.strip())
             p_smi = tuple(s.strip() for s in lr[1].split('+') if s.strip())
             reactions.append(Reaction(r_smi, p_smi, tp))
+    finally:
+        if owns_handle:
+            fh.close()
     return reactions
 
 

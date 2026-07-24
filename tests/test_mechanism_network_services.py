@@ -95,6 +95,25 @@ def _atomic_replace_preserving_size_and_mtime(
     assert after.st_ino != before.st_ino
 
 
+def _hardlink_rewrite_preserving_size_and_mtime(
+    path: Path,
+    link: Path,
+    text: str,
+) -> None:
+    before = path.stat()
+    os.link(path, link)
+    with link.open("r+b") as handle:
+        handle.write(text.encode("utf-8"))
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert after.st_ino == before.st_ino
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+
+
 @pytest.fixture
 def reaction_artifacts(tmp_path: Path) -> dict[str, str]:
     return {"reaction": str(_write_reaction_file(tmp_path))}
@@ -402,8 +421,71 @@ def test_same_metadata_atomic_replacement_invalidates_mechanism_cache(
     }
     assert first_species == {"[H]", "[O]"}
     assert second_species == {"[C]", "[H]"}
-    # Reproducible source signatures intentionally exclude inode/ctime.
-    assert first["source_signatures"] == second["source_signatures"]
+    assert first["source_signatures"]["reactionabcd"]["sha256"] != (
+        second["source_signatures"]["reactionabcd"]["sha256"]
+    )
+
+
+def test_content_digest_invalidates_coarse_metadata_hardlink_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    store = legacy_server.NetworkStore()
+    fixed_identity = legacy_server._reaction_source_identity(str(reaction))
+    monkeypatch.setattr(
+        legacy_server,
+        "_reaction_source_identity",
+        lambda _path: fixed_identity,
+    )
+
+    first = store.get(str(reaction), 1)
+    _hardlink_rewrite_preserving_size_and_mtime(
+        reaction,
+        tmp_path / "run.hardlink",
+        "4 [H] -> [C]\n",
+    )
+    second = store.get(str(reaction), 1)
+
+    assert first.reactions[0].product_smiles == ("[O]",)
+    assert second.reactions[0].product_smiles == ("[C]",)
+    assert second is not first
+
+
+@pytest.mark.parametrize("service_name", ["mechanism", "pathway"])
+def test_shared_services_export_digest_for_hardlink_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_name: str,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    artifacts = {"reaction": str(reaction)}
+    monkeypatch.setattr(svc, "STORE", legacy_server.NetworkStore())
+
+    if service_name == "mechanism":
+        call = lambda: svc.build_mechanism_elements(  # noqa: E731
+            artifacts,
+            anchor_smiles="[H]",
+            max_depth=1,
+        )
+    else:
+        call = lambda: svc.find_pathways(  # noqa: E731
+            artifacts,
+            "[H]",
+            max_depth=1,
+        )
+    first = call()
+    _hardlink_rewrite_preserving_size_and_mtime(
+        reaction,
+        tmp_path / f"{service_name}.hardlink",
+        "4 [H] -> [C]\n",
+    )
+    second = call()
+
+    first_signature = first["source_signatures"]["reactionabcd"]
+    second_signature = second["source_signatures"]["reactionabcd"]
+    assert len(first_signature["sha256"]) == 64
+    assert first_signature["sha256"] != second_signature["sha256"]
 
 
 def test_reaction_replacement_during_store_load_is_exact_stale_error(
@@ -431,6 +513,55 @@ def test_reaction_replacement_during_store_load_is_exact_stale_error(
             anchor_smiles="[H]",
             max_depth=1,
         )
+
+    assert caught.value.reason == "reaction_source_stale"
+
+
+@pytest.mark.parametrize("service_name", ["mechanism", "pathway"])
+def test_hardlink_rewrite_during_snapshot_load_is_exact_stale_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_name: str,
+) -> None:
+    reaction = _write_reaction_file(tmp_path, "4 [H] -> [O]\n")
+    hardlink = tmp_path / "during-load.hardlink"
+    os.link(reaction, hardlink)
+    before = reaction.stat()
+    real_parse = legacy_server.parse_reactionabcd
+    rewrote = False
+
+    def replacing_parse(source: Any, *, min_tp: int) -> list[Reaction]:
+        nonlocal rewrote
+        parsed = real_parse(source, min_tp=min_tp)
+        if not rewrote:
+            rewrote = True
+            with hardlink.open("r+b") as handle:
+                handle.write(b"4 [H] -> [C]\n")
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.utime(
+                reaction,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+        return parsed
+
+    monkeypatch.setattr(legacy_server, "parse_reactionabcd", replacing_parse)
+    monkeypatch.setattr(svc, "STORE", legacy_server.NetworkStore())
+
+    with pytest.raises(svc.ServiceError) as caught:
+        if service_name == "mechanism":
+            svc.build_mechanism_elements(
+                {"reaction": str(reaction)},
+                anchor_smiles="[H]",
+                max_depth=1,
+            )
+        else:
+            svc.find_pathways(
+                {"reaction": str(reaction)},
+                "[H]",
+                max_depth=1,
+            )
 
     assert caught.value.reason == "reaction_source_stale"
 
@@ -540,31 +671,9 @@ def test_csv_export_neutralizes_spreadsheet_formulas(
 
 
 def test_csv_export_preserves_numeric_negative_values() -> None:
-    payload = {
-        "schema_version": "reacnet-scope/mechanism-network/v1",
-        "network_semantics": "mechanism",
-        "evidence_level": "reaction_passage_counts",
-        "anchor_smiles": "A",
-        "query": {},
-        "source_signatures": {},
-        "nodes": [
-            {
-                "id": "species:1",
-                "kind": "species",
-                "label": "A",
-                "smiles": "A",
-                "formula": "A",
-                "forward_tp": -1,
-            }
-        ],
-        "edges": [],
-        "meta": {},
-    }
-
-    exported = svc.export_mechanism_graph(payload, "node-csv")
-    restored = list(csv.DictReader(io.StringIO(exported)))
-
-    assert restored[0]["forward_tp"] == "-1"
+    # Schema counts are nonnegative, but the low-level spreadsheet guard must
+    # still preserve numeric values rather than treating them as formulas.
+    assert svc._mechanism_csv_value(-1) == -1
 
 
 @pytest.mark.parametrize(
@@ -579,6 +688,8 @@ def test_csv_export_preserves_numeric_negative_values() -> None:
         ("missing_node_field", "label"),
         ("dangling_edge", "unknown target"),
         ("missing_edge_field", "coefficient"),
+        ("evidence_contradiction", "evidence_level"),
+        ("missing_semantic_edge", "semantic edges"),
     ],
 )
 def test_all_exports_share_complete_mechanism_payload_validation(
@@ -601,8 +712,12 @@ def test_all_exports_share_complete_mechanism_payload_validation(
         tampered["nodes"][0].pop("label")
     elif mutation == "dangling_edge":
         tampered["edges"][0]["target"] = "reaction:missing"
-    else:
+    elif mutation == "missing_edge_field":
         tampered["edges"][0].pop("coefficient")
+    elif mutation == "evidence_contradiction":
+        tampered["evidence_level"] = "event_evidence_linked"
+    else:
+        tampered["edges"].pop()
 
     with pytest.raises(ValueError, match=message):
         svc.export_mechanism_graph(tampered, format_name)

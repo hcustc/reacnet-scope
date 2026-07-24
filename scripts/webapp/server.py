@@ -6855,45 +6855,127 @@ def _reaction_source_identity(path: str) -> tuple[int, int, int, int, int]:
     )
 
 
+_REACTION_SNAPSHOT_MEMORY_LIMIT = 16 * 1024 * 1024
+_REACTION_HASH_CHUNK_SIZE = 1024 * 1024
+
+
+def _reaction_stat_identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _capture_reaction_source(
+    path: str,
+) -> tuple[tempfile.SpooledTemporaryFile[bytes], dict[str, Any]]:
+    """Capture and hash one opened reaction source without rereading it.
+
+    The spooled snapshot bounds memory for large ``reactionabcd`` files and is
+    the exact byte sequence later parsed by ``NetworkStore``.
+    """
+    resolved = os.path.abspath(path)
+    spool = tempfile.SpooledTemporaryFile(
+        max_size=_REACTION_SNAPSHOT_MEMORY_LIMIT,
+        mode="w+b",
+    )
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with open(resolved, "rb") as source:
+            before = os.fstat(source.fileno())
+            while True:
+                chunk = source.read(_REACTION_HASH_CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                spool.write(chunk)
+                total += len(chunk)
+            after = os.fstat(source.fileno())
+        if _reaction_stat_identity(before) != _reaction_stat_identity(after):
+            raise ReactionSourceChangedError(
+                f"reaction file changed while loading: {resolved}"
+            )
+        spool.seek(0)
+        return spool, {
+            "path": resolved,
+            "size": total,
+            "mtime_ns": int(after.st_mtime_ns),
+            "sha256": digest.hexdigest(),
+        }
+    except BaseException:
+        spool.close()
+        raise
+
+
+def reaction_source_signature(path: str) -> dict[str, Any]:
+    """Return a reproducible content-derived signature for a reaction file."""
+    snapshot, signature = _capture_reaction_source(path)
+    snapshot.close()
+    return signature
+
+
 class NetworkStore:
     def __init__(self, max_entries: int = 8) -> None:
         self._lock = threading.Lock()
         self._cache: OrderedDict[
             tuple[str, int],
-            tuple[tuple[int, int, int, int, int], ReactionNetwork],
+            tuple[str, ReactionNetwork],
         ] = OrderedDict()
         self._max_entries = max(2, int(max_entries))
 
     def get(self, reac_file: str, min_tp: int) -> ReactionNetwork:
+        network, _signature = self.get_with_signature(reac_file, min_tp)
+        return network
+
+    def get_with_signature(
+        self,
+        reac_file: str,
+        min_tp: int,
+    ) -> tuple[ReactionNetwork, dict[str, Any]]:
         path = os.path.abspath(reac_file)
         if not os.path.exists(path):
             raise FileNotFoundError(f"reaction file not found: {path}")
         key = (path, min_tp)
 
         with self._lock:
-            identity = _reaction_source_identity(path)
+            snapshot, signature = _capture_reaction_source(path)
+            digest = str(signature["sha256"])
             cached = self._cache.get(key)
-            if cached and cached[0] == identity:
-                if _reaction_source_identity(path) != identity:
-                    raise ReactionSourceChangedError(
-                        f"reaction file changed while loading: {path}"
-                    )
+            if cached and cached[0] == digest:
+                snapshot.close()
                 self._cache.move_to_end(key)
-                return cached[1]
+                return cached[1], dict(signature)
 
-            reactions = parse_reactionabcd(path, min_tp=min_tp)
-            if _reaction_source_identity(path) != identity:
+            try:
+                with io.TextIOWrapper(
+                    snapshot,
+                    encoding="utf-8",
+                ) as text_snapshot:
+                    reactions = parse_reactionabcd(
+                        text_snapshot,
+                        min_tp=min_tp,
+                    )
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(
+                    f"reaction file is not valid UTF-8: {path}"
+                ) from exc
+            current_signature = reaction_source_signature(path)
+            if current_signature["sha256"] != digest:
                 raise ReactionSourceChangedError(
                     f"reaction file changed while loading: {path}"
                 )
             if not reactions:
                 raise RuntimeError(f"no reactions loaded from: {path}")
             net = ReactionNetwork(reactions)
-            self._cache[key] = (identity, net)
+            self._cache[key] = (digest, net)
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
-            return net
+            return net, current_signature
 
 
 STORE = NetworkStore()

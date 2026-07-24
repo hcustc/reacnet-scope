@@ -176,21 +176,67 @@ def validate_mechanism_payload(
         raise ValueError(
             "mechanism payload anchor_smiles must be a non-empty string"
         )
+    expected_evidence_status = (
+        "evidence_linked"
+        if payload["evidence_level"] == "event_evidence_linked"
+        else "network_only"
+    )
+    expected_semantic_edges: dict[
+        tuple[str, str, str],
+        int,
+    ] = {}
+    species_ids_by_smiles: dict[str, str] = {}
+    reaction_ids_by_key: dict[str, str] = {}
 
     for node in nodes:
         node_id = node["id"]
         kind = node["kind"]
         _required_nonempty_string(node, "label", f"node {node_id}")
         if kind == "species":
-            _required_nonempty_string(node, "smiles", f"node {node_id}")
+            smiles = _required_nonempty_string(
+                node,
+                "smiles",
+                f"node {node_id}",
+            )
             _required_nullable_string(node, "formula", f"node {node_id}")
+            existing_species_id = species_ids_by_smiles.get(smiles)
+            if existing_species_id is not None:
+                raise ValueError(
+                    "mechanism payload has duplicate species identity "
+                    f"{smiles!r} in {existing_species_id} and {node_id}"
+                )
+            species_ids_by_smiles[smiles] = node_id
+            for reaction_field in (
+                "reaction_key",
+                "reactants",
+                "products",
+                "forward_tp",
+                "reverse_tp",
+                "net_tp",
+                "event_total",
+                "matched_event_total",
+                "event_coverage",
+                "evidence_status",
+            ):
+                if reaction_field in node:
+                    raise ValueError(
+                        f"mechanism payload species node {node_id} must not "
+                        f"define {reaction_field}"
+                    )
             continue
         _required_nullable_string(node, "formula", f"node {node_id}")
-        _required_nonempty_string(
+        reaction_key = _required_nonempty_string(
             node,
             "reaction_key",
             f"node {node_id}",
         )
+        existing_reaction_id = reaction_ids_by_key.get(reaction_key)
+        if existing_reaction_id is not None:
+            raise ValueError(
+                "mechanism payload has duplicate reaction identity "
+                f"{reaction_key!r} in {existing_reaction_id} and {node_id}"
+            )
+        reaction_ids_by_key[reaction_key] = node_id
         reactants = _required_string_sequence(
             node,
             "reactants",
@@ -235,8 +281,22 @@ def validate_mechanism_payload(
                 f"mechanism payload node {node_id} has invalid "
                 "evidence_status"
             )
+        if evidence_status != expected_evidence_status:
+            raise ValueError(
+                f"mechanism payload evidence_level contradicts node "
+                f"{node_id} evidence_status"
+            )
         _validate_reaction_evidence(node, node_id, evidence_status)
+        for role, side in (
+            ("reactant", reactants),
+            ("product", products),
+        ):
+            for species_smiles, coefficient in Counter(side).items():
+                expected_semantic_edges[
+                    (role, node_id, species_smiles)
+                ] = coefficient
 
+    actual_semantic_edges: dict[tuple[str, str, str], int] = {}
     for edge in edges:
         edge_id = edge["id"]
         species_smiles = _required_nonempty_string(
@@ -278,6 +338,25 @@ def validate_mechanism_payload(
                 f"mechanism payload edge {edge_id} coefficient "
                 "does not match its reaction side"
             )
+        semantic_edge = (role, reaction_id, species_smiles)
+        if semantic_edge in actual_semantic_edges:
+            raise ValueError(
+                "mechanism payload has duplicate semantic reaction/species "
+                f"edge {semantic_edge!r}"
+            )
+        actual_semantic_edges[semantic_edge] = coefficient
+
+    if actual_semantic_edges != expected_semantic_edges:
+        missing = sorted(
+            set(expected_semantic_edges) - set(actual_semantic_edges)
+        )
+        extra = sorted(
+            set(actual_semantic_edges) - set(expected_semantic_edges)
+        )
+        raise ValueError(
+            "mechanism payload semantic edges do not exactly match reaction "
+            f"sides (missing={missing!r}, extra={extra!r})"
+        )
 
     validated = dict(payload)
     validated["nodes"] = nodes
@@ -762,7 +841,7 @@ def build_mechanism_network(
                     heapq.heappush(frontier, (next_depth, continuation))
 
     source_signatures: Mapping[str, Any] = {}
-    linked_evidence = False
+    linked_evidence = evidence_provider is not None
     if evidence_provider is not None:
         reaction_keys = tuple(
             sorted(
@@ -779,9 +858,7 @@ def build_mechanism_network(
             if node["kind"] != "reaction":
                 continue
             reaction_key = node["reaction_key"]
-            if reaction_key not in summaries:
-                continue
-            summary = summaries[reaction_key]
+            summary = summaries.get(reaction_key, {})
             if not isinstance(summary, Mapping):
                 raise ValueError("evidence summary must be a mapping")
             event_total = _summary_count(summary, "total_events", "event_total")
@@ -802,7 +879,6 @@ def build_mechanism_network(
                 ),
                 evidence_status="evidence_linked",
             )
-            linked_evidence = True
 
     ordered_nodes = tuple(
         sorted(nodes.values(), key=lambda node: (node["kind"], node["id"]))

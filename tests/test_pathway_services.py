@@ -470,8 +470,9 @@ def test_same_metadata_atomic_replacement_invalidates_shared_pathway_cache(
 
     assert first["paths"][0]["species"] == ["[H]", "[O]"]
     assert second["paths"][0]["species"] == ["[H]", "[C]"]
-    # Reproducible source signatures intentionally exclude inode/ctime.
-    assert first["source_signatures"] == second["source_signatures"]
+    assert first["source_signatures"]["reactionabcd"]["sha256"] != (
+        second["source_signatures"]["reactionabcd"]["sha256"]
+    )
 
 
 def test_ready_index_missing_summary_returns_linked_zero_counts(

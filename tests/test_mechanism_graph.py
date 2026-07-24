@@ -15,6 +15,7 @@ from rng_tools.mechanism_graph import (
     decode_gexf_mechanism_metadata,
     serialize_mechanism_graph,
     to_networkx_mechanism_graph,
+    validate_mechanism_payload,
 )
 from rng_tools.network import Reaction, ReactionNetwork
 
@@ -318,7 +319,7 @@ def test_ready_evidence_provider_is_called_once_with_selected_sorted_keys() -> N
     assert payload["source_signatures"] == provider.source_signatures
 
 
-def test_missing_evidence_row_is_network_only_with_none_metrics() -> None:
+def test_missing_evidence_row_is_linked_with_zero_metrics() -> None:
     provider = _RecordingEvidenceProvider(
         {"A->B": {"total_events": 2, "matched_events": 2}}
     )
@@ -338,10 +339,11 @@ def test_missing_evidence_row_is_network_only_with_none_metrics() -> None:
         node for node in _reaction_nodes(payload)
         if node["reaction_key"] == "A->C"
     )
-    assert missing["event_total"] is None
-    assert missing["matched_event_total"] is None
-    assert missing["event_coverage"] is None
-    assert missing["evidence_status"] == "network_only"
+    assert missing["event_total"] == 0
+    assert missing["matched_event_total"] == 0
+    assert missing["event_coverage"] == 0.0
+    assert missing["evidence_status"] == "evidence_linked"
+    assert payload["evidence_level"] == "event_evidence_linked"
 
 
 def test_unavailable_evidence_does_not_perform_any_lookup() -> None:
@@ -719,3 +721,128 @@ def test_networkx_projection_reports_clear_payload_validation_errors(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         to_networkx_mechanism_graph(payload)
+
+
+@pytest.mark.parametrize(
+    ("evidence_level", "status"),
+    [
+        ("event_evidence_linked", "network_only"),
+        ("reaction_passage_counts", "evidence_linked"),
+    ],
+)
+def test_validator_rejects_payload_reaction_evidence_contradictions(
+    mechanism_payload: dict[str, object],
+    evidence_level: str,
+    status: str,
+) -> None:
+    payload = copy.deepcopy(mechanism_payload)
+    payload["evidence_level"] = evidence_level
+    reaction = _reaction_nodes(payload)[0]
+    reaction["evidence_status"] = status
+    if status == "network_only":
+        reaction["event_total"] = None
+        reaction["matched_event_total"] = None
+        reaction["event_coverage"] = None
+    else:
+        reaction["event_total"] = 2
+        reaction["matched_event_total"] = 1
+        reaction["event_coverage"] = 0.5
+
+    with pytest.raises(ValueError, match="evidence_level"):
+        validate_mechanism_payload(payload)
+
+
+def test_validator_rejects_species_with_reaction_evidence_fields(
+    mechanism_payload: dict[str, object],
+) -> None:
+    payload = copy.deepcopy(mechanism_payload)
+    species = next(
+        node for node in payload["nodes"]  # type: ignore[index]
+        if node["kind"] == "species"
+    )
+    species["evidence_status"] = "network_only"
+
+    with pytest.raises(ValueError, match="species.*evidence_status"):
+        validate_mechanism_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "extra",
+        "wrong_direction",
+        "wrong_role",
+        "wrong_reaction",
+        "split_duplicate",
+    ],
+)
+def test_validator_requires_exact_reaction_side_edge_counters(
+    mechanism_payload: dict[str, object],
+    mutation: str,
+) -> None:
+    payload = copy.deepcopy(mechanism_payload)
+    reaction = _reaction_nodes(payload)[0]
+    reaction_id = reaction["id"]
+    reactant_edge = next(
+        edge for edge in payload["edges"]  # type: ignore[index]
+        if edge["role"] == "reactant"
+    )
+    if mutation == "missing":
+        payload["edges"].remove(reactant_edge)  # type: ignore[union-attr]
+    elif mutation == "extra":
+        extra = copy.deepcopy(reactant_edge)
+        extra.update(
+            id="edge:extra",
+            species_smiles="B",
+            source=next(
+                node["id"] for node in payload["nodes"]  # type: ignore[index]
+                if node.get("smiles") == "B"
+            ),
+            coefficient=1,
+        )
+        payload["edges"].append(extra)  # type: ignore[union-attr]
+    elif mutation == "wrong_direction":
+        reactant_edge["source"], reactant_edge["target"] = (
+            reactant_edge["target"],
+            reactant_edge["source"],
+        )
+    elif mutation == "wrong_role":
+        reactant_edge["role"] = "product"
+    elif mutation == "wrong_reaction":
+        other = copy.deepcopy(reaction)
+        other["id"] = "reaction:other"
+        payload["nodes"].append(other)  # type: ignore[union-attr]
+        reactant_edge["target"] = "reaction:other"
+    else:
+        # Repeated A is represented by one edge with coefficient 2, never
+        # multiple semantic edges that split the same stoichiometric count.
+        duplicate = copy.deepcopy(reactant_edge)
+        duplicate["id"] = "edge:split"
+        duplicate["coefficient"] = 1
+        reactant_edge["coefficient"] = 1
+        payload["edges"].append(duplicate)  # type: ignore[union-attr]
+
+    with pytest.raises(ValueError):
+        validate_mechanism_payload(payload)
+
+
+def test_validator_allows_catalyst_on_both_semantic_roles() -> None:
+    payload = build_mechanism_network(
+        ReactionNetwork(
+            [Reaction(("A", "X"), ("B", "X"), 7)]
+        ),
+        anchor_smiles="A",
+        max_depth=1,
+    )
+
+    validated = validate_mechanism_payload(payload)
+    catalyst_edges = [
+        edge for edge in validated["edges"]
+        if edge["species_smiles"] == "X"
+    ]
+
+    assert {
+        (edge["role"], edge["coefficient"])
+        for edge in catalyst_edges
+    } == {("reactant", 1), ("product", 1)}

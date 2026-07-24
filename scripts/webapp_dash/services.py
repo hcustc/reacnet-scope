@@ -81,6 +81,7 @@ from scripts.webapp.server import (  # noqa: E402
     looks_like_formula,
     match_formula_reaction,
     net_flux,
+    reaction_source_signature,
     reaction_formula_str,
     reaction_mass_fields,
     reaction_smiles_str,
@@ -567,41 +568,58 @@ def _pathway_formula(smiles: str) -> str:
 
 def _pathway_source_snapshot(
     path_text: str,
-) -> tuple[dict[str, Any], tuple[int, int, int, int, int]]:
-    path = Path(path_text).expanduser().resolve()
-    stat = path.stat()
-    return (
-        {
-            "path": str(path),
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-        },
-        (
-            int(stat.st_dev),
-            int(stat.st_ino),
-            int(stat.st_size),
-            int(stat.st_mtime_ns),
-            int(stat.st_ctime_ns),
-        ),
+) -> dict[str, Any]:
+    return reaction_source_signature(
+        str(Path(path_text).expanduser().resolve())
     )
 
 
 def _pathway_assert_source_current(
     path_text: str,
-    expected: tuple[int, int, int, int, int],
+    expected: Mapping[str, Any],
 ) -> None:
     try:
-        _signature, actual = _pathway_source_snapshot(path_text)
+        actual = _pathway_source_snapshot(path_text)
     except OSError as exc:
         raise ServiceError(
             "reactionabcd 文件在路径查询期间发生变化，请重试",
             reason="reaction_source_stale",
         ) from exc
-    if actual != expected:
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    if actual.get("sha256") != expected.get("sha256"):
         raise ServiceError(
             "reactionabcd 文件在路径查询期间发生变化，请重试",
             reason="reaction_source_stale",
         )
+
+
+def _load_reaction_network_snapshot(
+    reaction_path: str,
+    min_tp: int,
+) -> tuple[ReactionNetwork, dict[str, Any]]:
+    """Load a network and its exact content signature as one snapshot."""
+    get_with_signature = getattr(STORE, "get_with_signature", None)
+    if callable(get_with_signature):
+        network, signature = get_with_signature(reaction_path, min_tp)
+        if not isinstance(signature, Mapping):
+            raise RuntimeError("reaction source signature is invalid")
+        return network, dict(signature)
+
+    # Compatibility for test/delivery stores implementing the historical
+    # ``get`` interface. Hash both sides so an object can never be paired with
+    # a signature from different content.
+    before = _pathway_source_snapshot(reaction_path)
+    network = STORE.get(reaction_path, min_tp)
+    after = _pathway_source_snapshot(reaction_path)
+    if before.get("sha256") != after.get("sha256"):
+        raise ReactionSourceChangedError(
+            f"reaction file changed while loading: {reaction_path}"
+        )
+    return network, after
 
 
 def _pathway_preparation_command(
@@ -654,11 +672,11 @@ def find_pathways(
         )
 
     try:
-        reaction_signature, reaction_identity = _pathway_source_snapshot(
-            reaction_path
+        network, reaction_signature = _load_reaction_network_snapshot(
+            reaction_path,
+            1,
         )
-        network = STORE.get(reaction_path, 1)
-        _pathway_assert_source_current(reaction_path, reaction_identity)
+        _pathway_assert_source_current(reaction_path, reaction_signature)
     except FileNotFoundError as exc:
         raise ServiceError(
             "需要 .reactionabcd 文件",
@@ -731,7 +749,7 @@ def find_pathways(
             ) from exc
         raise
 
-    _pathway_assert_source_current(reaction_path, reaction_identity)
+    _pathway_assert_source_current(reaction_path, reaction_signature)
     payload = result.as_dict()
     for path in payload["paths"]:
         path["formulas"] = [
@@ -2372,11 +2390,11 @@ def build_mechanism_elements(
     }
 
     try:
-        reaction_signature, reaction_identity = _pathway_source_snapshot(
-            reaction_path
+        network, reaction_signature = _load_reaction_network_snapshot(
+            reaction_path,
+            1,
         )
-        network = STORE.get(reaction_path, 1)
-        _pathway_assert_source_current(reaction_path, reaction_identity)
+        _pathway_assert_source_current(reaction_path, reaction_signature)
     except ServiceError:
         raise
     except FileNotFoundError as exc:
@@ -2448,7 +2466,7 @@ def build_mechanism_elements(
             reason="bad_mechanism_query",
         ) from exc
 
-    _pathway_assert_source_current(reaction_path, reaction_identity)
+    _pathway_assert_source_current(reaction_path, reaction_signature)
     payload["source_signatures"] = {
         "reactionabcd": reaction_signature,
         **(
