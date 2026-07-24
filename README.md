@@ -161,6 +161,22 @@ CLI 子命令 `reacnet-scope pathway` 和 Dash“关键路径”页面可以从�
 评分公式、搜索边界、事件索引准备、CLI 导出和 Dash 事件跳转的完整说明见
 [`docs/pathway-analysis.md`](docs/pathway-analysis.md)。
 
+## 机制网络与观察网络
+
+Dash“反应网络”页面提供两个明确分离的视图：
+
+- **机制网络（reactionabcd）**：以物种节点和显式反应节点组成有界二部图，
+  边保留反应物/产物角色及重复化学计量，数值是 ReacNetGenerator 的反应
+  passage counts；事件索引就绪时可关联事件汇总证据。
+- **观察网络（table）**：来自 `.lammpstrj.table` 的聚合物种转移观察，
+  标记为 `event_transfer · aggregate_observation`。
+
+两者都不是速率常数或原子转移动力学通量。机制网络使用稳定 ID，可导出
+Cytoscape JSON、GraphML、GEXF、节点 CSV 和边 CSV；GraphML/GEXF 可由
+NetworkX 重新读取，GEXF 导出会保留版本化图元数据和节点稳定身份。语义边界、
+二部图结构、查询上限、路径/事件交接及导入示例见
+[`docs/network-semantics-and-export.md`](docs/network-semantics-and-export.md)。
+
 ## 默认输入文件规则
 
 默认会按以下顺序寻找 reactionabcd：
