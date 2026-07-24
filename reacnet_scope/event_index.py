@@ -74,6 +74,13 @@ def _strict_int(
         if type(value) is int:
             parsed = value
         elif isinstance(value, str):
+            digits = value[1:] if value.startswith("-") else value
+            if (
+                not digits
+                or not digits.isascii()
+                or not digits.isdecimal()
+            ):
+                raise TypeError
             parsed = int(value, 10)
         elif isinstance(value, float) and value.is_integer():
             parsed = int(value)

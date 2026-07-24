@@ -289,6 +289,40 @@ def test_fractional_available_intervals_degrades_with_exact_rebuild_command(
     assert payload["paths"][0]["steps"][0]["event_coverage"] is None
 
 
+@pytest.mark.parametrize(
+    "corrupt_value",
+    ["1_0", " 10", "10 ", "１０", "", "+10"],
+)
+def test_noncanonical_available_intervals_text_degrades_with_exact_rebuild_command(
+    indexed_artifacts: dict[str, str],
+    corrupt_value: str,
+) -> None:
+    index_path = EVENT_EVIDENCE_STORE.open_required(
+        indexed_artifacts["reactionevent"],
+        indexed_artifacts["molecules"],
+    )["index_path"]
+    connection = sqlite3.connect(index_path)
+    try:
+        connection.execute(
+            "UPDATE meta SET value=? WHERE key='available_intervals'",
+            (corrupt_value,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
+
+    expected = (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
+        "--rebuild event"
+    )
+    assert payload["evidence_status"] == "network_only"
+    assert payload["preparation_command"] == expected
+    assert payload["paths"][0]["steps"][0]["event_coverage"] is None
+
+
 def test_atomic_event_index_replacement_during_batch_degrades_to_network_only(
     indexed_artifacts: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
