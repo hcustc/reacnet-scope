@@ -1272,6 +1272,56 @@ def test_mechanism_graph_metrics_rejects_explicit_null_id_after_gexf(
         mechanism_graph_metrics(restored)
 
 
+def test_gexf_round_trip_retains_reserved_stable_node_identity() -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    graph.nodes[species_a]["reacnet_scope_stable_id"] = "user-value"
+    before = copy.deepcopy(graph)
+
+    restored = nx.read_gexf(
+        io.BytesIO(serialize_mechanism_graph(graph, format="gexf"))
+    )
+
+    assert restored.nodes[species_a]["reacnet_scope_stable_id"] == species_a
+    assert nx.utils.graphs_equal(graph, before)
+
+
+@pytest.mark.parametrize("replacement", [None, "species:not-the-node-key"])
+def test_mechanism_graph_metrics_rejects_bad_gexf_stable_node_identity(
+    replacement: str | None,
+) -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    restored = nx.read_gexf(
+        io.BytesIO(serialize_mechanism_graph(graph, format="gexf"))
+    )
+    restored.nodes[species_a]["reacnet_scope_stable_id"] = replacement
+
+    with pytest.raises(ValueError, match="stable.*id|id.*stable"):
+        mechanism_graph_metrics(restored)
+
+
+def test_gexf_name_envelope_alone_does_not_allow_missing_node_id() -> None:
+    graph = _metric_graph()
+    species_a = _metric_node(graph, "species", "A")
+    restored = nx.read_gexf(
+        io.BytesIO(serialize_mechanism_graph(graph, format="gexf"))
+    )
+    envelope = restored.graph["name"]
+
+    native = nx.DiGraph(
+        schema_version="reacnet-scope/mechanism-network/v1",
+        network_semantics="mechanism",
+        evidence_level="reaction_passage_counts",
+        anchor_smiles="A",
+        name=envelope,
+    )
+    native.add_node(species_a, kind="species", smiles="A")
+
+    with pytest.raises(ValueError, match="id must match|stable"):
+        mechanism_graph_metrics(native)
+
+
 @pytest.mark.parametrize(
     ("graph", "message"),
     [

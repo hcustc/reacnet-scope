@@ -35,6 +35,7 @@ _MECHANISM_METADATA_FIELDS = (
     "anchor_smiles",
 )
 _GRAPHML_SEMANTIC_KEY_ATTRIBUTE = "semantic_key"
+_GEXF_STABLE_NODE_ID_ATTRIBUTE = "reacnet_scope_stable_id"
 
 
 @dataclass(frozen=True)
@@ -189,8 +190,23 @@ def _validate_mechanism_graph_contract(
             raise ValueError(
                 "mechanism graph node IDs must be non-empty strings"
             )
+        gexf_stable_id = attributes.get(_GEXF_STABLE_NODE_ID_ATTRIBUTE)
+        if (
+            _GEXF_STABLE_NODE_ID_ATTRIBUTE in attributes
+            and (
+                not isinstance(gexf_stable_id, str)
+                or gexf_stable_id != node_id
+            )
+        ):
+            raise ValueError(
+                f"mechanism graph node {node_id!r} stable id must match "
+                "its key"
+            )
         if "id" not in attributes:
-            if gexf_metadata is None:
+            if (
+                gexf_metadata is None
+                or gexf_stable_id != node_id
+            ):
                 raise ValueError(
                     f"mechanism graph node {node_id!r} id must match its key"
                 )
@@ -665,6 +681,14 @@ def serialize_mechanism_graph(
         # Reserve it for a versioned JSON envelope so required ReacNet Scope
         # metadata remains machine-readable without adding sentinel elements.
         export_graph.graph["name"] = _gexf_metadata_envelope(graph)
+        # NetworkX consumes the ordinary node ``id`` as the XML element ID
+        # and does not restore it as an attribute.  Preserve a separate,
+        # reserved stable identity so imported GEXF graphs do not receive a
+        # blanket identity-validation exemption based only on the graph name.
+        for node_id in export_graph:
+            export_graph.nodes[node_id][
+                _GEXF_STABLE_NODE_ID_ATTRIBUTE
+            ] = node_id
         nx.write_gexf(export_graph, buffer, encoding="utf-8")
     return buffer.getvalue()
 
