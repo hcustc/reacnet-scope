@@ -29,6 +29,26 @@ from .indexes import (
 
 COMPOSITION_INDEX_SCHEMA_VERSION = 4
 MARKER_FORMULAE = frozenset({"CO", "CO2", "HCl", "O2"})
+_COMPOSITION_REQUIRED_TABLE_COLUMNS = {
+    "meta": {"key", "value"},
+    "timepoints": {
+        "timestep",
+        "source_offset",
+        "composition_json",
+        "marker_json",
+        "parent_count",
+    },
+    "species_summary": {
+        "smiles",
+        "formula",
+        "carbon",
+        "oxygen",
+        "chlorine",
+        "total_count",
+        "peak_count",
+        "peak_timestep",
+    },
+}
 
 
 def composition_index_path(species_file: str) -> Path:
@@ -159,7 +179,86 @@ class SpeciesCompositionStore:
         )
         connection.commit()
 
-    def status(self, species_file: str) -> dict[str, Any]:
+    def _validate_metadata(
+        self,
+        index_path: Path,
+        *,
+        path: str,
+        size: int,
+        mtime_ns: int,
+    ) -> None:
+        connection = _readonly_connection(index_path)
+        try:
+            meta = _read_meta(connection)
+            if (
+                int(meta.get("schema_version", 0) or 0)
+                != COMPOSITION_INDEX_SCHEMA_VERSION
+            ):
+                raise IndexInvalidError(
+                    "Species composition index schema is incompatible"
+                )
+            if meta.get("build_state") != "ready":
+                raise IndexInvalidError(
+                    "Species composition index is incomplete"
+                )
+            if meta.get("source_file") != path:
+                raise IndexInvalidError(
+                    "Species composition index source path does not match"
+                )
+            if (
+                int(meta.get("source_size", -1) or -1) != size
+                or int(meta.get("source_mtime_ns", -1) or -1) != mtime_ns
+            ):
+                raise IndexStaleError(
+                    "Species composition index source signature changed"
+                )
+            if meta.get("dataset_id") != dataset_id_for_source(path):
+                raise IndexInvalidError(
+                    "Species composition index dataset id is invalid"
+                )
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if not _COMPOSITION_REQUIRED_TABLE_COLUMNS.keys() <= tables:
+                raise IndexInvalidError(
+                    "Species composition index tables are incomplete"
+                )
+            for table, required_columns in (
+                _COMPOSITION_REQUIRED_TABLE_COLUMNS.items()
+            ):
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                if not required_columns <= columns:
+                    raise IndexInvalidError(
+                        "Species composition index "
+                        f"{table} columns are incomplete"
+                    )
+            if int(meta.get("timepoint_count", -1) or -1) < 0:
+                raise IndexInvalidError(
+                    "Species composition index timepoint count is invalid"
+                )
+        except IndexNotReadyError:
+            raise
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            raise IndexInvalidError(
+                f"Species composition index metadata is invalid: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+
+    def status(
+        self,
+        species_file: str,
+        *,
+        metadata_only: bool = False,
+    ) -> dict[str, Any]:
         path, size, _mtime_ns = _source_signature(species_file)
         index_path = composition_index_path(path)
         building_path = Path(f"{index_path}.building")
@@ -177,12 +276,30 @@ class SpeciesCompositionStore:
         state = "ready" if index_path.is_file() else ("building" if building_path.is_file() else "missing")
         if state == "ready":
             try:
-                self.open_required(path)
+                if metadata_only:
+                    self._validate_metadata(
+                        index_path,
+                        path=path,
+                        size=size,
+                        mtime_ns=_mtime_ns,
+                    )
+                else:
+                    self.open_required(path)
             except IndexStaleError:
                 state = "stale"
             except IndexNotReadyError:
                 state = "invalid"
-        offset = int(meta.get("source_offset", 0) or 0)
+
+        def display_int(value: Any) -> int:
+            if not metadata_only:
+                return int(value or 0)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        offset = display_int(meta.get("source_offset", 0))
+        updated_at_epoch = display_int(meta.get("updated_at_epoch", 0))
         return {
             "state": state,
             "species_file": path,
@@ -192,9 +309,9 @@ class SpeciesCompositionStore:
             "index_size": active.stat().st_size if active.is_file() else 0,
             "source_offset": offset,
             "progress": min(max(offset / max(size, 1), 0.0), 1.0),
-            "timepoints": int(meta.get("timepoint_count", 0) or 0),
-            "unique_species": int(meta.get("unique_species", 0) or 0),
-            "updated_at_epoch": int(meta.get("updated_at_epoch", 0) or 0) or None,
+            "timepoints": display_int(meta.get("timepoint_count", 0)),
+            "unique_species": display_int(meta.get("unique_species", 0)),
+            "updated_at_epoch": updated_at_epoch or None,
         }
 
     def open_required(self, species_file: str) -> dict[str, Any]:

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import builtins
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
+from reacnet_scope import composition as composition_module
+from reacnet_scope import event_index as event_index_module
+from reacnet_scope import indexes as indexes_module
 from reacnet_scope.indexes import (
     IndexInvalidError,
     IndexNotReadyError,
@@ -299,6 +304,226 @@ class OnlineIndexContractTests(unittest.TestCase):
 
         self.assertEqual(len(snapshot["datasets"]), 1)
         self.assertEqual(snapshot["datasets"][0]["score"], len(source_paths))
+
+    def test_browser_ready_index_status_reads_sqlite_metadata_only(self) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        reactionevent = Path(f"{trajectory}.reactionevent.csv")
+        molecules = Path(f"{trajectory}.molecules.csv")
+        trajectory.write_bytes(_frame(0))
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        reactionevent.write_text(
+            "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+            encoding="utf-8",
+        )
+        molecules.write_text(
+            "Timestep,Species,AtomIDs,BondIDs\n"
+            "0,[C],0,\n"
+            "0,[O],1,\n"
+            "10,[C][O],0;1,0-1-1\n",
+            encoding="utf-8",
+        )
+        TrajectoryIndexStore().build(str(trajectory))
+        SPECIES_COMPOSITION_STORE.build(str(species))
+        EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+        self.assertEqual(
+            TrajectoryIndexStore().status(str(trajectory)),
+            TrajectoryIndexStore().status(
+                str(trajectory), metadata_only=True
+            ),
+        )
+        self.assertEqual(
+            SPECIES_COMPOSITION_STORE.status(str(species)),
+            SPECIES_COMPOSITION_STORE.status(
+                str(species), metadata_only=True
+            ),
+        )
+
+        forbidden_reads: list[str] = []
+        payload_tables = {
+            "events",
+            "frames",
+            "reaction_summary",
+            "species_summary",
+            "timepoints",
+        }
+        real_index_connection = indexes_module._readonly_connection
+        real_composition_connection = composition_module._readonly_connection
+        real_event_connection = event_index_module._readonly_connection
+
+        def guard_payload_reads(connection):
+            def authorize(action, arg1, _arg2, _database, _trigger):
+                if action == sqlite3.SQLITE_READ and arg1 in payload_tables:
+                    forbidden_reads.append(str(arg1))
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(authorize)
+            return connection
+
+        def guarded_index_connection(path):
+            return guard_payload_reads(real_index_connection(path))
+
+        def guarded_composition_connection(path):
+            return guard_payload_reads(real_composition_connection(path))
+
+        def guarded_event_connection(path):
+            return guard_payload_reads(real_event_connection(path))
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(
+            dash_services, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            indexes_module,
+            "_readonly_connection",
+            side_effect=guarded_index_connection,
+        ), mock.patch.object(
+            composition_module,
+            "_readonly_connection",
+            side_effect=guarded_composition_connection,
+        ), mock.patch.object(
+            event_index_module,
+            "_readonly_connection",
+            side_effect=guarded_event_connection,
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"]["event"], "ready"
+        )
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"]["trajectory"], "ready"
+        )
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"]["composition"], "ready"
+        )
+        self.assertEqual(forbidden_reads, [])
+
+    def test_browser_reports_malformed_trajectory_metadata_as_invalid(
+        self,
+    ) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        trajectory.write_bytes(_frame(0))
+        built = TrajectoryIndexStore().build(str(trajectory))
+        connection = sqlite3.connect(built.index_path)
+        try:
+            connection.execute(
+                "UPDATE meta SET value='bad' WHERE key='frame_count'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(
+            dash_services, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"]["trajectory"], "invalid"
+        )
+
+    def test_browser_reports_malformed_composition_metadata_as_invalid(
+        self,
+    ) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        built = SPECIES_COMPOSITION_STORE.build(str(species))
+        connection = sqlite3.connect(built["index_path"])
+        try:
+            connection.execute(
+                "UPDATE meta SET value='bad' WHERE key='timepoint_count'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        import rng_tools.dir_browser as dir_browser
+
+        with mock.patch.object(
+            dash_services, "ALLOWED_ROOTS", [self.root]
+        ), mock.patch.object(
+            dir_browser, "ALLOWED_ROOTS", [self.root]
+        ):
+            snapshot = dash_services.browse_dataset_location(str(self.root))
+
+        self.assertEqual(
+            snapshot["datasets"][0]["index_states"]["composition"], "invalid"
+        )
+
+    def test_metadata_only_status_validates_schema_and_table_metadata(
+        self,
+    ) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        trajectory.write_bytes(_frame(0))
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        trajectory_index = TrajectoryIndexStore().build(str(trajectory))
+        composition_index = SPECIES_COMPOSITION_STORE.build(str(species))
+
+        connection = sqlite3.connect(trajectory_index.index_path)
+        try:
+            connection.execute(
+                "UPDATE meta SET value='999' WHERE key='schema_version'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        connection = sqlite3.connect(composition_index["index_path"])
+        try:
+            connection.execute("DROP TABLE species_summary")
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            TrajectoryIndexStore().status(
+                str(trajectory), metadata_only=True
+            )["state"],
+            "invalid",
+        )
+        self.assertEqual(
+            SPECIES_COMPOSITION_STORE.status(
+                str(species), metadata_only=True
+            )["state"],
+            "invalid",
+        )
+
+    def test_metadata_only_status_validates_source_signatures(self) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        species = Path(f"{trajectory}.species")
+        trajectory.write_bytes(_frame(0))
+        species.write_text("Timestep 0: [C] 1\n", encoding="utf-8")
+        TrajectoryIndexStore().build(str(trajectory))
+        SPECIES_COMPOSITION_STORE.build(str(species))
+
+        trajectory.write_bytes(_frame(0) + _frame(10))
+        species.write_text(
+            "Timestep 0: [C] 1\nTimestep 10: [O] 1\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            TrajectoryIndexStore().status(
+                str(trajectory), metadata_only=True
+            )["state"],
+            "stale",
+        )
+        self.assertEqual(
+            SPECIES_COMPOSITION_STORE.status(
+                str(species), metadata_only=True
+            )["state"],
+            "stale",
+        )
 
 
 if __name__ == "__main__":

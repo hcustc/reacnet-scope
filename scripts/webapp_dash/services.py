@@ -223,11 +223,17 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
     """Return prepared-index states without scanning a dataset or its manifest."""
     artifact_paths = dict(candidate.get("artifact_paths") or {})
 
-    def status_for(store: Any, *kinds: str) -> dict[str, Any]:
+    def status_for(
+        store: Any,
+        *kinds: str,
+        metadata_only: bool = False,
+    ) -> dict[str, Any]:
         paths = [str(artifact_paths.get(kind) or "") for kind in kinds]
         if not all(path and Path(path).is_file() for path in paths):
             return {"state": "missing"}
         try:
+            if metadata_only:
+                return store.status(*paths, metadata_only=True)
             return store.status(*paths)
         except FileNotFoundError:
             return {"state": "missing"}
@@ -242,11 +248,19 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
             or "missing"
         ),
         "trajectory": str(
-            status_for(TRAJECTORY_INDEX_STORE, "trajectory").get("state")
+            status_for(
+                TRAJECTORY_INDEX_STORE,
+                "trajectory",
+                metadata_only=True,
+            ).get("state")
             or "missing"
         ),
         "composition": str(
-            status_for(SPECIES_COMPOSITION_STORE, "species").get("state")
+            status_for(
+                SPECIES_COMPOSITION_STORE,
+                "species",
+                metadata_only=True,
+            ).get("state")
             or "missing"
         ),
     }
