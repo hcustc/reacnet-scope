@@ -219,6 +219,39 @@ def _breadcrumbs_within_allowed_root(current: Path) -> list[dict[str, str]]:
     return crumbs
 
 
+def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
+    """Return prepared-index states without scanning a dataset or its manifest."""
+    artifact_paths = dict(candidate.get("artifact_paths") or {})
+
+    def status_for(store: Any, *kinds: str) -> dict[str, Any]:
+        paths = [str(artifact_paths.get(kind) or "") for kind in kinds]
+        if not all(path and Path(path).is_file() for path in paths):
+            return {"state": "missing"}
+        try:
+            return store.status(*paths)
+        except FileNotFoundError:
+            return {"state": "missing"}
+        except (OSError, RuntimeError) as exc:
+            return {"state": "invalid", "message": str(exc)}
+
+    return {
+        "event": str(
+            status_for(
+                EVENT_EVIDENCE_STORE, "reactionevent", "molecules"
+            ).get("state")
+            or "missing"
+        ),
+        "trajectory": str(
+            status_for(TRAJECTORY_INDEX_STORE, "trajectory").get("state")
+            or "missing"
+        ),
+        "composition": str(
+            status_for(SPECIES_COMPOSITION_STORE, "species").get("state")
+            or "missing"
+        ),
+    }
+
+
 def browse_dataset_location(path: str) -> dict[str, Any]:
     """Build a read-only directory and dataset-discovery browser snapshot."""
     current = validate_browse_path(path)
@@ -232,20 +265,12 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
 
     datasets: list[dict[str, Any]] = []
     for candidate in candidates:
-        preparation = dataset_preparation_status(
-            candidate["folder"],
-            base=candidate["base"],
-        )
         datasets.append(
             {
                 **candidate,
                 "auto_selected": len(candidates) == 1,
                 "completeness": f"{candidate['score']}/{len(ARTIFACT_SUFFIXES)}",
-                "index_states": {
-                    "event": preparation["events"]["state"],
-                    "trajectory": preparation["trajectory"]["state"],
-                    "composition": preparation["composition"]["state"],
-                },
+                "index_states": _candidate_index_states(candidate),
             }
         )
     return {

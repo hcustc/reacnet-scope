@@ -272,12 +272,28 @@ class OnlineIndexContractTests(unittest.TestCase):
                 raise AssertionError("browser snapshot opened a ReacNet source artifact")
             return real_path_open(path, *args, **kwargs)
 
+        real_read_text = Path.read_text
+
+        def guarded_read_text(path, *args, **kwargs):
+            if path.name == "manifest.json":
+                raise AssertionError("browser snapshot read a preparation manifest")
+            return real_read_text(path, *args, **kwargs)
+
+        def forbidden_facade(*_args, **_kwargs):
+            raise AssertionError("browser snapshot invoked the preparation facade")
+
         import rng_tools.dir_browser as dir_browser
 
         with mock.patch.object(dash_services, "ALLOWED_ROOTS", [self.root]), mock.patch.object(
             dir_browser, "ALLOWED_ROOTS", [self.root]
         ), mock.patch("builtins.open", side_effect=guarded_open), mock.patch(
             "pathlib.Path.open", new=guarded_path_open
+        ), mock.patch("pathlib.Path.read_text", new=guarded_read_text), mock.patch.object(
+            dash_services, "dataset_preparation_status", side_effect=forbidden_facade
+        ), mock.patch.object(
+            dash_services, "scan_dataset", side_effect=forbidden_facade
+        ), mock.patch.object(
+            dash_services, "build_dataset_status_payload", side_effect=forbidden_facade
         ):
             snapshot = dash_services.browse_dataset_location(str(self.root))
 
