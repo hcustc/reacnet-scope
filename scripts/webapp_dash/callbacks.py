@@ -450,7 +450,6 @@ def register_callbacks(app: Any) -> None:
         selected = candidate if isinstance(candidate, dict) else {}
         folder = str(selected.get("folder") or "").strip()
         base = str(selected.get("base") or "").strip()
-        label = str(selected.get("label") or "").strip()
         if not folder or not base:
             loaded = app_store or {}
             current_label = str(loaded.get("label") or "未选择")
@@ -461,6 +460,9 @@ def register_callbacks(app: Any) -> None:
                 True,
             )
         try:
+            target = _validated_dataset_target(selected)
+            folder = target["folder"]
+            base = target["base"]
             status = svc.scan_dataset(folder, base=base)
         except svc.ServiceError as exc:
             return (
@@ -487,7 +489,7 @@ def register_callbacks(app: Any) -> None:
             )
         artifact_html = _render_artifacts(svc.artifacts_from_status(status))
         ready = svc.dataset_ready_count(status)
-        display_label = label or svc.dataset_label(status)
+        display_label = target["label"] or svc.dataset_label(status)
         return (
             html.Div([html.Span("待加载数据集：", className="text-muted"), html.Strong(display_label)]),
             f"已验证 — {display_label}，就绪 {ready}/7",
@@ -514,14 +516,12 @@ def register_callbacks(app: Any) -> None:
     def _refresh_preparation_status(is_open, _refresh_clicks, _tick, candidate, app_store):
         if not is_open:
             return "", "", "", "", "", "", "", True, True
-        store = app_store or {}
-        selected = candidate if isinstance(candidate, dict) else {}
-        folder = str(selected.get("folder") or store.get("folder") or "").strip()
-        base = str(selected.get("base") or store.get("base") or "").strip()
-        if not folder:
-            return "请选择数据目录后查看准备状态。", "", "", "", "", "", "", True, False
         try:
-            payload = svc.dataset_preparation_status(folder, base=base)
+            target = _validated_dataset_target(candidate, app_store=app_store)
+            payload = svc.dataset_preparation_status(
+                target["folder"],
+                base=target["base"],
+            )
         except svc.ServiceError as exc:
             return str(exc.message), "", "", "", "", "", "", True, False
         except Exception as exc:
@@ -556,12 +556,12 @@ def register_callbacks(app: Any) -> None:
         if ctx.triggered_id == "data-clear-cancel-btn":
             return False, no_update, {}, None
         kind = "trajectory"
-        store = app_store or {}
-        selected = candidate if isinstance(candidate, dict) else {}
-        folder = str(selected.get("folder") or store.get("folder") or "").strip()
-        base = str(selected.get("base") or store.get("base") or "").strip()
         try:
-            payload = svc.dataset_preparation_status(folder, base=base)
+            target = _validated_dataset_target(candidate, app_store=app_store)
+            payload = svc.dataset_preparation_status(
+                target["folder"],
+                base=target["base"],
+            )
         except Exception as exc:
             return False, no_update, {}, dbc.Alert(f"无法读取索引状态: {exc}", color="danger", className="py-2")
         item = payload.get(kind) or {}
@@ -580,7 +580,16 @@ def register_callbacks(app: Any) -> None:
                 html.P("不会删除 .route、轨迹或任何 ReacNetGenerator 输出文件。", className="text-muted mb-0"),
             ]
         )
-        return True, message, {"kind": kind, "folder": folder, "base": base}, None
+        return (
+            True,
+            message,
+            {
+                "kind": kind,
+                "folder": target["folder"],
+                "base": target["base"],
+            },
+            None,
+        )
 
     @app.callback(
         Output("data-clear-confirm-modal", "is_open", allow_duplicate=True),
@@ -594,9 +603,10 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         request = clear_request or {}
         try:
+            target = _validated_dataset_target(request)
             result = svc.clear_dataset_index(
-                str(request.get("folder") or ""),
-                base=str(request.get("base") or ""),
+                target["folder"],
+                base=target["base"],
                 kind=str(request.get("kind") or ""),
             )
         except svc.ServiceError as exc:
@@ -818,9 +828,9 @@ def register_callbacks(app: Any) -> None:
                 dbc.Alert("请选择一个可用的数据集后再加载。", color="warning", className="py-2"),
             )
         try:
-            snapshot = svc.browse_dataset_location(folder)
-            if _candidate_for_base(snapshot, base) is None:
-                raise svc.ServiceError("所选数据集已不存在，请重新选择。")
+            target = _validated_dataset_target(selected)
+            folder = target["folder"]
+            base = target["base"]
             status = svc.scan_dataset(folder, base=base)
             dataset = status.get("dataset", {}) or {}
             selected_base_new = str(dataset.get("selected_base") or "")
@@ -2427,38 +2437,49 @@ def _candidate_for_base(snapshot: dict[str, Any], base: str) -> dict[str, Any] |
     )
 
 
-def _build_dir_browser_response(
-    path_str: str,
-    recent_records: list[dict[str, Any]] | None,
+def _validated_dataset_target(
+    candidate: dict[str, Any] | None,
+    *,
+    app_store: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Resolve one client-side selection through the bounded browser snapshot.
+
+    A partially populated candidate must fail as a unit instead of borrowing
+    its missing field from the applied store.  The store is only a fallback
+    when no candidate selection exists.
+    """
+    proposed = candidate if isinstance(candidate, dict) else {}
+    has_candidate = any(
+        str(proposed.get(key) or "").strip()
+        for key in ("folder", "base")
+    )
+    selected = proposed if has_candidate else (
+        app_store if isinstance(app_store, dict) else {}
+    )
+    folder = str(selected.get("folder") or "").strip()
+    base = str(selected.get("base") or "").strip()
+    if not folder or not base:
+        raise svc.ServiceError(
+            "请选择一个可用的数据集。",
+            reason="missing_dataset",
+        )
+    snapshot = svc.browse_dataset_location(folder)
+    actual = _candidate_for_base(snapshot, base)
+    if actual is None:
+        raise svc.ServiceError(
+            "所选数据集已不存在，请重新选择。",
+            reason="invalid_dataset_candidate",
+        )
+    return _compact_browser_candidate(actual)
+
+
+def _build_dir_browser_snapshot_response(
+    data: dict[str, Any],
+    candidate: dict[str, str] | None,
+    *,
     error: str = "",
 ) -> tuple:
-    """Build a complete browser snapshot response without applying a dataset."""
-    try:
-        resolved = svc.resolve_dataset_input(path_str)
-        data = svc.browse_dataset_location(resolved["folder"])
-    except svc.ServiceError as exc:
-        attempted = str(path_str or "")
-        return (
-            attempted,
-            True,
-            _render_browser_current(None, None, error=str(exc.message), path=attempted),
-            _render_dir_browser_error(str(exc.message)),
-            no_update,
-            None,
-            True,
-            no_update,
-            no_update,
-        )
-    datasets = data.get("datasets") or []
-    preferred_base = str(resolved.get("preferred_base") or "")
-    actual = (
-        _candidate_for_base(data, preferred_base)
-        if preferred_base
-        else (datasets[0] if len(datasets) == 1 else None)
-    )
-    candidate = _compact_browser_candidate(actual) if actual else None
-    if preferred_base and actual is None:
-        error = "当前目录未发现指定的数据集前缀。"
+    """Render one already-validated directory snapshot without rereading it."""
     return (
         data["current_path"],
         not bool(data.get("can_go_up")),
@@ -2472,29 +2493,75 @@ def _build_dir_browser_response(
     )
 
 
+def _build_dir_browser_error_response(path: str, message: str) -> tuple:
+    """Render a browser error without retrying the failed directory read."""
+    attempted = str(path or "")
+    return (
+        attempted,
+        True,
+        _render_browser_current(None, None, error=message, path=attempted),
+        _render_dir_browser_error(message),
+        no_update,
+        None,
+        True,
+        no_update,
+        no_update,
+    )
+
+
+def _build_dir_browser_response(
+    path_str: str,
+    recent_records: list[dict[str, Any]] | None,
+    error: str = "",
+) -> tuple:
+    """Build a complete browser snapshot response without applying a dataset."""
+    try:
+        resolved = svc.resolve_dataset_input(path_str)
+        data = svc.browse_dataset_location(resolved["folder"])
+    except svc.ServiceError as exc:
+        return _build_dir_browser_error_response(
+            path_str,
+            str(exc.message),
+        )
+    datasets = data.get("datasets") or []
+    preferred_base = str(resolved.get("preferred_base") or "")
+    actual = (
+        _candidate_for_base(data, preferred_base)
+        if preferred_base
+        else (datasets[0] if len(datasets) == 1 else None)
+    )
+    candidate = _compact_browser_candidate(actual) if actual else None
+    if preferred_base and actual is None:
+        error = "当前目录未发现指定的数据集前缀。"
+    return _build_dir_browser_snapshot_response(
+        data,
+        candidate,
+        error=error,
+    )
+
+
 def _select_browser_candidate(
     folder: str,
     base: str,
     recent_records: list[dict[str, Any]] | None,
 ) -> tuple:
-    """Refresh a directory then set its explicitly selected candidate."""
-    response = list(_build_dir_browser_response(folder, recent_records))
+    """Read a directory once then set its explicitly selected candidate."""
     try:
         snapshot = svc.browse_dataset_location(folder)
-    except svc.ServiceError:
-        return tuple(response)
+    except svc.ServiceError as exc:
+        return _build_dir_browser_error_response(
+            folder,
+            str(exc.message),
+        )
     candidate = _candidate_for_base(snapshot, base)
     if candidate is None:
-        return _build_dir_browser_response(
-            folder,
-            recent_records,
+        return _build_dir_browser_snapshot_response(
+            snapshot,
+            None,
             error="该数据集已不存在，请从当前目录重新选择。",
         )
     compact = _compact_browser_candidate(candidate)
-    response[2] = _render_browser_current(snapshot, compact)
-    response[5] = compact
-    response[6] = False
-    return tuple(response)
+    return _build_dir_browser_snapshot_response(snapshot, compact)
 
 
 def _render_browser_current(

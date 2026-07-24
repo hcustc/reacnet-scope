@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
@@ -554,6 +555,378 @@ def _candidate_status_callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def _preparation_status_callback_payload(
+    client,
+    *,
+    candidate: dict[str, str] | None,
+    store: dict[str, Any],
+) -> dict[str, Any]:
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "data-prep-status.children" in item["output"]
+    )
+    input_values = {
+        "data-modal": True,
+        "data-prep-refresh-btn": 1,
+        "data-prep-refresh": 0,
+        "dataset-browser-candidate": candidate,
+    }
+    return {
+        "output": dependency["output"],
+        "outputs": [
+            {"id": "data-prep-status", "property": "children"},
+            {"id": "data-rng-event-command", "property": "children"},
+            {"id": "data-prep-trajectory-command", "property": "children"},
+            {"id": "data-prep-composition-command", "property": "children"},
+            {"id": "data-rng-event-copy", "property": "content"},
+            {"id": "data-prep-trajectory-copy", "property": "content"},
+            {"id": "data-prep-composition-copy", "property": "content"},
+            {"id": "data-clear-trajectory-btn", "property": "disabled"},
+            {"id": "data-prep-refresh", "property": "disabled"},
+        ],
+        "changedPropIds": ["data-prep-refresh-btn.n_clicks"],
+        "inputs": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": input_values[item["id"]],
+            }
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {"id": item["id"], "property": item["property"], "value": store}
+            for item in dependency["state"]
+        ],
+    }
+
+
+def _clear_confirmation_callback_payload(
+    client,
+    *,
+    candidate: dict[str, str] | None,
+    store: dict[str, Any],
+) -> dict[str, Any]:
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if any(value["id"] == "data-clear-trajectory-btn" for value in item["inputs"])
+    )
+    input_values = {
+        "data-clear-trajectory-btn": 1,
+        "data-clear-cancel-btn": None,
+    }
+    state_values = {
+        "dataset-browser-candidate": candidate,
+        "app-store": store,
+    }
+    return {
+        "output": dependency["output"],
+        "outputs": [
+            {"id": "data-clear-confirm-modal", "property": "is_open"},
+            {"id": "data-clear-confirm-text", "property": "children"},
+            {"id": "data-clear-kind-store", "property": "data"},
+            {"id": "data-prep-clear-alert", "property": "children"},
+        ],
+        "changedPropIds": ["data-clear-trajectory-btn.n_clicks"],
+        "inputs": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": input_values[item["id"]],
+            }
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {
+                "id": item["id"],
+                "property": item["property"],
+                "value": state_values[item["id"]],
+            }
+            for item in dependency["state"]
+        ],
+    }
+
+
+def _clear_confirmed_callback_payload(
+    client,
+    *,
+    request: dict[str, str],
+) -> dict[str, Any]:
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if any(value["id"] == "data-clear-confirm-btn" for value in item["inputs"])
+    )
+    return {
+        "output": dependency["output"],
+        "outputs": [
+            {"id": "data-clear-confirm-modal", "property": "is_open"},
+            {"id": "data-prep-clear-alert", "property": "children"},
+        ],
+        "changedPropIds": ["data-clear-confirm-btn.n_clicks"],
+        "inputs": [
+            {"id": item["id"], "property": item["property"], "value": 1}
+            for item in dependency["inputs"]
+        ],
+        "state": [
+            {"id": item["id"], "property": item["property"], "value": request}
+            for item in dependency["state"]
+        ],
+    }
+
+
+def _discovered_candidate(folder: Path, name: str = "run.lammpstrj") -> dict[str, str]:
+    (folder / f"{name}.reactionabcd").touch()
+    (folder / f"{name}.species").touch()
+    return {
+        "folder": str(folder),
+        "base": str(folder / name),
+        "label": name,
+    }
+
+
+def test_candidate_preview_rejects_untrusted_candidates_before_scan(
+    tmp_path, monkeypatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    scan_calls: list[tuple[str, str]] = []
+
+    def fake_scan(folder: str, *, base: str = "") -> dict[str, Any]:
+        scan_calls.append((folder, base))
+        return {"dataset": {"selected_base": base}}
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(svc, "scan_dataset", fake_scan)
+    app = create_app()
+    client = app.server.test_client()
+    candidates = [
+        {
+            "folder": str(outside),
+            "base": str(outside / "run.lammpstrj"),
+            "label": "outside",
+        },
+        {
+            "folder": str(allowed),
+            "base": str(allowed / "forged.lammpstrj"),
+            "label": "forged",
+        },
+    ]
+
+    for candidate in candidates:
+        response = client.post(
+            "/_dash-update-component",
+            json=_candidate_status_callback_payload(
+                client,
+                candidate=candidate,
+                store={"folder": "", "base": "", "label": "未选择"},
+            ),
+        )
+        assert response.status_code == 200
+        assert response.get_json()["response"]["data-apply-btn"]["disabled"] is True
+
+    assert scan_calls == []
+
+
+def test_preparation_refresh_rejects_untrusted_candidate_and_app_store_before_service(
+    tmp_path, monkeypatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    preparation_calls: list[tuple[str, str]] = []
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        preparation_calls.append((folder, base))
+        return {"trajectory": {"state": "missing"}}
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+    forged = {
+        "folder": str(outside),
+        "base": str(outside / "run.lammpstrj"),
+        "label": "outside",
+    }
+
+    candidate_response = client.post(
+        "/_dash-update-component",
+        json=_preparation_status_callback_payload(
+            client,
+            candidate=forged,
+            store={"folder": str(allowed), "base": "", "label": "old"},
+        ),
+    )
+    store_response = client.post(
+        "/_dash-update-component",
+        json=_preparation_status_callback_payload(
+            client,
+            candidate=None,
+            store=forged,
+        ),
+    )
+
+    assert candidate_response.status_code == 200
+    assert store_response.status_code == 200
+    assert preparation_calls == []
+    for response in (candidate_response, store_response):
+        result = response.get_json()["response"]
+        assert result["data-clear-trajectory-btn"]["disabled"] is True
+
+
+def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+    preparation_calls: list[tuple[str, str]] = []
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        preparation_calls.append((folder, base))
+        return {
+            "trajectory": {"state": "ready"},
+            "rng_event_command": "rng",
+            "trajectory_command": "trajectory",
+            "composition_command": "composition",
+        }
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_preparation_status_callback_payload(
+            client,
+            candidate=None,
+            store=candidate,
+        ),
+    )
+
+    assert response.status_code == 200
+    assert preparation_calls == [(candidate["folder"], candidate["base"])]
+    assert response.get_json()["response"]["data-clear-trajectory-btn"]["disabled"] is False
+
+
+def test_clear_confirmation_rejects_untrusted_candidate_before_status_service(
+    tmp_path, monkeypatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    preparation_calls: list[tuple[str, str]] = []
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        preparation_calls.append((folder, base))
+        return {"trajectory": {"state": "ready", "index_size": 10}}
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+    forged = {
+        "folder": str(outside),
+        "base": str(outside / "run.lammpstrj"),
+        "label": "outside",
+    }
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_clear_confirmation_callback_payload(
+            client,
+            candidate=forged,
+            store={"folder": str(allowed), "base": "", "label": "old"},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert preparation_calls == []
+    assert result["data-clear-confirm-modal"]["is_open"] is False
+    assert result["data-clear-kind-store"]["data"] == {}
+
+
+def test_clear_confirmation_keeps_discovered_app_store_fallback_usable(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+    preparation_calls: list[tuple[str, str]] = []
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        preparation_calls.append((folder, base))
+        return {"trajectory": {"state": "ready", "index_size": 10}}
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_clear_confirmation_callback_payload(
+            client,
+            candidate=None,
+            store=candidate,
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert preparation_calls == [(candidate["folder"], candidate["base"])]
+    assert result["data-clear-confirm-modal"]["is_open"] is True
+    assert result["data-clear-kind-store"]["data"] == {
+        "kind": "trajectory",
+        "folder": candidate["folder"],
+        "base": candidate["base"],
+    }
+
+
+def test_confirmed_clear_rejects_forged_request_before_clear_service(
+    tmp_path, monkeypatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    clear_calls: list[tuple[str, str, str]] = []
+
+    def fake_clear(folder: str, *, base: str = "", kind: str) -> dict[str, Any]:
+        clear_calls.append((folder, base, kind))
+        return {"removed": [], "released_bytes": 0}
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [allowed])
+    monkeypatch.setattr(svc, "clear_dataset_index", fake_clear)
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_clear_confirmed_callback_payload(
+            client,
+            request={
+                "folder": str(outside),
+                "base": str(outside / "run.lammpstrj"),
+                "kind": "trajectory",
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert clear_calls == []
 
 
 def test_load_selected_dataset_updates_store_closes_modal_and_remembers_it(
@@ -1157,6 +1530,59 @@ def test_directory_browser_requires_explicit_choice_for_multiple_datasets(tmp_pa
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["dir-browser-path"]["data"] == str(tmp_path)
+
+
+def test_explicit_browser_selection_uses_one_directory_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    real_browse = svc.browse_dataset_location
+    browse_calls: list[str] = []
+
+    def counted_browse(folder: str) -> dict[str, Any]:
+        browse_calls.append(folder)
+        return real_browse(folder)
+
+    monkeypatch.setattr(svc, "browse_dataset_location", counted_browse)
+    app = create_app()
+    client = app.server.test_client()
+    selected = {"type": "dir-browser-dataset", "base": candidate["base"]}
+    payload = _browser_callback_payload(
+        client,
+        changed=f"{json.dumps(selected, sort_keys=True, separators=(',', ':'))}.n_clicks",
+        values={'{"base":["ALL"],"type":"dir-browser-dataset"}': [1]},
+        state_values={
+            "dir-browser-path": str(tmp_path),
+            "data-folder-input": "",
+            "recent-datasets": [],
+            "dataset-browser-candidate": None,
+        },
+    )
+    for item in payload["inputs"]:
+        if item["id"] == '{"base":["ALL"],"type":"dir-browser-dataset"}':
+            item["id"] = selected
+
+    response = client.post("/_dash-update-component", json=payload)
+
+    assert response.status_code == 200
+    assert browse_calls == [str(tmp_path)]
+    assert response.get_json()["response"]["dataset-browser-candidate"]["data"] == candidate
+
+
+def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_card_rule() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+
+    assert ".rs-browser-path-control .input-group" not in css
+    assert ".rs-dataset-card" not in css
+    assert ".rs-browser-path-control { flex-wrap: wrap; }" in css
 
 
 def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> None:

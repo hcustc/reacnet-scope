@@ -1447,11 +1447,10 @@ html, body {
 }
 
 @media (max-width: 768px) {
-    .rs-browser-path-control .input-group { flex-wrap: wrap; }
+    .rs-browser-path-control { flex-wrap: wrap; }
     .rs-browser-path-control .form-control,
     .rs-browser-path-control .btn { border-radius: 4px; }
     .rs-browser-path-control .form-control { flex-basis: 100%; }
-    .rs-dataset-card { grid-template-columns: 1fr; gap: 3px; }
     .rs-topbar { height: auto; min-height: 64px; flex-wrap: wrap; padding: 10px 12px; }
     .rs-topbar .rs-meta { order: 3; flex-basis: 100%; border-left: 0; padding-left: 0; }
     .rs-body.rs-workflow-shell { padding: 10px; }
