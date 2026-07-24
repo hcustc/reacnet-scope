@@ -13,6 +13,7 @@ This module never reimplements analysis logic.  It only:
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import io
 import json
@@ -2485,6 +2486,91 @@ def build_mechanism_elements(
     payload["ok"] = True
     payload["elements"] = _mechanism_cytoscape_elements(payload)
     return payload
+
+
+def project_mechanism_evidence(
+    payload: Mapping[str, Any],
+    evidence_filter: str,
+) -> dict[str, Any]:
+    """Return the exact mechanism snapshot displayed and exported by Dash.
+
+    Filtering is intentionally a pure, source-I/O-free projection of the
+    already built payload.  A retained reaction keeps its complete incident
+    species and semantic edges; species that become isolated are removed.
+    """
+    if evidence_filter not in {"all", "evidence_linked", "network_only"}:
+        raise ValueError("invalid mechanism evidence filter")
+    validated = validate_mechanism_payload(payload)
+    projected = copy.deepcopy(dict(payload))
+    if evidence_filter == "all":
+        projected["nodes"] = copy.deepcopy(validated["nodes"])
+        projected["edges"] = copy.deepcopy(validated["edges"])
+        projected["_ui_evidence_filter"] = "all"
+        validate_mechanism_payload(projected)
+        return projected
+
+    kept_reactions = {
+        str(node["id"])
+        for node in validated["nodes"]
+        if (
+            node.get("kind") == "reaction"
+            and node.get("evidence_status") == evidence_filter
+        )
+    }
+    kept_edges = [
+        edge
+        for edge in validated["edges"]
+        if (
+            str(edge.get("source") or "") in kept_reactions
+            or str(edge.get("target") or "") in kept_reactions
+        )
+    ]
+    kept_species = {
+        str(endpoint)
+        for edge in kept_edges
+        for endpoint in (edge.get("source"), edge.get("target"))
+        if str(endpoint) not in kept_reactions
+    }
+    kept_nodes = kept_reactions | kept_species
+    projected["nodes"] = [
+        copy.deepcopy(node)
+        for node in validated["nodes"]
+        if str(node.get("id") or "") in kept_nodes
+    ]
+    projected["edges"] = [copy.deepcopy(edge) for edge in kept_edges]
+    original_meta = (
+        payload.get("meta")
+        if isinstance(payload.get("meta"), Mapping)
+        else {}
+    )
+    reaction_count = len(kept_reactions)
+    projected["meta"] = {
+        "node_count": len(projected["nodes"]),
+        "edge_count": len(projected["edges"]),
+        "reaction_count": reaction_count,
+        "truncated": bool(original_meta.get("truncated")),
+        "reason": (
+            str(original_meta.get("reason") or "ok")
+            if reaction_count
+            else "filtered_by_evidence"
+        ),
+    }
+    projected["_ui_evidence_filter"] = evidence_filter
+    validate_mechanism_payload(projected)
+    projected["elements"] = _mechanism_cytoscape_elements(projected)
+    return projected
+
+
+def project_network_evidence(
+    payload: Mapping[str, Any],
+    evidence_filter: str,
+) -> dict[str, Any]:
+    """Project one stored raw network without rebuilding either semantics."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("network payload must be a mapping")
+    if payload.get("network_semantics") != "mechanism":
+        return copy.deepcopy(dict(payload))
+    return project_mechanism_evidence(payload, evidence_filter)
 
 
 def _mechanism_csv_value(value: Any) -> Any:

@@ -902,3 +902,72 @@ def test_mechanism_cytoscape_reaction_retains_dash_detail_fields(
     assert node["event_total"] is None
     assert node["matched_event_total"] is None
     assert node["event_coverage"] is None
+
+
+def test_project_mechanism_evidence_filter_is_a_valid_exportable_snapshot(
+    reaction_artifacts: dict[str, str],
+) -> None:
+    raw = svc.build_mechanism_elements(
+        reaction_artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+
+    displayed = svc.project_mechanism_evidence(
+        raw,
+        "evidence_linked",
+    )
+
+    assert displayed is not raw
+    assert raw["meta"]["reaction_count"] == 1
+    assert displayed["nodes"] == []
+    assert displayed["edges"] == []
+    assert displayed["elements"] == []
+    assert displayed["meta"] == {
+        "node_count": 0,
+        "edge_count": 0,
+        "reaction_count": 0,
+        "truncated": False,
+        "reason": "filtered_by_evidence",
+    }
+    assert displayed["_ui_evidence_filter"] == "evidence_linked"
+    for format_name in (
+        "cytoscape-json",
+        "graphml",
+        "gexf",
+        "node-csv",
+        "edge-csv",
+    ):
+        exported = svc.export_mechanism_graph(displayed, format_name)
+        if format_name == "cytoscape-json":
+            assert exported["elements"] == {"nodes": [], "edges": []}
+        elif format_name in {"graphml", "gexf"}:
+            loader = nx.read_graphml if format_name == "graphml" else nx.read_gexf
+            assert len(loader(io.BytesIO(exported))) == 0
+        else:
+            assert len(list(csv.DictReader(io.StringIO(exported)))) == 0
+
+
+def test_project_mechanism_all_preserves_topology_and_observation_is_unchanged(
+    reaction_artifacts: dict[str, str],
+) -> None:
+    raw = svc.build_mechanism_elements(
+        reaction_artifacts,
+        anchor_smiles="[H]",
+        max_depth=1,
+    )
+    raw["dataset_id"] = "run"
+
+    displayed = svc.project_mechanism_evidence(raw, "all")
+    assert displayed["nodes"] == raw["nodes"]
+    assert displayed["edges"] == raw["edges"]
+    assert displayed["elements"] == raw["elements"]
+    assert displayed["meta"] == raw["meta"]
+    assert displayed["_ui_evidence_filter"] == "all"
+
+    observation = {
+        "network_semantics": "event_transfer",
+        "elements": [{"data": {"id": "observed"}}],
+        "meta": {"node_count": 1},
+    }
+    assert svc.project_network_evidence(observation, "network_only") == observation

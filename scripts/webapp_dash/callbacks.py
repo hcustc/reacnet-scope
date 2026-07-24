@@ -152,6 +152,109 @@ def initial_workflow_store() -> dict[str, Any]:
     }
 
 
+def _network_dataset_id(store: dict[str, Any] | None) -> str:
+    value = store or {}
+    return str(
+        value.get("dataset_id")
+        or value.get("base")
+        or value.get("label")
+        or ""
+    )
+
+
+def _network_status_alert(payload: dict[str, Any] | None) -> Any:
+    if not isinstance(payload, dict):
+        return ""
+    meta = payload.get("meta") or {}
+    elements = [
+        item
+        for item in payload.get("elements") or []
+        if isinstance(item, dict)
+    ]
+    element_nodes = [
+        item
+        for item in elements
+        if not (
+            (item.get("data") or {}).get("source")
+            or (item.get("data") or {}).get("target")
+        )
+    ]
+    element_edges = [item for item in elements if item not in element_nodes]
+    node_count = int(
+        meta.get("node_count")
+        if meta.get("node_count") is not None
+        else len(element_nodes)
+    )
+    edge_count = int(
+        meta.get("edge_count")
+        if meta.get("edge_count") is not None
+        else len(element_edges)
+    )
+    reaction_count = int(
+        meta.get("reaction_count")
+        if meta.get("reaction_count") is not None
+        else sum(
+            (item.get("data") or {}).get("kind") == "reaction"
+            for item in element_nodes
+        )
+    )
+    reason = str(meta.get("reason") or "ok")
+    reason_labels = {
+        "ok": "网络已构建",
+        "species_absent": "锚点物种不在当前反应网络中",
+        "no_positive_net_continuation": "锚点存在，但没有正净 TP 的延伸反应",
+        "filtered_by_thresholds": "反应均被当前净 TP 阈值过滤",
+        "filtered_by_evidence": "当前事件证据筛选没有匹配反应",
+    }
+    children: list[Any] = [
+        html.Div(
+            reason_labels.get(reason, f"网络状态：{reason}"),
+            className="fw-semibold",
+        ),
+        html.Div(
+            f"{node_count} 个节点 · {edge_count} 条边 · "
+            f"{reaction_count} 个反应节点"
+        ),
+        html.Div(
+            "证据层级：{} · 证据状态：{}".format(
+                payload.get("evidence_level") or "未提供",
+                payload.get("evidence_status") or "未提供",
+            ),
+            className="small text-muted",
+        ),
+    ]
+    if meta.get("truncated"):
+        children.append(
+            html.Div("结果因节点上限而截断。", className="small fw-semibold")
+        )
+    command = str(payload.get("preparation_command") or "")
+    if command:
+        children.append(
+            html.Div(
+                [
+                    html.Div("离线证据准备命令：", className="small"),
+                    html.Div(
+                        [
+                            html.Code(command),
+                            dcc.Clipboard(
+                                content=command,
+                                title="复制准备命令",
+                                style={"marginLeft": "0.5rem"},
+                            ),
+                        ],
+                        className="d-flex align-items-center",
+                    ),
+                ]
+            )
+        )
+    color = (
+        "warning"
+        if reason != "ok" or bool(meta.get("truncated"))
+        else "success"
+    )
+    return dbc.Alert(children, color=color, className="py-2 mb-0")
+
+
 _EVENT_GROUP_STYLE = {
     "core": ("反应核", "#dc2626"),
     "reactant": ("反应物原子", "#2563eb"),
@@ -954,7 +1057,7 @@ def register_callbacks(app: Any) -> None:
         ready = svc.dataset_ready_count(status)
         label = svc.dataset_label(status)
         new_store = {
-            **store,
+            **initial_store(),
             "folder": folder,
             "base": selected_base_new,
             "dataset_id": dataset_id_for_source(selected_base_new),
@@ -2444,14 +2547,16 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-highlight-store", "data", allow_duplicate=True),
         Input("pathway-highlight-network-btn", "n_clicks"),
         State("pathway-selected-path", "data"),
+        State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _send_pathway_to_network(n_clicks, selected_path):
+    def _send_pathway_to_network(n_clicks, selected_path, app_store):
         if n_clicks is None or not selected_path:
             raise PreventUpdate
         return {
             "schema_version": "reacnet-scope/pathway-highlight/v1",
             "source": "pathway",
+            "dataset_id": _network_dataset_id(app_store),
             "path_rank": selected_path.get("path_rank"),
             "species_ids": list(selected_path.get("species_ids") or []),
             "reaction_keys": list(selected_path.get("reaction_keys") or []),
@@ -2501,17 +2606,26 @@ def register_callbacks(app: Any) -> None:
         Output("network-node-csv-btn", "disabled"),
         Output("network-edge-csv-btn", "disabled"),
         Input("network-semantics", "value"),
+        Input("network-store", "data"),
+        Input("app-store", "data"),
     )
-    def _switch_network_semantics(semantics):
+    def _switch_network_semantics(semantics, payload, app_store):
         mechanism = semantics == "mechanism"
+        export_ready = (
+            mechanism
+            and isinstance(payload, dict)
+            and payload.get("network_semantics") == "mechanism"
+            and str(payload.get("dataset_id") or "")
+            == _network_dataset_id(app_store)
+        )
         return (
             {"display": "none"} if mechanism else {"display": "flex"},
             {"display": "flex"} if mechanism else {"display": "none"},
-            not mechanism,
-            not mechanism,
-            not mechanism,
-            not mechanism,
-            not mechanism,
+            not export_ready,
+            not export_ready,
+            not export_ready,
+            not export_ready,
+            not export_ready,
         )
 
     @app.callback(
@@ -2533,10 +2647,14 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("network-alert", "children"),
+        Output("network-raw-store", "data"),
         Output("network-store", "data"),
         Output("network-cytoscape", "tapNodeData"),
+        Output("network-context-store", "data"),
         Input("network-search-btn", "n_clicks"),
-        State("network-semantics", "value"),
+        Input("network-semantics", "value"),
+        Input("network-evidence-filter", "value"),
+        Input("app-store", "data"),
         State("network-min-count", "value"),
         State("network-max-species", "value"),
         State("network-top-edges", "value"),
@@ -2545,14 +2663,17 @@ def register_callbacks(app: Any) -> None:
         State("network-depth", "value"),
         State("network-min-net-tp", "value"),
         State("network-max-nodes", "value"),
-        State("network-evidence-filter", "value"),
         State("network-layout", "value"),
-        State("app-store", "data"),
+        State("network-raw-store", "data"),
+        State("network-context-store", "data"),
+        State("pathway-highlight-store", "data"),
         prevent_initial_call=True,
     )
-    def _build_network(
+    def _update_network_state(
         n_clicks,
         semantics,
+        evidence_filter,
+        store,
         min_count,
         max_species,
         top_edges,
@@ -2561,19 +2682,79 @@ def register_callbacks(app: Any) -> None:
         max_depth,
         min_net_tp,
         max_nodes,
-        evidence_filter,
         layout_name,
-        store,
+        raw_payload,
+        previous_context,
+        pathway_handoff,
     ):
-        if n_clicks is None:
-            raise PreventUpdate
         store = store or {}
+        semantics = (
+            "mechanism" if semantics == "mechanism" else "event_transfer"
+        )
+        dataset_id = _network_dataset_id(store)
+        current_context = {
+            "dataset_id": dataset_id,
+            "network_semantics": semantics,
+        }
+        previous_context = (
+            previous_context
+            if isinstance(previous_context, dict)
+            else {}
+        )
+        if ctx.triggered_id in {"network-semantics", "app-store"}:
+            if previous_context == current_context:
+                raise PreventUpdate
+            return "", None, None, None, current_context
+
+        if ctx.triggered_id == "network-evidence-filter":
+            if (
+                not isinstance(raw_payload, dict)
+                or raw_payload.get("network_semantics") != semantics
+                or str(raw_payload.get("dataset_id") or "") != dataset_id
+            ):
+                return "", no_update, None, None, current_context
+            try:
+                displayed = svc.project_network_evidence(
+                    raw_payload,
+                    str(evidence_filter or "all"),
+                )
+            except (TypeError, ValueError) as exc:
+                return (
+                    dbc.Alert(str(exc), color="danger", className="py-2"),
+                    no_update,
+                    None,
+                    None,
+                    current_context,
+                )
+            return (
+                _network_status_alert(displayed),
+                no_update,
+                displayed,
+                None,
+                current_context,
+            )
+
+        if ctx.triggered_id != "network-search-btn" or n_clicks is None:
+            raise PreventUpdate
         artifacts = store.get("artifacts", {}) or {}
         try:
             if semantics == "mechanism":
+                anchor_smiles = str(anchor_smiles or "").strip()
+                if not anchor_smiles:
+                    return (
+                        dbc.Alert(
+                            "请输入锚点物种的精确 SMILES；这与“锚点不在网络中”的空结果不同。",
+                            color="warning",
+                            className="py-2",
+                        ),
+                        None,
+                        None,
+                        None,
+                        current_context,
+                    )
                 result = svc.build_mechanism_elements(
                     artifacts,
-                    anchor_smiles=str(anchor_smiles or ""),
+                    anchor_smiles=anchor_smiles,
                     direction=(
                         "both"
                         if direction is None
@@ -2595,27 +2776,76 @@ def register_callbacks(app: Any) -> None:
                     top_edges=int(40 if top_edges is None else top_edges),
                 )
         except (TypeError, ValueError) as exc:
-            return str(exc), None, None
+            return (
+                dbc.Alert(str(exc), color="danger", className="py-2"),
+                None,
+                None,
+                None,
+                current_context,
+            )
         except svc.ServiceError as exc:
-            return str(exc.message), None, None
+            message = (
+                "请输入锚点物种的精确 SMILES。"
+                if exc.reason == "bad_mechanism_query"
+                and not str(anchor_smiles or "").strip()
+                else str(exc.message)
+            )
+            return (
+                dbc.Alert(message, color="danger", className="py-2"),
+                None,
+                None,
+                None,
+                current_context,
+            )
 
-        dataset_id = str(
-            store.get("dataset_id")
-            or store.get("base")
-            or store.get("label")
-            or "dataset"
-        )
-        payload = {
+        raw = {
             **result,
-            "dataset_id": dataset_id,
-            "_ui_evidence_filter": str(evidence_filter or "all"),
+            "dataset_id": dataset_id or "dataset",
             "_ui_layout": str(layout_name or "concentric"),
         }
-        meta = payload.get("meta") or {}
-        count = meta.get("node_count")
-        if count is None:
-            count = len(payload.get("elements") or [])
-        return f"网络已构建 · {int(count or 0)} 个节点", payload, None
+        handoff = (
+            pathway_handoff
+            if isinstance(pathway_handoff, dict)
+            else {}
+        )
+        handoff_dataset = str(handoff.get("dataset_id") or "")
+        species_ids = [
+            str(value) for value in handoff.get("species_ids") or []
+        ]
+        if (
+            semantics == "mechanism"
+            and species_ids
+            and anchor_smiles in species_ids
+            and (not handoff_dataset or handoff_dataset == dataset_id)
+        ):
+            raw["_ui_pathway_highlight"] = {
+                "path_rank": handoff.get("path_rank"),
+                "species_ids": species_ids,
+                "reaction_keys": [
+                    str(value)
+                    for value in handoff.get("reaction_keys") or []
+                ],
+            }
+        try:
+            displayed = svc.project_network_evidence(
+                raw,
+                str(evidence_filter or "all"),
+            )
+        except (TypeError, ValueError) as exc:
+            return (
+                dbc.Alert(str(exc), color="danger", className="py-2"),
+                None,
+                None,
+                None,
+                current_context,
+            )
+        return (
+            _network_status_alert(displayed),
+            raw,
+            displayed,
+            None,
+            current_context,
+        )
 
     @app.callback(
         Output("network-cytoscape", "elements"),
@@ -2623,10 +2853,9 @@ def register_callbacks(app: Any) -> None:
         Output("network-cytoscape", "stylesheet"),
         Output("network-semantics-badge", "children"),
         Input("network-store", "data"),
-        Input("pathway-highlight-store", "data"),
         Input("network-layout", "value"),
     )
-    def _render_network(payload, pathway_handoff, layout_name):
+    def _render_network(payload, layout_name):
         payload = payload or {}
         elements = [
             {
@@ -2637,48 +2866,9 @@ def register_callbacks(app: Any) -> None:
             for item in payload.get("elements") or []
             if isinstance(item, dict)
         ]
-        if (
-            payload.get("network_semantics") == "mechanism"
-            and payload.get("_ui_evidence_filter") in {
-                "evidence_linked",
-                "network_only",
-            }
-        ):
-            expected = payload["_ui_evidence_filter"]
-            kept_reactions = {
-                str(item["data"].get("id") or "")
-                for item in elements
-                if item["data"].get("kind") == "reaction"
-                and item["data"].get("evidence_status") == expected
-            }
-            kept_edges = [
-                item
-                for item in elements
-                if item["data"].get("source") in kept_reactions
-                or item["data"].get("target") in kept_reactions
-            ]
-            kept_species = {
-                str(endpoint)
-                for item in kept_edges
-                for endpoint in (
-                    item["data"].get("source"),
-                    item["data"].get("target"),
-                )
-                if endpoint not in kept_reactions
-            }
-            kept_ids = kept_reactions | kept_species | {
-                str(item["data"].get("id") or "")
-                for item in kept_edges
-            }
-            elements = [
-                item
-                for item in elements
-                if str(item["data"].get("id") or "") in kept_ids
-            ]
-
         handoff = (
-            pathway_handoff
-            if isinstance(pathway_handoff, dict)
+            payload.get("_ui_pathway_highlight")
+            if isinstance(payload.get("_ui_pathway_highlight"), dict)
             else {}
         )
         species_ids = {

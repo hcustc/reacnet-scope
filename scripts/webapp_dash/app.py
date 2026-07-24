@@ -1818,7 +1818,16 @@ def build_layout() -> html.Div:
             dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
+            dcc.Store(id="network-raw-store", storage_type="memory", data=None),
             dcc.Store(id="network-store", storage_type="memory", data=None),
+            dcc.Store(
+                id="network-context-store",
+                storage_type="memory",
+                data={
+                    "dataset_id": "",
+                    "network_semantics": "event_transfer",
+                },
+            ),
             dcc.Store(id="pathway-store", storage_type="memory", data=None),
             dcc.Store(id="pathway-selected-step", storage_type="memory", data=None),
             dcc.Store(id="pathway-selected-path", storage_type="memory", data=None),
