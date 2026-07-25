@@ -12,6 +12,11 @@ This module never reimplements analysis logic.  It only:
 
 from __future__ import annotations
 
+import base64
+import copy
+import csv
+import io
+import json
 import os
 import re
 import shlex
@@ -33,6 +38,13 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from rng_tools.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
+from rng_tools.mechanism_graph import (  # noqa: E402
+    build_mechanism_network,
+    serialize_mechanism_graph,
+    to_networkx_mechanism_graph,
+    validate_mechanism_payload,
+)
+from rng_tools.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
     IndexInvalidError,
@@ -43,7 +55,10 @@ from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
-from reacnet_scope.event_index import EVENT_EVIDENCE_STORE  # noqa: E402
+from reacnet_scope.event_index import (  # noqa: E402
+    EVENT_EVIDENCE_STORE,
+    EventIndexEvidenceProvider,
+)
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
@@ -53,6 +68,7 @@ from reacnet_scope.datasets import (  # noqa: E402
     discover_dataset_candidates,
 )
 from scripts.webapp.server import (  # noqa: E402
+    ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
     build_carbon_plot_payload,
@@ -66,6 +82,8 @@ from scripts.webapp.server import (  # noqa: E402
     looks_like_formula,
     match_formula_reaction,
     net_flux,
+    load_reaction_network_snapshot,
+    reaction_source_signature,
     reaction_formula_str,
     reaction_mass_fields,
     reaction_smiles_str,
@@ -544,6 +562,324 @@ def _file_signature(path_text: str) -> tuple[str, int, int]:
         return "", 0, 0
     stat = path.stat()
     return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def _pathway_formula(smiles: str) -> str:
+    return formula_from_counts(count_atoms_fast(smiles))
+
+
+def _pathway_source_snapshot(
+    path_text: str,
+) -> dict[str, Any]:
+    return reaction_source_signature(
+        str(Path(path_text).expanduser().resolve())
+    )
+
+
+def _pathway_assert_source_current(
+    path_text: str,
+    expected: Mapping[str, Any],
+) -> None:
+    try:
+        actual = _pathway_source_snapshot(path_text)
+    except OSError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    if actual.get("sha256") != expected.get("sha256"):
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        )
+
+
+def _load_reaction_network_snapshot(
+    reaction_path: str,
+    min_tp: int,
+) -> tuple[ReactionNetwork, dict[str, Any]]:
+    """Load a network and its exact content signature as one snapshot."""
+    get_with_signature = getattr(STORE, "get_with_signature", None)
+    if callable(get_with_signature):
+        network, signature = get_with_signature(reaction_path, min_tp)
+        if not isinstance(signature, Mapping):
+            raise RuntimeError("reaction source signature is invalid")
+        return network, dict(signature)
+
+    # A historical ``get`` result has no verifiable content provenance.  Parse
+    # a fresh captured byte snapshot instead of pairing an opaque cached object
+    # with the digest of whatever happens to be at the path now.
+    return load_reaction_network_snapshot(reaction_path, min_tp)
+
+
+def _pathway_preparation_command(
+    reaction_path: str,
+    reactionevent_path: str,
+    *,
+    rebuild: bool,
+) -> str:
+    source = reactionevent_path or reaction_path
+    option = "--rebuild event" if rebuild else "--event-only"
+    return (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(source).parent))} "
+        f"{option}"
+    )
+
+
+_PATHWAY_QUERY_KEYS = {
+    "direction",
+    "max_depth",
+    "max_branches",
+    "max_paths",
+    "max_expansions",
+    "min_net_tp",
+    "min_directionality",
+}
+
+
+def find_pathways(
+    artifacts: dict[str, str],
+    start_smiles: str,
+    **limits: Any,
+) -> dict[str, Any]:
+    """Find candidate paths, linking a ready SQLite event index if present."""
+    reaction_path = (artifacts.get("reaction") or "").strip()
+    if (
+        not reaction_path.lower().endswith(".reactionabcd")
+        or not Path(reaction_path).is_file()
+    ):
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        )
+
+    unknown_limits = sorted(set(limits) - _PATHWAY_QUERY_KEYS)
+    if unknown_limits:
+        raise ServiceError(
+            f"无效的路径查询参数: {', '.join(unknown_limits)}",
+            reason="bad_pathway_query",
+        )
+
+    try:
+        network, reaction_signature = _load_reaction_network_snapshot(
+            reaction_path,
+            1,
+        )
+        _pathway_assert_source_current(reaction_path, reaction_signature)
+    except FileNotFoundError as exc:
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        ) from exc
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在路径查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无法加载反应网络: {exc}",
+            reason="bad_reac",
+        ) from exc
+
+    reactionevent_path = (artifacts.get("reactionevent") or "").strip()
+    molecules_path = (artifacts.get("molecules") or "").strip()
+    evidence_provider: EventIndexEvidenceProvider | None = None
+    rebuild_event_index = False
+    if (
+        reactionevent_path
+        and molecules_path
+        and Path(reactionevent_path).is_file()
+        and Path(molecules_path).is_file()
+    ):
+        try:
+            opened = EVENT_EVIDENCE_STORE.open_required(
+                reactionevent_path,
+                molecules_path,
+            )
+            evidence_provider = EventIndexEvidenceProvider(
+                reactionevent_path,
+                molecules_path,
+                store=EVENT_EVIDENCE_STORE,
+                opened=opened,
+            )
+        except (IndexStaleError, IndexInvalidError):
+            rebuild_event_index = True
+        except IndexNotReadyError:
+            rebuild_event_index = False
+
+    try:
+        try:
+            result = find_candidate_paths(
+                network,
+                start_smiles,
+                evidence_provider=evidence_provider,
+                **limits,
+            )
+            if evidence_provider is not None:
+                evidence_provider.assert_current()
+        except IndexNotReadyError:
+            evidence_provider = None
+            rebuild_event_index = True
+            result = find_candidate_paths(
+                network,
+                start_smiles,
+                evidence_provider=None,
+                **limits,
+            )
+    except (TypeError, ValueError) as exc:
+        message = str(exc)
+        if isinstance(exc, TypeError) or any(
+            name in message for name in _PATHWAY_QUERY_KEYS
+        ):
+            raise ServiceError(
+                f"无效的路径查询参数: {message}",
+                reason="bad_pathway_query",
+            ) from exc
+        raise
+
+    _pathway_assert_source_current(reaction_path, reaction_signature)
+    payload = result.as_dict()
+    for path in payload["paths"]:
+        path["formulas"] = [
+            _pathway_formula(smiles)
+            for smiles in path["species"]
+        ]
+        for step in path["steps"]:
+            step["focal_input_formula"] = _pathway_formula(
+                step["focal_input"]
+            )
+            step["focal_output_formula"] = _pathway_formula(
+                step["focal_output"]
+            )
+            step["reactant_formulas"] = [
+                _pathway_formula(smiles)
+                for smiles in step["reactants"]
+            ]
+            step["product_formulas"] = [
+                _pathway_formula(smiles)
+                for smiles in step["products"]
+            ]
+
+    payload["source_signatures"] = {
+        "reactionabcd": reaction_signature,
+        **dict(payload["source_signatures"]),
+    }
+    if evidence_provider is None:
+        payload["preparation_command"] = _pathway_preparation_command(
+            reaction_path,
+            reactionevent_path,
+            rebuild=rebuild_event_index,
+        )
+    return payload
+
+
+def _pathway_species_node_id(smiles: str) -> str:
+    encoded = base64.urlsafe_b64encode(smiles.encode("utf-8")).decode("ascii")
+    return f"species:{encoded}"
+
+
+def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Build a lossless bipartite Cytoscape payload from serialized paths.
+
+    Species identity is the exact SMILES string.  Reaction nodes remain
+    path-local because the same reaction may occur at different ranks/steps.
+    Repeated reactants/products intentionally produce repeated edges.
+    """
+    species_classes: dict[str, set[str]] = {}
+    species_order: list[str] = []
+    reaction_nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for path in payload.get("paths") or []:
+        rank = int(path.get("rank") or 0)
+        rank_class = f"path-rank-{rank}"
+        for step_index, step in enumerate(path.get("steps") or [], start=1):
+            reaction_key = str(step.get("reaction_key") or "")
+            encoded_key = base64.urlsafe_b64encode(
+                reaction_key.encode("utf-8")
+            ).decode("ascii")
+            reaction_id = (
+                f"reaction:{encoded_key}:path-{rank}-step-{step_index}"
+            )
+            reactants = [str(value) for value in step.get("reactants") or []]
+            products = [str(value) for value in step.get("products") or []]
+            reaction_text = (
+                f"{' + '.join(reactants)} -> {' + '.join(products)}"
+            )
+            classes = {"reaction", rank_class}
+            network_only = step.get("evidence_status") == "network_only"
+            if network_only:
+                classes.add("network-only")
+            reaction_nodes.append(
+                {
+                    "data": {
+                        "id": reaction_id,
+                        "node_kind": "reaction",
+                        "label": f"R{rank}.{step_index}",
+                        "path_rank": rank,
+                        "step_index": step_index,
+                        "reaction_key": reaction_key,
+                        "reaction_text": reaction_text,
+                        "score": step.get("score"),
+                        "evidence_status": step.get("evidence_status"),
+                    },
+                    "classes": " ".join(sorted(classes)),
+                }
+            )
+            for side, members in (("reactant", reactants), ("product", products)):
+                for occurrence, smiles in enumerate(members, start=1):
+                    if smiles not in species_classes:
+                        species_classes[smiles] = {"species"}
+                        species_order.append(smiles)
+                    species_classes[smiles].add(rank_class)
+                    species_id = _pathway_species_node_id(smiles)
+                    edge_id = (
+                        f"edge:{rank}:{step_index}:{side}:{occurrence}:"
+                        f"{encoded_key}"
+                    )
+                    if side == "reactant":
+                        source, target = species_id, reaction_id
+                    else:
+                        source, target = reaction_id, species_id
+                    edges.append(
+                        {
+                            "data": {
+                                "id": edge_id,
+                                "source": source,
+                                "target": target,
+                                "path_rank": rank,
+                                "step_index": step_index,
+                                "side": side,
+                                "occurrence": occurrence,
+                            },
+                            "classes": " ".join(
+                                [
+                                    rank_class,
+                                    side,
+                                    *(["network-only"] if network_only else []),
+                                ]
+                            ),
+                        }
+                    )
+    species_nodes = [
+        {
+            "data": {
+                "id": _pathway_species_node_id(smiles),
+                "node_kind": "species",
+                "label": smiles,
+                "smiles": smiles,
+            },
+            "classes": " ".join(sorted(species_classes[smiles])),
+        }
+        for smiles in species_order
+    ]
+    return [*species_nodes, *reaction_nodes, *edges]
 
 
 def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1106,6 +1442,8 @@ def search_reactions_by_formula(
                 "product_formulas": " + ".join(rxn.product_formulas),
                 "reaction_formulas": reaction_formula_str(rxn),
                 "reaction_smiles": reaction_smiles_str(rxn),
+                "reactant_smiles": list(rxn.reactant_smiles),
+                "product_smiles": list(rxn.product_smiles),
                 **reaction_mass_fields(rxn),
             }
         )
@@ -1936,6 +2274,428 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Mechanism network (reactionabcd, Cytoscape, and exports)
+# ---------------------------------------------------------------------------
+
+
+_MECHANISM_QUERY_KEYS = {
+    "anchor_smiles",
+    "direction",
+    "max_depth",
+    "min_net_tp",
+    "max_nodes",
+}
+_MECHANISM_EXPORT_FORMATS = (
+    "cytoscape-json",
+    "graphml",
+    "gexf",
+    "node-csv",
+    "edge-csv",
+)
+_MECHANISM_NODE_CSV_COLUMNS = (
+    "id",
+    "kind",
+    "label",
+    "smiles",
+    "formula",
+    "reaction_key",
+    "reactants_json",
+    "products_json",
+    "forward_tp",
+    "reverse_tp",
+    "net_tp",
+    "event_total",
+    "matched_event_total",
+    "event_coverage",
+    "evidence_status",
+)
+_MECHANISM_EDGE_CSV_COLUMNS = (
+    "id",
+    "source",
+    "target",
+    "role",
+    "species_smiles",
+    "coefficient",
+    "reaction_key",
+)
+
+
+def _mechanism_cytoscape_elements(
+    payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Project a mechanism payload through the shared NetworkX adapter."""
+    graph = to_networkx_mechanism_graph(payload)
+    document = serialize_mechanism_graph(graph, format="cytoscape-json")
+    if not isinstance(document, Mapping):
+        raise ValueError("mechanism Cytoscape serialization is invalid")
+    raw_elements = document.get("elements")
+    if not isinstance(raw_elements, Mapping):
+        raise ValueError("mechanism Cytoscape elements are invalid")
+
+    elements: list[dict[str, Any]] = []
+    for raw in raw_elements.get("nodes") or []:
+        item = dict(raw)
+        data = dict(item.get("data") or {})
+        item["data"] = data
+        item["classes"] = str(data.get("kind") or "")
+        elements.append(item)
+    for raw in raw_elements.get("edges") or []:
+        item = dict(raw)
+        data = dict(item.get("data") or {})
+        item["data"] = data
+        role = str(data.get("role") or "")
+        if role:
+            item["classes"] = role
+        elements.append(item)
+    return elements
+
+
+def build_mechanism_elements(
+    artifacts: dict[str, str],
+    **query: Any,
+) -> dict[str, Any]:
+    """Build a bounded reaction-passage mechanism snapshot for the Dash UI.
+
+    Event enrichment is strictly read-only: a ready SQLite index is opened,
+    queried once through ``EventIndexEvidenceProvider``, and revalidated before
+    the snapshot is returned.  Missing or invalid evidence degrades to the
+    reaction-passage payload and an offline preparation command.
+    """
+    reaction_path = str(artifacts.get("reaction") or "").strip()
+    if (
+        not reaction_path.lower().endswith(".reactionabcd")
+        or not Path(reaction_path).is_file()
+    ):
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        )
+
+    unknown = sorted(set(query) - _MECHANISM_QUERY_KEYS)
+    if unknown:
+        raise ServiceError(
+            f"无效的机制网络查询参数: {', '.join(unknown)}",
+            reason="bad_mechanism_query",
+        )
+    anchor_smiles = query.get("anchor_smiles")
+    limits = {
+        key: value
+        for key, value in query.items()
+        if key != "anchor_smiles"
+    }
+
+    try:
+        network, reaction_signature = _load_reaction_network_snapshot(
+            reaction_path,
+            1,
+        )
+        _pathway_assert_source_current(reaction_path, reaction_signature)
+    except ServiceError:
+        raise
+    except FileNotFoundError as exc:
+        raise ServiceError(
+            "需要 .reactionabcd 文件",
+            reason="missing_reac",
+        ) from exc
+    except ReactionSourceChangedError as exc:
+        raise ServiceError(
+            "reactionabcd 文件在机制网络查询期间发生变化，请重试",
+            reason="reaction_source_stale",
+        ) from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无法加载反应网络: {exc}",
+            reason="bad_reac",
+        ) from exc
+
+    reactionevent_path = str(
+        artifacts.get("reactionevent") or ""
+    ).strip()
+    molecules_path = str(artifacts.get("molecules") or "").strip()
+    evidence_provider: EventIndexEvidenceProvider | None = None
+    rebuild_event_index = False
+    if (
+        reactionevent_path
+        and molecules_path
+        and Path(reactionevent_path).is_file()
+        and Path(molecules_path).is_file()
+    ):
+        try:
+            opened = EVENT_EVIDENCE_STORE.open_required(
+                reactionevent_path,
+                molecules_path,
+            )
+            evidence_provider = EventIndexEvidenceProvider(
+                reactionevent_path,
+                molecules_path,
+                store=EVENT_EVIDENCE_STORE,
+                opened=opened,
+            )
+        except (IndexStaleError, IndexInvalidError):
+            rebuild_event_index = True
+        except IndexNotReadyError:
+            rebuild_event_index = False
+
+    try:
+        try:
+            payload = build_mechanism_network(
+                network,
+                anchor_smiles=anchor_smiles,
+                evidence_provider=evidence_provider,
+                **limits,
+            )
+            if evidence_provider is not None:
+                evidence_provider.assert_current()
+        except IndexNotReadyError:
+            evidence_provider = None
+            rebuild_event_index = True
+            payload = build_mechanism_network(
+                network,
+                anchor_smiles=anchor_smiles,
+                evidence_provider=None,
+                **limits,
+            )
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无效的机制网络查询参数: {exc}",
+            reason="bad_mechanism_query",
+        ) from exc
+
+    _pathway_assert_source_current(reaction_path, reaction_signature)
+    payload["source_signatures"] = {
+        "reactionabcd": reaction_signature,
+        **(
+            evidence_provider.source_signatures
+            if evidence_provider is not None
+            else {}
+        ),
+    }
+    if evidence_provider is not None:
+        # A ready index is part of the query snapshot even when the bounded
+        # neighborhood contains no reaction node to annotate.
+        payload["evidence_level"] = "event_evidence_linked"
+        payload["evidence_status"] = "evidence_linked"
+    else:
+        payload["evidence_level"] = "reaction_passage_counts"
+        payload["evidence_status"] = "network_only"
+        payload["preparation_command"] = _pathway_preparation_command(
+            reaction_path,
+            reactionevent_path,
+            rebuild=rebuild_event_index,
+        )
+    payload["ok"] = True
+    payload["elements"] = _mechanism_cytoscape_elements(payload)
+    return payload
+
+
+def project_mechanism_evidence(
+    payload: Mapping[str, Any],
+    evidence_filter: str,
+) -> dict[str, Any]:
+    """Return the exact mechanism snapshot displayed and exported by Dash.
+
+    Filtering is intentionally a pure, source-I/O-free projection of the
+    already built payload.  A retained reaction keeps its complete incident
+    species and semantic edges; species that become isolated are removed.
+    """
+    if evidence_filter not in {"all", "evidence_linked", "network_only"}:
+        raise ValueError("invalid mechanism evidence filter")
+    validated = validate_mechanism_payload(payload)
+    projected = copy.deepcopy(dict(payload))
+    if evidence_filter == "all":
+        projected["nodes"] = copy.deepcopy(validated["nodes"])
+        projected["edges"] = copy.deepcopy(validated["edges"])
+        projected["_ui_evidence_filter"] = "all"
+        validate_mechanism_payload(projected)
+        return projected
+
+    kept_reactions = {
+        str(node["id"])
+        for node in validated["nodes"]
+        if (
+            node.get("kind") == "reaction"
+            and node.get("evidence_status") == evidence_filter
+        )
+    }
+    kept_edges = [
+        edge
+        for edge in validated["edges"]
+        if (
+            str(edge.get("source") or "") in kept_reactions
+            or str(edge.get("target") or "") in kept_reactions
+        )
+    ]
+    kept_species = {
+        str(endpoint)
+        for edge in kept_edges
+        for endpoint in (edge.get("source"), edge.get("target"))
+        if str(endpoint) not in kept_reactions
+    }
+    kept_nodes = kept_reactions | kept_species
+    projected["nodes"] = [
+        copy.deepcopy(node)
+        for node in validated["nodes"]
+        if str(node.get("id") or "") in kept_nodes
+    ]
+    projected["edges"] = [copy.deepcopy(edge) for edge in kept_edges]
+    original_meta = (
+        payload.get("meta")
+        if isinstance(payload.get("meta"), Mapping)
+        else {}
+    )
+    reaction_count = len(kept_reactions)
+    projected["meta"] = {
+        "node_count": len(projected["nodes"]),
+        "edge_count": len(projected["edges"]),
+        "reaction_count": reaction_count,
+        "truncated": bool(original_meta.get("truncated")),
+        "reason": (
+            str(original_meta.get("reason") or "ok")
+            if reaction_count
+            else "filtered_by_evidence"
+        ),
+    }
+    projected["_ui_evidence_filter"] = evidence_filter
+    validate_mechanism_payload(projected)
+    projected["elements"] = _mechanism_cytoscape_elements(projected)
+    return projected
+
+
+def project_network_evidence(
+    payload: Mapping[str, Any],
+    evidence_filter: str,
+) -> dict[str, Any]:
+    """Project one stored raw network without rebuilding either semantics."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("network payload must be a mapping")
+    if payload.get("network_semantics") != "mechanism":
+        return copy.deepcopy(dict(payload))
+    return project_mechanism_evidence(payload, evidence_filter)
+
+
+def _mechanism_csv_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return _spreadsheet_safe_mechanism_text(value)
+    return value
+
+
+def _spreadsheet_safe_mechanism_text(value: str) -> str:
+    """Neutralize formula-like CSV text without changing numeric cells."""
+    if not value:
+        return value
+    index = 0
+    has_control_prefix = False
+    while index < len(value) and (
+        value[index].isspace() or ord(value[index]) < 32
+    ):
+        has_control_prefix = has_control_prefix or (
+            ord(value[index]) < 32
+        )
+        index += 1
+    formula_prefix = index < len(value) and value[index] in "=+-@"
+    if has_control_prefix or formula_prefix:
+        return "'" + value
+    return value
+
+
+def _mechanism_compact_json(value: Any) -> str:
+    if value is None:
+        return ""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _mechanism_csv(
+    records: Any,
+    columns: tuple[str, ...],
+    *,
+    node_rows: bool,
+) -> str:
+    if not isinstance(records, (list, tuple)):
+        raise ValueError("mechanism export records must be a sequence")
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=columns,
+        extrasaction="ignore",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            raise ValueError("mechanism export record must be a mapping")
+        row = {
+            key: _mechanism_csv_value(raw.get(key))
+            for key in columns
+        }
+        if node_rows:
+            row["reactants_json"] = _mechanism_compact_json(
+                raw.get("reactants")
+            )
+            row["products_json"] = _mechanism_compact_json(
+                raw.get("products")
+            )
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def export_mechanism_graph(
+    payload: Mapping[str, Any],
+    format: str,
+) -> dict[str, Any] | str | bytes:
+    """Export one already-computed mechanism payload without source I/O."""
+    if format not in _MECHANISM_EXPORT_FORMATS:
+        supported = ", ".join(_MECHANISM_EXPORT_FORMATS)
+        raise ValueError(
+            f"unknown mechanism graph format {format!r}; "
+            f"valid formats: {supported}"
+        )
+
+    validated = validate_mechanism_payload(payload)
+    if format == "node-csv":
+        return _mechanism_csv(
+            validated["nodes"],
+            _MECHANISM_NODE_CSV_COLUMNS,
+            node_rows=True,
+        )
+    if format == "edge-csv":
+        return _mechanism_csv(
+            validated["edges"],
+            _MECHANISM_EDGE_CSV_COLUMNS,
+            node_rows=False,
+        )
+
+    graph = to_networkx_mechanism_graph(validated)
+    serialized = serialize_mechanism_graph(graph, format=format)
+    if format != "cytoscape-json":
+        return serialized
+    if not isinstance(serialized, dict):
+        raise ValueError("mechanism Cytoscape export is invalid")
+    document = dict(serialized)
+    raw_data = document.get("data")
+    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
+    data.update(
+        schema_version=validated.get("schema_version"),
+        network_semantics=validated.get("network_semantics"),
+        evidence_level=validated.get("evidence_level"),
+        anchor_smiles=validated.get("anchor_smiles"),
+        query=dict(validated.get("query") or {}),
+        source_signatures=dict(validated.get("source_signatures") or {}),
+    )
+    document["data"] = data
+    return document
+
+
+# ---------------------------------------------------------------------------
 # Observation network (Cytoscape)
 # ---------------------------------------------------------------------------
 
@@ -2006,6 +2766,8 @@ def build_observation_elements(
         )
     return {
         "ok": True,
+        "network_semantics": "event_transfer",
+        "evidence_level": "aggregate_observation",
         "elements": elements,
         "species_smiles": [n.get("smiles", "") for n in species_nodes],
         "meta": payload.get("meta", {}),
@@ -2221,6 +2983,7 @@ __all__ = [
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
+    "find_pathways",
     "search_species_catalog",
     "search_species",
     "species_detail",

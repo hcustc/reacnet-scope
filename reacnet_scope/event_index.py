@@ -71,7 +71,21 @@ def _strict_int(
     minimum: int | None = None,
 ) -> int:
     try:
-        parsed = int(value)
+        if type(value) is int:
+            parsed = value
+        elif isinstance(value, str):
+            digits = value[1:] if value.startswith("-") else value
+            if (
+                not digits
+                or not digits.isascii()
+                or not digits.isdecimal()
+            ):
+                raise TypeError
+            parsed = int(value, 10)
+        elif isinstance(value, float) and value.is_integer():
+            parsed = int(value)
+        else:
+            raise TypeError
     except (TypeError, ValueError) as exc:
         raise IndexInvalidError(
             f"Event evidence index {label} is invalid"
@@ -1179,6 +1193,11 @@ class EventEvidenceStore:
                             "Event evidence index reaction summary "
                             "matched_events is invalid"
                         )
+                    if distinct_intervals > opened["available_intervals"]:
+                        raise IndexInvalidError(
+                            "Event evidence index reaction summary "
+                            "distinct_intervals is invalid"
+                        )
                     output[str(key)] = {
                         "reaction_key": str(key),
                         "total_events": total_events,
@@ -1232,3 +1251,169 @@ class EventEvidenceStore:
 
 
 EVENT_EVIDENCE_STORE = EventEvidenceStore()
+
+
+class EventIndexEvidenceProvider:
+    """Adapt one ready event index to the candidate-path evidence protocol."""
+
+    def __init__(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        *,
+        store: EventEvidenceStore = EVENT_EVIDENCE_STORE,
+        opened: dict[str, Any] | None = None,
+    ) -> None:
+        self._reactionevent_file = os.path.abspath(reactionevent_file)
+        self._molecules_file = os.path.abspath(molecules_file)
+        self._store = store
+        self._opened = dict(
+            opened
+            if opened is not None
+            else store.open_required(
+                self._reactionevent_file,
+                self._molecules_file,
+            )
+        )
+        self._index_path = os.path.abspath(str(self._opened["index_path"]))
+        self._source_identities = {
+            "reactionevent": self._identity(self._reactionevent_file),
+            "molecules": self._identity(self._molecules_file),
+            "event_index": self._identity(self._index_path),
+        }
+        self._source_signatures = {
+            "reactionevent": self._signature(self._reactionevent_file),
+            "molecules": self._signature(self._molecules_file),
+            "event_index": {
+                **self._signature(self._index_path),
+                "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+            },
+        }
+
+    @staticmethod
+    def _identity(path_text: str) -> tuple[int, int, int, int] | None:
+        try:
+            stat = os.stat(path_text)
+        except OSError:
+            return None
+        return (
+            int(stat.st_dev),
+            int(stat.st_ino),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        )
+
+    @staticmethod
+    def _signature(path_text: str) -> dict[str, Any]:
+        path = os.path.abspath(path_text)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return {"path": path}
+        return {
+            "path": path,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    @property
+    def source_signatures(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: dict(signature)
+            for name, signature in self._source_signatures.items()
+        }
+
+    def assert_current(self) -> None:
+        """Reject source replacement instead of mixing query snapshots."""
+        paths = {
+            "reactionevent": self._reactionevent_file,
+            "molecules": self._molecules_file,
+            "event_index": self._index_path,
+        }
+        for name, path in paths.items():
+            expected = self._source_identities[name]
+            if expected is None:
+                continue
+            actual = self._identity(path)
+            if actual != expected:
+                error_type = (
+                    IndexInvalidError
+                    if name == "event_index"
+                    else IndexStaleError
+                )
+                raise error_type(
+                    f"Event evidence {name} changed during pathway query"
+                )
+
+    def reaction_summaries(
+        self,
+        reaction_keys: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        selected = tuple(
+            sorted({str(key) for key in reaction_keys if str(key)})
+        )
+        if not selected:
+            return {}
+        self.assert_current()
+        try:
+            found = self._store.reaction_summary(
+                self._reactionevent_file,
+                self._molecules_file,
+                selected,
+            )
+        except IndexNotReadyError:
+            raise
+        except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
+            raise IndexInvalidError(
+                f"Event evidence batch query is invalid: {exc}"
+            ) from exc
+        self.assert_current()
+        available_intervals = _strict_int(
+            self._opened.get("available_intervals"),
+            "available_intervals",
+            minimum=0,
+        )
+        summaries: dict[str, dict[str, Any]] = {}
+        for key in selected:
+            summaries[key] = {
+                "reaction_key": key,
+                "total_events": 0,
+                "matched_events": 0,
+                "distinct_intervals": 0,
+                "available_intervals": available_intervals,
+                "source_references": (self._index_path,),
+                **dict(found.get(key, {})),
+            }
+            total_events = _strict_int(
+                summaries[key].get("total_events"),
+                "reaction summary total_events",
+                minimum=0,
+            )
+            matched_events = _strict_int(
+                summaries[key].get("matched_events"),
+                "reaction summary matched_events",
+                minimum=0,
+            )
+            distinct_intervals = _strict_int(
+                summaries[key].get("distinct_intervals"),
+                "reaction summary distinct_intervals",
+                minimum=0,
+            )
+            if matched_events > total_events:
+                raise IndexInvalidError(
+                    "Event evidence index reaction summary "
+                    "matched_events is invalid"
+                )
+            if distinct_intervals > available_intervals:
+                raise IndexInvalidError(
+                    "Event evidence index reaction summary "
+                    "distinct_intervals is invalid"
+                )
+            summaries[key].update(
+                total_events=total_events,
+                matched_events=matched_events,
+                distinct_intervals=distinct_intervals,
+                available_intervals=available_intervals,
+            )
+            summaries[key]["source_references"] = (self._index_path,)
+        return summaries

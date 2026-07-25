@@ -40,6 +40,12 @@ from rng_tools.carbon_plot import (  # noqa: E402
     plot_carbon_number_evolution,
     species_file_to_tidy_table,
 )
+from rng_tools.pathway_export import (  # noqa: E402
+    PATHWAY_CSV_FIELDS,
+    PATHWAY_SCHEMA_VERSION,
+    pathway_csv_rows as _pathway_csv_rows,
+    pathway_document as _pathway_document,
+)
 
 
 def detect_default_reaction_file() -> Path:
@@ -121,6 +127,100 @@ def write_csv(path: str, fieldnames: Sequence[str], rows: Iterable[dict]) -> Non
         w.writeheader()
         for row in rows:
             w.writerow(row)
+
+
+def find_pathways_service(
+    artifacts: dict[str, str],
+    start_smiles: str,
+    **limits: object,
+) -> dict:
+    """Load the shared read-only pathway adapter only for this subcommand."""
+    from scripts.webapp_dash.services import find_pathways
+
+    return find_pathways(artifacts, start_smiles, **limits)
+
+
+def _reaction_base(reaction_path: str) -> str:
+    suffix = ".reactionabcd"
+    return reaction_path[: -len(suffix)] if reaction_path.endswith(suffix) else reaction_path
+
+
+def _pathway_artifacts(reaction_path: str) -> dict[str, str]:
+    base = _reaction_base(reaction_path)
+    return {
+        "reaction": reaction_path,
+        "reactionevent": f"{base}.reactionevent.csv",
+        "molecules": f"{base}.molecules.csv",
+    }
+
+
+def _write_json_atomic(path: str, document: dict) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(f"{target}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(str(temporary), str(target))
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _print_pathway_table(payload: dict) -> None:
+    paths = payload.get("paths", [])
+    print(
+        f"# candidate_paths={len(paths)}, reason={payload.get('reason', '')}, "
+        f"truncated={payload.get('truncated', False)}, "
+        f"evidence={payload.get('evidence_status', 'network_only')}"
+    )
+    print("rank,score,steps,evidence_status,species")
+    for path in paths:
+        species = " -> ".join(str(item) for item in path.get("species", []))
+        print(
+            f"{path.get('rank')},{path.get('score')},{len(path.get('steps', []))},"
+            f"{path.get('evidence_status')},{species}"
+        )
+
+
+def cmd_pathway(args: argparse.Namespace) -> int:
+    artifacts = _pathway_artifacts(args.reac)
+    try:
+        payload = find_pathways_service(
+            artifacts,
+            args.start_smiles,
+            direction=args.direction,
+            max_depth=args.max_depth,
+            max_branches=args.max_branches,
+            max_paths=args.max_paths,
+            max_expansions=args.max_expansions,
+            min_net_tp=args.min_net_tp,
+            min_directionality=args.min_directionality,
+        )
+    except Exception as exc:
+        from scripts.webapp_dash.services import ServiceError
+
+        if not isinstance(exc, ServiceError):
+            raise
+        print(f"[ERROR] {exc.message}", file=sys.stderr)
+        return 2
+    document = _pathway_document(payload)
+    _print_pathway_table(payload)
+
+    preparation_command = payload.get("preparation_command")
+    if preparation_command:
+        print(preparation_command, file=sys.stderr)
+
+    if args.out_json:
+        _write_json_atomic(args.out_json, document)
+        print(f"[OK] wrote: {args.out_json}")
+    if args.out_csv:
+        write_csv(args.out_csv, PATHWAY_CSV_FIELDS, _pathway_csv_rows(payload))
+        print(f"[OK] wrote: {args.out_csv}")
+    return 0
 
 
 def cmd_species(args: argparse.Namespace) -> int:
@@ -915,6 +1015,35 @@ def cmd_carbon_plot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bounded_int(name: str, minimum: int, maximum: int | None = None):
+    def parse(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
+        if parsed < minimum or (maximum is not None and parsed > maximum):
+            upper = f" and <= {maximum}" if maximum is not None else ""
+            raise argparse.ArgumentTypeError(
+                f"{name} must be >= {minimum}{upper}"
+            )
+        return parsed
+
+    return parse
+
+
+def _unit_float(name: str):
+    def parse(value: str) -> float:
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+        if not 0.0 <= parsed <= 1.0:
+            raise argparse.ArgumentTypeError(f"{name} must be in [0, 1]")
+        return parsed
+
+    return parse
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="ReacNetGenerator 常用检索终端工具 (formula/smiles/path/topshare/plot/carbon-plot)."
@@ -986,6 +1115,70 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ts.add_argument("--abs-metric", action="store_true", help="对 metric 取绝对值后统计")
     sp_ts.add_argument("--out", default="", help="可选输出 CSV 路径")
     sp_ts.set_defaults(func=cmd_topshare)
+
+    sp_pathway = sub.add_parser(
+        "pathway",
+        help="检索并排序有界候选反应路径（候选路线，不代表机理证明）",
+    )
+    sp_pathway.add_argument(
+        "--reac",
+        default=str(DEFAULT_REACTION_FILE),
+        help=f"reactionabcd 文件路径 (default: {DEFAULT_REACTION_FILE})",
+    )
+    sp_pathway.add_argument(
+        "--start-smiles",
+        required=True,
+        help="路径检索起始物种 SMILES",
+    )
+    sp_pathway.add_argument(
+        "--direction",
+        choices=["downstream", "upstream"],
+        default="downstream",
+        help="沿生成方向或溯源方向检索",
+    )
+    sp_pathway.add_argument(
+        "--max-depth",
+        type=_bounded_int("max_depth", 1, 12),
+        default=3,
+        help="最大路径步数 (1-12)",
+    )
+    sp_pathway.add_argument(
+        "--max-branches",
+        type=_bounded_int("max_branches", 1, 100),
+        default=5,
+        help="每个状态保留的最大分支数 (1-100)",
+    )
+    sp_pathway.add_argument(
+        "--max-paths",
+        type=_bounded_int("max_paths", 1, 500),
+        default=20,
+        help="最大候选路径数 (1-500)",
+    )
+    sp_pathway.add_argument(
+        "--max-expansions",
+        type=_bounded_int("max_expansions", 1, 1_000_000),
+        default=5000,
+        help="最大搜索展开数 (1-1000000)",
+    )
+    sp_pathway.add_argument(
+        "--min-net-tp",
+        type=_bounded_int("min_net_tp", 1),
+        default=1,
+        help="最小正向净反应次数 (>=1)",
+    )
+    sp_pathway.add_argument(
+        "--min-directionality",
+        type=_unit_float("min_directionality"),
+        default=0.05,
+        help="最小方向性阈值 (0-1)",
+    )
+    sp_pathway.add_argument("--out-json", default="", help="可选 JSON 输出路径")
+    sp_pathway.add_argument(
+        "--out-csv",
+        default="",
+        help="可选逐步扁平 CSV 输出路径",
+    )
+    sp_pathway.set_defaults(func=cmd_pathway)
 
     sp_plot = sub.add_parser(
         "plot",
@@ -1150,9 +1343,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return int(args.func(args))
 
 
