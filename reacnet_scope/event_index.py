@@ -37,7 +37,7 @@ from .rng_events import (
 )
 
 
-EVENT_EVIDENCE_SCHEMA_VERSION = 1
+EVENT_EVIDENCE_SCHEMA_VERSION = 3
 _REQUIRED_TABLE_COLUMNS = {
     "meta": {"key", "value"},
     "events": {
@@ -52,7 +52,17 @@ _REQUIRED_TABLE_COLUMNS = {
         "atom_ids_json",
         "reactant_bonds_json",
         "product_bonds_json",
+        "reactant_participants_json",
+        "product_participants_json",
         "association_status",
+        "occurrence",
+    },
+    "event_atoms": {"event_id", "atom_id"},
+    "event_species": {
+        "event_id",
+        "side",
+        "species_smiles",
+        "timestep_index",
         "occurrence",
     },
     "reaction_summary": {
@@ -62,6 +72,14 @@ _REQUIRED_TABLE_COLUMNS = {
         "distinct_intervals",
     },
 }
+
+_EVENT_SELECT_COLUMNS = """
+    event_id,reaction_key,source_row,timestep_index,
+    before_timestep,after_timestep,reactant_text,
+    product_text,atom_ids_json,reactant_bonds_json,
+    product_bonds_json,reactant_participants_json,
+    product_participants_json,association_status,occurrence
+"""
 
 
 def _strict_int(
@@ -118,6 +136,143 @@ def _decode_json_list(raw: Any, label: str) -> list[Any]:
     return value
 
 
+def _participant_payload(
+    molecules: Iterable[MoleculeRow],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "species": str(molecule.species),
+            "atom_ids": sorted(atom_id + 1 for atom_id in molecule.atom_ids),
+        }
+        for molecule in molecules
+    ]
+
+
+def _decode_participants(raw: Any, label: str) -> list[dict[str, Any]]:
+    values = _decode_json_list(raw, label)
+    participants: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise IndexInvalidError(
+                f"Event evidence index {label} participants are invalid"
+            )
+        species = value.get("species")
+        atom_ids = value.get("atom_ids")
+        if not isinstance(species, str) or not isinstance(atom_ids, list):
+            raise IndexInvalidError(
+                f"Event evidence index {label} participants are invalid"
+            )
+        if any(
+            not isinstance(atom_id, int) or isinstance(atom_id, bool)
+            for atom_id in atom_ids
+        ):
+            raise IndexInvalidError(
+                f"Event evidence index {label} atom ids are invalid"
+            )
+        participants.append(
+            {
+                "species": species,
+                "atom_ids": sorted(set(atom_ids)),
+            }
+        )
+    return participants
+
+
+def _event_payload_from_record(
+    record: Iterable[Any],
+    *,
+    event_index: int,
+) -> dict[str, Any]:
+    (
+        event_id,
+        _stored_key,
+        source_row,
+        timestep_index,
+        before_timestep,
+        after_timestep,
+        reactant,
+        product,
+        atom_ids_json,
+        reactant_bonds_json,
+        product_bonds_json,
+        reactant_participants_json,
+        product_participants_json,
+        association_status,
+        occurrence,
+    ) = record
+    atom_values = _decode_json_list(atom_ids_json, "atom_ids_json")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in atom_values
+    ):
+        raise IndexInvalidError(
+            "Event evidence index atom_ids_json payload must contain integers"
+        )
+    atom_ids = sorted(set(atom_values))
+    reactant_values = _decode_json_list(
+        reactant_bonds_json, "reactant_bonds_json"
+    )
+    product_values = _decode_json_list(
+        product_bonds_json, "product_bonds_json"
+    )
+    if any(
+        not isinstance(value, str)
+        for value in reactant_values + product_values
+    ):
+        raise IndexInvalidError(
+            "Event evidence index bond payloads must contain strings"
+        )
+    if association_status not in {
+        "matched",
+        "unresolved_hmm_timeline",
+        "reactionevent_only",
+    }:
+        raise IndexInvalidError(
+            "Event evidence index association_status is invalid"
+        )
+    reactant_participants = _decode_participants(
+        reactant_participants_json,
+        "reactant_participants_json",
+    )
+    product_participants = _decode_participants(
+        product_participants_json,
+        "product_participants_json",
+    )
+    return {
+        "event_index": event_index,
+        "event_id": str(event_id),
+        "source_row": int(source_row),
+        "timestep_index": int(timestep_index),
+        "before_timestep": int(before_timestep),
+        "after_timestep": int(after_timestep),
+        "anchor_frame": int(after_timestep),
+        "reactant": str(reactant),
+        "product": str(product),
+        "reaction_smiles": f"{reactant} -> {product}",
+        "occurrence": int(occurrence),
+        "atom_ids": ",".join(map(str, atom_ids)),
+        "atom_id_list": atom_ids,
+        "rng_atom_ids": ",".join(
+            str(atom_id - 1) for atom_id in atom_ids
+        ),
+        "atom_count": len(atom_ids),
+        "reactant_bonds": ";".join(reactant_values),
+        "product_bonds": ";".join(product_values),
+        "reactant_participants": reactant_participants,
+        "product_participants": product_participants,
+        "association_status": str(association_status),
+        "event_class": (
+            "RNG 事件"
+            if association_status == "matched"
+            else (
+                "RNG 事件区间"
+                if association_status == "reactionevent_only"
+                else "RNG 事件（原子关联不确定）"
+            )
+        ),
+    }
+
+
 def _write_meta(connection: sqlite3.Connection, values: dict[str, Any]) -> None:
     connection.executemany(
         """
@@ -136,6 +291,32 @@ def _event_id(timestep_index: int, source_row: int, atom_ids: list[int]) -> str:
         ).encode("utf-8")
     ).hexdigest()[:12]
     return f"rngevt_{timestep_index}_{digest}"
+
+
+def _event_species_rows(
+    event_id: str,
+    timestep_index: int,
+    reaction_terms: tuple[tuple[str, ...], tuple[str, ...]],
+) -> list[tuple[str, str, str, int, int]]:
+    rows: list[tuple[str, str, str, int, int]] = []
+    for side, terms in zip(
+        ("reactant", "product"),
+        reaction_terms,
+        strict=True,
+    ):
+        occurrences: dict[str, int] = defaultdict(int)
+        for species in terms:
+            occurrences[species] += 1
+            rows.append(
+                (
+                    event_id,
+                    side,
+                    species,
+                    int(timestep_index),
+                    occurrences[species],
+                )
+            )
+    return rows
 
 
 def _read_csv_header(
@@ -304,9 +485,16 @@ class EventEvidenceStore:
     @staticmethod
     def _source_pair(
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
     ) -> tuple[tuple[str, int, int], tuple[str, int, int]]:
-        return _source_signature(reactionevent_file), _source_signature(molecules_file)
+        reaction_source = _source_signature(reactionevent_file)
+        molecule_path = str(molecules_file or "").strip()
+        molecule_source = (
+            _source_signature(molecule_path)
+            if molecule_path and Path(molecule_path).is_file()
+            else ("", 0, 0)
+        )
+        return reaction_source, molecule_source
 
     @staticmethod
     def _connect_for_build(target: Path) -> sqlite3.Connection:
@@ -331,6 +519,8 @@ class EventEvidenceStore:
                 atom_ids_json TEXT NOT NULL,
                 reactant_bonds_json TEXT NOT NULL,
                 product_bonds_json TEXT NOT NULL,
+                reactant_participants_json TEXT NOT NULL,
+                product_participants_json TEXT NOT NULL,
                 association_status TEXT NOT NULL,
                 occurrence INTEGER NOT NULL
             )
@@ -340,6 +530,43 @@ class EventEvidenceStore:
             """
             CREATE INDEX IF NOT EXISTS events_by_reaction
             ON events(reaction_key,timestep_index,source_row,event_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_atoms(
+                event_id TEXT NOT NULL,
+                atom_id INTEGER NOT NULL,
+                PRIMARY KEY(event_id,atom_id),
+                FOREIGN KEY(event_id) REFERENCES events(event_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS event_atoms_by_atom
+            ON event_atoms(atom_id,event_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_species(
+                event_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                species_smiles TEXT NOT NULL,
+                timestep_index INTEGER NOT NULL,
+                occurrence INTEGER NOT NULL,
+                PRIMARY KEY(event_id,side,species_smiles,occurrence),
+                FOREIGN KEY(event_id) REFERENCES events(event_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS event_species_lookup
+            ON event_species(
+                side,species_smiles,timestep_index,event_id
+            )
             """
         )
         connection.execute(
@@ -410,7 +637,13 @@ class EventEvidenceStore:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            if not {"meta", "events", "reaction_summary"}.issubset(tables):
+            if not {
+                "meta",
+                "events",
+                "event_atoms",
+                "event_species",
+                "reaction_summary",
+            }.issubset(tables):
                 raise IndexInvalidError("Event evidence index tables are incomplete")
             for table, required_columns in _REQUIRED_TABLE_COLUMNS.items():
                 columns = {
@@ -454,25 +687,34 @@ class EventEvidenceStore:
             "event_count": event_count,
             "reaction_types": reaction_types,
             "available_intervals": available_intervals,
+            "association_available": meta.get(
+                "association_available", "1"
+            )
+            == "1",
+            "time_basis": meta.get("time_basis", "physical_timestep"),
             "query_only": query_only,
         }
 
     def status(
         self,
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
     ) -> dict[str, Any]:
         index_path = self._expected_path(reactionevent_file)
         building_path = Path(f"{index_path}.building")
         reaction_path = Path(reactionevent_file)
-        molecule_path = Path(molecules_file)
-        if not reaction_path.is_file() or not molecule_path.is_file():
+        molecule_text = str(molecules_file or "").strip()
+        molecule_path = Path(molecule_text) if molecule_text else None
+        molecule_available = bool(
+            molecule_path is not None and molecule_path.is_file()
+        )
+        if not reaction_path.is_file():
             return {
                 "state": "missing_source",
                 "index_path": str(index_path),
                 "building_path": str(building_path),
                 "reactionevent_file": str(reaction_path),
-                "molecules_file": str(molecule_path),
+                "molecules_file": molecule_text,
             }
         active = index_path if index_path.is_file() else building_path
         state = (
@@ -484,7 +726,7 @@ class EventEvidenceStore:
         if index_path.is_file():
             try:
                 details = self.open_required(
-                    str(reaction_path), str(molecule_path)
+                    str(reaction_path), molecule_text
                 )
             except IndexStaleError:
                 state = "stale"
@@ -506,7 +748,34 @@ class EventEvidenceStore:
             "building_path": str(building_path),
             "index_size": active.stat().st_size if active.exists() else 0,
             "reactionevent_file": str(reaction_path.resolve()),
-            "molecules_file": str(molecule_path.resolve()),
+            "molecules_file": (
+                str(molecule_path.resolve())
+                if molecule_path is not None and molecule_path.is_file()
+                else ""
+            ),
+            "association_available": bool(
+                details.get(
+                    "association_available",
+                    meta.get(
+                        "association_available",
+                        "1" if molecule_available else "0",
+                    )
+                    == "1",
+                )
+            ),
+            "time_basis": str(
+                details.get(
+                    "time_basis",
+                    meta.get(
+                        "time_basis",
+                        (
+                            "physical_timestep"
+                            if molecule_available
+                            else "timestep_index"
+                        ),
+                    ),
+                )
+            ),
             "event_count": int(
                 details.get(
                     "event_count",
@@ -537,7 +806,7 @@ class EventEvidenceStore:
     def open_required(
         self,
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
     ) -> dict[str, Any]:
         reaction_source, molecule_source = self._source_pair(
             reactionevent_file, molecules_file
@@ -553,10 +822,221 @@ class EventEvidenceStore:
             index_path, reaction_source, molecule_source
         )
 
+    def _build_reactionevent_only_unlocked(
+        self,
+        reaction_source: tuple[str, int, int],
+        *,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        index_path = event_evidence_index_path(reaction_source[0])
+        if index_path.is_file():
+            return self.open_required(reaction_source[0], "")
+        building_path = Path(f"{index_path}.building")
+        if building_path.exists():
+            building_path.unlink()
+        connection = self._connect_for_build(building_path)
+        event_count = 0
+        reaction_types: set[str] = set()
+        completed_interval = -1
+        last_source_row = 0
+        try:
+            _write_meta(
+                connection,
+                {
+                    "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                    "build_state": "building",
+                    "dataset_id": dataset_id_for_source(
+                        reaction_source[0]
+                    ),
+                    "reactionevent_file": reaction_source[0],
+                    "reactionevent_size": reaction_source[1],
+                    "reactionevent_mtime_ns": reaction_source[2],
+                    "molecules_file": "",
+                    "molecules_size": 0,
+                    "molecules_mtime_ns": 0,
+                    "association_available": 0,
+                    "time_basis": "timestep_index",
+                    "event_count": 0,
+                    "reaction_type_count": 0,
+                    "available_intervals": 0,
+                    "updated_at_epoch": int(time.time()),
+                },
+            )
+            with open(
+                reaction_source[0],
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                reader = csv.DictReader(handle)
+                required = {"Timestep_Index", "Reactant", "Product"}
+                if not required.issubset(set(reader.fieldnames or [])):
+                    raise RngEventDataError(
+                        "reactionevent CSV columns are incompatible"
+                    )
+                interval_summary: dict[str, list[int]] = defaultdict(
+                    lambda: [0, 0]
+                )
+
+                def flush_summary() -> None:
+                    for key, (total, matched) in interval_summary.items():
+                        reaction_types.add(key)
+                        connection.execute(
+                            """
+                            INSERT INTO reaction_summary(
+                                reaction_key,total_events,matched_events,
+                                distinct_intervals
+                            ) VALUES(?,?,?,1)
+                            ON CONFLICT(reaction_key) DO UPDATE SET
+                                total_events=total_events+excluded.total_events,
+                                matched_events=matched_events+excluded.matched_events,
+                                distinct_intervals=distinct_intervals+1
+                            """,
+                            (key, total, matched),
+                        )
+                    interval_summary.clear()
+
+                for source_row, raw in enumerate(reader, 1):
+                    try:
+                        interval = int(raw["Timestep_Index"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise RngEventDataError(
+                            "reactionevent CSV contains an invalid "
+                            "Timestep_Index"
+                        ) from exc
+                    if interval < completed_interval:
+                        raise RngEventDataError(
+                            "reactionevent CSV must be sorted by "
+                            "Timestep_Index"
+                        )
+                    if completed_interval >= 0 and interval != completed_interval:
+                        flush_summary()
+                    completed_interval = interval
+                    last_source_row = source_row
+                    reactant = str(raw.get("Reactant", "")).strip()
+                    product = str(raw.get("Product", "")).strip()
+                    terms = reaction_key(reactant, product)
+                    normalized_key = canonical_reaction_key(*terms)
+                    event_id = _event_id(interval, source_row, [])
+                    occurrence = interval_summary[normalized_key][0] + 1
+                    participants = [
+                        [
+                            {"species": species, "atom_ids": []}
+                            for species in side_terms
+                        ]
+                        for side_terms in terms
+                    ]
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id,reaction_key,source_row,timestep_index,
+                            before_timestep,after_timestep,reactant_text,
+                            product_text,atom_ids_json,reactant_bonds_json,
+                            product_bonds_json,reactant_participants_json,
+                            product_participants_json,association_status,
+                            occurrence
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            event_id,
+                            normalized_key,
+                            source_row,
+                            interval,
+                            interval,
+                            interval + 1,
+                            reactant,
+                            product,
+                            "[]",
+                            "[]",
+                            "[]",
+                            json.dumps(
+                                participants[0], separators=(",", ":")
+                            ),
+                            json.dumps(
+                                participants[1], separators=(",", ":")
+                            ),
+                            "reactionevent_only",
+                            occurrence,
+                        ),
+                    )
+                    connection.executemany(
+                        """
+                        INSERT INTO event_species(
+                            event_id,side,species_smiles,timestep_index,
+                            occurrence
+                        ) VALUES(?,?,?,?,?)
+                        """,
+                        _event_species_rows(event_id, interval, terms),
+                    )
+                    interval_summary[normalized_key][0] += 1
+                    event_count += 1
+                    if event_count % 10_000 == 0:
+                        connection.commit()
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "progress": min(
+                                        handle.buffer.tell()
+                                        / max(reaction_source[1], 1),
+                                        0.95,
+                                    ),
+                                    "phase": "indexing_reactionevent_only",
+                                    "message": (
+                                        "Indexing reactionevent chronology"
+                                    ),
+                                }
+                            )
+                flush_summary()
+            _write_meta(
+                connection,
+                {
+                    "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                    "build_state": "ready",
+                    "dataset_id": dataset_id_for_source(
+                        reaction_source[0]
+                    ),
+                    "reactionevent_file": reaction_source[0],
+                    "reactionevent_size": reaction_source[1],
+                    "reactionevent_mtime_ns": reaction_source[2],
+                    "molecules_file": "",
+                    "molecules_size": 0,
+                    "molecules_mtime_ns": 0,
+                    "association_available": 0,
+                    "time_basis": "timestep_index",
+                    "reactionevent_offset": reaction_source[1],
+                    "molecules_offset": 0,
+                    "completed_interval": completed_interval,
+                    "last_source_row": last_source_row,
+                    "molecule_frame_index": 0,
+                    "previous_molecule_timestep": "",
+                    "molecule_frame_count": 0,
+                    "event_count": event_count,
+                    "reaction_type_count": len(reaction_types),
+                    "available_intervals": max(
+                        completed_interval + 1, 0
+                    ),
+                    "updated_at_epoch": int(time.time()),
+                },
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        os.replace(building_path, index_path)
+        if progress_callback:
+            progress_callback(
+                {
+                    "progress": 1.0,
+                    "phase": "completed",
+                    "message": "Reactionevent chronology index ready",
+                }
+            )
+        result = self.open_required(reaction_source[0], "")
+        result["resumed"] = False
+        return result
+
     def build(
         self,
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
         *,
         progress_callback: Any = None,
     ) -> dict[str, Any]:
@@ -566,8 +1046,19 @@ class EventEvidenceStore:
         index_path = event_evidence_index_path(reaction_source[0])
         with _exclusive_build_lock(index_path):
             if index_path.is_file():
-                return self.open_required(
-                    reaction_source[0], molecule_source[0]
+                try:
+                    opened = self.open_required(
+                        reaction_source[0], molecule_source[0]
+                    )
+                except (IndexInvalidError, IndexStaleError):
+                    index_path.unlink()
+                else:
+                    opened["resumed"] = False
+                    return opened
+            if not molecule_source[0]:
+                return self._build_reactionevent_only_unlocked(
+                    reaction_source,
+                    progress_callback=progress_callback,
                 )
             building_path = Path(f"{index_path}.building")
             connection = self._connect_for_build(building_path)
@@ -668,6 +1159,8 @@ class EventEvidenceStore:
                             "molecules_file": molecule_source[0],
                             "molecules_size": molecule_source[1],
                             "molecules_mtime_ns": molecule_source[2],
+                            "association_available": 1,
+                            "time_basis": "physical_timestep",
                             "reactionevent_offset": event_offset,
                             "molecules_offset": molecule_offset,
                             "completed_interval": completed_interval,
@@ -791,6 +1284,25 @@ class EventEvidenceStore:
                                 if component
                                 else "unresolved_hmm_timeline"
                             )
+                            event_id = _event_id(
+                                timestep_index,
+                                int(event["source_row"]),
+                                atom_ids,
+                            )
+                            reactant_participants = (
+                                _participant_payload(
+                                    component.reactant_molecules
+                                )
+                                if component
+                                else []
+                            )
+                            product_participants = (
+                                _participant_payload(
+                                    component.product_molecules
+                                )
+                                if component
+                                else []
+                            )
                             connection.execute(
                                 """
                                 INSERT INTO events(
@@ -798,16 +1310,14 @@ class EventEvidenceStore:
                                     timestep_index,before_timestep,
                                     after_timestep,reactant_text,product_text,
                                     atom_ids_json,reactant_bonds_json,
-                                    product_bonds_json,association_status,
-                                    occurrence
-                                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                    product_bonds_json,
+                                    reactant_participants_json,
+                                    product_participants_json,
+                                    association_status,occurrence
+                                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                                 """,
                                 (
-                                    _event_id(
-                                        timestep_index,
-                                        int(event["source_row"]),
-                                        atom_ids,
-                                    ),
+                                    event_id,
                                     normalized_key,
                                     int(event["source_row"]),
                                     timestep_index,
@@ -826,8 +1336,39 @@ class EventEvidenceStore:
                                         product_bonds,
                                         separators=(",", ":"),
                                     ),
+                                    json.dumps(
+                                        reactant_participants,
+                                        separators=(",", ":"),
+                                    ),
+                                    json.dumps(
+                                        product_participants,
+                                        separators=(",", ":"),
+                                    ),
                                     status,
                                     occurrences[normalized_key],
+                                ),
+                            )
+                            connection.executemany(
+                                """
+                                INSERT INTO event_atoms(event_id,atom_id)
+                                VALUES(?,?)
+                                """,
+                                [
+                                    (event_id, atom_id)
+                                    for atom_id in atom_ids
+                                ],
+                            )
+                            connection.executemany(
+                                """
+                                INSERT INTO event_species(
+                                    event_id,side,species_smiles,
+                                    timestep_index,occurrence
+                                ) VALUES(?,?,?,?,?)
+                                """,
+                                _event_species_rows(
+                                    event_id,
+                                    timestep_index,
+                                    event["reaction_key"],
                                 ),
                             )
                             summary_counts[normalized_key][0] += 1
@@ -882,6 +1423,8 @@ class EventEvidenceStore:
                                 "molecules_file": molecule_source[0],
                                 "molecules_size": molecule_source[1],
                                 "molecules_mtime_ns": molecule_source[2],
+                                "association_available": 1,
+                                "time_basis": "physical_timestep",
                                 "reactionevent_offset": next_event_offset,
                                 "molecules_offset": after_frame[3],
                                 "completed_interval": timestep_index,
@@ -965,6 +1508,8 @@ class EventEvidenceStore:
                             "molecules_file": molecule_source[0],
                             "molecules_size": molecule_source[1],
                             "molecules_mtime_ns": molecule_source[2],
+                            "association_available": 1,
+                            "time_basis": "physical_timestep",
                             "reactionevent_offset": reaction_source[1],
                             "molecules_offset": molecule_source[1],
                             "completed_interval": completed_interval,
@@ -1023,11 +1568,8 @@ class EventEvidenceStore:
                 ).fetchone()[0]
             )
             records = connection.execute(
-                """
-                SELECT event_id,reaction_key,source_row,timestep_index,
-                       before_timestep,after_timestep,reactant_text,
-                       product_text,atom_ids_json,reactant_bonds_json,
-                       product_bonds_json,association_status,occurrence
+                f"""
+                SELECT {_EVENT_SELECT_COLUMNS}
                 FROM events
                 WHERE reaction_key=?
                 ORDER BY timestep_index,source_row,event_id
@@ -1044,89 +1586,29 @@ class EventEvidenceStore:
         rows: list[dict[str, Any]] = []
         try:
             for page_index, record in enumerate(records, safe_offset + 1):
-                (
-                    event_id,
-                    _stored_key,
-                    source_row,
-                    timestep_index,
-                    before_timestep,
-                    after_timestep,
-                    reactant,
-                    product,
-                    atom_ids_json,
-                    reactant_bonds_json,
-                    product_bonds_json,
-                    association_status,
-                    occurrence,
-                ) = record
-                atom_values = _decode_json_list(
-                    atom_ids_json, "atom_ids_json"
-                )
-                if any(
-                    not isinstance(value, int) or isinstance(value, bool)
-                    for value in atom_values
-                ):
-                    raise IndexInvalidError(
-                        "Event evidence index atom_ids_json payload "
-                        "must contain integers"
-                    )
-                atom_ids = list(atom_values)
-                reactant_values = _decode_json_list(
-                    reactant_bonds_json, "reactant_bonds_json"
-                )
-                product_values = _decode_json_list(
-                    product_bonds_json, "product_bonds_json"
-                )
-                if any(
-                    not isinstance(value, str)
-                    for value in reactant_values + product_values
-                ):
-                    raise IndexInvalidError(
-                        "Event evidence index bond payloads "
-                        "must contain strings"
-                    )
-                reactant_bonds = list(reactant_values)
-                product_bonds = list(product_values)
-                if association_status not in {
-                    "matched",
-                    "unresolved_hmm_timeline",
-                }:
-                    raise IndexInvalidError(
-                        "Event evidence index association_status is invalid"
-                    )
                 rows.append(
-                    {
-                        "event_index": page_index,
-                        "event_id": str(event_id),
-                        "source_row": int(source_row),
-                        "timestep_index": int(timestep_index),
-                        "before_timestep": int(before_timestep),
-                        "after_timestep": int(after_timestep),
-                        "anchor_frame": int(after_timestep),
-                        "reactant": str(reactant),
-                        "product": str(product),
-                        "reaction_smiles": f"{reactant} -> {product}",
-                        "occurrence": int(occurrence),
-                        "atom_ids": ",".join(map(str, atom_ids)),
-                        "atom_id_list": atom_ids,
-                        "rng_atom_ids": ",".join(
-                            str(atom_id - 1) for atom_id in atom_ids
-                        ),
-                        "atom_count": len(atom_ids),
-                        "reactant_bonds": ";".join(reactant_bonds),
-                        "product_bonds": ";".join(product_bonds),
-                        "association_status": str(association_status),
-                        "event_class": (
-                            "RNG 事件"
-                            if association_status == "matched"
-                            else "RNG 事件（原子关联不确定）"
-                        ),
-                    }
+                    _event_payload_from_record(
+                        record,
+                        event_index=page_index,
+                    )
                 )
         except (TypeError, ValueError) as exc:
             raise IndexInvalidError(
                 f"Event evidence index payload is invalid: {exc}"
             ) from exc
+        source_signatures = {
+            "reactionevent": {
+                "path": os.path.abspath(reactionevent_file),
+                "size": os.path.getsize(reactionevent_file),
+                "mtime_ns": os.stat(reactionevent_file).st_mtime_ns,
+            },
+        }
+        if str(molecules_file or "").strip():
+            source_signatures["molecules"] = {
+                "path": os.path.abspath(molecules_file),
+                "size": os.path.getsize(molecules_file),
+                "mtime_ns": os.stat(molecules_file).st_mtime_ns,
+            }
         return {
             "rows": rows,
             "total": total,
@@ -1134,18 +1616,151 @@ class EventEvidenceStore:
             "offset": safe_offset,
             "has_more": safe_offset + len(rows) < total,
             "evidence_status": "evidence_linked",
-            "source_signatures": {
-                "reactionevent": {
-                    "path": os.path.abspath(reactionevent_file),
-                    "size": os.path.getsize(reactionevent_file),
-                    "mtime_ns": os.stat(reactionevent_file).st_mtime_ns,
-                },
-                "molecules": {
-                    "path": os.path.abspath(molecules_file),
-                    "size": os.path.getsize(molecules_file),
-                    "mtime_ns": os.stat(molecules_file).st_mtime_ns,
-                },
-            },
+            "association_available": opened["association_available"],
+            "time_basis": opened["time_basis"],
+            "source_signatures": source_signatures,
+        }
+
+    def query_adjacent_events(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        event_id: str,
+        *,
+        intermediate_smiles: str,
+        direction: str = "backward",
+        limit: int = 20,
+        include_total: bool = True,
+    ) -> dict[str, Any]:
+        """Find earlier/later authored events joined by one exact SMILES."""
+        opened = self.open_required(reactionevent_file, molecules_file)
+        direction_text = str(direction or "backward")
+        if direction_text not in {"backward", "forward"}:
+            raise ValueError("direction must be backward or forward")
+        bridge = str(intermediate_smiles or "").strip()
+        if not bridge:
+            raise ValueError("intermediate_smiles is required")
+        safe_limit = max(1, min(int(limit), 1000))
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            anchor_record = connection.execute(
+                f"""
+                SELECT {_EVENT_SELECT_COLUMNS}
+                FROM events
+                WHERE event_id=?
+                """,
+                (str(event_id),),
+            ).fetchone()
+            if anchor_record is None:
+                raise IndexInvalidError(
+                    f"Event evidence index does not contain event {event_id}"
+                )
+            anchor = _event_payload_from_record(
+                anchor_record,
+                event_index=1,
+            )
+            anchor_side = (
+                anchor["reactant_participants"]
+                if direction_text == "backward"
+                else anchor["product_participants"]
+            )
+            if bridge not in {
+                str(participant["species"]) for participant in anchor_side
+            }:
+                raise ValueError(
+                    "intermediate_smiles is not on the selected anchor side"
+                )
+            candidate_side = (
+                "product" if direction_text == "backward" else "reactant"
+            )
+            comparator = "<" if direction_text == "backward" else ">"
+            order = "DESC" if direction_text == "backward" else "ASC"
+            total = (
+                int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(DISTINCT e.event_id)
+                        FROM event_species AS s
+                        JOIN events AS e ON e.event_id=s.event_id
+                        WHERE s.side=? AND s.species_smiles=?
+                          AND e.timestep_index {comparator} ?
+                        """,
+                        (
+                            candidate_side,
+                            bridge,
+                            int(anchor["timestep_index"]),
+                        ),
+                    ).fetchone()[0]
+                )
+                if include_total
+                else None
+            )
+            records = connection.execute(
+                f"""
+                SELECT {_EVENT_SELECT_COLUMNS}
+                FROM events AS e
+                WHERE e.event_id IN (
+                    SELECT s.event_id
+                    FROM event_species AS s
+                    WHERE s.side=? AND s.species_smiles=?
+                      AND s.timestep_index {comparator} ?
+                )
+                ORDER BY e.timestep_index {order},e.source_row,e.event_id
+                LIMIT ?
+                """,
+                (
+                    candidate_side,
+                    bridge,
+                    int(anchor["timestep_index"]),
+                    safe_limit,
+                ),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event species index is corrupt: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+        rows: list[dict[str, Any]] = []
+        for rank, record in enumerate(records, 1):
+            candidate = _event_payload_from_record(
+                record,
+                event_index=rank,
+            )
+            candidate.update(
+                candidate_rank=rank,
+                direction=direction_text,
+                intermediate_smiles=bridge,
+                interval_gap=abs(
+                    int(anchor["timestep_index"])
+                    - int(candidate["timestep_index"])
+                ),
+                timestep_gap=max(
+                    0,
+                    (
+                        int(anchor["before_timestep"])
+                        - int(candidate["after_timestep"])
+                        if direction_text == "backward"
+                        else int(candidate["before_timestep"])
+                        - int(anchor["after_timestep"])
+                    ),
+                ),
+                evidence_level="rng_event",
+                time_basis=opened["time_basis"],
+                can_assert_order=True,
+            )
+            rows.append(candidate)
+        return {
+            "anchor": anchor,
+            "direction": direction_text,
+            "intermediate_smiles": bridge,
+            "rows": rows,
+            "total": total,
+            "limit": safe_limit,
+            "evidence_level": "rng_event",
+            "time_basis": opened["time_basis"],
+            "can_assert_order": True,
+            "association_available": opened["association_available"],
         }
 
     def reaction_summary(
@@ -1218,7 +1833,7 @@ class EventEvidenceStore:
     def clear(
         self,
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
     ) -> dict[str, Any]:
         del molecules_file
         index_path = resolve_dataset_paths(
@@ -1259,13 +1874,17 @@ class EventIndexEvidenceProvider:
     def __init__(
         self,
         reactionevent_file: str,
-        molecules_file: str,
+        molecules_file: str = "",
         *,
         store: EventEvidenceStore = EVENT_EVIDENCE_STORE,
         opened: dict[str, Any] | None = None,
     ) -> None:
         self._reactionevent_file = os.path.abspath(reactionevent_file)
-        self._molecules_file = os.path.abspath(molecules_file)
+        self._molecules_file = (
+            os.path.abspath(molecules_file)
+            if str(molecules_file or "").strip()
+            else ""
+        )
         self._store = store
         self._opened = dict(
             opened
@@ -1278,17 +1897,23 @@ class EventIndexEvidenceProvider:
         self._index_path = os.path.abspath(str(self._opened["index_path"]))
         self._source_identities = {
             "reactionevent": self._identity(self._reactionevent_file),
-            "molecules": self._identity(self._molecules_file),
             "event_index": self._identity(self._index_path),
         }
+        if self._molecules_file:
+            self._source_identities["molecules"] = self._identity(
+                self._molecules_file
+            )
         self._source_signatures = {
             "reactionevent": self._signature(self._reactionevent_file),
-            "molecules": self._signature(self._molecules_file),
             "event_index": {
                 **self._signature(self._index_path),
                 "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
             },
         }
+        if self._molecules_file:
+            self._source_signatures["molecules"] = self._signature(
+                self._molecules_file
+            )
 
     @staticmethod
     def _identity(path_text: str) -> tuple[int, int, int, int] | None:
@@ -1327,9 +1952,10 @@ class EventIndexEvidenceProvider:
         """Reject source replacement instead of mixing query snapshots."""
         paths = {
             "reactionevent": self._reactionevent_file,
-            "molecules": self._molecules_file,
             "event_index": self._index_path,
         }
+        if self._molecules_file:
+            paths["molecules"] = self._molecules_file
         for name, path in paths.items():
             expected = self._source_identities[name]
             if expected is None:

@@ -17,14 +17,15 @@ For a quick private-network trial, bind the existing entry point to the host
 interface:
 
 ```bash
-REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/data:/mnt:/scratch" \
+REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/media/$USER:/data:/mnt:/scratch" \
   uv run reacnet-scope-web-dash --host 0.0.0.0 --port 8060
 ```
 
 `REACNET_SCOPE_ALLOWED_ROOTS` controls which server directories are visible in
 the Dash directory browser. It is a colon-separated list and must include the
 actual mount point used by the simulation data. Restart the Dash or Gunicorn
-process after changing it. The legacy `run_web.sh` entry point serves a
+process after changing it. Setting it replaces the built-in defaults rather
+than appending to them. The legacy `run_web.sh` entry point serves a
 different UI; use `run_dash.sh` or `reacnet-scope-web-dash` for this interface.
 
 Use this only behind a VPN or a trusted LAN firewall. Do not expose the Dash
@@ -92,9 +93,10 @@ The preparation command supports `--clear {route,trajectory,all}` and
   `$REACNET_SCOPE_CACHE_DIR/datasets/<dataset-id>/`. Partial builds use a `.building` file and
   resume from their last committed source offset. Missing, stale, or invalid
   indexes cause a fast online error; Dash never builds or repairs them.
-- Reaction-event search reads ReacNetGenerator's `.reactionevent.csv` and
-  `.molecules.csv` outputs. Generate them with `--reaction-event` and
-  `--show-molecule-time`; Dash does not reconstruct events from Route.
+- Reaction-event search requires `.reactionevent.csv`; `.molecules.csv` is
+  optional and adds atom, bond, and physical-timestep evidence. Generate the
+  first with `--reaction-event`, and add `--show-molecule-time` when local
+  atom-trajectory verification is needed.
 - `GET /api/health` reports service uptime, cache writability, and allowed data
   roots for monitoring.
 

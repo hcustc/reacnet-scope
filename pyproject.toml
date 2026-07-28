@@ -13,7 +13,6 @@ dependencies = [
   "pandas>=2.0",
   "openpyxl>=3.1",
   "rdkit>=2023.9",
-  "networkx>=3.2,<4",
 ]
 keywords = ["reacnetgenerator", "reaction-network", "md", "chemistry", "smiles"]
 classifiers = [

@@ -69,15 +69,17 @@ from rng_tools.network import (  # noqa: E402
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
-from rng_tools.io import load_transition_table  # noqa: E402
 from rng_tools.dir_browser import validate_browse_path  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     choose_dataset_candidate,
     discover_dataset_candidates,
 )
-from rng_tools.observation_network import build_observation_network  # noqa: E402
-from rng_tools.formula import formula_exact_mass, formula_nominal_mass  # noqa: E402
+from rng_tools.formula import (  # noqa: E402
+    formula_exact_mass,
+    formula_isotopic_masses,
+    formula_nominal_mass,
+)
 from rng_tools.reaction import canonical_smiles  # noqa: E402
 from rng_tools.carbon_plot import (  # noqa: E402
     parse_carbon_range_specs,
@@ -155,28 +157,7 @@ def detect_default_reaction_file() -> Path:
     return candidates[0]
 
 
-def detect_default_transition_table() -> Path:
-    """Find the bundled RP3 transition matrix when no table is supplied."""
-
-    env_path = os.getenv("RNG_TRANSITION_TABLE", "").strip()
-    candidates: list[Path] = []
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-    candidates.extend(
-        [
-            TOOL_ROOT / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
-            PROJECT_ROOT / "reacnet-scope" / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
-            Path.cwd() / "ref_data" / "rng_rp3_test" / "rp3.lammpstrj.table",
-        ]
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
 DEFAULT_REACTION_FILE = detect_default_reaction_file()
-DEFAULT_TRANSITION_TABLE = detect_default_transition_table()
 
 FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
 SPECIES_TS_PREFIX_RE = re.compile(r"^Timestep\s+(\d+):")
@@ -198,8 +179,25 @@ COVALENT_RADII: dict[str, float] = {
 
 
 def split_terms(expr: str) -> list[str]:
-    parts = re.split(r"\s*[+,;]\s*", expr.strip())
-    return [x for x in parts if x]
+    parts: list[str] = []
+    current: list[str] = []
+    bracket_depth = 0
+    for character in str(expr or "").strip():
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth:
+            bracket_depth -= 1
+        if character in "+,;" and bracket_depth == 0:
+            term = "".join(current).strip()
+            if term:
+                parts.append(term)
+            current = []
+            continue
+        current.append(character)
+    term = "".join(current).strip()
+    if term:
+        parts.append(term)
+    return parts
 
 
 def _round_or_none(v: float | None, ndigits: int = 6) -> float | None:
@@ -216,6 +214,30 @@ def exact_mass_cached(formula: str) -> float | None:
 @lru_cache(maxsize=50000)
 def nominal_mass_cached(formula: str) -> int | None:
     return formula_nominal_mass(formula)
+
+
+@lru_cache(maxsize=50000)
+def isotopic_masses_cached(formula: str) -> tuple[tuple[float, int], ...] | None:
+    return formula_isotopic_masses(formula)
+
+
+def closest_isotopic_mass(
+    formula: str,
+    target: float,
+    mode: str,
+) -> tuple[float, int] | None:
+    """Return the chlorine isotopologue closest to a mass-search target."""
+    masses = isotopic_masses_cached(formula)
+    if not masses:
+        return None
+    comparison_index = 0 if mode == "exact" else 1
+    return min(
+        masses,
+        key=lambda item: (
+            abs(float(item[comparison_index]) - target),
+            float(item[comparison_index]),
+        ),
+    )
 
 
 @lru_cache(maxsize=200000)
@@ -747,7 +769,6 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "moname": (params.get("moname_file", [""])[0] or "").strip(),
         "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
         "route": (params.get("route_file", [""])[0] or "").strip(),
-        "table": (params.get("table_file", [""])[0] or "").strip(),
         "reactionevent": (params.get("reactionevent_file", [""])[0] or "").strip(),
         "molecules": (params.get("molecules_file", [""])[0] or "").strip(),
     }
@@ -771,12 +792,11 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "moname": f"{base}.moname" if base else "",
         "trajectory": base,
         "route": f"{base}.route" if base else "",
-        "table": f"{base}.table" if base else "",
         "reactionevent": f"{base}.reactionevent.csv" if base else "",
         "molecules": f"{base}.molecules.csv" if base else "",
     }
     artifacts: dict[str, dict[str, Any]] = {}
-    for key in ("reaction", "species", "moname", "trajectory", "route", "table", "reactionevent", "molecules"):
+    for key in ("reaction", "species", "moname", "trajectory", "route", "reactionevent", "molecules"):
         selected = explicit[key] or folder_files.get(key, "") or inferred[key]
         # ``.moname`` is optional structure evidence.  Preserve the historic
         # artifact contract for datasets that do not produce it while still
@@ -792,7 +812,6 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "reaction": artifacts["reaction"]["exists"],
         "events": bool(artifacts["reactionevent"]["exists"] and artifacts["molecules"]["exists"]),
         "evolution": artifacts["species"]["exists"],
-        "transition": artifacts["table"]["exists"],
     }
     manifest_payload: dict[str, Any] = {}
     manifest_path = ""
@@ -5573,108 +5592,6 @@ def downsample_summary_payload(obj: Any, max_points: int) -> Any:
     return obj
 
 
-def _transition_species_summary(smiles: str, index: int, incoming: int, outgoing: int) -> dict[str, Any]:
-    formula = smiles_formula_cached(smiles)
-    return {
-        "index": int(index),
-        "smiles": smiles,
-        "formula": formula or "?",
-        "incoming": int(incoming),
-        "outgoing": int(outgoing),
-        "total": int(incoming + outgoing),
-    }
-
-
-def build_transition_table_payload(params: dict[str, list[str]]) -> dict[str, Any]:
-    """Build a compact visualization payload for RNG transition matrices."""
-
-    raw_path = (params.get("table", params.get("transition_table", [str(DEFAULT_TRANSITION_TABLE)]))[0] or "").strip()
-    table_path = Path(raw_path).expanduser() if raw_path else DEFAULT_TRANSITION_TABLE
-    if not table_path.exists() and not raw_path:
-        table_path = DEFAULT_TRANSITION_TABLE
-    parsed = load_transition_table(table_path)
-    labels = list(parsed["labels"])
-    matrix = parsed["matrix"]
-    min_count = max(0, int_param(params, "min_count", 1))
-    max_species = max(0, int_param(params, "max_species", 60))
-    top_edges_limit = max(1, min(500, int_param(params, "top_edges", 40)))
-
-    incoming = [sum(int(row[index]) for row in matrix) for index in range(len(labels))]
-    outgoing = [sum(int(value) for value in matrix[index]) for index in range(len(labels))]
-    ranking = sorted(
-        range(len(labels)),
-        key=lambda index: (-incoming[index] - outgoing[index], -incoming[index], labels[index]),
-    )
-    if max_species:
-        selected = ranking[: min(max_species, len(ranking))]
-    else:
-        selected = ranking
-    selected_set = set(selected)
-    selected = [index for index in ranking if index in selected_set]
-    # Keep the displayed matrix in rank order, which makes dominant species
-    # visible at the upper-left instead of preserving arbitrary file order.
-    submatrix = [[int(matrix[row][col]) for col in selected] for row in selected]
-    species = [
-        _transition_species_summary(labels[index], index, incoming[index], outgoing[index])
-        for index in selected
-    ]
-    for rank, item in enumerate(species, 1):
-        item["rank"] = rank
-
-    edges: list[dict[str, Any]] = []
-    for row_index in selected:
-        for col_index in selected:
-            count = int(matrix[row_index][col_index])
-            if count < min_count:
-                continue
-            edges.append(
-                {
-                    "source_index": int(row_index),
-                    "target_index": int(col_index),
-                    "source": labels[row_index],
-                    "target": labels[col_index],
-                    "source_formula": smiles_formula_cached(labels[row_index]) or "?",
-                    "target_formula": smiles_formula_cached(labels[col_index]) or "?",
-                    "count": count,
-                }
-            )
-    edges.sort(key=lambda edge: (-int(edge["count"]), edge["source"], edge["target"]))
-
-    total_events = int(sum(sum(int(value) for value in row) for row in matrix))
-    nonzero_events = int(sum(1 for row in matrix for value in row if int(value) >= min_count))
-    observation_network = build_observation_network(
-        parsed,
-        table_path=table_path,
-        min_count=min_count,
-        max_species=max_species,
-        top_edges=top_edges_limit,
-        formula_resolver=smiles_formula_cached,
-    )
-    return {
-        "ok": True,
-        "mode": "transition_table",
-        "query": {
-            "table": str(table_path.resolve()),
-            "min_count": min_count,
-            "max_species": max_species,
-            "top_edges": top_edges_limit,
-        },
-        "meta": {
-            "n_species_total": len(labels),
-            "n_species_displayed": len(selected),
-            "n_edges_displayed": min(len(edges), top_edges_limit),
-            "total_events": total_events,
-            "nonzero_events": nonzero_events,
-            "density": round(nonzero_events / max(1, len(labels) ** 2), 6),
-        },
-        "labels": [labels[index] for index in selected],
-        "matrix": submatrix,
-        "species": species,
-        "edges": edges[:top_edges_limit],
-        "network": observation_network,
-    }
-
-
 def build_species_plot_payload(
     params: dict[str, list[str]],
     *,
@@ -8813,10 +8730,11 @@ class AppHandler(BaseHTTPRequestHandler):
             rows: list[dict[str, Any]] = []
             for smi, sp in net.species.items():
                 f = sp.formula
-                exact = exact_mass_cached(f)
-                nominal = nominal_mass_cached(f)
-                if exact is None or nominal is None:
+                comparison_target = target_mass if mode == "exact" else float(target_nominal)
+                matched_mass = closest_isotopic_mass(f, comparison_target, mode)
+                if matched_mass is None:
                     continue
+                exact, nominal = matched_mass
                 if mode == "exact":
                     err = exact - target_mass
                     if abs(err) > tol:
@@ -9379,16 +9297,6 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
-    def _api_transition_table(self, params: dict[str, list[str]]) -> None:
-        try:
-            self._send_json(build_transition_table_payload(params))
-        except ValueError as exc:
-            self._send_json({"ok": False, "error": str(exc)}, status=400)
-        except FileNotFoundError as exc:
-            self._send_json({"ok": False, "error": str(exc)}, status=404)
-        except Exception as exc:
-            self._send_json({"ok": False, "error": str(exc)}, status=500)
-
     def _api_dataset_status(self, params: dict[str, list[str]]) -> None:
         try:
             self._send_json(build_dataset_status_payload(params))
@@ -9596,9 +9504,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/plot":
             self._api_plot(params)
-            return
-        if path == "/api/transition_table":
-            self._api_transition_table(params)
             return
         if path == "/api/dataset_status":
             self._api_dataset_status(params)

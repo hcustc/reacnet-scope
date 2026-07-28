@@ -18,7 +18,7 @@ from numbers import Real
 from os import PathLike
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 
-from rng_tools.network import Reaction, ReactionNetwork
+from rng_tools.network import Reaction, ReactionNetwork, count_atoms_fast
 
 
 SCORE_VERSION = "candidate-path/v1"
@@ -246,6 +246,7 @@ def find_candidate_paths(
     max_expansions: int = 5000,
     min_net_tp: int = 1,
     min_directionality: float = 0.05,
+    target_max_carbon: int | None = None,
     evidence_provider: EvidenceProvider | None = None,
 ) -> CandidatePathResult:
     """Enumerate bounded, loopless candidate routes without implying proof.
@@ -262,6 +263,7 @@ def find_candidate_paths(
         max_expansions=max_expansions,
         min_net_tp=min_net_tp,
         min_directionality=min_directionality,
+        target_max_carbon=target_max_carbon,
     )
     query = {
         "start_smiles": start_smiles,
@@ -275,6 +277,8 @@ def find_candidate_paths(
         "score_version": SCORE_VERSION,
         "interpretation": "candidate route, not mechanistic proof",
     }
+    if target_max_carbon is not None:
+        query["target_max_carbon"] = target_max_carbon
 
     evidence_status: Literal["evidence_linked", "network_only"] = (
         "evidence_linked"
@@ -292,6 +296,16 @@ def find_candidate_paths(
             source_signatures=source_signatures,
             evidence_status=evidence_status,
             reason="species_absent",
+            truncated=False,
+            expansions=0,
+        )
+    if _matches_carbon_target(start_smiles, target_max_carbon):
+        return CandidatePathResult(
+            paths=(),
+            query=query,
+            source_signatures=source_signatures,
+            evidence_status=evidence_status,
+            reason="target_already_reached",
             truncated=False,
             expansions=0,
         )
@@ -338,8 +352,14 @@ def find_candidate_paths(
 
         priority = heapq.heappop(queue)
         state = priority[-1]
-        if len(state.steps) >= max_depth:
+        if state.steps and _matches_carbon_target(
+            state.species[-1], target_max_carbon
+        ):
             completed.append(state)
+            continue
+        if len(state.steps) >= max_depth:
+            if target_max_carbon is None:
+                completed.append(state)
             continue
 
         if expansions >= max_expansions:
@@ -370,7 +390,7 @@ def find_candidate_paths(
             root_had_fresh_continuation = had_fresh_continuation
             root_had_threshold_match = had_threshold_match
         if not next_steps:
-            if state.steps:
+            if state.steps and target_max_carbon is None:
                 completed.append(state)
             continue
 
@@ -385,7 +405,18 @@ def find_candidate_paths(
             )
             children.append(child)
 
-        children.sort(key=_state_sort_key)
+        if target_max_carbon is None:
+            children.sort(key=_state_sort_key)
+        else:
+            # A goal-directed fragmentation search must not lose a direct
+            # C1-Cn product merely because high-frequency isomerizations fill
+            # the per-expansion branch cap. Scores still order the retained
+            # goal paths; this key only decides which branches are explored.
+            children.sort(
+                key=lambda child: _target_branch_sort_key(
+                    child, target_max_carbon
+                )
+            )
         for child in children[:max_branches]:
             heapq.heappush(
                 queue,
@@ -400,7 +431,7 @@ def find_candidate_paths(
 
     truncated = stopped_at_expansion_cap
     result_states = completed
-    if truncated:
+    if truncated and target_max_carbon is None:
         result_states = [
             *completed,
             *(item[-1] for item in queue if item[-1].steps),
@@ -418,6 +449,8 @@ def find_candidate_paths(
 
     if paths:
         reason = "ok"
+    elif target_max_carbon is not None:
+        reason = "target_not_reached"
     elif not root_had_positive or not root_had_fresh_continuation:
         reason = "no_positive_net_continuation"
     elif not root_had_threshold_match:
@@ -444,6 +477,7 @@ def _validate_query(
     max_expansions: int,
     min_net_tp: int,
     min_directionality: float,
+    target_max_carbon: int | None,
 ) -> None:
     if direction not in {"downstream", "upstream"}:
         raise ValueError("direction must be 'downstream' or 'upstream'")
@@ -453,6 +487,8 @@ def _validate_query(
     _validate_int_bound("max_expansions", max_expansions, 1, 1_000_000)
     _validate_int_bound("min_net_tp", min_net_tp, 1, None)
     _validate_unit_metric("min_directionality", min_directionality)
+    if target_max_carbon is not None:
+        _validate_int_bound("target_max_carbon", target_max_carbon, 1, 100)
 
 
 def _validate_int_bound(
@@ -714,6 +750,43 @@ def _state_sort_key(
     state: _SearchState,
 ) -> tuple[float, tuple[str, ...], tuple[str, ...]]:
     return (
+        -_required_state_score(state),
+        state.species,
+        tuple(step.reaction_key for step in state.steps),
+    )
+
+
+def _carbon_count(smiles: str) -> int:
+    """Return the explicit carbon count used by RNG-style SMILES."""
+    return int(count_atoms_fast(smiles).get("C", 0))
+
+
+def _matches_carbon_target(
+    smiles: str,
+    target_max_carbon: int | None,
+) -> bool:
+    if target_max_carbon is None:
+        return False
+    carbon_count = _carbon_count(smiles)
+    return 0 < carbon_count <= target_max_carbon
+
+
+def _target_branch_sort_key(
+    state: _SearchState,
+    target_max_carbon: int,
+) -> tuple[
+    int,
+    int,
+    float,
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    carbon_count = _carbon_count(state.species[-1])
+    return (
+        0 if _matches_carbon_target(
+            state.species[-1], target_max_carbon
+        ) else 1,
+        carbon_count if carbon_count > 0 else 10**9,
         -_required_state_score(state),
         state.species,
         tuple(step.reaction_key for step in state.steps),

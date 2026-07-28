@@ -1,15 +1,15 @@
 # reacnet-scope
 
-`ReacNet Scope` 是面向 ReacNetGenerator 输出结果的交互式后处理与分析软件，主要用于解析和管理反应分子动力学模拟中生成的物种、反应事件与反应网络数据，并提供物种检索、反应路径追踪、中间体筛选、时间演化分析及网络可视化等功能，从而提升 ReacNetGenerator 结果的可查询性、可解释性和应用效率，并为复杂反应机理分析及实验质谱结果解释提供辅助支持。
+`ReacNet Scope` 是面向 ReacNetGenerator 输出结果的交互式后处理与分析软件，主要用于解析和管理反应分子动力学模拟中生成的物种与反应事件，并提供物种检索、反应路径追踪、中间体筛选和时间演化分析等功能，从而提升 ReacNetGenerator 结果的可查询性、可解释性和应用效率，并为复杂反应机理分析及实验质谱结果解释提供辅助支持。
 
 当前支持的主要输出包括 `.reactionabcd`、`.species`、`.reactionevent.csv`、
-`.molecules.csv` 和 `.lammpstrj.table`：
+`.molecules.csv`：
 
 - Web 前端：分子式/SMILES/质量数检索、结构渲染、时间曲线绘图、中间体候选筛选
-- Web 前端：RNG 事件检索、参与原子与键展示、索引化局部轨迹提取，以及 `.lammpstrj.table` 观察网络
+- Web 前端：RNG 事件检索、参与原子与键展示和索引化局部轨迹提取
 - CLI：批量检索、路径导出、TOP-N 统计、曲线绘制
 
-它的核心定位是反应 MD 后处理与 ReacNetGenerator 输出解析；质谱实验解释是下游对接场景，而不是把本项目做成峰检测、色谱处理或通用质谱软件。网络数据协议和交互设计正在按 ReaxTools、NOCTIS、Cytoscape.js 等项目落地；GasRMDKit、ReNView、SCINE Heron 和 RMG-Py 目前作为后续扩展参考，不代表已经完全实现对应功能。
+它的核心定位是反应 MD 后处理与 ReacNetGenerator 输出解析；质谱实验解释是下游对接场景，而不是把本项目做成峰检测、色谱处理或通用质谱软件。
 
 ## Description
 
@@ -54,11 +54,12 @@ uv sync --extra web --extra trajectory
 
 ```bash
 uv sync --extra web
-REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/data:/mnt" \
+REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/media/$USER:/data:/mnt" \
   uv run ./run_dash.sh 127.0.0.1 8060
 ```
 
 打开 `http://127.0.0.1:8060`。远程部署时，目录浏览器看到的是服务端文件系统；请把实际数据挂载点加入 `REACNET_SCOPE_ALLOWED_ROOTS`，多个目录用冒号分隔。
+该变量会替换而不是追加默认允许目录，修改后需要重启 Dash 服务。
 
 ### 加载 ReacNetGenerator 数据集
 
@@ -71,17 +72,27 @@ ReacNetGenerator 数据集；目录中只有一个数据集时自动选中，存
 “手动输入服务器路径”中，可填写数据目录或完整公共前缀；所有路径仍受
 `REACNET_SCOPE_ALLOWED_ROOTS` 限制。
 
-Dash 的默认入口是面向实验解释的四步工作流：
+Dash 默认进入“物种检索”。所有功能入口直接显示在页面顶部，不使用下拉菜单；
+不同类别仅以分隔关系组织：
 
-1. 在 `.species` 目录中按分子式、SMILES 或质量选定实验物种；若同目录有 `.moname`，它会作为可选的原子/键结构证据。
-2. 从 `.reactionabcd` 中分别查看该物种的高频生成与消耗通道，选择一条通道。
-3. 从 `.reactionevent.csv` 与 `.molecules.csv` 中按可验证性推荐代表性事件，同时保留人工选择权。
-4. 利用预建轨迹索引查看该事件的局部原子、断键/成键证据和前后帧，并记录“支持 / 证据不足 / 排除”结论；结果可导出 CSV。
+- **通用工具**：物种检索、反应式检索、时间演化、事件与轨迹。
+- **自动分析**：中间体筛选、候选路径、组成演化。
 
-旧的专题分析页面仍在右上角“高级工具”菜单中提供。
+各工具保持独立，页面只显示当前工具名称、数据状态和操作区域。需要继续分析时，
+已选物种可以直接检索生成/消耗通道，再将所选通道送入事件与轨迹；也可作为
+候选路径起点或直接定位物种事件。批量对比从“管理数据”进入，不占用顶部工具栏。
 
-生成数据时建议启用 RNG 的事件输出；事件证据索引由这两个文件离线构建，
-不再从 Route 重建事件：
+候选路径发现采用两阶段
+检索：“多步碎片路径”页面首先只读取 `.reactionabcd`，默认限制为 4 步、每步
+4 分支、10 条结果和 300 次状态展开；
+不会在粗筛阶段读取事件、Route 或 species 时间索引。选中具体反应后，再按需
+进入事件与轨迹核查。
+
+完整的信息架构、功能归属与后续去重计划见
+[`docs/usage-logic-redesign.md`](docs/usage-logic-redesign.md)。
+
+生成数据时建议至少启用 RNG 的事件输出；`.molecules.csv` 是可选的原子、
+键与物理 timestep 补充证据：
 
 ```bash
 # 添加到原 ReacNetGenerator 命令
@@ -104,10 +115,11 @@ export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
 uv run reacnet-scope-prepare /data/case --event-only
 ```
 
-事件索引以流式方式读取 `.reactionevent.csv` 和 `.molecules.csv`，支持中断后
-从检查点继续构建；最终索引通过原子替换发布。Dash 查询期间只打开该索引，
-不会回扫两个原始 CSV。若源文件在构建后发生变化，状态会显示为 `stale`，
-需要重新运行准备命令（必要时加 `--rebuild`）。
+事件索引 schema v3 始终记录反应式、`Timestep_Index` 和反应物/产物侧
+SMILES；有 `.molecules.csv` 时再补充参与原子、键变化和物理 timestep。
+配对构建支持检查点续建，只有 `.reactionevent.csv` 时也可直接准备事件区间
+索引。Dash 查询期间只打开索引，不回扫原始 CSV。已有旧索引升级后需执行
+`reacnet-scope-prepare /data/case --rebuild event` 一次。
 
 统一命令默认准备可用的事件、轨迹以及 `.species` 的 C/O/Cl 组成索引；
 也可只准备组成索引：
@@ -152,30 +164,17 @@ uv run ./run_cli.sh species --reac /path/to/xxx.reactionabcd --formula C6H4
 
 ## 候选路径分析
 
-CLI 子命令 `reacnet-scope pathway` 和 Dash“关键路径”页面可以从精确 SMILES
+CLI 子命令 `reacnet-scope pathway` 和 Dash“多步碎片路径”页面可以从精确 SMILES
 出发，按网络净通量、方向性和可用的 RNG 事件证据检索并排序有界候选路径。
+Dash 可把 C1–C4（或用户指定的最大碳数）设为搜索目标，并在结果中分别显示
+焦点终点、末步反应的全部物种、小分子碎片和终止原因；达到深度上限不会被
+标成真实终产物。
 这里的“路径”是用于后续核查的候选路线，不是已经确认的原子连续反应机理；
 事件索引缺失时会明确降级为 `network_only`，不会在交互请求中扫描事件 CSV
 或自动构建索引。
 
 评分公式、搜索边界、事件索引准备、CLI 导出和 Dash 事件跳转的完整说明见
 [`docs/pathway-analysis.md`](docs/pathway-analysis.md)。
-
-## 机制网络与观察网络
-
-Dash“反应网络”页面提供两个明确分离的视图：
-
-- **机制网络（reactionabcd）**：以物种节点和显式反应节点组成有界二部图，
-  边保留反应物/产物角色及重复化学计量，数值是 ReacNetGenerator 的反应
-  passage counts；事件索引就绪时可关联事件汇总证据。
-- **观察网络（table）**：来自 `.lammpstrj.table` 的聚合物种转移观察，
-  标记为 `event_transfer · aggregate_observation`。
-
-两者都不是速率常数或原子转移动力学通量。机制网络使用稳定 ID，可导出
-Cytoscape JSON、GraphML、GEXF、节点 CSV 和边 CSV；GraphML/GEXF 可由
-NetworkX 重新读取，GEXF 导出会保留版本化图元数据和节点稳定身份。语义边界、
-二部图结构、查询上限、路径/事件交接及导入示例见
-[`docs/network-semantics-and-export.md`](docs/network-semantics-and-export.md)。
 
 ## 默认输入文件规则
 
@@ -191,7 +190,7 @@ NetworkX 重新读取，GEXF 导出会保留版本化图元数据和节点稳定
 ## 依赖
 
 - Python 3.10+
-- 基础依赖：`pandas`、`openpyxl`、`rdkit`、`networkx`
+- 基础依赖：`pandas`、`openpyxl`、`rdkit`
 - 可选绘图增强：`matplotlib`、`scipy`（CLI `plot --out-png`、Carbon-number evolution plot 时需要）
 - 可选轨迹适配：`ase`（安装 extra：`trajectory`）
 
@@ -208,28 +207,6 @@ uv sync
 ```bash
 uv sync --extra plot
 ```
-
-## `.lammpstrj.table` 观察网络可视化
-
-ReacNetGenerator 新版输出的 `*.lammpstrj.table` 是一个带 SMILES 行列标签的物种转移矩阵，单元格表示来源物种到目标物种的观察事件数。Web 端的 `观察网络` 模块：
-
-- 默认复用顶部导入文件夹中检测到的 Table，也可在 `RNG Table(.lammpstrj.table)` 输入框指定其他文件；
-- `矩阵` 视图按事件数对数着色，点击单元格可查看完整 SMILES 与原始事件数；
-- `强通道` 视图显示高事件数有向边，节点大小对应总通量；
-- 可按最小事件数和显示物种数裁剪结果，并导出主转移通道 CSV。
-
-后端 API 也提供结构化结果：`GET /api/transition_table?table=/path/to/file.table`。
-
-### 观察网络的数据边界
-
-`*.lammpstrj.table` 只有聚合的 Species → Species 观察次数，没有原始事件 ID、原子重叠配对或转移原子明细。因此 API 会明确标注：
-
-- `schema_version: observation-network/v1`
-- `model: species_reaction_bipartite`
-- `evidence_level: aggregate_observation`
-- `audit.status: not_available`
-
-每个非零矩阵单元会被表示为一个 `observed_transition` Reaction 节点，并通过 `reactant_of` / `produces` 连接两个 Species 节点。这是对聚合观察的可追溯表示，不等同于原子级反应事件；真实事件证据由 ReacNetGenerator 的 `.reactionevent.csv` 和 `.molecules.csv` 提供，不再由 Dash 扫描 `.route` 重建。网络视图使用 Cytoscape.js，矩阵视图仍使用 ECharts。
 
 ## C/O/Cl Composition Evolution
 

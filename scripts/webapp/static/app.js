@@ -18,21 +18,18 @@ const ARTIFACT_LABELS = {
   species: "Species",
   trajectory: "Trajectory",
   route: "Route",
-  table: "Table",
 };
 const ARTIFACT_SUFFIX_LABELS = {
   reaction: ".reactionabcd",
   species: ".species",
   trajectory: ".lammpstrj",
   route: ".route",
-  table: ".table",
 };
 const WORKSPACE_MODULES = [
   { key: "species", label: "物种身份", hint: "公式、质量、中间体", artifacts: ["reaction", "species"] },
   { key: "reaction", label: "路径搜索", hint: "ReactionABCD 网络", artifacts: ["reaction"] },
   { key: "events", label: "事件证据", hint: "Route + Trajectory", artifacts: ["species", "route", "trajectory"] },
   { key: "evolution", label: "时间演化", hint: "Species / Carbon", artifacts: ["species"] },
-  { key: "transition", label: "观察网络", hint: "Table 强通道", artifacts: ["table"] },
 ];
 const VIEWER_CONTEXTS = {
   general: {
@@ -114,11 +111,6 @@ const state = {
     mergeBasket: [],
     summary: null,
   },
-  transition: {
-    data: null,
-    mode: "heatmap",
-    selected: null,
-  },
   contextSpeciesTaskId: "",
   contextReactionTaskId: "",
   contextExtract: {
@@ -180,10 +172,6 @@ function globalTrajectoryFile() {
 
 function globalRouteFile() {
   return value("sharedRouteFile") || state.ui.dataset?.artifacts?.route?.path || "";
-}
-
-function globalTableFile() {
-  return value("sharedTableFile") || state.ui.dataset?.artifacts?.table?.path || "";
 }
 
 function artifactLabel(kind) {
@@ -1289,7 +1277,6 @@ function datasetRequestParams() {
     species_file: value("sharedSpeciesFile"),
     trajectory_file: value("sharedTrajectoryFile"),
     route_file: value("sharedRouteFile"),
-    table_file: value("sharedTableFile"),
   };
 }
 
@@ -1624,8 +1611,7 @@ function buildWorkspaceShell() {
   const plotSwitch = document.querySelector(".plot-unified-switch");
   const plotSpecies = q("plotSectionSpecies");
   const plotCarbon = q("plotSectionCarbon");
-  const transition = q("transitionMatrixSection");
-  if (!shell || !datasetImport || !globalConfig || !source || !query || !plotSwitch || !plotSpecies || !plotCarbon || !transition) return;
+  if (!shell || !datasetImport || !globalConfig || !source || !query || !plotSwitch || !plotSpecies || !plotCarbon) return;
   if (q("workspaceShell")) return;
 
   const workspace = document.createElement("section");
@@ -1651,7 +1637,6 @@ function buildWorkspaceShell() {
       <div id="workspace-reaction" class="workspace-panel hidden"></div>
       <div id="workspace-events" class="workspace-panel hidden"></div>
       <div id="workspace-evolution" class="workspace-panel hidden"></div>
-      <div id="workspace-transition" class="workspace-panel hidden"></div>
     </section>
   `;
   shell.insertBefore(workspace, query);
@@ -1660,7 +1645,6 @@ function buildWorkspaceShell() {
     reaction: q("workspace-reaction"),
     events: q("workspace-events"),
     evolution: q("workspace-evolution"),
-    transition: q("workspace-transition"),
   };
   const manualOverrides = document.createElement("details");
   manualOverrides.className = "manual-overrides";
@@ -1669,7 +1653,6 @@ function buildWorkspaceShell() {
   datasetImport.append(manualOverrides);
   panels.species.append(query);
   panels.evolution.append(plotSwitch, plotSpecies, plotCarbon);
-  panels.transition.append(transition);
 
   const queryGroups = Array.from(query.querySelectorAll(".query-module-group"));
   const generalGroup = queryGroups.find((element) => element.dataset.queryModuleGroup === "general");
@@ -4213,8 +4196,6 @@ const PLOT_COLORS = [
 let plotChart = null;
 let carbonPlotChart = null;
 let echartsLoadPromise = null;
-let cytoscapeLoadPromise = null;
-let transitionCy = null;
 
 function loadExternalScript(src) {
   return new Promise((resolve, reject) => {
@@ -4256,27 +4237,6 @@ async function ensureECharts() {
     return false;
   })();
   return echartsLoadPromise;
-}
-
-async function ensureCytoscape() {
-  if (window.cytoscape) return true;
-  if (cytoscapeLoadPromise) return cytoscapeLoadPromise;
-  cytoscapeLoadPromise = (async () => {
-    const cdns = [
-      "https://cdn.jsdelivr.net/npm/cytoscape@3.31.2/dist/cytoscape.umd.js",
-      "https://unpkg.com/cytoscape@3.31.2/dist/cytoscape.umd.js",
-    ];
-    for (const src of cdns) {
-      try {
-        await loadExternalScript(src);
-        if (window.cytoscape) return true;
-      } catch (err) {
-        // Try the alternate CDN endpoint.
-      }
-    }
-    return false;
-  })();
-  return cytoscapeLoadPromise;
 }
 
 function renderPlotLegend(curves) {
@@ -5333,343 +5293,6 @@ async function runCarbonPlot() {
   }
 }
 
-function transitionLabel(species, fallbackIndex = 0) {
-  const formula = String(species?.formula || "?");
-  return `${formula} · #${Number(species?.rank || fallbackIndex + 1)}`;
-}
-
-function shortText(text, limit = 42) {
-  const raw = String(text || "");
-  return raw.length > limit ? `${raw.slice(0, Math.max(1, limit - 3))}...` : raw;
-}
-
-function renderTransitionStats(data) {
-  const meta = data?.meta || {};
-  const stats = [
-    ["物种", `${meta.n_species_displayed || 0}/${meta.n_species_total || 0}`],
-    ["观察次数", Number(meta.total_events || 0).toLocaleString()],
-    ["非零通道", Number(meta.nonzero_events || 0).toLocaleString()],
-    ["矩阵密度", `${(Number(meta.density || 0) * 100).toFixed(2)}%`],
-  ];
-  q("transitionStats").innerHTML = stats
-    .map(([label, value]) => `<span class="stat-chip"><strong>${escapeHtml(label)}</strong> ${escapeHtml(value)}</span>`)
-    .join("");
-}
-
-function renderTransitionSelection(selection = null) {
-  const box = q("transitionSelection");
-  const data = state.transition.data;
-  if (!data) {
-    box.textContent = "点击物种或观察转移查看证据";
-    return;
-  }
-  if (!selection) {
-    const lead = (data.species || [])[0];
-    if (!lead) {
-      box.textContent = "当前筛选没有可显示的物种";
-      return;
-    }
-    box.innerHTML = `<strong>${escapeHtml(transitionLabel(lead))}</strong><code>${escapeHtml(lead.smiles)}</code><span>入流 ${Number(lead.incoming).toLocaleString()} · 出流 ${Number(lead.outgoing).toLocaleString()}</span>`;
-    return;
-  }
-  if (selection.kind === "edge") {
-    box.innerHTML = `<strong>${escapeHtml(`${selection.source_formula} → ${selection.target_formula}`)}</strong><code>${escapeHtml(selection.source)}</code><span class="transition-arrow">→</span><code>${escapeHtml(selection.target)}</code><span>${Number(selection.count).toLocaleString()} events</span>`;
-    return;
-  }
-  if (selection.kind === "reaction") {
-    box.innerHTML = `<strong>${escapeHtml(selection.label || "观察转移")}</strong><span>${Number(selection.event_count || 0).toLocaleString()} events · ${escapeHtml(selection.evidence_level || "aggregate_observation")}</span><code>${escapeHtml(selection.source_artifact || "")}</code>`;
-    return;
-  }
-  const item = selection.species || selection;
-  box.innerHTML = `<strong>${escapeHtml(transitionLabel(item))}</strong><code>${escapeHtml(item.smiles)}</code><span>入流 ${Number(item.incoming).toLocaleString()} · 出流 ${Number(item.outgoing).toLocaleString()} · 总通量 ${Number(item.total).toLocaleString()}</span>`;
-}
-
-function renderTransitionEdgeTable(data) {
-  const table = q("transitionEdgeTable");
-  const thead = table.querySelector("thead");
-  const tbody = table.querySelector("tbody");
-  const edges = data?.edges || [];
-  thead.innerHTML = "<tr><th>#</th><th>来源</th><th>目标</th><th>事件数</th></tr>";
-  tbody.innerHTML = edges
-    .map((edge, index) => `
-      <tr data-transition-edge="${index}">
-        <td>${index + 1}</td>
-        <td><strong>${escapeHtml(edge.source_formula)}</strong><code title="${escapeHtml(edge.source)}">${escapeHtml(shortText(edge.source, 42))}</code></td>
-        <td><strong>${escapeHtml(edge.target_formula)}</strong><code title="${escapeHtml(edge.target)}">${escapeHtml(shortText(edge.target, 42))}</code></td>
-        <td><strong>${Number(edge.count).toLocaleString()}</strong></td>
-      </tr>
-    `)
-    .join("");
-  q("btnTransitionExport").disabled = !edges.length;
-}
-
-function transitionSpeciesByLabel(label) {
-  return (state.transition.data?.species || []).find((item) => item.smiles === label) || null;
-}
-
-function renderTransitionHeatmap(data) {
-  const host = q("transitionChart");
-  if (transitionCy) {
-    transitionCy.destroy();
-    transitionCy = null;
-  }
-  if (!window.echarts) return false;
-  const chart = window.echarts.getInstanceByDom(host) || window.echarts.init(host);
-  const labels = data.labels || [];
-  const matrix = data.matrix || [];
-  const minCount = Math.max(0, Number(data.query?.min_count || 0));
-  const points = [];
-  let maxValue = 1;
-  matrix.forEach((row, y) => row.forEach((count, x) => {
-    const numeric = Number(count) || 0;
-    if (numeric > maxValue) maxValue = numeric;
-    if (numeric >= minCount && numeric > 0) points.push([x, y, numeric, Math.log10(numeric + 1)]);
-  }));
-  const maxLog = Math.log10(maxValue + 1);
-  chart.setOption({
-    animation: false,
-    grid: { left: 76, right: 30, top: 26, bottom: 72 },
-    tooltip: {
-      position: "top",
-      formatter: (params) => {
-        const [x, y, _logCount, count] = params.data || [];
-        const source = transitionSpeciesByLabel(labels[y]) || {};
-        const target = transitionSpeciesByLabel(labels[x]) || {};
-        return `<strong>${escapeHtml(source.formula || "?")} → ${escapeHtml(target.formula || "?")}</strong><br/>${Number(count).toLocaleString()} events`;
-      },
-    },
-    xAxis: {
-      type: "category",
-      data: labels,
-      name: "目标物种",
-      axisLabel: { interval: 0, rotate: 55, formatter: (label) => transitionSpeciesByLabel(label)?.formula || "?" },
-      splitArea: { show: true },
-    },
-    yAxis: {
-      type: "category",
-      data: labels,
-      inverse: true,
-      name: "来源物种",
-      axisLabel: { formatter: (label) => transitionSpeciesByLabel(label)?.formula || "?" },
-      splitArea: { show: true },
-    },
-    visualMap: {
-      min: 0,
-      max: maxLog,
-      calculable: true,
-      orient: "horizontal",
-      left: "center",
-      bottom: 6,
-      text: ["高", "低"],
-      formatter: (value) => Math.max(1, Math.round((10 ** value) - 1)).toLocaleString(),
-      inRange: { color: ["#f0eee8", "#4ca587", "#d86f2c"] },
-    },
-    series: [{
-      type: "heatmap",
-      data: points.map((item) => [item[0], item[1], item[3], item[2]]),
-      encode: { x: 0, y: 1, value: 2 },
-      label: { show: labels.length <= 24, formatter: (params) => Number(params.data?.[3] || 0) || "" },
-      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: "rgba(0,0,0,0.25)" } },
-    }],
-  }, true);
-  chart.off("click");
-  chart.on("click", (params) => {
-    const [x, y, _logCount, count] = params.data || [];
-    const edge = {
-      kind: "edge",
-      source: labels[y],
-      target: labels[x],
-      source_formula: transitionSpeciesByLabel(labels[y])?.formula || "?",
-      target_formula: transitionSpeciesByLabel(labels[x])?.formula || "?",
-      count: Number(count) || 0,
-    };
-    state.transition.selected = edge;
-    renderTransitionSelection(edge);
-  });
-  return true;
-}
-
-function renderTransitionNetwork(data) {
-  const host = q("transitionChart");
-  if (!window.cytoscape) return false;
-  if (transitionCy) {
-    transitionCy.destroy();
-    transitionCy = null;
-  }
-  const network = data.network || {};
-  const species = network.species || [];
-  const reactions = network.reactions || [];
-  const graphEdges = network.edges || [];
-  const maxCount = Math.max(1, ...reactions.map((item) => Number(item.event_count) || 0));
-  const elements = [
-    ...species.map((item) => ({
-      group: "nodes",
-      data: { id: item.id, kind: "species", label: item.formula || "?", species: item },
-    })),
-    ...reactions.map((item) => ({
-      group: "nodes",
-      data: { id: item.id, kind: "reaction", label: item.label || "observed transition", reaction: item, event_count: item.event_count || 0 },
-    })),
-    ...graphEdges.map((edge) => ({
-      group: "edges",
-      data: { id: edge.id, source: edge.source, target: edge.target, kind: edge.kind, event_count: edge.event_count },
-    })),
-  ];
-  transitionCy = window.cytoscape({
-    container: host,
-    elements,
-    layout: { name: "cose", animate: false, padding: 32, nodeRepulsion: 9000, idealEdgeLength: 110 },
-    minZoom: 0.2,
-    maxZoom: 3,
-    wheelSensitivity: 0.18,
-    style: [
-      {
-        selector: "node[kind = 'species']",
-        style: {
-          "background-color": "#177e89",
-          "label": "data(label)",
-          "color": "#17333a",
-          "font-size": "11px",
-          "text-valign": "center",
-          "text-halign": "center",
-          "text-wrap": "wrap",
-          "text-max-width": "74px",
-          "width": "mapData(total, 0, 1, 26, 26)",
-          "height": "mapData(total, 0, 1, 26, 26)",
-          "border-width": 1.5,
-          "border-color": "#0e5962",
-        },
-      },
-      {
-        selector: "node[kind = 'reaction']",
-        style: {
-          "background-color": "#d66853",
-          "label": "data(label)",
-          "color": "#5a2116",
-          "font-size": "9px",
-          "text-wrap": "wrap",
-          "text-max-width": "92px",
-          "shape": "round-rectangle",
-          "width": 32,
-          "height": 22,
-          "border-width": 1,
-          "border-color": "#9e3f2b",
-        },
-      },
-      {
-        selector: "edge",
-        style: {
-          "curve-style": "bezier",
-          "target-arrow-shape": "triangle",
-          "target-arrow-color": "#8d8173",
-          "line-color": "#8d8173",
-          "width": "mapData(event_count, 0, 1, 1, 1)",
-          opacity: 0.62,
-        },
-      },
-      { selector: ":selected", style: { "border-width": 3, "border-color": "#f08c46", "line-color": "#f08c46", "target-arrow-color": "#f08c46" } },
-    ],
-  });
-  // Keep the graph readable for sparse tables while preserving data-driven sizing.
-  transitionCy.nodes("[kind = 'species']").forEach((node) => {
-    const total = Number(node.data("species")?.total || 0);
-    node.style({ width: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28), height: 26 + Math.min(28, Math.sqrt(total / maxCount) * 28) });
-  });
-  transitionCy.on("tap", (event) => {
-    if (event.target !== transitionCy) return;
-    transitionCy.elements().style("opacity", 1);
-    renderTransitionSelection();
-  });
-  transitionCy.nodes().on("tap", (event) => {
-    const node = event.target;
-    const neighborhood = node.closedNeighborhood();
-    transitionCy.elements().style("opacity", 0.16);
-    neighborhood.style("opacity", 1);
-    const item = event.target.data();
-    if (item.kind === "reaction") {
-      state.transition.selected = { kind: "reaction", ...item.reaction };
-    } else {
-      state.transition.selected = { kind: "species", species: item.species || {} };
-    }
-    renderTransitionSelection(state.transition.selected);
-  });
-  return true;
-}
-
-async function renderTransitionChart() {
-  const data = state.transition.data;
-  if (!data) return;
-  const loaded = await ensureECharts();
-  if (!loaded) {
-    q("transitionChart").innerHTML = '<div class="context-storyboard-empty">ECharts 加载失败，仍可使用下方通道排行。</div>';
-    return;
-  }
-  if (state.transition.mode === "network") {
-    const loadedCy = await ensureCytoscape();
-    if (!loadedCy) {
-      q("transitionChart").innerHTML = '<div class="context-storyboard-empty">Cytoscape.js 加载失败，仍可使用矩阵和下方通道排行。</div>';
-      return;
-    }
-    renderTransitionNetwork(data);
-  } else renderTransitionHeatmap(data);
-}
-
-function setTransitionMode(mode) {
-  state.transition.mode = mode === "network" ? "network" : "heatmap";
-  const heatmap = state.transition.mode === "heatmap";
-  q("btnTransitionHeatmap").classList.toggle("is-selected", heatmap);
-  q("btnTransitionHeatmap").setAttribute("aria-pressed", heatmap ? "true" : "false");
-  q("btnTransitionNetwork").classList.toggle("is-selected", !heatmap);
-  q("btnTransitionNetwork").setAttribute("aria-pressed", heatmap ? "false" : "true");
-  renderTransitionChart();
-}
-
-async function runTransitionTable() {
-  q("btnTransitionLoad").disabled = true;
-  q("transitionSourceLabel").textContent = "正在解析转移矩阵";
-  q("transitionResultPanel").classList.remove("hidden");
-  try {
-    const data = await fetchJson("/api/transition_table", {
-      table: value("qTransitionTable") || globalTableFile() || state.ui.dataset?.artifacts?.table?.path || "",
-      max_species: value("qTransitionMaxSpecies") || 40,
-      min_count: value("qTransitionMinCount") || 1,
-      top_edges: value("qTransitionTopEdges") || 40,
-    });
-    state.transition.data = data;
-    state.transition.selected = null;
-    q("transitionSourceLabel").textContent = data.query?.table || "transition table";
-    renderTransitionStats(data);
-    renderTransitionSelection();
-    renderTransitionEdgeTable(data);
-    await renderTransitionChart();
-  } finally {
-    q("btnTransitionLoad").disabled = false;
-  }
-}
-
-function exportTransitionEdges() {
-  const edges = state.transition.data?.edges || [];
-  if (!edges.length) return;
-  const cols = ["source_formula", "source_smiles", "target_formula", "target_smiles", "count"];
-  const lines = [cols.join(",")];
-  edges.forEach((edge) => lines.push([
-    edge.source_formula,
-    edge.source,
-    edge.target_formula,
-    edge.target,
-    edge.count,
-  ].map(csvEscape).join(",")));
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "rng_transition_edges.csv";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
 async function runWithToast(fn, moduleKey = null) {
   try {
     document.body.style.cursor = "progress";
@@ -5703,10 +5326,6 @@ function bindEvents() {
   q("btnContextExtractManual").addEventListener("click", () => runWithToast(() => runContextExtract("manual"), "context_extract"));
   q("btnPlot").addEventListener("click", () => runWithToast(runPlot, "plot"));
   q("btnCarbonPlot").addEventListener("click", () => runWithToast(runCarbonPlot));
-  q("btnTransitionLoad").addEventListener("click", () => runWithToast(runTransitionTable));
-  q("btnTransitionHeatmap").addEventListener("click", () => setTransitionMode("heatmap"));
-  q("btnTransitionNetwork").addEventListener("click", () => setTransitionMode("network"));
-  q("btnTransitionExport").addEventListener("click", exportTransitionEdges);
   q("btnBrowseDatasetFolder").addEventListener("click", () => runWithToast(browseDatasetFolder));
   q("btnImportDatasetFolder").addEventListener("click", () => runWithToast(importDatasetFolder));
   q("datasetCandidateSelect").addEventListener("change", () => {
@@ -5718,22 +5337,12 @@ function bindEvents() {
     if (!(button instanceof HTMLButtonElement)) return;
     setWorkspaceModule(button.dataset.workspaceModule || "species");
   });
-  ["datasetFolder", "reacFile", "sharedSpeciesFile", "sharedTrajectoryFile", "sharedRouteFile", "sharedTableFile"].forEach((id) => {
+  ["datasetFolder", "reacFile", "sharedSpeciesFile", "sharedTrajectoryFile", "sharedRouteFile"].forEach((id) => {
     q(id).addEventListener("change", () => {
       if (id === "datasetFolder") state.ui.datasetBase = "";
       refreshDatasetStatus({ silent: true }).catch(() => {});
     });
   });
-  q("transitionEdgeTable").addEventListener("click", (event) => {
-    const row = event.target.closest("tr[data-transition-edge]");
-    if (!row) return;
-    const index = Number.parseInt(row.dataset.transitionEdge || "", 10);
-    const edge = state.transition.data?.edges?.[index];
-    if (!edge) return;
-    state.transition.selected = { kind: "edge", ...edge };
-    renderTransitionSelection(state.transition.selected);
-  });
-
   document.querySelectorAll(".viewer-show-h").forEach((input) => {
     input.addEventListener("change", () => {
       const viewerKey = String(input.dataset.viewerKey || "general");
@@ -6173,12 +5782,6 @@ function bindEvents() {
         !!q("qCarbonCompareLogY").checked
       );
     }
-    const transitionHost = q("transitionChart");
-    if (transitionHost && window.echarts) {
-      const transitionChart = window.echarts.getInstanceByDom(transitionHost);
-      if (transitionChart) transitionChart.resize();
-    }
-    if (transitionCy) transitionCy.resize();
     drawContextFrameCanvas();
   });
   syncContextTrajectoryAtomScopeControl();
@@ -6197,7 +5800,7 @@ async function init() {
   const rdkitAvailable = Boolean(health?.rdkit?.available);
   initializeResultWorkbench({
     status: "ready",
-    hint: "先导入 RNG 输出文件夹；检索、事件证据和观察网络会自动复用对应文件",
+    hint: "先导入 RNG 输出文件夹；检索、事件证据和时间演化会自动复用对应文件",
     rdkit_available: rdkitAvailable,
     viewer_note: rdkitAvailable ? "SMILES 结构渲染可用" : "RDKit 不可用，结构渲染将显示错误占位图",
   });

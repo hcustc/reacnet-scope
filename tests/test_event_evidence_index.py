@@ -40,6 +40,30 @@ def write_rng_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return reactionevent, molecules
 
 
+def write_continuous_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    reactionevent = tmp_path / "continuous.reactionevent.csv"
+    molecules = tmp_path / "continuous.molecules.csv"
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "0,[C][O][N],[C][O]+[N]\n"
+        "1,[C][O],[O][C]\n"
+        "2,[O][C],[C]=[O]\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "0,[C][O][N],0;1;2,0-1-1;1-2-1\n"
+        "10,[C][O],0;1,0-1-1\n"
+        "10,[N],2,\n"
+        "20,[O][C],0;1,0-1-1\n"
+        "20,[N],2,\n"
+        "30,[C]=[O],0;1,0-1-2\n"
+        "30,[N],2,\n",
+        encoding="utf-8",
+    )
+    return reactionevent, molecules
+
+
 def test_event_index_uses_dataset_local_cache_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent, _molecules = write_rng_fixture(tmp_path)
@@ -82,6 +106,92 @@ def test_event_store_publishes_dataset_local_index_and_pages(
         "matched",
         "unresolved_hmm_timeline",
     ]
+    assert first["rows"][0]["reactant_participants"] == [
+        {"species": "[H]", "atom_ids": [1]},
+        {"species": "[O]", "atom_ids": [2]},
+    ]
+    assert first["rows"][0]["product_participants"] == [
+        {"species": "[H][O]", "atom_ids": [1, 2]}
+    ]
+
+
+def test_event_species_index_finds_exact_predecessor_by_interval(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_continuous_fixture(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    selected = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent),
+        str(molecules),
+        "[O][C]->[C]=[O]",
+        limit=1,
+    )["rows"][0]
+
+    result = EVENT_EVIDENCE_STORE.query_adjacent_events(
+        str(reactionevent),
+        str(molecules),
+        selected["event_id"],
+        intermediate_smiles="[O][C]",
+        direction="backward",
+    )
+
+    assert result["can_assert_order"] is True
+    assert result["time_basis"] == "physical_timestep"
+    assert [row["timestep_index"] for row in result["rows"]] == [1]
+    assert result["rows"][0]["reaction_smiles"] == "[C][O] -> [O][C]"
+    assert result["rows"][0]["interval_gap"] == 1
+
+    bounded = EVENT_EVIDENCE_STORE.query_adjacent_events(
+        str(reactionevent),
+        str(molecules),
+        selected["event_id"],
+        intermediate_smiles="[O][C]",
+        direction="backward",
+        limit=1,
+        include_total=False,
+    )
+    assert bounded["total"] is None
+    assert len(bounded["rows"]) == 1
+
+
+def test_reactionevent_only_index_supports_both_directions(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent = tmp_path / "only.reactionevent.csv"
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "1,A,[NH4+]\n"
+        "4,[NH4+],B\n"
+        "9,B,C\n",
+        encoding="utf-8",
+    )
+
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent))
+    anchor = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent), "", "[NH4+]->B", limit=1
+    )["rows"][0]
+    backward = EVENT_EVIDENCE_STORE.query_adjacent_events(
+        str(reactionevent),
+        "",
+        anchor["event_id"],
+        intermediate_smiles="[NH4+]",
+        direction="backward",
+    )
+    forward = EVENT_EVIDENCE_STORE.query_adjacent_events(
+        str(reactionevent),
+        "",
+        anchor["event_id"],
+        intermediate_smiles="B",
+        direction="forward",
+    )
+
+    assert built["association_available"] is False
+    assert built["time_basis"] == "timestep_index"
+    assert backward["rows"][0]["reaction_smiles"] == "A -> [NH4+]"
+    assert forward["rows"][0]["reaction_smiles"] == "B -> C"
+    assert backward["rows"][0]["association_status"] == "reactionevent_only"
 
 
 def test_builder_only_runs_global_counts_once_at_finalization(

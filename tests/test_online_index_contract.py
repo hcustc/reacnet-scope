@@ -253,7 +253,6 @@ class OnlineIndexContractTests(unittest.TestCase):
             Path(f"{base}.moname"),
             base,
             Path(f"{base}.route"),
-            Path(f"{base}.table"),
             Path(f"{base}.reactionevent.csv"),
             Path(f"{base}.molecules.csv"),
         ]

@@ -82,6 +82,18 @@ def test_discovery_sorts_by_completeness_then_latest_mtime(tmp_path):
     ]
 
 
+def test_discovery_ignores_macos_appledouble_sidecars(tmp_path):
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionabcd").write_text("4 [H] -> [H][H]\n")
+    Path(f"{base}.species").write_text("[H] 1\n")
+    (tmp_path / "._run.lammpstrj.reactionabcd").write_bytes(b"metadata")
+    (tmp_path / "._run.lammpstrj.species").write_bytes(b"metadata")
+
+    candidates = discover_dataset_candidates(tmp_path)
+
+    assert [item["label"] for item in candidates] == ["run.lammpstrj"]
+
+
 def test_choose_dataset_candidate_requires_preference_when_ambiguous(tmp_path):
     first = tmp_path / "first.lammpstrj"
     second = tmp_path / "second.lammpstrj"

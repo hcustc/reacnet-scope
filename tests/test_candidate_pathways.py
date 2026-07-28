@@ -786,6 +786,58 @@ def test_repeated_output_terms_retain_search_multiplicity() -> None:
     assert all(path.steps[0].products == ("B", "B") for path in result.paths)
 
 
+def test_small_carbon_goal_prioritizes_direct_fragment_before_branch_cap() -> None:
+    parent = "[C][C][C][C][C][C]"
+    five_carbon = "[C][C][C][C][C]"
+    carbon_monoxide = "[C]=[O]"
+    net = ReactionNetwork(
+        [
+            Reaction((parent,), (five_carbon, carbon_monoxide), 1),
+            Reaction((parent,), ("[C]1[C][C][C][C][C]1",), 100),
+        ]
+    )
+
+    result = find_candidate_paths(
+        net,
+        parent,
+        max_depth=2,
+        max_branches=1,
+        target_max_carbon=4,
+    )
+
+    assert result.reason == "ok"
+    assert result.query["target_max_carbon"] == 4
+    assert [path.species for path in result.paths] == [
+        (parent, carbon_monoxide)
+    ]
+    assert result.paths[0].steps[0].products == (
+        five_carbon,
+        carbon_monoxide,
+    )
+
+
+def test_small_carbon_goal_does_not_return_non_goal_depth_limited_paths() -> None:
+    net = ReactionNetwork(
+        [
+            Reaction(
+                ("[C][C][C][C][C][C]",),
+                ("[C][C][C][C][C]",),
+                10,
+            )
+        ]
+    )
+
+    result = find_candidate_paths(
+        net,
+        "[C][C][C][C][C][C]",
+        max_depth=1,
+        target_max_carbon=4,
+    )
+
+    assert result.paths == ()
+    assert result.reason == "target_not_reached"
+
+
 def test_expansion_cap_precedes_further_candidate_evidence_validation() -> None:
     net = ReactionNetwork(
         [

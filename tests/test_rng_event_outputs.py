@@ -6,6 +6,7 @@ import pytest
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
+from rng_tools import dir_browser
 from reacnet_scope.rng_events import (
     canonical_reaction_key,
     event_output_status,
@@ -81,6 +82,8 @@ def test_rng_event_query_preserves_stoichiometry_and_maps_atoms(tmp_path) -> Non
 
 def test_dataset_scan_uses_rng_event_outputs_instead_of_route(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     reactionevent, molecules = _rng_outputs(tmp_path)
     trajectory = tmp_path / "run.lammpstrj"
     trajectory.write_text(_frame(0) + _frame(10), encoding="utf-8")
@@ -121,6 +124,8 @@ def test_stale_event_index_recommends_explicit_rebuild(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     reactionevent, molecules = _rng_outputs(tmp_path)
     EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
     reactionevent.write_text(

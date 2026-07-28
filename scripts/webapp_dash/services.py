@@ -13,10 +13,8 @@ This module never reimplements analysis logic.  It only:
 from __future__ import annotations
 
 import base64
-import copy
 import csv
 import io
-import json
 import os
 import re
 import shlex
@@ -25,7 +23,7 @@ import sys
 import time
 import traceback
 from functools import lru_cache
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 from collections import Counter
 from typing import Any, Iterable, Mapping
@@ -38,13 +36,8 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from rng_tools.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
-from rng_tools.mechanism_graph import (  # noqa: E402
-    build_mechanism_network,
-    serialize_mechanism_graph,
-    to_networkx_mechanism_graph,
-    validate_mechanism_payload,
-)
 from rng_tools.pathways import find_candidate_paths  # noqa: E402
+from rng_tools.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
     IndexInvalidError,
@@ -52,6 +45,7 @@ from reacnet_scope.indexes import (  # noqa: E402
     IndexStaleError,
     clear_index,
     resolve_dataset_paths,
+    ROUTE_INDEX_STORE,
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
@@ -74,9 +68,9 @@ from scripts.webapp.server import (  # noqa: E402
     build_carbon_plot_payload,
     build_intermediate_candidates_payload,
     build_species_plot_payload,
-    build_transition_table_payload,
     collect_species_totals,
     collect_next_reactions,
+    closest_isotopic_mass,
     derive_species_path,
     formula_mass_fields,
     looks_like_formula,
@@ -92,6 +86,8 @@ from scripts.webapp.server import (  # noqa: E402
     smiles_to_svg,
     split_terms,
     parse_lammpstrj_frame_block,
+    _group_reaction_hits_by_time,
+    _prepare_reaction_query,
 )
 
 
@@ -147,10 +143,11 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
             (artifacts.get("reactionevent") or {}).get("path") or ""
         )
         molecules = str((artifacts.get("molecules") or {}).get("path") or "")
-        if reactionevent and molecules:
+        if reactionevent:
             try:
                 event_status = EVENT_EVIDENCE_STORE.status(
-                    reactionevent, molecules
+                    reactionevent,
+                    molecules if molecules and Path(molecules).is_file() else "",
                 )
             except RuntimeError as exc:
                 event_status = {"state": "invalid", "message": str(exc)}
@@ -259,12 +256,25 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
         except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
             return {"state": "invalid", "message": str(exc)}
 
+    event_path = str(artifact_paths.get("reactionevent") or "")
+    molecule_path = str(artifact_paths.get("molecules") or "")
+    if event_path and Path(event_path).is_file():
+        try:
+            event_status = EVENT_EVIDENCE_STORE.status(
+                event_path,
+                (
+                    molecule_path
+                    if molecule_path and Path(molecule_path).is_file()
+                    else ""
+                ),
+            )
+        except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+            event_status = {"state": "invalid", "message": str(exc)}
+    else:
+        event_status = {"state": "missing"}
     return {
         "event": str(
-            status_for(
-                EVENT_EVIDENCE_STORE, "reactionevent", "molecules"
-            ).get("state")
-            or "missing"
+            event_status.get("state") or "missing"
         ),
         "trajectory": str(
             status_for(
@@ -366,7 +376,7 @@ def artifacts_from_status(status: dict[str, Any]) -> dict[str, str]:
     dataset = status.get("dataset", {}) if status else {}
     artifacts = dataset.get("artifacts", {}) or {}
     out: dict[str, str] = {}
-    for key in ("reaction", "species", "moname", "trajectory", "route", "table", "reactionevent", "molecules"):
+    for key in ("reaction", "species", "moname", "trajectory", "route", "reactionevent", "molecules"):
         item = artifacts.get(key, {}) or {}
         path_text = item.get("path") or ""
         if path_text:
@@ -469,7 +479,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
                 if events.get("state") in {"stale", "invalid"}
                 else f"{command_prefix} --event-only"
             )
-            if artifacts.get("reactionevent") and artifacts.get("molecules")
+            if artifacts.get("reactionevent")
             else ""
         ),
         "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
@@ -617,6 +627,14 @@ def _load_reaction_network_snapshot(
     return load_reaction_network_snapshot(reaction_path, min_tp)
 
 
+def _reaction_min_tp(artifacts: Mapping[str, Any]) -> int:
+    """Return the session-level reaction throughput threshold."""
+    try:
+        return max(1, int(artifacts.get("_min_tp") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _pathway_preparation_command(
     reaction_path: str,
     reactionevent_path: str,
@@ -640,6 +658,8 @@ _PATHWAY_QUERY_KEYS = {
     "max_expansions",
     "min_net_tp",
     "min_directionality",
+    "target_max_carbon",
+    "evidence_mode",
 }
 
 
@@ -649,6 +669,15 @@ def find_pathways(
     **limits: Any,
 ) -> dict[str, Any]:
     """Find candidate paths, linking a ready SQLite event index if present."""
+    query_limits = dict(limits)
+    evidence_mode = str(
+        query_limits.pop("evidence_mode", "auto") or "auto"
+    )
+    if evidence_mode not in {"auto", "network_only"}:
+        raise ServiceError(
+            "evidence_mode 必须是 auto 或 network_only",
+            reason="bad_pathway_query",
+        )
     reaction_path = (artifacts.get("reaction") or "").strip()
     if (
         not reaction_path.lower().endswith(".reactionabcd")
@@ -669,7 +698,7 @@ def find_pathways(
     try:
         network, reaction_signature = _load_reaction_network_snapshot(
             reaction_path,
-            1,
+            _reaction_min_tp(artifacts),
         )
         _pathway_assert_source_current(reaction_path, reaction_signature)
     except FileNotFoundError as exc:
@@ -693,11 +722,15 @@ def find_pathways(
     evidence_provider: EventIndexEvidenceProvider | None = None
     rebuild_event_index = False
     if (
-        reactionevent_path
-        and molecules_path
+        evidence_mode == "auto"
+        and reactionevent_path
         and Path(reactionevent_path).is_file()
-        and Path(molecules_path).is_file()
     ):
+        molecules_path = (
+            molecules_path
+            if molecules_path and Path(molecules_path).is_file()
+            else ""
+        )
         try:
             opened = EVENT_EVIDENCE_STORE.open_required(
                 reactionevent_path,
@@ -720,7 +753,7 @@ def find_pathways(
                 network,
                 start_smiles,
                 evidence_provider=evidence_provider,
-                **limits,
+                **query_limits,
             )
             if evidence_provider is not None:
                 evidence_provider.assert_current()
@@ -731,7 +764,7 @@ def find_pathways(
                 network,
                 start_smiles,
                 evidence_provider=None,
-                **limits,
+                **query_limits,
             )
     except (TypeError, ValueError) as exc:
         message = str(exc)
@@ -746,6 +779,15 @@ def find_pathways(
 
     _pathway_assert_source_current(reaction_path, reaction_signature)
     payload = result.as_dict()
+    payload.setdefault("query", {})["evidence_mode"] = evidence_mode
+    payload["search_stage"] = (
+        "network_shortlist"
+        if evidence_mode == "network_only"
+        else "evidence_ranked"
+    )
+    payload["evidence_deferred"] = evidence_mode == "network_only"
+    target_max_carbon = payload.get("query", {}).get("target_max_carbon")
+    max_depth = int(payload.get("query", {}).get("max_depth") or 0)
     for path in payload["paths"]:
         path["formulas"] = [
             _pathway_formula(smiles)
@@ -766,18 +808,119 @@ def find_pathways(
                 _pathway_formula(smiles)
                 for smiles in step["products"]
             ]
+        _annotate_pathway_endpoints(
+            path,
+            direction=str(
+                payload.get("query", {}).get("direction") or "downstream"
+            ),
+            target_max_carbon=(
+                int(target_max_carbon)
+                if target_max_carbon is not None
+                else None
+            ),
+            max_depth=max_depth,
+            search_truncated=bool(payload.get("truncated")),
+        )
 
     payload["source_signatures"] = {
         "reactionabcd": reaction_signature,
         **dict(payload["source_signatures"]),
     }
-    if evidence_provider is None:
+    if evidence_provider is None and evidence_mode == "auto":
         payload["preparation_command"] = _pathway_preparation_command(
             reaction_path,
             reactionevent_path,
             rebuild=rebuild_event_index,
         )
     return payload
+
+
+def _pathway_species_summary(smiles: str) -> dict[str, Any]:
+    carbon_count = int(count_atoms_fast(smiles).get("C", 0))
+    return {
+        "smiles": smiles,
+        "formula": _pathway_formula(smiles),
+        "carbon_count": carbon_count,
+        "is_small_carbon_fragment": 0 < carbon_count <= 4,
+        "structure_url": (
+            "/api/structure.svg?"
+            f"smiles={quote(smiles, safe='')}&width=150&height=104&show_h=1"
+        ),
+    }
+
+
+def _annotate_pathway_endpoints(
+    path: dict[str, Any],
+    *,
+    direction: str,
+    target_max_carbon: int | None,
+    max_depth: int,
+    search_truncated: bool,
+) -> None:
+    """Expose full terminal hyperedge products and route-ending semantics."""
+    steps = path.get("steps") or []
+    species = [str(value) for value in path.get("species") or []]
+    terminal_smiles = species[-1] if species else ""
+    path["terminal_species"] = (
+        _pathway_species_summary(terminal_smiles)
+        if terminal_smiles
+        else None
+    )
+    terminal_carbon = int(
+        (path.get("terminal_species") or {}).get("carbon_count") or 0
+    )
+    if (
+        target_max_carbon is not None
+        and 0 < terminal_carbon <= target_max_carbon
+    ):
+        ending = "small_molecule_goal"
+    elif search_truncated and len(steps) < max_depth:
+        ending = "search_truncated"
+    elif len(steps) >= max_depth:
+        ending = "depth_limit"
+    else:
+        ending = "no_positive_continuation"
+    path["termination_reason"] = ending
+
+    last_step = steps[-1] if steps else {}
+    terminal_side = (
+        last_step.get("reactants")
+        if direction == "upstream"
+        else last_step.get("products")
+    ) or []
+    path["terminal_products"] = [
+        _pathway_species_summary(str(smiles))
+        for smiles in terminal_side
+    ]
+
+    fragments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    fragmentation_steps: list[int] = []
+    for step_index, step in enumerate(steps, start=1):
+        focal_input = str(step.get("focal_input") or "")
+        input_carbon = int(count_atoms_fast(focal_input).get("C", 0))
+        output_side = (
+            step.get("reactants")
+            if direction == "upstream"
+            else step.get("products")
+        ) or []
+        step_fragmented = False
+        for raw_smiles in output_side:
+            summary = _pathway_species_summary(str(raw_smiles))
+            carbon_count = int(summary["carbon_count"])
+            if (
+                summary["is_small_carbon_fragment"]
+                and input_carbon > carbon_count
+            ):
+                step_fragmented = True
+                if summary["smiles"] not in seen:
+                    seen.add(summary["smiles"])
+                    fragments.append(summary)
+        if step_fragmented:
+            fragmentation_steps.append(step_index)
+    path["small_fragments"] = fragments
+    path["fragmentation_step_indices"] = fragmentation_steps
+    path["has_fragmentation"] = bool(fragmentation_steps)
 
 
 def _pathway_species_node_id(smiles: str) -> str:
@@ -867,12 +1010,19 @@ def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                             ),
                         }
                     )
+        for item in path.get("terminal_products") or []:
+            smiles = str(item.get("smiles") or "")
+            if smiles and smiles in species_classes:
+                species_classes[smiles].add("terminal-product")
+                if item.get("is_small_carbon_fragment"):
+                    species_classes[smiles].add("small-fragment")
     species_nodes = [
         {
             "data": {
                 "id": _pathway_species_node_id(smiles),
                 "node_kind": "species",
-                "label": smiles,
+                "label": _pathway_formula(smiles) or smiles,
+                "formula": _pathway_formula(smiles),
                 "smiles": smiles,
             },
             "classes": " ".join(sorted(species_classes[smiles])),
@@ -882,7 +1032,13 @@ def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [*species_nodes, *reaction_nodes, *edges]
 
 
-def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+def _species_catalog_entry(
+    smiles: str,
+    total_count: int,
+    evidence: dict[str, Any] | None = None,
+    *,
+    catalog_source: str = ".species",
+) -> dict[str, Any]:
     """Build one catalogue row, calculating chemistry only for that SMILES."""
     formula = smiles_formula_cached(smiles) or "?"
     mass_fields = formula_mass_fields(formula) if formula != "?" else {}
@@ -893,12 +1049,57 @@ def _species_catalog_entry(smiles: str, total_count: int, evidence: dict[str, An
         "exact_mass": mass_fields.get("exact_mass"),
         "nominal_mass": mass_fields.get("nominal_mass"),
         "total_count": int(total_count),
-        "structure_source": ".moname" if evidence else "SMILES",
+        "catalog_source": catalog_source,
+        "structure_source": (
+            ".moname"
+            if evidence
+            else (".reactionabcd" if catalog_source == ".reactionabcd" else "SMILES")
+        ),
         "moname_available": bool(evidence),
         "moname_occurrences": int(evidence.get("moname_occurrences") or 0),
         "moname_atom_count": int(evidence.get("moname_atom_count") or 0),
         "moname_bond_count": int(evidence.get("moname_bond_count") or 0),
     }
+
+
+@lru_cache(maxsize=100_000)
+def _canonical_smiles_cached(smiles: str) -> str:
+    return canonical_smiles(smiles) or ""
+
+
+def _reaction_catalog_matches(
+    artifacts: Mapping[str, Any],
+    query: str,
+    *,
+    existing: set[str],
+) -> list[dict[str, Any]]:
+    """Recover transient reaction-network species absent from snapshots."""
+    reaction_path = str(artifacts.get("reaction") or "").strip()
+    if not reaction_path or not Path(reaction_path).is_file():
+        return []
+    query_canonical = _canonical_smiles_cached(query)
+    if not query_canonical:
+        return []
+    try:
+        network = STORE.get(reaction_path, _reaction_min_tp(artifacts))
+    except Exception:
+        return []
+    matches: list[dict[str, Any]] = []
+    for smiles in network.species:
+        if smiles in existing:
+            continue
+        if (
+            smiles == query
+            or _canonical_smiles_cached(smiles) == query_canonical
+        ):
+            matches.append(
+                _species_catalog_entry(
+                    smiles,
+                    0,
+                    catalog_source=".reactionabcd",
+                )
+            )
+    return matches
 
 
 @lru_cache(maxsize=8)
@@ -932,20 +1133,60 @@ def _structure_markdown(smiles: str) -> str:
     return f"![{smiles}](/api/structure.svg?smiles={quote(smiles, safe='')})"
 
 
+def _aggregate_mass_rows_by_formula(
+    rows: Iterable[dict[str, Any]],
+    *,
+    activity_field: str,
+    summed_fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Collapse mass-search structures into one result per molecular formula.
+
+    The most active structure remains in ``smiles`` as the representative so
+    existing detail/pathway actions can still operate on a concrete species.
+    Formula-level activity fields are summed across every matching structure.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        formula = str(row.get("formula") or "")
+        if formula:
+            grouped.setdefault(formula, []).append(row)
+
+    aggregated: list[dict[str, Any]] = []
+    for formula, members in grouped.items():
+        representative = min(
+            members,
+            key=lambda row: (
+                -int(row.get(activity_field) or 0),
+                str(row.get("smiles") or ""),
+            ),
+        )
+        result = dict(representative)
+        result["formula"] = formula
+        result["structure_count"] = len(members)
+        result["representative_activity"] = int(
+            representative.get(activity_field) or 0
+        )
+        for field in summed_fields:
+            result[field] = sum(int(row.get(field) or 0) for row in members)
+        aggregated.append(result)
+    return aggregated
+
+
 def search_species_catalog(
     artifacts: dict[str, str],
     query: str = "",
     *,
     kind: str = "auto",
     mass_tolerance: float = 0.5,
-    mass_mode: str = "exact",
-    top: int = 50,
 ) -> dict[str, Any]:
     """Search the ``.species``-derived target-species catalogue.
 
-    Unlike the legacy species search, this endpoint does not require a
-    reaction network.  It is the first stage of the focused experimental
-    species workflow; reaction channels are joined only in the next stage.
+    The snapshot catalogue remains authoritative for abundance.  An optional
+    reaction network is consulted only when an exact/canonical SMILES is
+    absent from every snapshot, so transient channel species remain selectable
+    with an explicit zero snapshot abundance and source label.  Mass searches
+    return one aggregate row per matching molecular formula.  Mass matching
+    always uses exact mass and all matching rows are returned.
     """
     species_path = (artifacts.get("species") or "").strip()
     if not species_path or not Path(species_path).is_file():
@@ -955,6 +1196,11 @@ def search_species_catalog(
     if effective_kind not in {"all", "formula", "smiles", "mass"}:
         raise ServiceError(f"未知查询类型: {effective_kind}", reason="bad_kind")
     target_mass: float | None = None
+    query_canonical = (
+        _canonical_smiles_cached(text)
+        if effective_kind == "smiles" and text
+        else ""
+    )
     if effective_kind == "mass":
         try:
             target_mass = float(text)
@@ -963,10 +1209,8 @@ def search_species_catalog(
 
     species_signature = _file_signature(species_path)
     moname_signature = _file_signature((artifacts.get("moname") or "").strip())
-    # The landing table is deliberately a fast path: it needs only the most
-    # abundant rows, not formula/mass derivation for every species in a large
-    # trajectory.  Formula and mass searches build the reusable full index.
-    limit = max(1, int(top or 30))
+    network_fallback = False
+    canonical_match = False
     if effective_kind in {"all", "smiles"}:
         totals = collect_species_totals(species_signature[0])
         fast_items = [
@@ -974,9 +1218,30 @@ def search_species_catalog(
             for smiles, total_count in totals.items()
             if effective_kind == "all" or text.lower() in smiles.lower()
         ]
+        if effective_kind == "smiles" and text and not fast_items:
+            if query_canonical:
+                fast_items = [
+                    (smiles, total_count)
+                    for smiles, total_count in totals.items()
+                    if _canonical_smiles_cached(smiles) == query_canonical
+                ]
+                canonical_match = bool(fast_items)
         matching_count = len(fast_items)
         fast_items.sort(key=lambda item: (-int(item[1]), item[0]))
-        catalog = tuple(_species_catalog_entry(smiles, int(total_count)) for smiles, total_count in fast_items[:limit])
+        catalog = tuple(
+            _species_catalog_entry(smiles, int(total_count))
+            for smiles, total_count in fast_items
+        )
+        if effective_kind == "smiles" and text and not catalog:
+            network_rows = _reaction_catalog_matches(
+                artifacts,
+                text,
+                existing={str(item["smiles"]) for item in catalog},
+            )
+            if network_rows:
+                catalog = (*catalog, *network_rows)
+                matching_count += len(network_rows)
+                network_fallback = True
         catalog_size = len(totals)
         full_catalog_cached = False
     else:
@@ -986,7 +1251,6 @@ def search_species_catalog(
         matching_count = None
     rows: list[dict[str, Any]] = []
     tolerance = max(0.0, float(mass_tolerance or 0.0))
-    normalized_mode = mass_mode if mass_mode in {"exact", "nominal"} else "exact"
     for entry in catalog:
         smiles = str(entry["smiles"])
         formula = str(entry["formula"])
@@ -995,34 +1259,53 @@ def search_species_catalog(
         mass_error: float | None = None
         if effective_kind == "formula" and formula != text:
             continue
-        if effective_kind == "smiles" and text.lower() not in smiles.lower():
+        if (
+            effective_kind == "smiles"
+            and text.lower() not in smiles.lower()
+            and (
+                not query_canonical
+                or _canonical_smiles_cached(smiles) != query_canonical
+            )
+        ):
             continue
         if effective_kind == "mass":
             if exact is None or nominal is None or target_mass is None:
                 continue
-            comparison = float(exact) if normalized_mode == "exact" else float(nominal)
-            target = target_mass if normalized_mode == "exact" else float(round(target_mass))
-            mass_error = comparison - target
+            matched_mass = closest_isotopic_mass(formula, target_mass, "exact")
+            if matched_mass is None:
+                continue
+            exact, nominal = matched_mass
+            mass_error = float(exact) - target_mass
             if abs(mass_error) > tolerance:
                 continue
         rows.append(
             {
                 **entry,
+                "exact_mass": round(float(exact), 6) if exact is not None else None,
+                "nominal_mass": int(nominal) if nominal is not None else None,
                 "mass_error": round(mass_error, 6) if mass_error is not None else None,
                 "ppm_error": round(mass_error / target_mass * 1e6, 3) if mass_error is not None and target_mass else None,
             }
         )
     if effective_kind == "mass":
-        rows.sort(key=lambda row: (abs(float(row.get("mass_error") or 0.0)), -int(row["total_count"]), row["smiles"]))
+        rows = _aggregate_mass_rows_by_formula(
+            rows,
+            activity_field="total_count",
+            summed_fields=("total_count",),
+        )
+        rows.sort(key=lambda row: (abs(float(row.get("mass_error") or 0.0)), -int(row["total_count"]), row["formula"]))
     else:
         rows.sort(key=lambda row: (-int(row["total_count"]), row["formula"], row["smiles"]))
-    visible_rows = rows[:limit]
-    for row in visible_rows:
+    for row in rows:
         row["structure"] = _structure_markdown(str(row["smiles"]))
     return {
         "ok": True,
-        "query": {"text": text, "kind": effective_kind, "mass_mode": normalized_mode, "mass_tolerance": tolerance},
-        "rows": visible_rows,
+        "query": {
+            "text": text,
+            "kind": effective_kind,
+            "mass_tolerance": tolerance,
+        },
+        "rows": rows,
         "n_rows": matching_count if matching_count is not None else len(rows),
         "meta": {
             "species_file": species_signature[0],
@@ -1030,6 +1313,8 @@ def search_species_catalog(
             "moname_available": bool(moname_signature[0]),
             "catalog_size": catalog_size,
             "catalog_cache": "memory" if full_catalog_cached else "fast-path",
+            "canonical_match": canonical_match,
+            "reaction_network_fallback": network_fallback,
         },
     }
 
@@ -1056,13 +1341,14 @@ def search_species(
     *,
     kind: str = "auto",
     mass_tolerance: float = 0.5,
-    mass_mode: str = "exact",
-    top: int = 0,
 ) -> dict[str, Any]:
     """Search species by formula / SMILES / mass using the existing network.
 
     Returns ``{ok, rows, query_kind}`` where each row carries the fields
-    needed by AG Grid and the right-hand detail panel.
+    needed by AG Grid and the right-hand detail panel.  Formula and SMILES
+    searches return concrete structures; mass searches aggregate all matching
+    structures into one row per molecular formula.  Mass matching always uses
+    exact mass, and every matching result is returned for client-side paging.
     """
     reac_path = (artifacts.get("reaction") or "").strip()
     if not reac_path:
@@ -1076,7 +1362,7 @@ def search_species(
         raise ServiceError("请输入查询内容", reason="missing_query")
 
     try:
-        net = STORE.get(reac_path, 1)
+        net = STORE.get(reac_path, _reaction_min_tp(artifacts))
     except FileNotFoundError as exc:
         raise ServiceError(f"reactionabcd 文件不存在: {reac_path}", reason="missing_reaction") from exc
     except Exception as exc:
@@ -1088,18 +1374,18 @@ def search_species(
     elif effective_kind == "smiles":
         rows = _rows_for_smiles(net, text)
     elif effective_kind == "mass":
-        rows = _rows_for_mass(net, text, mass_tolerance, mode=mass_mode)
+        rows = _rows_for_mass(net, text, mass_tolerance)
     else:
         raise ServiceError(f"未知查询类型: {effective_kind}", reason="bad_kind")
 
-    if int(top or 0) > 0:
-        rows = rows[: int(top)]
+    matching_count = len(rows)
     return {
         "ok": True,
         "query_kind": effective_kind,
         "query": text,
         "rows": rows,
-        "n_rows": len(rows),
+        "n_rows": matching_count,
+        "n_visible_rows": len(rows),
     }
 
 
@@ -1137,14 +1423,16 @@ def _rows_for_smiles(net: ReactionNetwork, query: str) -> list[dict[str, Any]]:
     return [_species_row(net, resolved)]
 
 
-def _rows_for_mass(net: ReactionNetwork, query: str, tolerance: float, *, mode: str = "exact") -> list[dict[str, Any]]:
+def _rows_for_mass(
+    net: ReactionNetwork,
+    query: str,
+    tolerance: float,
+) -> list[dict[str, Any]]:
     try:
         target = float(query)
     except ValueError as exc:
         raise ServiceError(f"无效的质量数: {query}", reason="bad_mass") from exc
     tol = max(0.0, float(tolerance))
-    mass_mode = mode if mode in {"nominal", "exact"} else "exact"
-    target_nominal = int(round(target))
     rows: list[dict[str, Any]] = []
     for smi, info in net.species.items():
         formula = info.formula
@@ -1155,14 +1443,30 @@ def _rows_for_mass(net: ReactionNetwork, query: str, tolerance: float, *, mode: 
         nominal = fields.get("nominal_mass")
         if exact is None or nominal is None:
             continue
-        error = float(exact) - target if mass_mode == "exact" else float(nominal) - target_nominal
+        matched_mass = closest_isotopic_mass(formula, target, "exact")
+        if matched_mass is None:
+            continue
+        exact, nominal = matched_mass
+        error = float(exact) - target
         if abs(error) > tol:
             continue
         row = _species_row(net, smi)
+        row["exact_mass"] = round(float(exact), 6)
+        row["nominal_mass"] = int(nominal)
         row["mass_error"] = round(error, 6)
-        row["ppm_error"] = round(error / target * 1e6, 3) if mass_mode == "exact" and target else None
+        row["ppm_error"] = round(error / target * 1e6, 3) if target else None
         rows.append(row)
-    rows.sort(key=lambda r: (abs(float(r.get("mass_error") or 0.0)), -(r["total_throughput"]), r["smiles"]))
+    rows = _aggregate_mass_rows_by_formula(
+        rows,
+        activity_field="total_throughput",
+        summed_fields=(
+            "tp_as_reactant",
+            "tp_as_product",
+            "total_throughput",
+            "net_production",
+        ),
+    )
+    rows.sort(key=lambda r: (abs(float(r.get("mass_error") or 0.0)), -(r["total_throughput"]), r["formula"]))
     return rows
 
 
@@ -1183,7 +1487,7 @@ def species_detail(artifacts: dict[str, str], smiles: str) -> dict[str, Any]:
     n_consume = n_produce = 0
     if reac_path and os.path.exists(reac_path):
         try:
-            net = STORE.get(reac_path, 1)
+            net = STORE.get(reac_path, _reaction_min_tp(artifacts))
             info = net.species.get(smi)
             if info:
                 tp_reactant = int(info.tp_as_reactant)
@@ -1208,32 +1512,32 @@ def species_detail(artifacts: dict[str, str], smiles: str) -> dict[str, Any]:
     }
 
 
-def render_species_svg(smiles: str, *, width: int = 280, height: int = 200) -> dict[str, Any]:
+def render_species_svg(
+    smiles: str,
+    *,
+    width: int = 280,
+    height: int = 200,
+    show_h: bool = True,
+) -> dict[str, Any]:
     """Render a 2D structure SVG using the existing RDKit helper."""
     smi = (smiles or "").strip()
     if not smi:
         return {"ok": False, "svg": "", "message": "未选择物种"}
     try:
-        svg = smiles_to_svg(smi, width=width, height=height, show_h=True)
+        svg = smiles_to_svg(smi, width=width, height=height, show_h=show_h)
         return {"ok": True, "svg": svg, "message": ""}
     except Exception as exc:
         return {"ok": False, "svg": "", "message": str(exc) or "RDKit 渲染失败"}
 
 
-# ---------------------------------------------------------------------------
-# Transition relations (next-step reactions)
-# ---------------------------------------------------------------------------
-
-
-def collect_transitions(
+def _collect_reaction_channels(
     artifacts: dict[str, str],
     smiles: str,
     *,
     direction: str = "both",
     top: int = 30,
-    net_positive_only: bool = False,
 ) -> dict[str, Any]:
-    """Wrap ``collect_next_reactions`` for the transition relations page."""
+    """Return reaction-channel rows for one selected species."""
     smi = (smiles or "").strip()
     if not smi:
         raise ServiceError("请先在物种检索中选择一个物种", reason="missing_species")
@@ -1242,7 +1546,7 @@ def collect_transitions(
         raise ServiceError("缺少 reactionabcd 数据文件", reason="missing_reaction")
     role = direction if direction in {"consume", "produce", "both"} else "both"
     try:
-        net = STORE.get(reac_path, 1)
+        net = STORE.get(reac_path, _reaction_min_tp(artifacts))
     except Exception as exc:
         raise ServiceError(f"加载反应网络失败: {exc}") from exc
     if smi not in net.species:
@@ -1250,10 +1554,8 @@ def collect_transitions(
     try:
         matched = collect_next_reactions(net, smi, role)
     except Exception as exc:
-        raise ServiceError(f"查询转化关系失败: {exc}") from exc
+        raise ServiceError(f"查询反应通道失败: {exc}") from exc
     rows = [_transition_row(m) for m in matched]
-    if net_positive_only:
-        rows = [row for row in rows if int(row.get("net_tp") or 0) > 0]
     if int(top or 0) > 0:
         rows = rows[: int(top)]
     return {
@@ -1272,14 +1574,23 @@ def collect_species_channels(
     top: int = 20,
 ) -> dict[str, Any]:
     """Split one target species' high-frequency pathways into two lanes."""
-    production = collect_transitions(artifacts, smiles, direction="produce", top=0).get("rows") or []
-    consumption = collect_transitions(artifacts, smiles, direction="consume", top=0).get("rows") or []
+    production = _collect_reaction_channels(
+        artifacts,
+        smiles,
+        direction="produce",
+        top=0,
+    ).get("rows") or []
+    consumption = _collect_reaction_channels(
+        artifacts,
+        smiles,
+        direction="consume",
+        top=0,
+    ).get("rows") or []
 
     def decorate(rows: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
         prepared = []
         for row in rows:
             out = dict(row)
-            out["workflow_role"] = role
             out["role_label"] = "生成" if role == "produce" else "消耗"
             prepared.append(out)
         prepared.sort(key=lambda row: (-int(row.get("forward_tp") or 0), -abs(int(row.get("net_tp") or 0)), str(row.get("reaction_smiles") or "")))
@@ -1396,6 +1707,684 @@ def rank_representative_events(
     return {"ok": True, "rows": ranked, "meta": meta}
 
 
+def _continuous_sides(
+    row: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    reactants = [
+        str(item.get("species") or "").strip()
+        for item in (row.get("reactant_participants") or [])
+        if str(item.get("species") or "").strip()
+    ]
+    products = [
+        str(item.get("species") or "").strip()
+        for item in (row.get("product_participants") or [])
+        if str(item.get("species") or "").strip()
+    ]
+    if reactants or products:
+        return reactants, products
+    raw_reactants = row.get("reactant_smiles") or []
+    raw_products = row.get("product_smiles") or []
+    if isinstance(raw_reactants, str):
+        raw_reactants = [raw_reactants]
+    if isinstance(raw_products, str):
+        raw_products = [raw_products]
+    explicit_reactants = [
+        str(value).strip()
+        for value in raw_reactants
+        if str(value).strip()
+    ]
+    explicit_products = [
+        str(value).strip()
+        for value in raw_products
+        if str(value).strip()
+    ]
+    if explicit_reactants or explicit_products:
+        return explicit_reactants, explicit_products
+    reaction_text = str(row.get("reaction_smiles") or "")
+    if "->" not in reaction_text:
+        return [], []
+    left, right = reaction_text.split("->", 1)
+    parsed_left, parsed_right = reaction_key(left, right)
+    return list(parsed_left), list(parsed_right)
+
+
+def _event_prepare_command(source: str, *, rebuild: bool = False) -> str:
+    option = "--rebuild event" if rebuild else "--event-only"
+    return (
+        "reacnet-scope-prepare "
+        f"{shlex.quote(str(Path(source).parent))} {option}"
+    )
+
+
+def _continuous_channel_candidates(
+    artifacts: dict[str, str],
+    anchor: Mapping[str, Any],
+    direction: str,
+    bridge: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    role = "produce" if direction == "backward" else "consume"
+    payload = _collect_reaction_channels(
+        artifacts,
+        bridge,
+        direction=role,
+        top=0,
+    )
+    anchor_sides = _continuous_sides(anchor)
+    anchor_key = canonical_reaction_key(*anchor_sides)
+    candidates: list[dict[str, Any]] = []
+    for raw in payload.get("rows") or []:
+        row = dict(raw)
+        sides = _continuous_sides(row)
+        if canonical_reaction_key(*sides) == anchor_key:
+            continue
+        connector = sides[1] if direction == "backward" else sides[0]
+        if bridge not in connector:
+            continue
+        row.update(
+            candidate_rank=0,
+            direction=direction,
+            intermediate_smiles=bridge,
+            evidence_level="network_only",
+            time_basis="none",
+            can_assert_order=False,
+            interval_gap=None,
+        )
+        candidates.append(row)
+    candidates.sort(
+        key=lambda row: (
+            -int(row.get("forward_tp") or row.get("tp") or 0),
+            -abs(int(row.get("net_tp") or 0)),
+            str(row.get("reaction_smiles") or ""),
+        )
+    )
+    for rank, row in enumerate(candidates[:limit], 1):
+        row["candidate_rank"] = rank
+    return candidates[:limit]
+
+
+def _route_occurrences(
+    route_file: str,
+    row: Mapping[str, Any],
+    *,
+    max_hits: int = 5_000,
+) -> list[dict[str, int]]:
+    reaction_text = str(row.get("reaction_smiles") or "").strip()
+    if not reaction_text:
+        return []
+    query = _prepare_reaction_query(reaction_text)
+    hits = ROUTE_INDEX_STORE.query_reaction_hits(
+        route_file,
+        query,
+        max_hits=max(1, int(max_hits)),
+    ).get("hits") or []
+    forward_hits = [
+        hit
+        for hit in hits
+        if str(hit.get("direction") or "") == "reactant_to_product"
+    ]
+    groups = _group_reaction_hits_by_time(
+        forward_hits or list(hits),
+        merge_gap=1,
+    )
+    return [
+        {
+            "start_frame": min(int(hit["start_frame"]) for hit in group),
+            "end_frame": max(int(hit["end_frame"]) for hit in group),
+        }
+        for group in groups
+        if group
+    ]
+
+
+def _nearest_species_timestep(index_path: str, frame: int) -> int | None:
+    connection = sqlite3.connect(
+        f"file:{os.path.abspath(index_path)}?mode=ro",
+        uri=True,
+    )
+    try:
+        row = connection.execute(
+            """
+            SELECT timestep FROM timepoints
+            ORDER BY ABS(timestep-?),timestep LIMIT 1
+            """,
+            (int(frame),),
+        ).fetchone()
+    finally:
+        connection.close()
+    return int(row[0]) if row is not None else None
+
+
+def _species_validates_occurrence(
+    species_file: str,
+    species_index: Mapping[str, Any],
+    row: Mapping[str, Any],
+    occurrence: Mapping[str, int],
+    snapshot_cache: dict[int, dict[str, int]],
+) -> bool:
+    before = _nearest_species_timestep(
+        str(species_index["index_path"]),
+        int(occurrence["start_frame"]),
+    )
+    after = _nearest_species_timestep(
+        str(species_index["index_path"]),
+        int(occurrence["end_frame"]),
+    )
+    if before is None or after is None or before == after:
+        return False
+
+    def counts(timestep: int) -> dict[str, int]:
+        cached = snapshot_cache.get(timestep)
+        if cached is None:
+            snapshot = SPECIES_COMPOSITION_STORE.snapshot(
+                species_file, timestep
+            )
+            cached = {
+                str(item["smiles"]): int(item["count"])
+                for item in snapshot.get("records") or []
+            }
+            snapshot_cache[timestep] = cached
+        return cached
+
+    before_counts = counts(before)
+    after_counts = counts(after)
+    reactants, products = _continuous_sides(row)
+    expected = Counter(products)
+    expected.subtract(reactants)
+    tested = False
+    for species, expected_delta in expected.items():
+        if expected_delta == 0:
+            continue
+        tested = True
+        observed = after_counts.get(species, 0) - before_counts.get(
+            species, 0
+        )
+        if expected_delta > 0 and observed <= 0:
+            return False
+        if expected_delta < 0 and observed >= 0:
+            return False
+    return tested
+
+
+def _route_continuous_candidates(
+    artifacts: dict[str, str],
+    anchor: Mapping[str, Any],
+    direction: str,
+    bridge: str,
+    limit: int,
+    *,
+    max_route_hits: int = 5_000,
+    candidate_pool: int | None = None,
+    validate_species: bool = True,
+) -> tuple[list[dict[str, Any]], bool]:
+    route_file = str(artifacts.get("route") or "").strip()
+    anchor_occurrences = _route_occurrences(
+        route_file,
+        anchor,
+        max_hits=max_route_hits,
+    )
+    if not anchor_occurrences:
+        return [], False
+    pool_size = (
+        max(limit * 5, 50)
+        if candidate_pool is None
+        else max(limit, int(candidate_pool))
+    )
+    network_rows = _continuous_channel_candidates(
+        artifacts, anchor, direction, bridge, pool_size
+    )
+    species_file = str(artifacts.get("species") or "").strip()
+    species_index: dict[str, Any] | None = None
+    if (
+        validate_species
+        and species_file
+        and Path(species_file).is_file()
+    ):
+        try:
+            species_index = SPECIES_COMPOSITION_STORE.open_required(
+                species_file
+            )
+        except (
+            IndexBuildInProgressError,
+            IndexInvalidError,
+            IndexNotReadyError,
+            IndexStaleError,
+        ):
+            species_index = None
+    snapshot_cache: dict[int, dict[str, int]] = {}
+    paired: list[dict[str, Any]] = []
+    anchor_by_start = sorted(
+        anchor_occurrences,
+        key=lambda item: (
+            int(item["start_frame"]),
+            int(item["end_frame"]),
+        ),
+    )
+    anchor_starts = [
+        int(item["start_frame"]) for item in anchor_by_start
+    ]
+    anchor_by_end = sorted(
+        anchor_occurrences,
+        key=lambda item: (
+            int(item["end_frame"]),
+            int(item["start_frame"]),
+        ),
+    )
+    anchor_ends = [int(item["end_frame"]) for item in anchor_by_end]
+    for raw in network_rows:
+        candidate_occurrences = _route_occurrences(
+            route_file,
+            raw,
+            max_hits=max_route_hits,
+        )
+        for occurrence in candidate_occurrences:
+            if direction == "backward":
+                position = bisect_left(
+                    anchor_starts, int(occurrence["end_frame"])
+                )
+                if position >= len(anchor_by_start):
+                    continue
+                anchor_occurrence = anchor_by_start[position]
+                gap = (
+                    int(anchor_occurrence["start_frame"])
+                    - int(occurrence["end_frame"])
+                )
+            else:
+                position = (
+                    bisect_right(
+                        anchor_ends, int(occurrence["start_frame"])
+                    )
+                    - 1
+                )
+                if position < 0:
+                    continue
+                anchor_occurrence = anchor_by_end[position]
+                gap = (
+                    int(occurrence["start_frame"])
+                    - int(anchor_occurrence["end_frame"])
+                )
+            species_validated = False
+            if species_index is not None:
+                species_validated = (
+                    _species_validates_occurrence(
+                        species_file,
+                        species_index,
+                        anchor,
+                        anchor_occurrence,
+                        snapshot_cache,
+                    )
+                    and _species_validates_occurrence(
+                        species_file,
+                        species_index,
+                        raw,
+                        occurrence,
+                        snapshot_cache,
+                    )
+                )
+                if not species_validated:
+                    continue
+            paired.append(
+                {
+                    **raw,
+                    "anchor_start_frame": int(
+                        anchor_occurrence["start_frame"]
+                    ),
+                    "anchor_end_frame": int(
+                        anchor_occurrence["end_frame"]
+                    ),
+                    "candidate_start_frame": int(
+                        occurrence["start_frame"]
+                    ),
+                    "candidate_end_frame": int(
+                        occurrence["end_frame"]
+                    ),
+                    "interval_gap": gap,
+                    "evidence_level": (
+                        "route_species"
+                        if species_index is not None
+                        else "route"
+                    ),
+                    "time_basis": "route_frame",
+                    "can_assert_order": True,
+                    "species_validated": species_validated,
+                }
+            )
+    paired.sort(
+        key=lambda row: (
+            int(row["interval_gap"]),
+            -int(row.get("forward_tp") or row.get("tp") or 0),
+            str(row.get("reaction_smiles") or ""),
+            int(row["candidate_start_frame"]),
+        )
+    )
+    for rank, row in enumerate(paired[:limit], 1):
+        row["candidate_rank"] = rank
+    return paired[:limit], species_index is not None
+
+
+def find_continuous_reactions(
+    artifacts: dict[str, str],
+    anchor: dict[str, Any],
+    direction: str = "backward",
+    intermediate_smiles: str = "",
+    limit: int = 20,
+    core_only: bool = False,
+) -> dict[str, Any]:
+    """Use the strongest prepared chronology available for one two-step link."""
+    direction_text = str(direction or "backward")
+    if direction_text not in {"backward", "forward"}:
+        raise ServiceError("方向必须是前溯或后溯", reason="bad_direction")
+    bridge = str(intermediate_smiles or "").strip()
+    if not bridge:
+        raise ServiceError("请选择连接中间体", reason="missing_intermediate")
+    safe_limit = max(1, min(int(limit), 200))
+    if core_only:
+        safe_limit = min(safe_limit, 10)
+    anchor_reactants, anchor_products = _continuous_sides(anchor)
+    selected_side = (
+        anchor_reactants
+        if direction_text == "backward"
+        else anchor_products
+    )
+    if bridge not in selected_side:
+        raise ServiceError(
+            "所选中间体不在当前反应的连接侧",
+            reason="invalid_intermediate",
+        )
+    preparation_hints: list[str] = []
+    reaction_file = str(artifacts.get("reaction") or "").strip()
+    reactionevent_file = (artifacts.get("reactionevent") or "").strip()
+    molecules_file = (artifacts.get("molecules") or "").strip()
+    event_id = str(anchor.get("event_id") or "")
+    if reactionevent_file and Path(reactionevent_file).is_file():
+        event_molecules = (
+            molecules_file
+            if molecules_file and Path(molecules_file).is_file()
+            else ""
+        )
+        if event_id:
+            try:
+                payload = EVENT_EVIDENCE_STORE.query_adjacent_events(
+                    reactionevent_file,
+                    event_molecules,
+                    event_id,
+                    intermediate_smiles=bridge,
+                    direction=direction_text,
+                    limit=safe_limit,
+                    include_total=not core_only,
+                )
+                payload.update(
+                    ok=True,
+                    candidates=list(payload.get("rows") or []),
+                    data_sources=[
+                        reactionevent_file,
+                        *([event_molecules] if event_molecules else []),
+                    ],
+                    preparation_hint="\n".join(preparation_hints),
+                    preparation_hints=preparation_hints,
+                    meta={
+                        "message": (
+                            f"找到 {len(payload.get('rows') or [])} 个 "
+                            "RNG 事件区间候选"
+                        ),
+                        "semantics": (
+                            "按 RNG authored Timestep_Index 确定事件区间"
+                            "先后；不要求位于相邻帧"
+                        ),
+                        "search_stage": (
+                            "core_shortlist" if core_only else "validated"
+                        ),
+                        "budgets": (
+                            {
+                                "candidate_limit": safe_limit,
+                                "count_total": False,
+                            }
+                            if core_only
+                            else {}
+                        ),
+                    },
+                )
+                return payload
+            except (IndexInvalidError, IndexStaleError):
+                preparation_hints.append(
+                    _event_prepare_command(
+                        reactionevent_file, rebuild=True
+                    )
+                )
+            except IndexNotReadyError:
+                preparation_hints.append(
+                    _event_prepare_command(reactionevent_file)
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise ServiceError(
+                    str(exc), reason="continuous_event_query_error"
+                ) from exc
+        else:
+            preparation_hints.append(
+                "选择一个 RNG 代表事件后可提升为事件区间证据"
+            )
+
+    route_file = str(artifacts.get("route") or "").strip()
+    if route_file and Path(route_file).is_file():
+        try:
+            ROUTE_INDEX_STORE.open_required(route_file)
+        except (IndexInvalidError, IndexStaleError):
+            preparation_hints.append(
+                "reacnet-scope-prepare "
+                f"{shlex.quote(str(Path(route_file).parent))} "
+                "--rebuild route"
+            )
+        except IndexNotReadyError:
+            preparation_hints.append(
+                "reacnet-scope-prepare "
+                f"{shlex.quote(str(Path(route_file).parent))} "
+                "--route-only"
+            )
+        else:
+            try:
+                rows, species_validated = _route_continuous_candidates(
+                    artifacts,
+                    anchor,
+                    direction_text,
+                    bridge,
+                    safe_limit,
+                    max_route_hits=(200 if core_only else 5_000),
+                    candidate_pool=(
+                        max(safe_limit * 2, 10)
+                        if core_only
+                        else None
+                    ),
+                    validate_species=not core_only,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise ServiceError(
+                    f"Route 候选查询失败: {exc}",
+                    reason="continuous_route_query_error",
+                ) from exc
+            if rows:
+                evidence_level = (
+                    "route_species" if species_validated else "route"
+                )
+                species_file = str(
+                    artifacts.get("species") or ""
+                ).strip()
+                if (
+                    species_file
+                    and Path(species_file).is_file()
+                    and not species_validated
+                ):
+                    preparation_hints.append(
+                        "reacnet-scope-prepare "
+                        f"{shlex.quote(str(Path(species_file).parent))} "
+                        "--composition-only"
+                    )
+                return {
+                    "ok": True,
+                    "anchor": dict(anchor),
+                    "direction": direction_text,
+                    "intermediate_smiles": bridge,
+                    "rows": rows,
+                    "candidates": rows,
+                    "total": len(rows),
+                    "limit": safe_limit,
+                    "evidence_level": evidence_level,
+                    "time_basis": "route_frame",
+                    "can_assert_order": True,
+                    "association_available": False,
+                    "data_sources": [
+                        reaction_file,
+                        route_file,
+                        *(
+                            [
+                                str(
+                                    artifacts.get("species") or ""
+                                ).strip()
+                            ]
+                            if species_validated
+                            else []
+                        ),
+                    ],
+                    "preparation_hint": "\n".join(preparation_hints),
+                    "preparation_hints": preparation_hints,
+                    "meta": {
+                        "message": (
+                            "Route + species 时间候选"
+                            if species_validated
+                            else "Route 原子转移时间候选"
+                        ),
+                        "semantics": (
+                            "Route 仅提供近似发生帧，不把单原子变化"
+                            "视为已确认的完整反应事件"
+                        ),
+                        "search_stage": (
+                            "core_shortlist" if core_only else "validated"
+                        ),
+                        "budgets": (
+                            {
+                                "candidate_limit": safe_limit,
+                                "network_candidate_pool": max(
+                                    safe_limit * 2, 10
+                                ),
+                                "route_hits_per_reaction": 200,
+                                "species_validation": False,
+                            }
+                            if core_only
+                            else {}
+                        ),
+                    },
+                }
+
+    if not reaction_file or not Path(reaction_file).is_file():
+        raise ServiceError(
+            "缺少可用于共享 SMILES 连接的 .reactionabcd",
+            reason="missing_reaction_network",
+        )
+    rows = _continuous_channel_candidates(
+        artifacts, anchor, direction_text, bridge, safe_limit
+    )
+    return {
+        "ok": True,
+        "anchor": dict(anchor),
+        "direction": direction_text,
+        "intermediate_smiles": bridge,
+        "rows": rows,
+        "candidates": rows,
+        "total": len(rows),
+        "limit": safe_limit,
+        "evidence_level": "network_only",
+        "time_basis": "none",
+        "can_assert_order": False,
+        "association_available": False,
+        "data_sources": [reaction_file],
+        "preparation_hint": "\n".join(preparation_hints),
+        "preparation_hints": preparation_hints,
+        "meta": {
+            "message": f"找到 {len(rows)} 个聚合网络候选",
+            "semantics": (
+                "仅按精确共享 SMILES 连接；当前数据不能判断两个"
+                "反应是否实际连续发生"
+            ),
+            "search_stage": (
+                "core_shortlist" if core_only else "network_only"
+            ),
+            "budgets": (
+                {
+                    "candidate_limit": safe_limit,
+                    "event_scan": False,
+                    "route_scan": False,
+                }
+                if core_only
+                else {}
+            ),
+        },
+    }
+
+
+def compose_continuous_reaction_pair(
+    anchor_event: Mapping[str, Any],
+    candidate_event: Mapping[str, Any],
+    *,
+    direction: str,
+    intermediate_smiles: str,
+) -> dict[str, Any]:
+    """Compose two reactions while cancelling exactly one chosen bridge."""
+    direction_text = str(direction or "backward")
+    if direction_text not in {"backward", "forward"}:
+        raise ValueError("direction must be backward or forward")
+    bridge = str(intermediate_smiles or "").strip()
+    if not bridge:
+        raise ValueError("intermediate_smiles is required")
+    chronological = (
+        [dict(candidate_event), dict(anchor_event)]
+        if direction_text == "backward"
+        else [dict(anchor_event), dict(candidate_event)]
+    )
+    first_reactants, first_products = _continuous_sides(chronological[0])
+    second_reactants, second_products = _continuous_sides(
+        chronological[1]
+    )
+    if bridge not in first_products or bridge not in second_reactants:
+        raise ValueError(
+            "selected intermediate does not connect the two reactions"
+        )
+    first_products.remove(bridge)
+    second_reactants.remove(bridge)
+    reactant_smiles = [*first_reactants, *second_reactants]
+    product_smiles = [*first_products, *second_products]
+    reactant_formulas = [
+        smiles_formula_cached(smiles) or "?"
+        for smiles in reactant_smiles
+    ]
+    product_formulas = [
+        smiles_formula_cached(smiles) or "?"
+        for smiles in product_smiles
+    ]
+    return {
+        "reaction_smiles": (
+            " + ".join(reactant_smiles)
+            + " -> "
+            + " + ".join(product_smiles)
+        ),
+        "reaction_formulas": (
+            " + ".join(reactant_formulas)
+            + " -> "
+            + " + ".join(product_formulas)
+        ),
+        "reactant_smiles": reactant_smiles,
+        "product_smiles": product_smiles,
+        "reactant_formulas": reactant_formulas,
+        "product_formulas": product_formulas,
+        "event_ids": [
+            str(row.get("event_id") or "")
+            for row in chronological
+            if row.get("event_id")
+        ],
+        "event_count": len(chronological),
+        "cancelled_intermediate": bridge,
+        "semantics": "candidate_composed_net_change",
+    }
+
+
 def search_reactions_by_formula(
     artifacts: dict[str, str],
     reactants_text: str,
@@ -1421,7 +2410,7 @@ def search_reactions_by_formula(
     effective_mode = mode if mode in {"exact", "contains"} else "exact"
     metric = share_metric if share_metric in {"tp", "reverse_tp", "net_tp"} else "net_tp"
     try:
-        net = STORE.get(reac_path, 1)
+        net = STORE.get(reac_path, _reaction_min_tp(artifacts))
     except Exception as exc:
         raise ServiceError(f"加载反应网络失败: {exc}") from exc
 
@@ -1511,6 +2500,13 @@ def _transition_row(matched: Any) -> dict[str, Any]:
         "role": matched.role,
         "reaction_smiles": " + ".join(rxn.reactant_smiles) + " -> " + " + ".join(rxn.product_smiles),
         "reaction_formulas": " + ".join(rxn.reactant_formulas) + " -> " + " + ".join(rxn.product_formulas),
+        # Keep the ordered, uncollapsed sides in the row payload.  The
+        # focused workflow uses these only after a channel is selected, and
+        # repeated entries represent real stoichiometric occurrences.
+        "reactant_smiles": list(rxn.reactant_smiles),
+        "product_smiles": list(rxn.product_smiles),
+        "reactant_formulas": list(rxn.reactant_formulas),
+        "product_formulas": list(rxn.product_formulas),
         "forward_tp": int(matched.forward_tp),
         "reverse_tp": int(matched.reverse_tp),
         "net_tp": int(matched.net_tp),
@@ -1519,34 +2515,124 @@ def _transition_row(matched: Any) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Transition table payload (species transition matrix)
-# ---------------------------------------------------------------------------
+def _reaction_text_sides(reaction_text: str) -> tuple[list[str], list[str]]:
+    """Recover ordered reaction sides from the UI's spaced reaction text."""
+    text = str(reaction_text or "").strip()
+    for arrow in (" -> ", " → ", "->", "→"):
+        if arrow not in text:
+            continue
+        left, right = text.split(arrow, 1)
+
+        def terms(side: str) -> list[str]:
+            # ``_transition_row`` deliberately emits a spaced separator so a
+            # charge marker such as ``[NH4+]`` is never mistaken for a term.
+            return [part.strip() for part in side.split(" + ") if part.strip()]
+
+        return terms(left), terms(right)
+    return [], []
 
 
-def build_transition_table(
-    artifacts: dict[str, str],
+def build_species_structure_items(
+    smiles_values: Iterable[Any],
     *,
-    min_count: int = 1,
-    max_species: int = 60,
-    top_edges: int = 40,
+    formula_values: Iterable[Any] | None = None,
+    show_h: bool = True,
+    max_items: int = 0,
+) -> list[dict[str, Any]]:
+    """Return ordered structure cards without eagerly rendering any SVG."""
+    smiles_list = [
+        str(value).strip()
+        for value in smiles_values
+        if str(value).strip()
+    ]
+    if max_items > 0:
+        smiles_list = smiles_list[: int(max_items)]
+    provided = (
+        [str(value).strip() for value in formula_values]
+        if formula_values is not None
+        else []
+    )
+    totals = Counter(smiles_list)
+    seen: Counter[str] = Counter()
+    result: list[dict[str, Any]] = []
+    for index, smiles in enumerate(smiles_list):
+        seen[smiles] += 1
+        formula = provided[index] if index < len(provided) and provided[index] else (
+            smiles_formula_cached(smiles) or "?"
+        )
+        result.append(
+            {
+                "index": index,
+                "smiles": smiles,
+                "formula": formula,
+                "occurrence": seen[smiles],
+                "occurrence_total": totals[smiles],
+                "structure_url": (
+                    f"/api/structure.svg?smiles={quote(smiles, safe='')}"
+                    "&width=180&height=116"
+                    f"&show_h={1 if show_h else 0}"
+                ),
+            }
+        )
+    return result
+
+
+def build_channel_structure_detail(
+    channel: Mapping[str, Any] | None,
+    *,
+    show_h: bool = True,
 ) -> dict[str, Any]:
-    """Wrap ``build_transition_table_payload`` for the observation network page."""
-    table_path = (artifacts.get("table") or "").strip()
-    if not table_path:
-        raise ServiceError("缺少 .lammpstrj.table 数据文件", reason="missing_table")
-    if not os.path.exists(table_path):
-        raise ServiceError(f"table 文件不存在: {table_path}", reason="missing_table")
-    params = {
-        "table": [table_path],
-        "min_count": [str(max(0, int(min_count)))],
-        "max_species": [str(max(0, int(max_species)))],
-        "top_edges": [str(max(1, min(500, int(top_edges))))],
+    """Build one selected channel's ordered, stoichiometry-preserving detail.
+
+    No SVG is rendered here.  The returned same-origin image URLs are added
+    only for this selected channel, so the browser never requests structures
+    for every row in the channel tables.
+    """
+    selected = dict(channel or {})
+    reactant_smiles = [
+        str(value).strip()
+        for value in (selected.get("reactant_smiles") or [])
+        if str(value).strip()
+    ]
+    product_smiles = [
+        str(value).strip()
+        for value in (selected.get("product_smiles") or [])
+        if str(value).strip()
+    ]
+    if not reactant_smiles or not product_smiles:
+        parsed_reactants, parsed_products = _reaction_text_sides(
+            str(selected.get("reaction_smiles") or "")
+        )
+        reactant_smiles = reactant_smiles or parsed_reactants
+        product_smiles = product_smiles or parsed_products
+
+    reactants = build_species_structure_items(
+        reactant_smiles,
+        formula_values=selected.get("reactant_formulas"),
+        show_h=show_h,
+    )
+    products = build_species_structure_items(
+        product_smiles,
+        formula_values=selected.get("product_formulas"),
+        show_h=show_h,
+    )
+    reaction_smiles = str(selected.get("reaction_smiles") or "").strip() or (
+        " + ".join(item["smiles"] for item in reactants)
+        + " -> "
+        + " + ".join(item["smiles"] for item in products)
+    )
+    reaction_formulas = str(selected.get("reaction_formulas") or "").strip() or (
+        " + ".join(item["formula"] for item in reactants)
+        + " -> "
+        + " + ".join(item["formula"] for item in products)
+    )
+    return {
+        "ok": bool(reactants or products),
+        "reaction_smiles": reaction_smiles,
+        "reaction_formulas": reaction_formulas,
+        "reactants": reactants,
+        "products": products,
     }
-    try:
-        return build_transition_table_payload(params)
-    except Exception as exc:
-        raise ServiceError(f"构建转化矩阵失败: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1588,6 +2674,7 @@ def build_species_evolution(
     params = {
         "target": ["\n".join(target_list)],
         "reac": [reac_path or ""],
+        "min_tp": [str(_reaction_min_tp(artifacts))],
         "species_file": [species_path],
         "species_files": [multi_source_text],
         "x_axis": [x_axis if x_axis in {"step", "ps", "ns"} else "ps"],
@@ -1994,6 +3081,7 @@ def build_intermediate_candidates(
         raise ServiceError("WithFlux 需要 reactionabcd 数据文件", reason="missing_reaction")
     params = {
         "reac": [reac_path or ""],
+        "min_tp": [str(_reaction_min_tp(artifacts))],
         "species_file": [species_path],
         "kind": [kind if kind in {"intermediate", "product", "reactant", "all"} else "intermediate"],
         "top": [str(max(1, int(top)))],
@@ -2030,11 +3118,11 @@ def locate_rng_events(
             "缺少 .reactionevent.csv；请在 ReacNetGenerator 中启用 --reaction-event",
             reason="missing_reactionevent",
         )
-    if not molecules_file or not Path(molecules_file).is_file():
-        raise ServiceError(
-            "缺少 .molecules.csv；请在 ReacNetGenerator 中启用 --show-molecule-time",
-            reason="missing_molecules",
-        )
+    molecules_file = (
+        molecules_file
+        if molecules_file and Path(molecules_file).is_file()
+        else ""
+    )
     if "->" not in str(reaction_text or ""):
         raise ServiceError(
             "请输入完整反应式，例如 A + B -> C + D",
@@ -2086,10 +3174,188 @@ def locate_rng_events(
         "matched_atoms": matched,
         "unresolved_atoms": len(rows) - matched,
         "reactionevent_file": os.path.abspath(reactionevent_file),
-        "molecules_file": os.path.abspath(molecules_file),
-        "evidence_status": "evidence_linked",
+        "molecules_file": (
+            os.path.abspath(molecules_file) if molecules_file else ""
+        ),
+        "evidence_status": (
+            "atom_evidence_linked"
+            if payload.get("association_available")
+            else "reactionevent_only"
+        ),
+        "time_basis": payload.get("time_basis"),
     }
     return payload
+
+
+def validate_pathway_step_occurrences(
+    artifacts: dict[str, str],
+    step: Mapping[str, Any],
+    *,
+    max_occurrences: int = 20,
+) -> dict[str, Any]:
+    """Validate one shortlisted pathway step against prepared time indexes.
+
+    RNG-authored events are authoritative for an exact reaction occurrence.
+    A prepared Route index is a bounded fallback and is deliberately labelled
+    as approximate atom-transfer timing rather than a complete reaction event.
+    Raw event or Route sources are never scanned by this online query.
+    """
+
+    reactants = [
+        str(value).strip()
+        for value in (step.get("reactants") or [])
+        if str(value).strip()
+    ]
+    products = [
+        str(value).strip()
+        for value in (step.get("products") or [])
+        if str(value).strip()
+    ]
+    reaction_text = str(step.get("reaction_text") or "").strip()
+    if not reaction_text and reactants and products:
+        reaction_text = f"{' + '.join(reactants)} -> {' + '.join(products)}"
+    if "->" not in reaction_text:
+        raise ServiceError(
+            "所选路径步骤缺少完整反应式",
+            reason="bad_pathway_step",
+        )
+
+    limit = max(1, min(int(max_occurrences), 50))
+    preparation_hints: list[str] = []
+    checked_sources: list[str] = []
+    event_file = str(artifacts.get("reactionevent") or "").strip()
+    molecules_file = str(artifacts.get("molecules") or "").strip()
+    event_absent = not event_file or not Path(event_file).is_file()
+
+    if not event_absent:
+        checked_sources.append(event_file)
+        try:
+            event_payload = locate_rng_events(
+                artifacts,
+                reaction_text,
+                max_events=limit,
+            )
+        except ServiceError as exc:
+            if exc.reason in {
+                "event_index_not_ready",
+                "event_index_stale",
+                "event_index_invalid",
+            }:
+                preparation_hints.append(exc.message)
+            else:
+                raise
+        else:
+            event_rows = list(event_payload.get("rows") or [])
+            if event_rows:
+                for rank, row in enumerate(event_rows, 1):
+                    row["occurrence_rank"] = rank
+                    row["evidence_source"] = "RNG 事件"
+                time_basis = str(
+                    (event_payload.get("meta") or {}).get("time_basis")
+                    or event_payload.get("time_basis")
+                    or "timestep_index"
+                )
+                return {
+                    "ok": True,
+                    "reaction_text": reaction_text,
+                    "rows": event_rows,
+                    "evidence_level": "rng_event",
+                    "time_basis": time_basis,
+                    "can_assert_occurrence": True,
+                    "checked_sources": checked_sources,
+                    "preparation_hints": preparation_hints,
+                    "message": (
+                        f"找到 {len(event_rows)} 条精确匹配的 RNG 反应事件；"
+                        "可选择事件后进入局部轨迹核查。"
+                    ),
+                }
+
+    route_file = str(artifacts.get("route") or "").strip()
+    route_absent = not route_file or not Path(route_file).is_file()
+    if not route_absent:
+        checked_sources.append(route_file)
+        try:
+            occurrences = _route_occurrences(
+                route_file,
+                {"reaction_smiles": reaction_text},
+                max_hits=min(200, limit * 20),
+            )[:limit]
+        except (IndexInvalidError, IndexStaleError):
+            preparation_hints.append(
+                "reacnet-scope-prepare "
+                f"{shlex.quote(str(Path(route_file).parent))} --rebuild route"
+            )
+            occurrences = []
+        except (IndexNotReadyError, IndexBuildInProgressError):
+            preparation_hints.append(
+                "reacnet-scope-prepare "
+                f"{shlex.quote(str(Path(route_file).parent))} --route-only"
+            )
+            occurrences = []
+        except RuntimeError as exc:
+            preparation_hints.append(str(exc))
+            occurrences = []
+        except (OSError, TypeError, ValueError) as exc:
+            raise ServiceError(
+                f"Route 时间候选查询失败: {exc}",
+                reason="pathway_route_query_error",
+            ) from exc
+        if occurrences:
+            route_rows = [
+                {
+                    "occurrence_rank": rank,
+                    "evidence_source": "Route 候选",
+                    "start_frame": int(item["start_frame"]),
+                    "end_frame": int(item["end_frame"]),
+                    "frame_span": (
+                        int(item["end_frame"]) - int(item["start_frame"])
+                    ),
+                    "reaction_smiles": reaction_text,
+                }
+                for rank, item in enumerate(occurrences, 1)
+            ]
+            return {
+                "ok": True,
+                "reaction_text": reaction_text,
+                "rows": route_rows,
+                "evidence_level": "route",
+                "time_basis": "route_frame",
+                "can_assert_occurrence": False,
+                "checked_sources": checked_sources,
+                "preparation_hints": preparation_hints,
+                "message": (
+                    f"找到 {len(route_rows)} 个 Route 原子转移时间候选；"
+                    "它们只能定位近似帧，不能单独证明完整反应事件。"
+                ),
+            }
+
+    reasons: list[str] = []
+    if event_absent:
+        reasons.append("数据集没有 .reactionevent.csv")
+    else:
+        reasons.append("RNG 事件索引中没有精确匹配事件")
+    if route_absent:
+        reasons.append("数据集没有 .route")
+    elif preparation_hints:
+        reasons.append("Route 索引尚未就绪")
+    else:
+        reasons.append("Route 索引中没有匹配的时间候选")
+    message = "；".join(reasons) + "。"
+    if preparation_hints:
+        message += " 请先执行：" + "；".join(
+            dict.fromkeys(preparation_hints)
+        )
+    return {
+        "ok": True,
+        "reaction_text": reaction_text,
+        "rows": [],
+        "evidence_level": "network_only",
+        "time_basis": "none",
+        "can_assert_occurrence": False,
+        "checked_sources": checked_sources,
+        "preparation_hints": preparation_hints,
+        "message": message,
+    }
 
 
 def build_rng_event_visualization(
@@ -2210,46 +3476,103 @@ def build_rng_event_visualization(
     }
 
 
-def upsert_validation_record(
-    validations: list[dict[str, Any]] | None,
+def event_viewer_frames_csv(viewer: Mapping[str, Any] | None) -> str:
+    """Serialize the currently extracted event window for audit/download."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        ["frame", "atom_id", "type", "element", "x", "y", "z", "group", "bond_state"]
+    )
+    for frame in (viewer or {}).get("frames") or []:
+        for atom in frame.get("atoms") or []:
+            writer.writerow(
+                [
+                    frame.get("frame"),
+                    atom.get("id"),
+                    atom.get("type"),
+                    atom.get("element"),
+                    atom.get("x"),
+                    atom.get("y"),
+                    atom.get("z"),
+                    atom.get("group"),
+                    frame.get("bond_state"),
+                ]
+            )
+    return output.getvalue()
+
+
+def event_viewer_trajectory_text(viewer: Mapping[str, Any] | None) -> str:
+    """Serialize selected event atoms as a standalone LAMMPS trajectory."""
+    chunks: list[str] = []
+    for frame in (viewer or {}).get("frames") or []:
+        atoms = frame.get("atoms") or []
+        box = list(frame.get("box") or [])
+        while len(box) < 3:
+            box.append((0.0, 1.0))
+        chunks.extend(
+            [
+                "ITEM: TIMESTEP",
+                str(frame.get("frame") or 0),
+                "ITEM: NUMBER OF ATOMS",
+                str(len(atoms)),
+                "ITEM: BOX BOUNDS pp pp pp",
+                *[
+                    f"{float(bounds[0]):.10g} {float(bounds[1]):.10g}"
+                    for bounds in box[:3]
+                ],
+                "ITEM: ATOMS id type element x y z",
+            ]
+        )
+        for atom in atoms:
+            atom_type = str(atom.get("type") or "0")
+            element = str(atom.get("element") or "X")
+            chunks.append(
+                "{} {} {} {:.10g} {:.10g} {:.10g}".format(
+                    int(atom.get("id") or 0),
+                    atom_type,
+                    element,
+                    float(atom.get("x") or 0.0),
+                    float(atom.get("y") or 0.0),
+                    float(atom.get("z") or 0.0),
+                )
+            )
+    return "\n".join(chunks) + ("\n" if chunks else "")
+
+
+def event_viewer_atom_ids(viewer: Mapping[str, Any] | None) -> list[int]:
+    """Return the ordered visualization atom IDs for one extracted event."""
+    groups = (viewer or {}).get("atom_groups") or {}
+    values = groups.get("context") or groups.get("core") or []
+    return sorted({int(value) for value in values})
+
+
+def event_viewer_ovito_expression(viewer: Mapping[str, Any] | None) -> str:
+    """Build an OVITO Expression Selection for original LAMMPS IDs."""
+    return " || ".join(
+        f"ParticleIdentifier == {atom_id}"
+        for atom_id in event_viewer_atom_ids(viewer)
+    )
+
+
+def event_viewer_vmd_script(
+    viewer: Mapping[str, Any] | None,
     *,
-    dataset_id: str,
-    species: dict[str, Any],
-    channel: dict[str, Any],
-    event: dict[str, Any],
-    outcome: str,
-    note: str = "",
-    recorded_at: str = "",
-) -> list[dict[str, Any]]:
-    """Upsert one user validation in the session-local evidence ledger."""
-    normalized = outcome if outcome in {"support", "insufficient", "exclude"} else "insufficient"
-    row = {
-        "dataset_id": dataset_id,
-        "species_formula": species.get("formula") or "",
-        "species_smiles": species.get("smiles") or "",
-        "channel_role": channel.get("role_label") or channel.get("workflow_role") or "",
-        "reaction_formulas": channel.get("reaction_formulas") or "",
-        "reaction_smiles": channel.get("reaction_smiles") or "",
-        "forward_tp": channel.get("forward_tp"),
-        "reverse_tp": channel.get("reverse_tp"),
-        "net_tp": channel.get("net_tp"),
-        "event_id": event.get("event_id") or "",
-        "before_timestep": event.get("before_timestep"),
-        "after_timestep": event.get("after_timestep"),
-        "atom_ids": event.get("atom_ids") or "",
-        "association_status": event.get("association_status") or "",
-        "validation_outcome": normalized,
-        "note": (note or "").strip(),
-        "recorded_at": recorded_at,
-    }
-    items = [dict(item) for item in (validations or [])]
-    key = (str(dataset_id), str(row["event_id"]))
-    for index, item in enumerate(items):
-        if (str(item.get("dataset_id") or ""), str(item.get("event_id") or "")) == key:
-            items[index] = row
-            return items
-    items.append(row)
-    return items
+    trajectory_name: str = "event_subset.lammpstrj",
+) -> str:
+    """Build a portable VMD helper script for the downloaded event subset."""
+    atom_ids = " ".join(str(value) for value in event_viewer_atom_ids(viewer))
+    return (
+        f'mol new "{trajectory_name}" type lammpstrj waitfor all\n'
+        "mol delrep 0 top\n"
+        "mol representation Licorice 0.18 12.0 12.0\n"
+        "mol color Element\n"
+        "mol selection all\n"
+        "mol material Opaque\n"
+        "mol addrep top\n"
+        f'puts "Original LAMMPS atom IDs: {atom_ids}"\n'
+        "animate goto 0\n"
+        "display resetview\n"
+    )
 
 
 def rows_to_csv(rows: list[dict[str, Any]]) -> str:
@@ -2271,569 +3594,6 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
     for row in safe_rows:
         writer.writerow(row)
     return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# Mechanism network (reactionabcd, Cytoscape, and exports)
-# ---------------------------------------------------------------------------
-
-
-_MECHANISM_QUERY_KEYS = {
-    "anchor_smiles",
-    "direction",
-    "max_depth",
-    "min_net_tp",
-    "max_nodes",
-}
-_MECHANISM_EXPORT_FORMATS = (
-    "cytoscape-json",
-    "graphml",
-    "gexf",
-    "node-csv",
-    "edge-csv",
-)
-_MECHANISM_NODE_CSV_COLUMNS = (
-    "id",
-    "kind",
-    "label",
-    "smiles",
-    "formula",
-    "reaction_key",
-    "reactants_json",
-    "products_json",
-    "forward_tp",
-    "reverse_tp",
-    "net_tp",
-    "event_total",
-    "matched_event_total",
-    "event_coverage",
-    "evidence_status",
-)
-_MECHANISM_EDGE_CSV_COLUMNS = (
-    "id",
-    "source",
-    "target",
-    "role",
-    "species_smiles",
-    "coefficient",
-    "reaction_key",
-)
-
-
-def _mechanism_cytoscape_elements(
-    payload: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    """Project a mechanism payload through the shared NetworkX adapter."""
-    graph = to_networkx_mechanism_graph(payload)
-    document = serialize_mechanism_graph(graph, format="cytoscape-json")
-    if not isinstance(document, Mapping):
-        raise ValueError("mechanism Cytoscape serialization is invalid")
-    raw_elements = document.get("elements")
-    if not isinstance(raw_elements, Mapping):
-        raise ValueError("mechanism Cytoscape elements are invalid")
-
-    elements: list[dict[str, Any]] = []
-    for raw in raw_elements.get("nodes") or []:
-        item = dict(raw)
-        data = dict(item.get("data") or {})
-        item["data"] = data
-        item["classes"] = str(data.get("kind") or "")
-        elements.append(item)
-    for raw in raw_elements.get("edges") or []:
-        item = dict(raw)
-        data = dict(item.get("data") or {})
-        item["data"] = data
-        role = str(data.get("role") or "")
-        if role:
-            item["classes"] = role
-        elements.append(item)
-    return elements
-
-
-def build_mechanism_elements(
-    artifacts: dict[str, str],
-    **query: Any,
-) -> dict[str, Any]:
-    """Build a bounded reaction-passage mechanism snapshot for the Dash UI.
-
-    Event enrichment is strictly read-only: a ready SQLite index is opened,
-    queried once through ``EventIndexEvidenceProvider``, and revalidated before
-    the snapshot is returned.  Missing or invalid evidence degrades to the
-    reaction-passage payload and an offline preparation command.
-    """
-    reaction_path = str(artifacts.get("reaction") or "").strip()
-    if (
-        not reaction_path.lower().endswith(".reactionabcd")
-        or not Path(reaction_path).is_file()
-    ):
-        raise ServiceError(
-            "需要 .reactionabcd 文件",
-            reason="missing_reac",
-        )
-
-    unknown = sorted(set(query) - _MECHANISM_QUERY_KEYS)
-    if unknown:
-        raise ServiceError(
-            f"无效的机制网络查询参数: {', '.join(unknown)}",
-            reason="bad_mechanism_query",
-        )
-    anchor_smiles = query.get("anchor_smiles")
-    limits = {
-        key: value
-        for key, value in query.items()
-        if key != "anchor_smiles"
-    }
-
-    try:
-        network, reaction_signature = _load_reaction_network_snapshot(
-            reaction_path,
-            1,
-        )
-        _pathway_assert_source_current(reaction_path, reaction_signature)
-    except ServiceError:
-        raise
-    except FileNotFoundError as exc:
-        raise ServiceError(
-            "需要 .reactionabcd 文件",
-            reason="missing_reac",
-        ) from exc
-    except ReactionSourceChangedError as exc:
-        raise ServiceError(
-            "reactionabcd 文件在机制网络查询期间发生变化，请重试",
-            reason="reaction_source_stale",
-        ) from exc
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ServiceError(
-            f"无法加载反应网络: {exc}",
-            reason="bad_reac",
-        ) from exc
-
-    reactionevent_path = str(
-        artifacts.get("reactionevent") or ""
-    ).strip()
-    molecules_path = str(artifacts.get("molecules") or "").strip()
-    evidence_provider: EventIndexEvidenceProvider | None = None
-    rebuild_event_index = False
-    if (
-        reactionevent_path
-        and molecules_path
-        and Path(reactionevent_path).is_file()
-        and Path(molecules_path).is_file()
-    ):
-        try:
-            opened = EVENT_EVIDENCE_STORE.open_required(
-                reactionevent_path,
-                molecules_path,
-            )
-            evidence_provider = EventIndexEvidenceProvider(
-                reactionevent_path,
-                molecules_path,
-                store=EVENT_EVIDENCE_STORE,
-                opened=opened,
-            )
-        except (IndexStaleError, IndexInvalidError):
-            rebuild_event_index = True
-        except IndexNotReadyError:
-            rebuild_event_index = False
-
-    try:
-        try:
-            payload = build_mechanism_network(
-                network,
-                anchor_smiles=anchor_smiles,
-                evidence_provider=evidence_provider,
-                **limits,
-            )
-            if evidence_provider is not None:
-                evidence_provider.assert_current()
-        except IndexNotReadyError:
-            evidence_provider = None
-            rebuild_event_index = True
-            payload = build_mechanism_network(
-                network,
-                anchor_smiles=anchor_smiles,
-                evidence_provider=None,
-                **limits,
-            )
-    except (TypeError, ValueError) as exc:
-        raise ServiceError(
-            f"无效的机制网络查询参数: {exc}",
-            reason="bad_mechanism_query",
-        ) from exc
-
-    _pathway_assert_source_current(reaction_path, reaction_signature)
-    payload["source_signatures"] = {
-        "reactionabcd": reaction_signature,
-        **(
-            evidence_provider.source_signatures
-            if evidence_provider is not None
-            else {}
-        ),
-    }
-    if evidence_provider is not None:
-        # A ready index is part of the query snapshot even when the bounded
-        # neighborhood contains no reaction node to annotate.
-        payload["evidence_level"] = "event_evidence_linked"
-        payload["evidence_status"] = "evidence_linked"
-    else:
-        payload["evidence_level"] = "reaction_passage_counts"
-        payload["evidence_status"] = "network_only"
-        payload["preparation_command"] = _pathway_preparation_command(
-            reaction_path,
-            reactionevent_path,
-            rebuild=rebuild_event_index,
-        )
-    payload["ok"] = True
-    payload["elements"] = _mechanism_cytoscape_elements(payload)
-    return payload
-
-
-def project_mechanism_evidence(
-    payload: Mapping[str, Any],
-    evidence_filter: str,
-) -> dict[str, Any]:
-    """Return the exact mechanism snapshot displayed and exported by Dash.
-
-    Filtering is intentionally a pure, source-I/O-free projection of the
-    already built payload.  A retained reaction keeps its complete incident
-    species and semantic edges; species that become isolated are removed.
-    """
-    if evidence_filter not in {"all", "evidence_linked", "network_only"}:
-        raise ValueError("invalid mechanism evidence filter")
-    validated = validate_mechanism_payload(payload)
-    projected = copy.deepcopy(dict(payload))
-    if evidence_filter == "all":
-        projected["nodes"] = copy.deepcopy(validated["nodes"])
-        projected["edges"] = copy.deepcopy(validated["edges"])
-        projected["_ui_evidence_filter"] = "all"
-        validate_mechanism_payload(projected)
-        return projected
-
-    kept_reactions = {
-        str(node["id"])
-        for node in validated["nodes"]
-        if (
-            node.get("kind") == "reaction"
-            and node.get("evidence_status") == evidence_filter
-        )
-    }
-    kept_edges = [
-        edge
-        for edge in validated["edges"]
-        if (
-            str(edge.get("source") or "") in kept_reactions
-            or str(edge.get("target") or "") in kept_reactions
-        )
-    ]
-    kept_species = {
-        str(endpoint)
-        for edge in kept_edges
-        for endpoint in (edge.get("source"), edge.get("target"))
-        if str(endpoint) not in kept_reactions
-    }
-    kept_nodes = kept_reactions | kept_species
-    projected["nodes"] = [
-        copy.deepcopy(node)
-        for node in validated["nodes"]
-        if str(node.get("id") or "") in kept_nodes
-    ]
-    projected["edges"] = [copy.deepcopy(edge) for edge in kept_edges]
-    original_meta = (
-        payload.get("meta")
-        if isinstance(payload.get("meta"), Mapping)
-        else {}
-    )
-    reaction_count = len(kept_reactions)
-    projected["meta"] = {
-        "node_count": len(projected["nodes"]),
-        "edge_count": len(projected["edges"]),
-        "reaction_count": reaction_count,
-        "truncated": bool(original_meta.get("truncated")),
-        "reason": (
-            str(original_meta.get("reason") or "ok")
-            if reaction_count
-            else "filtered_by_evidence"
-        ),
-    }
-    projected["_ui_evidence_filter"] = evidence_filter
-    validate_mechanism_payload(projected)
-    projected["elements"] = _mechanism_cytoscape_elements(projected)
-    return projected
-
-
-def project_network_evidence(
-    payload: Mapping[str, Any],
-    evidence_filter: str,
-) -> dict[str, Any]:
-    """Project one stored raw network without rebuilding either semantics."""
-    if not isinstance(payload, Mapping):
-        raise ValueError("network payload must be a mapping")
-    if payload.get("network_semantics") != "mechanism":
-        return copy.deepcopy(dict(payload))
-    return project_mechanism_evidence(payload, evidence_filter)
-
-
-def _mechanism_csv_value(value: Any) -> Any:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, str):
-        return _spreadsheet_safe_mechanism_text(value)
-    return value
-
-
-def _spreadsheet_safe_mechanism_text(value: str) -> str:
-    """Neutralize formula-like CSV text without changing numeric cells."""
-    if not value:
-        return value
-    index = 0
-    has_control_prefix = False
-    while index < len(value) and (
-        value[index].isspace() or ord(value[index]) < 32
-    ):
-        has_control_prefix = has_control_prefix or (
-            ord(value[index]) < 32
-        )
-        index += 1
-    formula_prefix = index < len(value) and value[index] in "=+-@"
-    if has_control_prefix or formula_prefix:
-        return "'" + value
-    return value
-
-
-def _mechanism_compact_json(value: Any) -> str:
-    if value is None:
-        return ""
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-
-
-def _mechanism_csv(
-    records: Any,
-    columns: tuple[str, ...],
-    *,
-    node_rows: bool,
-) -> str:
-    if not isinstance(records, (list, tuple)):
-        raise ValueError("mechanism export records must be a sequence")
-    buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(
-        buffer,
-        fieldnames=columns,
-        extrasaction="ignore",
-        lineterminator="\n",
-    )
-    writer.writeheader()
-    for raw in records:
-        if not isinstance(raw, Mapping):
-            raise ValueError("mechanism export record must be a mapping")
-        row = {
-            key: _mechanism_csv_value(raw.get(key))
-            for key in columns
-        }
-        if node_rows:
-            row["reactants_json"] = _mechanism_compact_json(
-                raw.get("reactants")
-            )
-            row["products_json"] = _mechanism_compact_json(
-                raw.get("products")
-            )
-        writer.writerow(row)
-    return buffer.getvalue()
-
-
-def export_mechanism_graph(
-    payload: Mapping[str, Any],
-    format: str,
-) -> dict[str, Any] | str | bytes:
-    """Export one already-computed mechanism payload without source I/O."""
-    if format not in _MECHANISM_EXPORT_FORMATS:
-        supported = ", ".join(_MECHANISM_EXPORT_FORMATS)
-        raise ValueError(
-            f"unknown mechanism graph format {format!r}; "
-            f"valid formats: {supported}"
-        )
-
-    validated = validate_mechanism_payload(payload)
-    if format == "node-csv":
-        return _mechanism_csv(
-            validated["nodes"],
-            _MECHANISM_NODE_CSV_COLUMNS,
-            node_rows=True,
-        )
-    if format == "edge-csv":
-        return _mechanism_csv(
-            validated["edges"],
-            _MECHANISM_EDGE_CSV_COLUMNS,
-            node_rows=False,
-        )
-
-    graph = to_networkx_mechanism_graph(validated)
-    serialized = serialize_mechanism_graph(graph, format=format)
-    if format != "cytoscape-json":
-        return serialized
-    if not isinstance(serialized, dict):
-        raise ValueError("mechanism Cytoscape export is invalid")
-    document = dict(serialized)
-    raw_data = document.get("data")
-    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
-    data.update(
-        schema_version=validated.get("schema_version"),
-        network_semantics=validated.get("network_semantics"),
-        evidence_level=validated.get("evidence_level"),
-        anchor_smiles=validated.get("anchor_smiles"),
-        query=dict(validated.get("query") or {}),
-        source_signatures=dict(validated.get("source_signatures") or {}),
-    )
-    document["data"] = data
-    return document
-
-
-# ---------------------------------------------------------------------------
-# Observation network (Cytoscape)
-# ---------------------------------------------------------------------------
-
-
-def build_observation_elements(
-    artifacts: dict[str, str],
-    *,
-    min_count: int = 1,
-    max_species: int = 60,
-    top_edges: int = 40,
-) -> dict[str, Any]:
-    """Build Cytoscape elements from the existing transition table payload."""
-    payload = build_transition_table(
-        artifacts,
-        min_count=min_count,
-        max_species=max_species,
-        top_edges=top_edges,
-    )
-    network = payload.get("network") or {}
-    species_nodes = network.get("species") or []
-    reaction_nodes = network.get("reactions") or []
-    edges = network.get("edges") or []
-
-    elements: list[dict[str, Any]] = []
-    for node in species_nodes:
-        elements.append(
-            {
-                "data": {
-                    "id": node["id"],
-                    "label": node.get("formula") or node.get("smiles") or node["id"],
-                    "kind": "species",
-                    "smiles": node.get("smiles", ""),
-                    "formula": node.get("formula", ""),
-                    "rank": int(node.get("rank") or 0),
-                    "incoming": int(node.get("incoming") or 0),
-                    "outgoing": int(node.get("outgoing") or 0),
-                    "total": int(node.get("total") or 0),
-                },
-                "classes": "species",
-            }
-        )
-    for node in reaction_nodes:
-        elements.append(
-            {
-                "data": {
-                    "id": node["id"],
-                    "label": node.get("label") or node["id"],
-                    "kind": "reaction",
-                    "reaction_type": node.get("reaction_type", ""),
-                    "event_count": int(node.get("event_count") or 0),
-                    "net_event_count": int(node.get("net_event_count") or 0),
-                    "ordinal": int(node.get("ordinal") or 0),
-                },
-                "classes": "reaction",
-            }
-        )
-    for edge in edges:
-        elements.append(
-            {
-                "data": {
-                    "id": edge["id"],
-                    "source": edge["source"],
-                    "target": edge["target"],
-                    "kind": edge.get("kind", ""),
-                    "event_count": int(edge.get("event_count") or 0),
-                },
-            }
-        )
-    return {
-        "ok": True,
-        "network_semantics": "event_transfer",
-        "evidence_level": "aggregate_observation",
-        "elements": elements,
-        "species_smiles": [n.get("smiles", "") for n in species_nodes],
-        "meta": payload.get("meta", {}),
-        "network": network,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Literature mechanism verification
-# ---------------------------------------------------------------------------
-
-
-def verify_literature_mechanism(
-    artifacts: dict[str, str],
-    reaction_texts: list[str],
-    *,
-    verify_mode: str = "species",
-) -> dict[str, Any]:
-    """Verify a list of literature reactions against simulation data.
-
-    Parameters
-    ----------
-    artifacts:
-        Dataset artifact paths dict.
-    reaction_texts:
-        List of reaction strings (e.g. ``"A + B -> C + D"``).
-    verify_mode:
-        ``"species"`` for formula-level only, ``"atom"`` for atom-level
-        (requires ``.route`` file).
-    """
-    from rng_tools.mechanism_verify import MechanismVerifier
-
-    reac_path = (artifacts.get("reaction") or "").strip()
-    if not reac_path or not os.path.isfile(reac_path):
-        raise ServiceError("需要 .reactionabcd 文件", reason="missing_reac")
-
-    # Load or reuse the ReactionNetwork
-    network = STORE.get(reac_path, 1)
-
-    verifier = MechanismVerifier(network)
-
-    try:
-        mechanism_reactions = verifier.parse_literature_reactions(reaction_texts)
-    except Exception as exc:
-        raise ServiceError(f"无法解析文献反应式: {exc}", reason="parse_error")
-
-    if not mechanism_reactions:
-        raise ServiceError("未能解析任何有效反应式", reason="no_reactions")
-
-    matrix = verifier.build_matrix(mechanism_reactions)
-    rows = verifier.matrix_to_rows(matrix)
-    summary = verifier.summary_to_dict(matrix)
-
-    return {
-        "ok": True,
-        "rows": rows,
-        "summary": summary,
-        "meta": {
-            "status": "ok",
-            "message": (
-                f"验证完成: {summary['detected']}/{summary['total_reactions']} "
-                f"检测到, {summary['has_net_flux']} 存在净通量"
-            ),
-            "verify_mode": verify_mode,
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -2988,10 +3748,10 @@ __all__ = [
     "search_species",
     "species_detail",
     "render_species_svg",
-    "collect_transitions",
     "collect_species_channels",
+    "build_species_structure_items",
+    "build_channel_structure_detail",
     "search_reactions_by_formula",
-    "build_transition_table",
     "build_species_evolution",
     "evolution_to_csv",
     "build_carbon_evolution",
@@ -3001,12 +3761,17 @@ __all__ = [
     "carbon_plot_to_csv",
     "build_intermediate_candidates",
     "locate_rng_events",
+    "validate_pathway_step_occurrences",
     "rank_representative_events",
+    "find_continuous_reactions",
+    "compose_continuous_reaction_pair",
     "build_rng_event_visualization",
-    "upsert_validation_record",
+    "event_viewer_frames_csv",
+    "event_viewer_trajectory_text",
+    "event_viewer_atom_ids",
+    "event_viewer_ovito_expression",
+    "event_viewer_vmd_script",
     "rows_to_csv",
-    "build_observation_elements",
-    "verify_literature_mechanism",
     "scan_batch_conditions",
     "run_batch_comparison",
 ]

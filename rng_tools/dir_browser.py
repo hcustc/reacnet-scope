@@ -90,7 +90,10 @@ def validate_browse_path(path_str: str) -> Path:
     if not within:
         root_list = ", ".join(str(r) for r in existing_roots)
         raise DirBrowserError(
-            f"路径超出允许范围。允许的根目录: {root_list}",
+            "路径超出允许范围。"
+            f"允许的根目录: {root_list}。"
+            "如需访问其他挂载点，请将它加入 "
+            "REACNET_SCOPE_ALLOWED_ROOTS 并重启 Dash 服务。",
             reason="path_out_of_bounds",
         )
     return resolved

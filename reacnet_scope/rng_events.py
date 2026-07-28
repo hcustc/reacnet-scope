@@ -92,6 +92,8 @@ class MoleculeComponent:
     atom_ids: tuple[int, ...]
     reactant_bonds: tuple[str, ...]
     product_bonds: tuple[str, ...]
+    reactant_molecules: tuple[MoleculeRow, ...] = ()
+    product_molecules: tuple[MoleculeRow, ...] = ()
 
     @property
     def key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -129,8 +131,14 @@ def changed_components(
                 if neighbor not in seen:
                     seen.add(neighbor)
                     queue.append(neighbor)
-        left_rows = [before[index] for side, index in nodes if side == 0]
-        right_rows = [after[index] for side, index in nodes if side == 1]
+        left_rows = sorted(
+            (before[index] for side, index in nodes if side == 0),
+            key=lambda row: (row.species, tuple(sorted(row.atom_ids))),
+        )
+        right_rows = sorted(
+            (after[index] for side, index in nodes if side == 1),
+            key=lambda row: (row.species, tuple(sorted(row.atom_ids))),
+        )
         reactants = tuple(sorted(row.species for row in left_rows))
         products = tuple(sorted(row.species for row in right_rows))
         if reactants == products:
@@ -143,6 +151,8 @@ def changed_components(
                 atom_ids=atom_ids,
                 reactant_bonds=tuple(sorted({bond for row in left_rows for bond in row.bond_ids})),
                 product_bonds=tuple(sorted({bond for row in right_rows for bond in row.bond_ids})),
+                reactant_molecules=tuple(left_rows),
+                product_molecules=tuple(right_rows),
             )
         )
     components.sort(key=lambda item: (item.key, item.atom_ids))

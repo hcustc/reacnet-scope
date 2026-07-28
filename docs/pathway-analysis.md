@@ -117,6 +117,8 @@ path_score =
 | `max_expansions` | 5000 | 1–1,000,000 | 非终止搜索状态的展开上限 |
 | `min_net_tp` | 1 | 整数，至少 1 | 每步最小正净 TP |
 | `min_directionality` | 0.05 | 0–1 | 每步最小方向性 |
+| `target_max_carbon` | `null` | 1–100 或 `null` | 可选的目标导向模式；只返回焦点物种已到达 C1–Cn 的路径 |
+| `evidence_mode` | `auto` | `auto` / `network_only` | `network_only` 仅做 reactionabcd 粗筛，推迟事件与 Route 验证 |
 
 搜索是确定性的有界 best-first 枚举。分支先按评分和稳定的语义键排序，再应用
 `max_branches`。在不触及展开上限时，搜索只会在剩余队列的理论最高完成分数
@@ -138,6 +140,8 @@ path_score =
 | `species_absent` | 起始 SMILES 不在反应网络中 |
 | `no_positive_net_continuation` | 起点没有可继续的正净分支，或只有焦点循环 |
 | `filtered_by_thresholds` | 正净的新分支全部被净 TP 或方向性阈值过滤 |
+| `target_not_reached` | 当前深度、分支和阈值内没有到达目标碳数 |
+| `target_already_reached` | 起始物种本身已满足目标碳数 |
 
 结果最终按路径分数降序排列；分数相同时使用物种链和 reaction key 链稳定
 排序。`max_paths` 只是返回上限，`truncated` 专门表示是否撞到 expansion
@@ -145,10 +149,10 @@ path_score =
 
 ## 人工准备事件索引
 
-ReacNetGenerator 运行时需要生成事件及分子时间线：
+ReacNetGenerator 运行时至少需要生成事件；分子时间线是可选的增强证据：
 
 ```text
---reaction-event --show-molecule-time
+--reaction-event [--show-molecule-time]
 ```
 
 候选路径请求本身始终是只读的：它不会构建索引，也不会顺序扫描
@@ -318,20 +322,31 @@ evidence_status,score_version,source_references
 `path_species`、`reactants`、`products` 和 `source_references` 是 JSON 数组文本，
 所以能够无损保留重复项。空结果仍会写出合法的 JSON 空数组和只有表头的 CSV。
 
-## Dash“关键路径”页面
+## Dash“多步碎片路径”页面
 
 1. 加载含 `.reactionabcd` 的数据集。
-2. 从右上角“高级工具”进入“关键路径”，或在物种/反应检索结果中点击
+2. 从右上角“高级工具”进入“多步碎片路径”，或在物种/反应检索结果中点击
    “作为路径起点”/“从所选反应起点找路径”。
 3. 输入或确认精确 SMILES，选择下游或上游方向，设置深度、每步分支、路径
-   上限、最小净 TP 和最小方向性，然后点击“搜索候选路径”。
-4. 表格显示分子式链、SMILES 链、路径分数、最弱步分数、深度和证据状态；
-   下方二部超图保留每一步的完整反应物/产物。
+   上限、最小净 TP 和最小方向性。需要追踪裂解时选择“追踪至小分子碎片”
+   并设置最大碳数，然后点击“搜索候选路径”。
+4. 表格显示分子式链、SMILES 链、末步全部物种、小分子碎片、终点状态、路径
+   分数、最弱步分数、深度和证据状态；终点卡片显示末步反应的所有物种及结构。
+   “达到深度上限”只表示搜索边界，不表示已经找到真实终产物。下方二部超图
+   保留每一步的完整反应物/产物。
+   选择只有一步的路径时，界面会自动选中该唯一反应并立即查询时间证据：
+   优先显示精确 RNG 事件，缺少事件时回退到已准备的 Route 近似帧候选。
+   单步路径本身不存在“两步连续性”，Route 命中也不能单独证明完整反应事件。
 5. 在表格选择一条路径，可点击“在网络中高亮路径”。要检查某一步，继续点击
    图中的黄色菱形反应节点，再点击“查看该步事件”；界面会进入事件页并填入
    该步的完整 `reactants → products` 文本。
 6. 使用“下载 JSON”或“下载 CSV”导出当前内存中的同一排序结果，不会重新
    发起搜索。
+
+该页面是独立的网络级检索工具，不属于“高频生成/消耗通道”的一步事件工作流。
+默认使用大数据快速预算：深度 4、每步分支 4、路径上限 10、状态展开上限
+300，并设置 `evidence_mode=network_only`。粗筛阶段不会打开事件、Route 或
+species 时间索引；选定具体反应后再进入连续反应与局部轨迹验证。
 
 灰色虚线反应节点表示 `network_only`。如果事件页没有可用索引，先按界面或
 CLI 输出的准备命令离线建立索引，再重新执行路径搜索。
