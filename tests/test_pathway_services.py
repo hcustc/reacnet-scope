@@ -15,6 +15,7 @@ from reacnet_scope.event_index import (
     EVENT_EVIDENCE_STORE,
     EventIndexEvidenceProvider,
 )
+from reacnet_scope.indexes import ROUTE_INDEX_STORE
 from rng_tools.network import Reaction, ReactionNetwork
 from rng_tools.pathways import find_candidate_paths
 from scripts.webapp import server as legacy_server
@@ -51,6 +52,58 @@ def _write_reaction_file(tmp_path: Path, text: str | None = None) -> Path:
         encoding="utf-8",
     )
     return reaction
+
+
+def test_pathway_step_validation_uses_prepared_route_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    route = tmp_path / "run.route"
+    route.write_text(
+        "Atom 1 C: 0 [H] -> 10 [H][O]\n",
+        encoding="utf-8",
+    )
+    ROUTE_INDEX_STORE.build(str(route))
+
+    result = svc.validate_pathway_step_occurrences(
+        {"route": str(route)},
+        {
+            "reactants": ["[H]"],
+            "products": ["[H][O]"],
+        },
+    )
+
+    assert result["evidence_level"] == "route"
+    assert result["can_assert_occurrence"] is False
+    assert result["rows"][0]["start_frame"] == 0
+    assert result["rows"][0]["end_frame"] == 10
+
+
+def test_pathway_step_validation_explains_missing_time_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    route = tmp_path / "run.route"
+    route.write_text(
+        "Atom 1 C: 0 [H] -> 10 [H][O]\n",
+        encoding="utf-8",
+    )
+
+    result = svc.validate_pathway_step_occurrences(
+        {"route": str(route)},
+        {
+            "reactants": ["[H]"],
+            "products": ["[H][O]"],
+        },
+    )
+
+    assert result["evidence_level"] == "network_only"
+    assert result["rows"] == []
+    assert "没有 .reactionevent.csv" in result["message"]
+    assert "Route 索引尚未就绪" in result["message"]
+    assert "--route-only" in result["message"]
 
 
 def _atomic_replace_preserving_size_and_mtime(
@@ -162,6 +215,64 @@ def test_pathway_service_degrades_without_event_index(
     assert step["event_total"] is None
     assert step["matched_event_total"] is None
     assert step["distinct_intervals"] is None
+
+
+def test_network_shortlist_skips_event_index_queries(
+    indexed_artifacts: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_summary(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("network shortlist must not query event evidence")
+
+    monkeypatch.setattr(
+        EVENT_EVIDENCE_STORE,
+        "reaction_summary",
+        forbidden_summary,
+    )
+
+    payload = svc.find_pathways(
+        indexed_artifacts,
+        "[H]",
+        max_depth=1,
+        evidence_mode="network_only",
+    )
+
+    assert payload["search_stage"] == "network_shortlist"
+    assert payload["evidence_deferred"] is True
+    assert payload["query"]["evidence_mode"] == "network_only"
+    assert payload["evidence_status"] == "network_only"
+    assert "preparation_command" not in payload
+
+
+def test_fragment_pathway_exposes_terminal_hyperedge_and_ending_state(
+    tmp_path: Path,
+) -> None:
+    parent = "[C][C][C][C][C][C]"
+    five_carbon = "[C][C][C][C][C]"
+    carbon_monoxide = "[C]=[O]"
+    reaction = _write_reaction_file(
+        tmp_path,
+        f"1 {parent}->{five_carbon}+{carbon_monoxide}\n",
+    )
+
+    payload = svc.find_pathways(
+        {"reaction": str(reaction)},
+        parent,
+        max_depth=2,
+        target_max_carbon=4,
+    )
+
+    path = payload["paths"][0]
+    assert path["termination_reason"] == "small_molecule_goal"
+    assert path["terminal_species"]["smiles"] == carbon_monoxide
+    assert [item["smiles"] for item in path["terminal_products"]] == [
+        five_carbon,
+        carbon_monoxide,
+    ]
+    assert [item["smiles"] for item in path["small_fragments"]] == [
+        carbon_monoxide
+    ]
+    assert path["fragmentation_step_indices"] == [1]
 
 
 @pytest.mark.parametrize(

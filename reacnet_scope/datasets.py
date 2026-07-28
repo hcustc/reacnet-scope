@@ -16,7 +16,6 @@ ARTIFACT_SUFFIXES = (
     (".species", "species"),
     (".moname", "moname"),
     (".route", "route"),
-    (".table", "table"),
 )
 
 
@@ -30,6 +29,11 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
     with os.scandir(root) as entries:
         for entry in entries:
             if not entry.is_file(follow_symlinks=False):
+                continue
+            # Removable media copied from macOS commonly contains AppleDouble
+            # sidecars such as ``._run.lammpstrj.species``.  They mirror real
+            # RNG suffixes but are metadata, not a second dataset.
+            if entry.name.startswith("._"):
                 continue
             lower_name = entry.name.lower()
             for suffix, kind in ARTIFACT_SUFFIXES:

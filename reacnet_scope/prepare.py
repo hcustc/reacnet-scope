@@ -50,7 +50,8 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             stems = (
                 reaction_stems
                 | route_stems
-                | (event_stems & molecule_stems)
+                | event_stems
+                | molecule_stems
             )
             if len(stems) != 1:
                 raise RuntimeError("dataset directory is ambiguous; pass --base")
@@ -61,6 +62,10 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         stem = stem[: -len(".reactionabcd")]
     if stem.endswith(".route"):
         stem = stem[: -len(".route")]
+    if stem.endswith(".reactionevent.csv"):
+        stem = stem[: -len(".reactionevent.csv")]
+    if stem.endswith(".molecules.csv"):
+        stem = stem[: -len(".molecules.csv")]
     return {
         "base": stem,
         "reaction": f"{stem}.reactionabcd",
@@ -212,10 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_route = False
         selected_trajectory = Path(dataset["trajectory"]).is_file()
         selected_composition = Path(dataset["species"]).is_file()
-        selected_event = all(
-            Path(dataset[key]).is_file()
-            for key in ("reactionevent", "molecules")
-        )
+        selected_event = Path(dataset["reactionevent"]).is_file()
     route_needs_build = (
         selected_route
         and Path(dataset["route"]).is_file()
@@ -234,9 +236,13 @@ def main(argv: list[str] | None = None) -> int:
     event_needs_build = (
         selected_event
         and Path(dataset["reactionevent"]).is_file()
-        and Path(dataset["molecules"]).is_file()
         and EVENT_EVIDENCE_STORE.status(
-            dataset["reactionevent"], dataset["molecules"]
+            dataset["reactionevent"],
+            (
+                dataset["molecules"]
+                if Path(dataset["molecules"]).is_file()
+                else ""
+            ),
         )["state"] != "ready"
     )
     if not args.status and not args.clear:
@@ -286,13 +292,13 @@ def main(argv: list[str] | None = None) -> int:
                         "reactionevent file not found: "
                         f"{dataset['reactionevent']}"
                     )
-                if not Path(dataset["molecules"]).is_file():
-                    raise FileNotFoundError(
-                        f"molecules file not found: {dataset['molecules']}"
-                    )
                 EVENT_EVIDENCE_STORE.build(
                     dataset["reactionevent"],
-                    dataset["molecules"],
+                    (
+                        dataset["molecules"]
+                        if Path(dataset["molecules"]).is_file()
+                        else ""
+                    ),
                     progress_callback=report,
                 )
         except KeyboardInterrupt:

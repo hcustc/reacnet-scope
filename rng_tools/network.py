@@ -201,6 +201,29 @@ class InitiationChannel:
 #  2.  Reaction file parser
 # ═══════════════════════════════════════════════════════════
 
+def _split_reaction_terms(side: str) -> tuple[str, ...]:
+    """Split top-level '+' separators without breaking charged SMILES."""
+    terms: List[str] = []
+    current: List[str] = []
+    bracket_depth = 0
+    for character in str(side or ""):
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth:
+            bracket_depth -= 1
+        if character == "+" and bracket_depth == 0:
+            term = "".join(current).strip()
+            if term:
+                terms.append(term)
+            current = []
+            continue
+        current.append(character)
+    term = "".join(current).strip()
+    if term:
+        terms.append(term)
+    return tuple(terms)
+
+
 def parse_reactionabcd(filepath: str | os.PathLike[str] | TextIO,
                        *,
                        min_tp: int = 1) -> List[Reaction]:
@@ -238,8 +261,8 @@ def parse_reactionabcd(filepath: str | os.PathLike[str] | TextIO,
             lr = parts[1].split('->')
             if len(lr) != 2:
                 continue
-            r_smi = tuple(s.strip() for s in lr[0].split('+') if s.strip())
-            p_smi = tuple(s.strip() for s in lr[1].split('+') if s.strip())
+            r_smi = _split_reaction_terms(lr[0])
+            p_smi = _split_reaction_terms(lr[1])
             reactions.append(Reaction(r_smi, p_smi, tp))
     finally:
         if owns_handle:

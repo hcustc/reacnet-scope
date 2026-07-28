@@ -9,121 +9,36 @@ from __future__ import annotations
 
 import re
 import time
-import base64
 import csv
 import io
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from rng_tools.pathway_export import pathway_csv_text, pathway_document
 from reacnet_scope.indexes import dataset_id_for_source
 from scripts.webapp_dash import services as svc
-
-
-PAGE_IDS = ["workflow", "species", "transitions", "reactions", "pathway", "intermediate", "evolution", "carbon", "events", "network", "literature", "batch-compare"]
-PAGE_LABELS = {
-    "workflow": "反应证据工作流",
-    "species": "物种检索",
-    "transitions": "转化关系",
-    "reactions": "反应式检索",
-    "pathway": "关键路径",
-    "intermediate": "中间体筛选",
-    "evolution": "时间演化",
-    "carbon": "C/O/Cl 组成演化",
-    "events": "事件证据",
-    "network": "反应网络",
-    "literature": "文献验证",
-    "batch-compare": "批量对比",
-}
-PAGE_DESCRIPTIONS = {
-    "workflow": "从实验目标物种出发，依次定位高频通道、代表性事件和局部轨迹证据。",
-    "species": "按分子式、SMILES 或精确质量定位物种，并查看结构与通量。",
-    "transitions": "围绕已选物种查看生成、消耗及净通量关系。",
-    "reactions": "按反应物和产物组合检索反应，比较正反向通量。",
-    "pathway": "从精确 SMILES 出发，搜索有界候选路径并关联事件证据。",
-    "intermediate": "基于丰度、寿命与通量条件筛选关键中间体。",
-    "evolution": "绘制目标物种随帧数或模拟时间变化的丰度曲线。",
-    "carbon": "选择 O/Cl 条件，查看碳数随时间变化，再点击曲线查看代表物种。",
-    "events": "检索 ReacNetGenerator 事件输出，并按参与原子查看局部轨迹。",
-    "network": "在 reactionabcd 机制网络与 table 观察网络之间明确切换。",
-    "literature": "将文献反应式与当前网络逐条比对并生成证据矩阵。",
-    "batch-compare": "扫描多组模拟结果，对比反应通量与检出率。",
-}
+from scripts.webapp_dash.navigation import (
+    DEFAULT_PAGE,
+    PAGE_CLASS_NAMES,
+    PAGE_IDS,
+    PAGE_LABELS,
+    TOP_NAV_PAGE_IDS,
+)
 PAGE_DATA_REQUIREMENTS = {
     "species": ("reaction", "reactionabcd"),
-    "transitions": ("reaction", "reactionabcd"),
     "reactions": ("reaction", "reactionabcd"),
     "pathway": ("reaction", "reactionabcd"),
     "intermediate": ("species", ".species"),
     "evolution": ("species", ".species"),
     "carbon": ("species", ".species"),
     "events": ("reactionevent", ".reactionevent.csv + .molecules.csv"),
-    "network": ("table", ".lammpstrj.table"),
-    "literature": ("reaction", "reactionabcd"),
 }
-
-NETWORK_STYLESHEET = [
-    {
-        "selector": "node",
-        "style": {
-            "label": "data(label)",
-            "text-valign": "center",
-            "text-halign": "center",
-            "font-size": 8,
-            "width": 28,
-            "height": 28,
-            "background-color": "#dbeafe",
-            "border-color": "#93c5fd",
-            "border-width": 1,
-        },
-    },
-    {
-        "selector": "node.reaction",
-        "style": {
-            "background-color": "#fde68a",
-            "border-color": "#f59e0b",
-            "shape": "rectangle",
-            "width": 18,
-            "height": 18,
-            "font-size": 6,
-        },
-    },
-    {
-        "selector": "node[selected]",
-        "style": {
-            "border-width": 3,
-            "border-color": "#2563eb",
-        },
-    },
-    {
-        "selector": "edge",
-        "style": {
-            "curve-style": "bezier",
-            "target-arrow-shape": "triangle",
-            "arrow-scale": 0.8,
-            "line-color": "#9ca3af",
-            "target-arrow-color": "#9ca3af",
-            "width": 1,
-        },
-    },
-    {
-        "selector": ".is-path-highlight",
-        "style": {
-            "border-color": "#2563eb",
-            "border-width": 4,
-            "line-color": "#2563eb",
-            "target-arrow-color": "#2563eb",
-            "width": 3,
-            "z-index": 10,
-        },
-    },
-]
 
 
 def initial_store() -> dict[str, Any]:
@@ -136,24 +51,16 @@ def initial_store() -> dict[str, Any]:
         "capabilities": {},
         "readiness": {},
         "artifacts": {},
+        "discovered_artifacts": {},
+        "artifact_overrides": {},
+        "min_tp": 1,
         "selected_smiles": "",
         "selected_formula": "",
+        "selected_species_source": "",
     }
 
 
-def initial_workflow_store() -> dict[str, Any]:
-    """Session-local state for the focused four-step evidence workflow."""
-    return {
-        "dataset_key": "",
-        "current_step": 1,
-        "species": None,
-        "channel": None,
-        "event": None,
-        "validations": [],
-    }
-
-
-def _network_dataset_id(store: dict[str, Any] | None) -> str:
+def _current_dataset_id(store: dict[str, Any] | None) -> str:
     value = store or {}
     dataset_id = str(value.get("dataset_id") or "")
     if dataset_id:
@@ -231,13 +138,8 @@ def _pathway_reset_trigger_kind(
         "app-store.data" in property_ids
         or "app-store" in triggered_components
     )
-    semantics_triggered = (
-        "network-semantics.value" in property_ids
-        or "network-semantics" in triggered_components
-    )
-
     if app_store_triggered:
-        current_dataset_id = _network_dataset_id(app_store)
+        current_dataset_id = _current_dataset_id(app_store)
         source_dataset_id = str(
             (pathway_context or {}).get("dataset_id") or ""
         )
@@ -247,102 +149,7 @@ def _pathway_reset_trigger_kind(
             or current_dataset_id != source_dataset_id
         ):
             return "dataset"
-    if semantics_triggered:
-        return "semantics"
     return None
-
-
-def _network_status_alert(payload: dict[str, Any] | None) -> Any:
-    if not isinstance(payload, dict):
-        return ""
-    meta = payload.get("meta") or {}
-    elements = [
-        item
-        for item in payload.get("elements") or []
-        if isinstance(item, dict)
-    ]
-    element_nodes = [
-        item
-        for item in elements
-        if not (
-            (item.get("data") or {}).get("source")
-            or (item.get("data") or {}).get("target")
-        )
-    ]
-    element_edges = [item for item in elements if item not in element_nodes]
-    node_count = int(
-        meta.get("node_count")
-        if meta.get("node_count") is not None
-        else len(element_nodes)
-    )
-    edge_count = int(
-        meta.get("edge_count")
-        if meta.get("edge_count") is not None
-        else len(element_edges)
-    )
-    reaction_count = int(
-        meta.get("reaction_count")
-        if meta.get("reaction_count") is not None
-        else sum(
-            (item.get("data") or {}).get("kind") == "reaction"
-            for item in element_nodes
-        )
-    )
-    reason = str(meta.get("reason") or "ok")
-    reason_labels = {
-        "ok": "网络已构建",
-        "species_absent": "锚点物种不在当前反应网络中",
-        "no_positive_net_continuation": "锚点存在，但没有正净 TP 的延伸反应",
-        "filtered_by_thresholds": "反应均被当前净 TP 阈值过滤",
-        "filtered_by_evidence": "当前事件证据筛选没有匹配反应",
-    }
-    children: list[Any] = [
-        html.Div(
-            reason_labels.get(reason, f"网络状态：{reason}"),
-            className="fw-semibold",
-        ),
-        html.Div(
-            f"{node_count} 个节点 · {edge_count} 条边 · "
-            f"{reaction_count} 个反应节点"
-        ),
-        html.Div(
-            "证据层级：{} · 证据状态：{}".format(
-                payload.get("evidence_level") or "未提供",
-                payload.get("evidence_status") or "未提供",
-            ),
-            className="small text-muted",
-        ),
-    ]
-    if meta.get("truncated"):
-        children.append(
-            html.Div("结果因节点上限而截断。", className="small fw-semibold")
-        )
-    command = str(payload.get("preparation_command") or "")
-    if command:
-        children.append(
-            html.Div(
-                [
-                    html.Div("离线证据准备命令：", className="small"),
-                    html.Div(
-                        [
-                            html.Code(command),
-                            dcc.Clipboard(
-                                content=command,
-                                title="复制准备命令",
-                                style={"marginLeft": "0.5rem"},
-                            ),
-                        ],
-                        className="d-flex align-items-center",
-                    ),
-                ]
-            )
-        )
-    color = (
-        "warning"
-        if reason != "ok" or bool(meta.get("truncated"))
-        else "success"
-    )
-    return dbc.Alert(children, color=color, className="py-2 mb-0")
 
 
 _EVENT_GROUP_STYLE = {
@@ -511,140 +318,281 @@ def _event_selection_summary(selected: dict[str, Any]) -> Any:
     )
 
 
-def _transition_selection_summary(row: dict[str, Any]) -> Any:
-    """Render the selected transition before it is handed to event evidence."""
+def _structure_species_card(item: dict[str, Any], side_label: str = "物种") -> Any:
+    duplicate_label = ""
+    if int(item.get("occurrence_total") or 0) > 1:
+        duplicate_label = (
+            f"（第 {item.get('occurrence')} / "
+            f"{item.get('occurrence_total')} 项）"
+        )
     return html.Div(
         [
-            html.Span("已选反应", className="rs-selection-label"),
-            html.Span(str(row.get("reaction_formulas") or ""), className="rs-selection-main"),
-            html.Span(str(row.get("reaction_smiles") or ""), className="rs-selection-query"),
+            html.Img(
+                src=item.get("structure_url"),
+                alt=f"{side_label} {item.get('formula') or '?'} 结构{duplicate_label}",
+            ),
+            html.Strong(
+                str(item.get("formula") or "?"),
+                className="rs-channel-species-formula",
+            ),
+            html.Code(
+                str(item.get("smiles") or ""),
+                className="rs-channel-species-smiles",
+            ),
+            html.Span(duplicate_label, className="rs-channel-stoich-label")
+            if duplicate_label
+            else None,
         ],
-        className="rs-selection-line",
+        className="rs-channel-species-card",
     )
+
+
+def _structure_reaction_side(items: list[dict[str, Any]], side_label: str) -> Any:
+    children: list[Any] = []
+    for index, item in enumerate(items):
+        if index:
+            children.append(html.Span("+", className="rs-channel-operator"))
+        children.append(_structure_species_card(item, side_label))
+    return html.Div(children, className="rs-channel-reaction-side")
+
+
+def _reaction_structure_detail_children(
+    detail: dict[str, Any],
+    *,
+    title: str = "完整结构反应式",
+    role_label: str = "",
+) -> list[Any]:
+    return [
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Span(title, className="rs-channel-detail-kicker"),
+                        html.Strong(role_label, className="rs-channel-role")
+                        if role_label
+                        else None,
+                    ]
+                ),
+                html.Div(
+                    [
+                        html.Span("分子式"),
+                        html.Code(str(detail.get("reaction_formulas") or "")),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+                html.Div(
+                    [
+                        html.Span("SMILES"),
+                        html.Code(str(detail.get("reaction_smiles") or "")),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+            ],
+            className="rs-channel-detail-header",
+        ),
+        html.Div(
+            [
+                _structure_reaction_side(
+                    detail.get("reactants") or [],
+                    "反应物",
+                ),
+                html.Span(
+                    "→",
+                    className="rs-channel-arrow",
+                    **{"aria-label": "生成"},
+                ),
+                _structure_reaction_side(
+                    detail.get("products") or [],
+                    "产物",
+                ),
+            ],
+            className="rs-channel-structure-reaction",
+        ),
+    ]
+
+
+def _species_structure_detail_children(
+    items: list[dict[str, Any]],
+    *,
+    title: str,
+    note: str = "",
+) -> list[Any]:
+    return [
+        html.Div(
+            [
+                html.Span(title, className="rs-channel-detail-kicker"),
+                html.Span(note, className="rs-channel-role") if note else None,
+            ],
+            className="rs-channel-detail-header rs-structure-detail-heading",
+        ),
+        html.Div(
+            [_structure_species_card(item) for item in items],
+            className="rs-channel-reaction-side rs-species-structure-list",
+        ),
+    ]
+
+
+def _selected_table_row(
+    selected_rows: list[int] | None,
+    rows: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not selected_rows or not rows:
+        return None
+    index = int(selected_rows[0])
+    return dict(rows[index]) if 0 <= index < len(rows) else None
 
 
 def register_callbacks(app: Any) -> None:
     # ── Navigation ──────────────────────────────────────────────────
 
     @app.callback(
-        Output("page-workflow", "className"),
         Output("page-species", "className"),
-        Output("page-transitions", "className"),
         Output("page-reactions", "className"),
-        Output("page-pathway", "className"),
-        Output("page-intermediate", "className"),
         Output("page-evolution", "className"),
-        Output("page-carbon", "className"),
         Output("page-events", "className"),
-        Output("page-network", "className"),
-        Output("page-literature", "className"),
+        Output("page-intermediate", "className"),
+        Output("page-pathway", "className"),
+        Output("page-carbon", "className"),
         Output("page-batch-compare", "className"),
-        Output("nav-workflow", "className"),
         Output("nav-species", "className"),
-        Output("nav-transitions", "className"),
         Output("nav-reactions", "className"),
-        Output("nav-pathway", "className"),
-        Output("nav-intermediate", "className"),
         Output("nav-evolution", "className"),
-        Output("nav-carbon", "className"),
         Output("nav-events", "className"),
-        Output("nav-network", "className"),
-        Output("nav-literature", "className"),
-        Output("nav-batch-compare", "className"),
+        Output("nav-intermediate", "className"),
+        Output("nav-pathway", "className"),
+        Output("nav-carbon", "className"),
         Output("page-store", "data"),
         Output("page-title", "children"),
-        Output("page-description", "children"),
         Output("page-header", "style"),
         Output("app-body", "className"),
-        Input("nav-workflow", "n_clicks"),
         Input("nav-species", "n_clicks"),
-        Input("nav-transitions", "n_clicks"),
         Input("nav-reactions", "n_clicks"),
-        Input("nav-pathway", "n_clicks"),
-        Input("nav-intermediate", "n_clicks"),
         Input("nav-evolution", "n_clicks"),
-        Input("nav-carbon", "n_clicks"),
         Input("nav-events", "n_clicks"),
-        Input("nav-network", "n_clicks"),
-        Input("nav-literature", "n_clicks"),
-        Input("nav-batch-compare", "n_clicks"),
+        Input("nav-intermediate", "n_clicks"),
+        Input("nav-pathway", "n_clicks"),
+        Input("nav-carbon", "n_clicks"),
+        Input("data-open-batch-compare-btn", "n_clicks"),
+        Input("species-to-channels-btn", "n_clicks"),
+        Input("rxn-channel-back-btn", "n_clicks"),
         Input("species-to-event-btn", "n_clicks"),
         Input("rxn-to-event-btn", "n_clicks"),
-        Input("transitions-to-event-btn", "n_clicks"),
+        Input("rxn-channel-to-event-btn", "n_clicks"),
+        Input("event-back-btn", "n_clicks"),
         Input("species-to-pathway-btn", "n_clicks"),
         Input("rxn-to-pathway-btn", "n_clicks"),
+        Input("inter-to-pathway-btn", "n_clicks"),
+        Input("inter-to-evolution-btn", "n_clicks"),
         Input("pathway-open-events-btn", "n_clicks"),
-        Input("pathway-highlight-network-btn", "n_clicks"),
-        Input("network-open-events-btn", "n_clicks"),
         State("page-store", "data"),
     )
     def _navigate(*_args):
         triggered_id = ctx.triggered_id
-        stored_page = (_args[-1] or {}).get("page") if _args else None
+        stored_state = (_args[-1] or {}) if _args else {}
+        stored_page = stored_state.get("page")
         if triggered_id in {
             "species-to-event-btn",
             "rxn-to-event-btn",
-            "transitions-to-event-btn",
+            "rxn-channel-to-event-btn",
             "pathway-open-events-btn",
-            "network-open-events-btn",
         }:
             page_id = "events"
-        elif triggered_id in {"species-to-pathway-btn", "rxn-to-pathway-btn"}:
+        elif triggered_id == "event-back-btn":
+            page_id = stored_state.get("return_page") or DEFAULT_PAGE
+        elif triggered_id in {
+            "species-to-pathway-btn",
+            "rxn-to-pathway-btn",
+            "inter-to-pathway-btn",
+        }:
             page_id = "pathway"
-        elif triggered_id == "pathway-highlight-network-btn":
-            page_id = "network"
+        elif triggered_id == "species-to-channels-btn":
+            page_id = "reactions"
+        elif triggered_id == "rxn-channel-back-btn":
+            page_id = "species"
+        elif triggered_id == "data-open-batch-compare-btn":
+            page_id = "batch-compare"
+        elif triggered_id == "inter-to-evolution-btn":
+            page_id = "evolution"
         else:
             page_id = triggered_id.removeprefix("nav-") if triggered_id else stored_page
         if page_id not in PAGE_IDS:
-            page_id = "workflow"
+            page_id = DEFAULT_PAGE
         page_classes = {
-            pid: "rs-page active" if pid == page_id else "rs-page"
+            pid: (
+                f"{PAGE_CLASS_NAMES.get(pid, 'rs-page')} active"
+                if pid == page_id
+                else PAGE_CLASS_NAMES.get(pid, "rs-page")
+            )
             for pid in PAGE_IDS
         }
         nav_classes = {
-            pid: f"rs-nav-item{' active' if pid == page_id else ''}"
-            for pid in PAGE_IDS
+            pid: f"rs-top-nav-item{' active' if pid == page_id else ''}"
+            for pid in TOP_NAV_PAGE_IDS
         }
-        nav_classes["workflow"] = f"rs-workflow-home{' active' if page_id == 'workflow' else ''}"
-        shell_class = "rs-body rs-workflow-shell"
+        page_state = {"page": page_id}
+        return_context = {
+            "species-to-event-btn": ("species", "返回物种检索"),
+            "rxn-to-event-btn": ("reactions", "返回反应式检索"),
+            "rxn-channel-to-event-btn": ("reactions", "返回反应通道"),
+            "pathway-open-events-btn": ("pathway", "返回候选路径"),
+        }.get(triggered_id)
+        if page_id == "events" and return_context:
+            page_state.update(
+                return_page=return_context[0],
+                return_label=return_context[1],
+            )
         return (
             tuple(page_classes[pid] for pid in PAGE_IDS)
-            + tuple(nav_classes[pid] for pid in PAGE_IDS)
-            + ({"page": page_id}, PAGE_LABELS[page_id], PAGE_DESCRIPTIONS[page_id], {"display": "none"} if page_id == "workflow" else {}, shell_class)
+            + tuple(nav_classes[pid] for pid in TOP_NAV_PAGE_IDS)
+            + (
+                page_state,
+                PAGE_LABELS[page_id],
+                {},
+                "rs-body rs-tool-shell",
+            )
         )
+
+    @app.callback(
+        Output("event-back-btn", "children"),
+        Output("event-back-btn", "style"),
+        Input("page-store", "data"),
+    )
+    def _render_event_back_button(page_store):
+        state = page_store or {}
+        if state.get("page") != "events" or not state.get("return_page"):
+            return "返回", {"display": "none"}
+        return f"← {state.get('return_label') or '返回'}", {}
 
     @app.callback(
         Output("page-data-status", "children"),
         Output("page-data-status", "className"),
         Input("page-store", "data"),
         Input("app-store", "data"),
-        Input("network-semantics", "value"),
     )
-    def _update_page_data_status(page_store, app_store, network_semantics):
+    def _update_page_data_status(page_store, app_store):
         page_id = (page_store or {}).get("page") or "species"
         if page_id == "batch-compare":
             return "独立目录分析", "rs-page-status is-independent"
         if page_id == "events":
-            event_ready = bool((((app_store or {}).get("readiness") or {}).get("event_search") or {}).get("ready"))
+            artifacts = (app_store or {}).get("artifacts") or {}
+            event_ready = bool(
+                artifacts.get("reactionevent") and artifacts.get("molecules")
+            )
             return (
                 ("RNG 事件输出已就绪", "rs-page-status is-ready")
                 if event_ready
                 else ("需要 reactionevent.csv + molecules.csv", "rs-page-status is-blocked")
             )
-        if page_id == "network" and network_semantics == "mechanism":
-            artifact_key, artifact_label = "reaction", "reactionabcd"
-        else:
-            artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(
-                page_id,
-                ("", ""),
-            )
+        artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(
+            page_id,
+            ("", ""),
+        )
         artifacts = (app_store or {}).get("artifacts") or {}
         if artifact_key and artifacts.get(artifact_key):
             return f"{artifact_label} 已就绪", "rs-page-status is-ready"
         return f"需要 {artifact_label or '数据文件'}", "rs-page-status is-blocked"
 
     @app.callback(
-        Output("transitions-search-btn", "disabled"),
         Output("rxn-search-btn", "disabled"),
         Output("pathway-search-btn", "disabled"),
         Output("inter-search-btn", "disabled"),
@@ -652,21 +600,17 @@ def register_callbacks(app: Any) -> None:
         Output("carbon-search-btn", "disabled"),
         Output("event-rxn-btn", "disabled"),
         Output("event-extract-btn", "disabled"),
-        Output("network-search-btn", "disabled"),
-        Output("literature-verify-btn", "disabled"),
         Input("app-store", "data"),
-        Input("network-semantics", "value"),
     )
-    def _update_data_dependent_actions(app_store, network_semantics):
+    def _update_data_dependent_actions(app_store):
         artifacts = (app_store or {}).get("artifacts") or {}
-        readiness = (app_store or {}).get("readiness") or {}
         no_reaction = not bool(artifacts.get("reaction"))
         no_species = not bool(artifacts.get("species"))
-        no_reaction_events = not bool((readiness.get("event_search") or {}).get("ready"))
-        no_trajectory = not bool((readiness.get("trajectory_evidence") or {}).get("ready"))
-        no_table = not bool(artifacts.get("table"))
+        no_reaction_events = not bool(
+            artifacts.get("reactionevent") and artifacts.get("molecules")
+        )
+        no_trajectory = not bool(artifacts.get("trajectory"))
         return (
-            no_reaction,
             no_reaction,
             no_reaction,
             no_species,
@@ -674,10 +618,6 @@ def register_callbacks(app: Any) -> None:
             no_species,
             no_reaction_events,
             no_trajectory,
-            no_reaction
-            if network_semantics == "mechanism"
-            else no_table,
-            no_reaction,
         )
 
     # ── Data modal open / close ─────────────────────────────────────
@@ -686,15 +626,25 @@ def register_callbacks(app: Any) -> None:
         Output("data-modal", "is_open"),
         Input("open-data-modal", "n_clicks"),
         Input("species-open-data-modal", "n_clicks"),
+        Input("data-open-batch-compare-btn", "n_clicks"),
         Input("data-close-btn", "n_clicks"),
         State("data-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def _toggle_data_modal(topbar_open, species_open, close_btn, is_open):
+    def _toggle_data_modal(
+        topbar_open,
+        species_open,
+        batch_compare,
+        close_btn,
+        is_open,
+    ):
         triggered = ctx.triggered_id
-        if triggered in ("open-data-modal", "species-open-data-modal"):
+        if triggered in (
+            "open-data-modal",
+            "species-open-data-modal",
+        ):
             return True
-        if triggered == "data-close-btn":
+        if triggered in {"data-close-btn", "data-open-batch-compare-btn"}:
             return False
         return is_open
 
@@ -784,6 +734,145 @@ def register_callbacks(app: Any) -> None:
             f"已验证 — {display_label}，就绪 {ready}/7",
             artifact_html,
             False,
+        )
+
+    @app.callback(
+        Output("data-global-min-tp", "value"),
+        Output("data-override-reaction", "value"),
+        Output("data-override-species", "value"),
+        Output("data-override-moname", "value"),
+        Output("data-override-trajectory", "value"),
+        Output("data-override-route", "value"),
+        Output("data-override-reactionevent", "value"),
+        Output("data-override-molecules", "value"),
+        Input("data-modal", "is_open"),
+        Input("app-store", "data"),
+    )
+    def _populate_data_overrides(is_open, app_store):
+        if not is_open:
+            raise PreventUpdate
+        store = app_store if isinstance(app_store, dict) else {}
+        overrides = (
+            store.get("artifact_overrides")
+            if isinstance(store.get("artifact_overrides"), dict)
+            else {}
+        )
+        keys = (
+            "reaction",
+            "species",
+            "moname",
+            "trajectory",
+            "route",
+            "reactionevent",
+            "molecules",
+        )
+        return (
+            int(store.get("min_tp") or 1),
+            *(str(overrides.get(key) or "") for key in keys),
+        )
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("data-overrides-feedback", "children"),
+        Input("data-overrides-apply-btn", "n_clicks"),
+        Input("data-overrides-reset-btn", "n_clicks"),
+        State("data-global-min-tp", "value"),
+        State("data-override-reaction", "value"),
+        State("data-override-species", "value"),
+        State("data-override-moname", "value"),
+        State("data-override-trajectory", "value"),
+        State("data-override-route", "value"),
+        State("data-override-reactionevent", "value"),
+        State("data-override-molecules", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _apply_data_overrides(
+        apply_clicks,
+        reset_clicks,
+        min_tp,
+        reaction,
+        species,
+        moname,
+        trajectory,
+        route,
+        reactionevent,
+        molecules,
+        app_store,
+    ):
+        del apply_clicks, reset_clicks
+        store = dict(app_store or {})
+        discovered = (
+            dict(store.get("discovered_artifacts") or {})
+            if isinstance(store.get("discovered_artifacts"), dict)
+            else {
+                key: value
+                for key, value in (store.get("artifacts") or {}).items()
+                if not str(key).startswith("_")
+            }
+        )
+        threshold = max(1, int(min_tp or 1))
+        if ctx.triggered_id == "data-overrides-reset-btn":
+            merged = {**discovered, "_min_tp": threshold}
+            return (
+                {
+                    **store,
+                    "artifacts": merged,
+                    "artifact_overrides": {},
+                    "discovered_artifacts": discovered,
+                    "min_tp": threshold,
+                },
+                dbc.Alert(
+                    f"已恢复自动检测文件；全局最小 TP = {threshold}。",
+                    color="success",
+                    className="py-2 mb-0",
+                ),
+            )
+
+        raw_values = {
+            "reaction": reaction,
+            "species": species,
+            "moname": moname,
+            "trajectory": trajectory,
+            "route": route,
+            "reactionevent": reactionevent,
+            "molecules": molecules,
+        }
+        overrides: dict[str, str] = {}
+        try:
+            for key, raw in raw_values.items():
+                text = str(raw or "").strip()
+                if not text:
+                    continue
+                path = svc.validate_browse_path(text)
+                if not path.is_file():
+                    raise svc.ServiceError(
+                        f"{key} 不是可读文件: {path}",
+                        reason="not_file",
+                    )
+                overrides[key] = str(path)
+        except (TypeError, ValueError, svc.ServiceError) as exc:
+            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            return no_update, dbc.Alert(
+                f"未应用覆盖：{message}",
+                color="danger",
+                className="py-2 mb-0",
+            )
+
+        merged = {**discovered, **overrides, "_min_tp": threshold}
+        return (
+            {
+                **store,
+                "artifacts": merged,
+                "artifact_overrides": overrides,
+                "discovered_artifacts": discovered,
+                "min_tp": threshold,
+            },
+            dbc.Alert(
+                f"已应用 {len(overrides)} 个文件覆盖；全局最小 TP = {threshold}。",
+                color="success",
+                className="py-2 mb-0",
+            ),
         )
 
     @app.callback(
@@ -1142,6 +1231,8 @@ def register_callbacks(app: Any) -> None:
                 ),
             )
         artifacts = svc.artifacts_from_status(status)
+        min_tp = max(1, int(store.get("min_tp") or 1))
+        artifacts["_min_tp"] = min_tp
         capabilities = svc.dataset_capabilities(status)
         readiness = svc.dataset_readiness(status)
         ready = svc.dataset_ready_count(status)
@@ -1159,6 +1250,13 @@ def register_callbacks(app: Any) -> None:
             "capabilities": capabilities,
             "readiness": readiness,
             "artifacts": artifacts,
+            "discovered_artifacts": {
+                key: value
+                for key, value in artifacts.items()
+                if not str(key).startswith("_")
+            },
+            "artifact_overrides": {},
+            "min_tp": min_tp,
         }
         status_class = "rs-badge" if ready >= 3 else ("rs-badge rs-bad" if ready <= 1 else "rs-badge")
         recent = svc.normalise_recent_datasets(
@@ -1188,265 +1286,11 @@ def register_callbacks(app: Any) -> None:
             None,
         )
 
-    # ── Focused four-step evidence workflow ─────────────────────────
-
-    def _workflow_columns(items: list[tuple[str, str, int | None]]) -> list[dict[str, Any]]:
+    def _channel_columns(items: list[tuple[str, str, int | None]]) -> list[dict[str, Any]]:
         return [
             {"name": label, "id": field, **({"presentation": "markdown"} if field == "structure" else {}), **({"type": "numeric"} if field not in {"structure", "smiles", "formula", "reaction_formulas", "recommendation", "association_status", "structure_source"} else {})}
             for field, label, _width in items
         ]
-
-    @app.callback(
-        Output("workflow-species-grid", "data"),
-        Output("workflow-species-grid", "columns"),
-        Output("workflow-species-alert", "children"),
-        Output("workflow-species-grid", "selected_rows"),
-        Input("workflow-species-search", "n_clicks"),
-        Input("app-store", "data"),
-        State("workflow-species-query", "value"),
-        State("workflow-species-kind", "value"),
-        State("workflow-mass-tolerance", "value"),
-        State("workflow-mass-mode", "value"),
-    )
-    def _search_workflow_catalog(_clicks, app_store, query, kind, tolerance, mass_mode):
-        artifacts = (app_store or {}).get("artifacts") or {}
-        if not artifacts.get("species"):
-            return [], _workflow_columns([]), "选择数据集后，可从 .species 建立目标物种目录。", []
-        try:
-            payload = svc.search_species_catalog(
-                artifacts,
-                query or "",
-                kind=kind or "auto",
-                mass_tolerance=float(0.5 if tolerance is None else tolerance),
-                mass_mode=mass_mode or "exact",
-            )
-        except svc.ServiceError as exc:
-            return [], _workflow_columns([]), exc.message, []
-        rows = payload.get("rows") or []
-        columns = _workflow_columns(
-            [
-                ("structure", "结构", 90), ("formula", "分子式", 100), ("smiles", "SMILES", 240), ("exact_mass", "精确质量", 92),
-                ("nominal_mass", "标称质量", 82), ("total_count", "累计丰度", 96),
-                ("structure_source", "结构证据", 88),
-            ]
-        )
-        meta = payload.get("meta") or {}
-        moname_state = ".moname 已补充结构实例" if meta.get("moname_available") else ".moname 未提供，使用 SMILES 结构"
-        return rows, columns, f"目录含 {meta.get('catalog_size', 0)} 个物种；{moname_state}。", []
-
-    @app.callback(
-        Output("workflow-store", "data"),
-        Input("app-store", "data"),
-        Input("workflow-species-search", "n_clicks"),
-        Input("workflow-species-grid", "selected_rows"),
-        Input("workflow-species-confirm", "n_clicks"),
-        Input("workflow-production-grid", "selected_rows"),
-        Input("workflow-consumption-grid", "selected_rows"),
-        Input("workflow-channel-confirm", "n_clicks"),
-        Input("workflow-event-grid", "selected_rows"),
-        Input("workflow-event-confirm", "n_clicks"),
-        Input("workflow-validation-save", "n_clicks"),
-        Input("workflow-step-1", "n_clicks"),
-        Input("workflow-step-2", "n_clicks"),
-        Input("workflow-step-3", "n_clicks"),
-        Input("workflow-step-4", "n_clicks"),
-        State("workflow-store", "data"),
-        State("workflow-species-grid", "data"),
-        State("workflow-production-grid", "data"),
-        State("workflow-consumption-grid", "data"),
-        State("workflow-event-grid", "data"),
-        State("workflow-validation-outcome", "value"),
-        State("workflow-validation-note", "value"),
-        prevent_initial_call=False,
-    )
-    def _advance_workflow(
-        app_store, _species_search, species_selected, species_confirm, production_selected, consumption_selected, channel_confirm,
-        event_selected, event_confirm, validation_save, _step1, _step2, _step3, _step4,
-        workflow, species_rows, production_rows, consumption_rows, event_rows, outcome, note,
-    ):
-        state = dict(workflow or initial_workflow_store())
-        app_store = app_store or {}
-        dataset_key = str(app_store.get("base") or app_store.get("label") or "")
-        triggered = ctx.triggered_id
-        if triggered == "app-store" and dataset_key != state.get("dataset_key", ""):
-            return {**initial_workflow_store(), "dataset_key": dataset_key}
-        if not dataset_key:
-            return initial_workflow_store()
-        state["dataset_key"] = dataset_key
-
-        def chosen(rows: list[int] | None, data: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-            if not rows or not data:
-                return None
-            index = int(rows[0])
-            return dict(data[index]) if 0 <= index < len(data) else None
-
-        if triggered == "workflow-species-search":
-            state.update(
-                {
-                    "species": None,
-                    "channel": None,
-                    "event": None,
-                    "current_step": 1,
-                    "validation_message": "",
-                }
-            )
-        elif triggered == "workflow-species-grid":
-            row = chosen(species_selected, species_rows)
-            if row:
-                state.update({"species": row, "channel": None, "event": None, "current_step": 1})
-        elif triggered == "workflow-species-confirm" and state.get("species"):
-            state.update({"channel": None, "event": None, "current_step": 2})
-        elif triggered in {"workflow-production-grid", "workflow-consumption-grid"}:
-            row = chosen(production_selected if triggered == "workflow-production-grid" else consumption_selected, production_rows if triggered == "workflow-production-grid" else consumption_rows)
-            if row:
-                state.update({"channel": row, "event": None, "current_step": 2})
-        elif triggered == "workflow-channel-confirm" and state.get("channel"):
-            state.update({"event": None, "current_step": 3})
-        elif triggered == "workflow-event-grid":
-            row = chosen(event_selected, event_rows)
-            if row:
-                state.update({"event": row, "current_step": 3})
-        elif triggered == "workflow-event-confirm" and (state.get("event") or {}).get("validation_ready"):
-            state["current_step"] = 4
-        elif triggered == "workflow-validation-save" and state.get("species") and state.get("channel") and state.get("event"):
-            state["validations"] = svc.upsert_validation_record(
-                state.get("validations"), dataset_id=dataset_key, species=state["species"], channel=state["channel"],
-                event=state["event"], outcome=outcome or "insufficient", note=note or "",
-                recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            )
-            state["validation_message"] = f"已记录 {len(state['validations'])} 条会话内验证结果。"
-        elif triggered and str(triggered).startswith("workflow-step-"):
-            requested = int(str(triggered).rsplit("-", 1)[-1])
-            maximum = 1 + int(bool(state.get("species"))) + int(bool(state.get("channel"))) + int(bool(state.get("event") and (state.get("event") or {}).get("validation_ready")))
-            state["current_step"] = min(requested, maximum)
-        return state
-
-    @app.callback(
-        Output("workflow-production-grid", "data"),
-        Output("workflow-production-grid", "columns"),
-        Output("workflow-consumption-grid", "data"),
-        Output("workflow-consumption-grid", "columns"),
-        Output("workflow-channels-alert", "children"),
-        Input("workflow-store", "data"),
-        Input("app-store", "data"),
-    )
-    def _load_workflow_channels(workflow, app_store):
-        species = (workflow or {}).get("species") or {}
-        if not species or int((workflow or {}).get("current_step") or 1) < 2:
-            return [], _workflow_columns([]), [], _workflow_columns([]), "先选定一个目标物种。"
-        try:
-            payload = svc.collect_species_channels((app_store or {}).get("artifacts") or {}, str(species.get("smiles") or ""))
-        except svc.ServiceError as exc:
-            return [], _workflow_columns([]), [], _workflow_columns([]), exc.message
-        columns = _workflow_columns([("reaction_formulas", "反应式", 240), ("forward_tp", "频次", 72), ("reverse_tp", "逆向", 72), ("net_tp", "净频次", 76), ("ratio_pct", "占比%", 68)])
-        return payload.get("production_rows") or [], columns, payload.get("consumption_rows") or [], columns, "按正向频次排序；净频次保留用于判断可逆性。"
-
-    @app.callback(
-        Output("workflow-event-grid", "data"),
-        Output("workflow-event-grid", "columns"),
-        Output("workflow-events-alert", "children"),
-        Input("workflow-store", "data"),
-        Input("app-store", "data"),
-    )
-    def _load_workflow_events(workflow, app_store):
-        channel = (workflow or {}).get("channel") or {}
-        if not channel or int((workflow or {}).get("current_step") or 1) < 3:
-            return [], _workflow_columns([]), "先选定一条生成或消耗通道。"
-        try:
-            payload = svc.rank_representative_events((app_store or {}).get("artifacts") or {}, str(channel.get("reaction_smiles") or ""))
-        except svc.ServiceError as exc:
-            return [], _workflow_columns([]), exc.message
-        columns = _workflow_columns([("recommendation", "推荐", 88), ("before_timestep", "反应前", 86), ("after_timestep", "反应后", 86), ("atom_count", "原子数", 70), ("association_status", "原子关联", 94), ("broken_bonds", "断键", 140), ("formed_bonds", "成键", 140)])
-        meta = payload.get("meta") or {}
-        message = f"推荐 {meta.get('recommended_count', 0)} 条事件。"
-        if not meta.get("trajectory_index_ready"):
-            message += " " + str(meta.get("trajectory_index_message") or "需要准备轨迹索引。")
-        return payload.get("rows") or [], columns, message
-
-    @app.callback(
-        Output("workflow-panel-1", "style"), Output("workflow-panel-2", "style"), Output("workflow-panel-3", "style"), Output("workflow-panel-4", "style"),
-        Output("workflow-step-1", "className"), Output("workflow-step-2", "className"), Output("workflow-step-3", "className"), Output("workflow-step-4", "className"),
-        Output("workflow-summary", "children"), Output("workflow-species-choice", "children"), Output("workflow-channel-choice", "children"), Output("workflow-event-choice", "children"),
-        Output("workflow-species-confirm", "disabled"), Output("workflow-channel-confirm", "disabled"), Output("workflow-event-confirm", "disabled"), Output("workflow-validation-status", "children"),
-        Input("workflow-store", "data"),
-    )
-    def _render_workflow_state(workflow):
-        state = workflow or initial_workflow_store()
-        current = max(1, min(4, int(state.get("current_step") or 1)))
-        species, channel, event = state.get("species") or {}, state.get("channel") or {}, state.get("event") or {}
-        panels = tuple({"display": "block"} if current == step else {"display": "none"} for step in range(1, 5))
-        step_classes = tuple("rs-flow-step is-current" if current == step else ("rs-flow-step is-complete" if step < current else "rs-flow-step") for step in range(1, 5))
-        summary_items: list[Any] = []
-        if species:
-            structure: Any = None
-            smiles = str(species.get("smiles") or "")
-            if smiles:
-                try:
-                    render_result = svc.render_species_svg(smiles, width=96, height=54)
-                    if render_result.get("ok") and render_result.get("svg"):
-                        encoded_svg = base64.b64encode(str(render_result["svg"]).encode("utf-8")).decode("ascii")
-                        structure = html.Img(src=f"data:image/svg+xml;base64,{encoded_svg}", className="rs-summary-structure", alt=f"{species.get('formula') or 'selected'} structure")
-                except Exception:
-                    structure = None
-            summary_items.append(html.Div([structure, html.Div([html.Span("实验物种", className="rs-summary-label"), html.Strong(f"{species.get('formula') or '?'} · {smiles}"), html.Span(str(species.get('structure_source') or 'SMILES'), className="rs-summary-source")])], className="rs-summary-item"))
-        if channel:
-            summary_items.append(html.Div([html.Span("选定通道", className="rs-summary-label"), html.Strong(str(channel.get("reaction_formulas") or channel.get("reaction_smiles") or ""))], className="rs-summary-item"))
-        if event:
-            summary_items.append(html.Div([html.Span("选定事件", className="rs-summary-label"), html.Strong(f"{event.get('event_id') or ''} · {event.get('before_timestep')} → {event.get('after_timestep')}")], className="rs-summary-item"))
-        summary = summary_items or [html.Span("从第 1 步开始：导入数据集后检索实验目标物种。", className="rs-summary-empty")]
-        species_choice = f"已选：{species.get('formula') or ''} · {species.get('smiles') or ''}" if species else "在表格中选择一个物种。"
-        channel_choice = f"已选 {channel.get('role_label') or ''}通道：{channel.get('reaction_formulas') or ''}" if channel else "从生成或消耗通道中选择一条反应。"
-        event_choice = f"已选 {event.get('recommendation') or ''} 事件：{event.get('event_id') or ''}" if event else "选择一条可验证的代表性事件。"
-        return (*panels, *step_classes, summary, species_choice, channel_choice, event_choice, not bool(species), not bool(channel), not bool(event and event.get("validation_ready")), state.get("validation_message") or "")
-
-    @app.callback(
-        Output("workflow-viewer-store", "data"), Output("workflow-event-evidence", "children"), Output("workflow-bond-evidence", "children"),
-        Output("workflow-frame-slider", "min"), Output("workflow-frame-slider", "max"), Output("workflow-frame-slider", "value"), Output("workflow-frame-slider", "marks"), Output("workflow-storyboard", "children"), Output("workflow-viewer-alert", "children"),
-        Input("workflow-store", "data"), Input("app-store", "data"),
-    )
-    def _load_workflow_viewer(workflow, app_store):
-        state = workflow or {}
-        event = state.get("event") or {}
-        if int(state.get("current_step") or 1) < 4 or not event:
-            return None, [], [], 0, 0, 0, {}, [], "确认一条可验证事件后提取局部轨迹。"
-        try:
-            viewer = svc.build_rng_event_visualization((app_store or {}).get("artifacts") or {}, event)
-        except svc.ServiceError as exc:
-            return None, [], [], 0, 0, 0, {}, [], exc.message
-        frames = viewer.get("frames") or []
-        marks = {index: str(frame.get("frame")) for index, frame in enumerate(frames)}
-        anchor = event.get("anchor_frame")
-        anchor_index = next((index for index, frame in enumerate(frames) if frame.get("frame") == anchor), 0)
-        bonds = viewer.get("bond_evidence") or {}
-        event_evidence = [html.H3("事件来源与参与原子"), html.P("reactionevent.csv + molecules.csv"), html.Div(f"事件 ID：{event.get('event_id') or '-'}"), html.Div(f"Timestep：{event.get('before_timestep')} → {event.get('after_timestep')}"), html.Div(f"参与原子：{event.get('atom_ids') or '-'}"), html.Div(f"关联状态：{event.get('association_status') or '-'}")]
-        bond_evidence = [html.H3("键变化证据"), html.Div([html.Strong("反应前键"), html.Code("; ".join(bonds.get("reactant") or []) or "—")]), html.Div([html.Strong("反应后键"), html.Code("; ".join(bonds.get("product") or []) or "—")]), html.Div([html.Strong("断裂键"), html.Code("; ".join(bonds.get("broken") or []) or "—")], className="rs-bond-broken"), html.Div([html.Strong("形成键"), html.Code("; ".join(bonds.get("formed") or []) or "—")], className="rs-bond-formed")]
-        storyboard = []
-        for number in viewer.get("storyboard_frames") or []:
-            index = next((idx for idx, frame in enumerate(frames) if frame.get("frame") == number), None)
-            if index is not None:
-                label = (viewer.get("storyboard_labels") or {}).get(str(number), f"Frame {number}")
-                storyboard.append(html.Div([html.Div(label, className="rs-storyboard-label"), dcc.Graph(figure=_event_frame_figure(viewer, index, "context", compact=True), config={"displayModeBar": False})], className="rs-storyboard-item"))
-        return viewer, event_evidence, bond_evidence, 0, max(0, len(frames) - 1), anchor_index, marks, storyboard, "局部轨迹已提取；中间帧中的彩色键线仅表示事件键变化指示。"
-
-    @app.callback(Output("workflow-trajectory-3d", "figure"), Output("workflow-frame-label", "children"), Input("workflow-frame-slider", "value"), Input("workflow-view-scope", "value"), Input("workflow-viewer-store", "data"))
-    def _render_workflow_frame(frame_index, scope, viewer):
-        if not viewer or not (viewer.get("frames") or []):
-            import plotly.graph_objects as go
-            return go.Figure(), ""
-        frames = viewer.get("frames") or []
-        safe = max(0, min(int(frame_index or 0), len(frames) - 1))
-        frame = frames[safe]
-        note = "（键变化指示）" if frame.get("bond_state") == "intermediate" else ""
-        return _event_frame_figure(viewer, safe, scope or "context"), f"Frame {frame.get('frame')} {note}"
-
-    @app.callback(Output("workflow-validation-download", "data"), Input("workflow-validation-export", "n_clicks"), State("workflow-store", "data"), prevent_initial_call=True)
-    def _export_workflow_validations(n_clicks, workflow):
-        if n_clicks is None:
-            raise PreventUpdate
-        rows = (workflow or {}).get("validations") or []
-        if not rows:
-            raise PreventUpdate
-        return {"content": svc.rows_to_csv(rows), "filename": "local_trajectory_validations.csv", "type": "text/csv"}
 
     # ── Species search ──────────────────────────────────────────────
 
@@ -1456,47 +1300,82 @@ def register_callbacks(app: Any) -> None:
         Output("species-alert", "children"),
         Output("species-grid-store", "data"),
         Output("species-grid", "selected_rows"),
+        Output("species-grid", "page_size"),
+        Output("species-grid", "page_current"),
+        Output("species-csv-btn", "children"),
         Input("species-search-btn", "n_clicks"),
         State("species-query", "value"),
         State("species-query-kind", "value"),
         State("species-mass-tol", "value"),
-        State("species-mass-mode", "value"),
-        State("species-top", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _search_species(n_clicks, query, kind, mass_tol, mass_mode, top, store):
+    def _search_species(n_clicks, query, kind, mass_tol, store):
         if n_clicks is None:
             raise PreventUpdate
         store = store or {}
         artifacts = store.get("artifacts", {}) or {}
         if not artifacts.get("reaction"):
-            return [], _species_columns(), '请先在「管理数据」中导入包含 reactionabcd 的数据目录。', {"rows": []}, []
+            return (
+                [],
+                _species_columns(),
+                '请先在「管理数据」中导入包含 reactionabcd 的数据目录。',
+                {"rows": []},
+                [],
+                50,
+                0,
+                "导出全部 CSV",
+            )
         try:
             result = svc.search_species(
                 artifacts,
                 query or "",
                 kind=kind or "auto",
                 mass_tolerance=float(mass_tol or 0.5),
-                mass_mode=mass_mode or "exact",
-                top=int(top or 0),
             )
         except svc.ServiceError as exc:
-            return [], _species_columns(), str(exc.message), {"rows": []}, []
+            return (
+                [],
+                _species_columns(),
+                str(exc.message),
+                {"rows": []},
+                [],
+                50,
+                0,
+                "导出全部 CSV",
+            )
 
         rows = result.get("rows") or []
-        message = f"找到 {len(rows)} 条匹配物种" if rows else "未找到匹配物种；可以放宽质量容差或切换查询类型。"
+        query_kind = str(result.get("query_kind") or "")
+        matching_count = int(result.get("n_rows") or len(rows))
+        page_size = 20 if query_kind == "mass" else 50
+        if rows:
+            unit = "个匹配分子式" if query_kind == "mass" else "条匹配物种"
+            message = f"找到 {matching_count} {unit}；每页显示 {page_size} 条"
+            if query_kind == "mass":
+                message += "；选择分子式可查看原始结构结果"
+        else:
+            message = "未找到匹配物种；可以放宽质量容差或切换查询类型。"
         return (
             rows,
-            _species_columns(result.get("query_kind")),
+            _species_columns(query_kind),
             message,
             {
                 "rows": rows,
-                "query_kind": result.get("query_kind"),
+                "query_kind": query_kind,
+                "n_rows": matching_count,
+                "n_visible_rows": len(rows),
                 "searched": True,
                 "message": message,
             },
             [],
+            page_size,
+            0,
+            (
+                "导出全部分子式 CSV"
+                if query_kind == "mass"
+                else "导出全部结构 CSV"
+            ),
         )
 
     @app.callback(
@@ -1519,10 +1398,9 @@ def register_callbacks(app: Any) -> None:
 
         if not has_reaction_data:
             empty = [
-                html.Div("开始分析", className="rs-empty-eyebrow"),
-                html.H5("导入反应网络数据", className="rs-empty-title"),
+                html.H5("尚未导入反应数据", className="rs-empty-title"),
                 html.P(
-                    "选择包含 reactionabcd 文件的数据目录后，即可按分子式、SMILES 或质量数检索物种。",
+                    "选择 reactionabcd 数据后即可检索。",
                     className="rs-empty-copy",
                 ),
             ]
@@ -1535,13 +1413,90 @@ def register_callbacks(app: Any) -> None:
             text = grid_store.get("message") or "未找到匹配物种；可以放宽质量容差或切换查询类型。"
             title = "没有匹配结果"
         else:
-            text = "输入查询内容并执行检索。支持分子式、SMILES 和质量数。"
+            text = "输入分子式、SMILES 或质量后查询。"
             title = "等待查询"
         empty = [
             html.Div(title, className="rs-empty-title"),
             html.P(text, className="rs-empty-copy"),
         ]
         return empty, {"display": "flex"}, {"display": "none"}, {"display": "none"}, False, True, {}
+
+    @app.callback(
+        Output("species-structure-results", "style"),
+        Output("species-structure-title", "children"),
+        Output("species-structure-alert", "children"),
+        Output("species-structure-grid", "data"),
+        Output("species-structure-grid", "columns"),
+        Output("species-structure-grid", "selected_rows"),
+        Output("species-structure-grid", "page_current"),
+        Output("species-structure-csv-btn", "disabled"),
+        Input("species-grid", "selected_rows"),
+        State("species-grid", "data"),
+        State("species-grid-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _load_mass_formula_structures(
+        selected_rows,
+        formula_rows,
+        grid_store,
+        store,
+    ):
+        if str((grid_store or {}).get("query_kind") or "") != "mass":
+            return (
+                {"display": "none"},
+                "分子式对应结构",
+                "",
+                [],
+                _species_columns(),
+                [],
+                0,
+                True,
+            )
+        row = _selected_table_row(selected_rows, formula_rows)
+        formula = str((row or {}).get("formula") or "").strip()
+        if not formula:
+            return (
+                {"display": "none"},
+                "分子式对应结构",
+                "选择一个候选分子式以查看原始结构结果。",
+                [],
+                _species_columns(),
+                [],
+                0,
+                True,
+            )
+        artifacts = ((store or {}).get("artifacts") or {})
+        try:
+            result = svc.search_species(
+                artifacts,
+                formula,
+                kind="formula",
+            )
+        except svc.ServiceError as exc:
+            return (
+                {"display": "block"},
+                f"{formula} 的结构结果",
+                str(exc.message),
+                [],
+                _species_columns(),
+                [],
+                0,
+                True,
+            )
+        rows = result.get("rows") or []
+        total = int(result.get("n_rows") or len(rows))
+        message = f"共 {total} 个结构；每页显示 50 条"
+        return (
+            {"display": "block"},
+            f"{formula} 的结构结果",
+            message,
+            rows,
+            _species_columns(),
+            [],
+            0,
+            not bool(rows),
+        )
 
     # ── Species detail panel ────────────────────────────────────────
 
@@ -1550,20 +1505,39 @@ def register_callbacks(app: Any) -> None:
         Output("detail-body", "style"),
         Output("detail-body", "children"),
         Output("detail-empty", "style"),
+        Output("species-to-channels-btn", "disabled"),
         Output("species-to-event-btn", "disabled"),
         Output("species-to-pathway-btn", "disabled"),
         Output("app-store", "data", allow_duplicate=True),
-        Output("transitions-smiles", "value"),
         Output("evolution-targets", "value"),
-        Output("network-smiles", "value"),
         Input("species-grid", "selected_rows"),
+        Input("species-structure-grid", "selected_rows"),
         State("species-grid", "data"),
+        State("species-structure-grid", "data"),
         State("app-store", "data"),
         State("species-grid-store", "data"),
         prevent_initial_call=True,
     )
-    def _show_species_detail(selected_rows, table_rows, store, grid_store):
+    def _show_species_detail(
+        formula_selected_rows,
+        structure_selected_rows,
+        formula_rows,
+        structure_rows,
+        store,
+        grid_store,
+    ):
         store = store or {}
+        is_mass_search = str((grid_store or {}).get("query_kind") or "") == "mass"
+        if is_mass_search:
+            selected_rows = structure_selected_rows
+            table_rows = structure_rows or []
+            selected_source = "mass_structure"
+            if ctx.triggered_id == "species-grid":
+                selected_rows = []
+        else:
+            selected_rows = formula_selected_rows
+            table_rows = formula_rows or (grid_store or {}).get("rows") or []
+            selected_source = "species_grid"
         if not selected_rows or len(selected_rows) == 0:
             return (
                 {"display": "none"},
@@ -1572,20 +1546,13 @@ def register_callbacks(app: Any) -> None:
                 {"display": "block"},
                 True,
                 True,
-                no_update,
-                no_update,
+                True,
                 no_update,
                 no_update,
             )
-        table_rows = table_rows or (grid_store or {}).get("rows") or []
-        selected_indices = [
-            int(index)
-            for index in selected_rows
-            if isinstance(index, int) and 0 <= int(index) < len(table_rows)
-        ]
-        if not selected_indices:
+        row_idx = int(selected_rows[0])
+        if row_idx < 0 or row_idx >= len(table_rows):
             raise PreventUpdate
-        row_idx = selected_indices[0]
         row = table_rows[row_idx]
         smiles = (row.get("smiles") or "").strip()
         if not smiles:
@@ -1596,8 +1563,7 @@ def register_callbacks(app: Any) -> None:
                 {"display": "block"},
                 True,
                 True,
-                no_update,
-                no_update,
+                True,
                 no_update,
                 no_update,
             )
@@ -1611,13 +1577,7 @@ def register_callbacks(app: Any) -> None:
 
         formula = detail.get("formula") or "?"
         smiles_value = detail.get("smiles") or smiles
-        evolution_targets = "\n".join(
-            dict.fromkeys(
-                str((table_rows[index] or {}).get("smiles") or "").strip()
-                for index in selected_indices
-                if str((table_rows[index] or {}).get("smiles") or "").strip()
-            )
-        )
+        evolution_target = smiles
 
         info_panel = html.Div(
             [
@@ -1667,7 +1627,12 @@ def register_callbacks(app: Any) -> None:
 
         children = [structure_panel, info_panel]
 
-        updated_store = {**store, "selected_smiles": smiles, "selected_formula": formula}
+        updated_store = {
+            **store,
+            "selected_smiles": smiles,
+            "selected_formula": formula,
+            "selected_species_source": selected_source,
+        }
         return (
             {"display": "block"},
             {"display": "grid"},
@@ -1675,45 +1640,69 @@ def register_callbacks(app: Any) -> None:
             {"display": "none"},
             False,
             False,
+            False,
             updated_store,
-            smiles,
-            evolution_targets,
-            smiles,
+            evolution_target,
         )
 
     @app.callback(
         Output("pathway-start-smiles", "value"),
+        Output("pathway-goal", "value"),
+        Output("pathway-target-max-carbon", "value"),
         Input("species-to-pathway-btn", "n_clicks"),
         Input("rxn-to-pathway-btn", "n_clicks"),
+        Input("inter-to-pathway-btn", "n_clicks"),
         State("species-grid", "selected_rows"),
         State("species-grid", "data"),
         State("rxn-grid", "selected_rows"),
         State("rxn-grid", "data"),
+        State("inter-grid", "selected_rows"),
+        State("inter-grid", "data"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
     def _send_selection_to_pathway(
         species_clicks,
         reaction_clicks,
+        intermediate_clicks,
         species_selected,
         species_rows,
         reaction_selected,
         reaction_rows,
+        intermediate_selected,
+        intermediate_rows,
         store,
     ):
         if ctx.triggered_id == "species-to-pathway-btn":
             if species_clicks is None:
                 raise PreventUpdate
+            if (
+                str((store or {}).get("selected_species_source") or "")
+                == "mass_structure"
+            ):
+                smiles = str((store or {}).get("selected_smiles") or "")
+                if smiles:
+                    return smiles, no_update, no_update
             rows = species_rows or []
             if species_selected:
                 index = int(species_selected[0])
                 if 0 <= index < len(rows):
                     smiles = str((rows[index] or {}).get("smiles") or "")
                     if smiles:
-                        return smiles
+                        return smiles, no_update, no_update
             smiles = str((store or {}).get("selected_smiles") or "")
             if smiles:
-                return smiles
+                return smiles, no_update, no_update
+            raise PreventUpdate
+        if ctx.triggered_id == "inter-to-pathway-btn":
+            if intermediate_clicks is None or not intermediate_selected:
+                raise PreventUpdate
+            rows = intermediate_rows or []
+            index = int(intermediate_selected[0])
+            if 0 <= index < len(rows):
+                smiles = str((rows[index] or {}).get("smiles") or "").strip()
+                if smiles:
+                    return smiles, no_update, no_update
             raise PreventUpdate
         if reaction_clicks is None or not reaction_selected:
             raise PreventUpdate
@@ -1724,67 +1713,12 @@ def register_callbacks(app: Any) -> None:
         row = rows[index] or {}
         reactants = row.get("reactant_smiles") or []
         if reactants:
-            return str(reactants[0])
+            return str(reactants[0]), no_update, no_update
         reaction_text = str(row.get("reaction_smiles") or "")
         first_side, separator, _second_side = reaction_text.partition(" -> ")
         if separator and first_side:
-            return first_side.split(" + ", 1)[0]
+            return first_side.split(" + ", 1)[0], no_update, no_update
         raise PreventUpdate
-
-    # ── Transitions ─────────────────────────────────────────────────
-
-    @app.callback(
-        Output("transitions-grid", "data"),
-        Output("transitions-grid", "columns"),
-        Output("transitions-alert", "children"),
-        Output("transitions-grid-store", "data"),
-        Input("transitions-search-btn", "n_clicks"),
-        State("transitions-smiles", "value"),
-        State("transitions-direction", "value"),
-        State("transitions-top", "value"),
-        State("transitions-net-positive", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _search_transitions(n_clicks, smiles, direction, top, net_positive, store):
-        if n_clicks is None:
-            raise PreventUpdate
-        store = store or {}
-        artifacts = store.get("artifacts", {}) or {}
-        smi = (smiles or store.get("selected_smiles") or "").strip()
-        if not smi:
-            return [], _transitions_columns(), "请先在物种检索中选择一个物种。", {"rows": []}
-        try:
-            result = svc.collect_transitions(
-                artifacts,
-                smi,
-                direction=direction or "both",
-                top=int(top or 0),
-                net_positive_only=bool(net_positive),
-            )
-        except svc.ServiceError as exc:
-            return [], _transitions_columns(), str(exc.message), {"rows": []}
-        rows = result.get("rows") or []
-        return rows, _transitions_columns(), None, {"rows": rows}
-
-    @app.callback(
-        Output("transitions-selection-card", "style"),
-        Output("transitions-selected-summary", "children"),
-        Output("transitions-to-event-btn", "disabled"),
-        Input("transitions-grid", "selected_rows"),
-        State("transitions-grid", "data"),
-    )
-    def _show_selected_transition(selected_rows, rows):
-        if not selected_rows:
-            return {"display": "none"}, [], True
-        rows = rows or []
-        index = int(selected_rows[0])
-        if index < 0 or index >= len(rows):
-            return {"display": "none"}, [], True
-        row = rows[index] or {}
-        if not row.get("reaction_smiles"):
-            return {"display": "none"}, [], True
-        return {"display": "flex"}, _transition_selection_summary(row), False
 
     # ── Reaction formula search ─────────────────────────────────────
 
@@ -1805,7 +1739,18 @@ def register_callbacks(app: Any) -> None:
         State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _search_reactions(n_clicks, reactants, products, mode, top, with_share, share_metric, share_abs, share_positive, store):
+    def _search_reactions(
+        n_clicks,
+        reactants,
+        products,
+        mode,
+        top,
+        with_share,
+        share_metric,
+        share_abs,
+        share_positive,
+        store,
+    ):
         if n_clicks is None:
             raise PreventUpdate
         artifacts = (store or {}).get("artifacts", {}) or {}
@@ -1827,20 +1772,207 @@ def register_callbacks(app: Any) -> None:
         return rows, _reaction_columns(with_share=bool(with_share)), None, {"rows": rows, "meta": result.get("meta", {})}
 
     @app.callback(
-        Output("event-reaction-text", "value"),
-        Input("rxn-to-event-btn", "n_clicks"),
-        Input("transitions-to-event-btn", "n_clicks"),
-        State("rxn-grid", "selected_rows"),
-        State("rxn-grid", "data"),
-        State("transitions-grid", "selected_rows"),
-        State("transitions-grid", "data"),
+        Output("rxn-query-card", "style"),
+        Output("rxn-results-card", "style"),
+        Output("rxn-channel-view", "style"),
+        Input("species-to-channels-btn", "n_clicks"),
+        Input("rxn-channel-back-btn", "n_clicks"),
+        Input("nav-reactions", "n_clicks"),
         prevent_initial_call=True,
     )
-    def _send_reaction_to_event(rxn_clicks, transition_clicks, rxn_selected_rows, rxn_rows, transition_selected_rows, transition_rows):
-        if ctx.triggered_id == "transitions-to-event-btn":
-            selected_rows, rows, n_clicks = transition_selected_rows, transition_rows, transition_clicks
-        else:
-            selected_rows, rows, n_clicks = rxn_selected_rows, rxn_rows, rxn_clicks
+    def _toggle_reaction_view(_channel_clicks, _back_clicks, _nav_clicks):
+        if ctx.triggered_id == "species-to-channels-btn":
+            return {"display": "none"}, {"display": "none"}, {"display": "block"}
+        return {}, {}, {"display": "none"}
+
+    @app.callback(
+        Output("rxn-production-grid", "data"),
+        Output("rxn-production-grid", "columns"),
+        Output("rxn-consumption-grid", "data"),
+        Output("rxn-consumption-grid", "columns"),
+        Output("rxn-channel-alert", "children"),
+        Output("rxn-production-grid", "selected_rows"),
+        Output("rxn-consumption-grid", "selected_rows"),
+        Input("species-to-channels-btn", "n_clicks"),
+        State("rxn-top", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _load_selected_species_channels(n_clicks, top, store):
+        if n_clicks is None:
+            raise PreventUpdate
+        store = store or {}
+        selected_smiles = str(store.get("selected_smiles") or "").strip()
+        selected_formula = str(store.get("selected_formula") or "").strip()
+        columns = _channel_columns(
+            [
+                ("reaction_formulas", "反应式", 240),
+                ("forward_tp", "频次", 72),
+                ("reverse_tp", "逆向", 72),
+                ("net_tp", "净频次", 76),
+                ("ratio_pct", "占比%", 68),
+            ]
+        )
+        try:
+            result = svc.collect_species_channels(
+                store.get("artifacts", {}) or {},
+                selected_smiles,
+                top=max(1, int(top or 50)),
+            )
+        except svc.ServiceError as exc:
+            return (
+                [],
+                columns,
+                [],
+                columns,
+                str(exc.message),
+                [],
+                [],
+            )
+        production_rows = result.get("production_rows") or []
+        consumption_rows = result.get("consumption_rows") or []
+        target = selected_formula or selected_smiles
+        message = (
+            f"{target}：生成通道 {len(production_rows)} 条，"
+            f"消耗通道 {len(consumption_rows)} 条；"
+            "按正向频次排序，净频次用于判断可逆性。"
+        )
+        return (
+            production_rows,
+            columns,
+            consumption_rows,
+            columns,
+            message,
+            [],
+            [],
+        )
+
+    @app.callback(
+        Output("rxn-channel-selection-store", "data"),
+        Input("rxn-production-grid", "selected_rows"),
+        Input("rxn-consumption-grid", "selected_rows"),
+        State("rxn-production-grid", "data"),
+        State("rxn-consumption-grid", "data"),
+        prevent_initial_call=True,
+    )
+    def _select_species_channel(
+        production_selected,
+        consumption_selected,
+        production_rows,
+        consumption_rows,
+    ):
+        choices = (
+            (
+                "production",
+                "生成",
+                production_selected,
+                production_rows or [],
+            ),
+            (
+                "consumption",
+                "消耗",
+                consumption_selected,
+                consumption_rows or [],
+            ),
+        )
+        preferred_lane = (
+            "production"
+            if ctx.triggered_id == "rxn-production-grid"
+            else "consumption"
+        )
+        ordered = sorted(choices, key=lambda item: item[0] != preferred_lane)
+        for lane, role_label, selected, rows in ordered:
+            if not selected:
+                continue
+            index = int(selected[0])
+            if 0 <= index < len(rows):
+                row = dict(rows[index] or {})
+                row["role_label"] = row.get("role_label") or role_label
+                return {"lane": lane, "row": row}
+        return None
+
+    @app.callback(
+        Output("rxn-channel-detail", "children"),
+        Output("rxn-channel-detail", "className"),
+        Output("rxn-channel-choice", "children"),
+        Output("rxn-channel-to-event-btn", "disabled"),
+        Input("rxn-channel-selection-store", "data"),
+        Input("rxn-channel-show-h", "value"),
+    )
+    def _render_selected_species_channel(selection, show_h):
+        row = (selection or {}).get("row") or {}
+        if not row:
+            return (
+                "在上方表格中选择一条通道，查看完整结构反应式。",
+                "rs-channel-detail rs-channel-detail-empty",
+                "选择一条生成或消耗通道。",
+                True,
+            )
+        detail = svc.build_channel_structure_detail(row, show_h=bool(show_h))
+        children = (
+            _reaction_structure_detail_children(detail)
+            if detail.get("ok")
+            else "所选反应缺少可解析的 SMILES。"
+        )
+        role_label = str(row.get("role_label") or "通道")
+        reaction = str(
+            row.get("reaction_formulas")
+            or row.get("reaction_smiles")
+            or ""
+        )
+        return (
+            children,
+            "rs-channel-detail",
+            f"已选{role_label}通道：{reaction}",
+            False,
+        )
+
+    @app.callback(
+        Output("rxn-structure-detail", "children"),
+        Input("rxn-grid", "selected_rows"),
+        Input("rxn-structure-show-h", "value"),
+        State("rxn-grid", "data"),
+    )
+    def _show_reaction_structure(selected_rows, show_h, rows):
+        row = _selected_table_row(selected_rows, rows)
+        if not row:
+            return "选择一条公式反应后显示完整结构反应式。"
+        detail = svc.build_channel_structure_detail(
+            row,
+            show_h=bool(show_h),
+        )
+        if not detail.get("ok"):
+            return "所选反应缺少可解析的 SMILES。"
+        return _reaction_structure_detail_children(detail)
+
+    @app.callback(
+        Output("event-reaction-text", "value"),
+        Input("rxn-to-event-btn", "n_clicks"),
+        Input("rxn-channel-to-event-btn", "n_clicks"),
+        State("rxn-grid", "selected_rows"),
+        State("rxn-grid", "data"),
+        State("rxn-channel-selection-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _send_reaction_to_event(
+        n_clicks,
+        channel_clicks,
+        selected_rows,
+        rows,
+        channel_selection,
+    ):
+        if ctx.triggered_id == "rxn-channel-to-event-btn":
+            if channel_clicks is None:
+                raise PreventUpdate
+            reaction = str(
+                (
+                    (channel_selection or {}).get("row") or {}
+                ).get("reaction_smiles")
+                or ""
+            )
+            if not reaction:
+                raise PreventUpdate
+            return reaction
         if n_clicks is None or not selected_rows:
             raise PreventUpdate
         rows = rows or []
@@ -1869,6 +2001,18 @@ def register_callbacks(app: Any) -> None:
         State("inter-flux-top", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output("inter-progress", "children"),
+                "正在读取物种时间序列、计算寿命与通量候选…",
+                "",
+            ),
+            (
+                Output("inter-progress", "className"),
+                "rs-analysis-progress is-running",
+                "rs-analysis-progress",
+            ),
+        ],
     )
     def _search_intermediates(
         n_clicks,
@@ -1906,6 +2050,61 @@ def register_callbacks(app: Any) -> None:
         rows = result.get("rows") or []
         return rows, _intermediate_columns(rows), None, {"rows": rows, "meta": result.get("meta", {})}
 
+    @app.callback(
+        Output("inter-structure-detail", "children"),
+        Output("inter-selected-summary", "children"),
+        Output("inter-selection-card", "style"),
+        Output("inter-to-pathway-btn", "disabled"),
+        Output("inter-to-evolution-btn", "disabled"),
+        Input("inter-grid", "selected_rows"),
+        Input("inter-structure-show-h", "value"),
+        State("inter-grid", "data"),
+    )
+    def _show_intermediate_structure(selected_rows, show_h, rows):
+        row = _selected_table_row(selected_rows, rows)
+        smiles = str((row or {}).get("smiles") or "").strip()
+        if not smiles:
+            return (
+                "选择一个中间体后显示其结构、分子式与 SMILES。",
+                "",
+                {"display": "none"},
+                True,
+                True,
+            )
+        items = svc.build_species_structure_items(
+            [smiles],
+            formula_values=[(row or {}).get("formula") or ""],
+            show_h=bool(show_h),
+        )
+        formula = str((row or {}).get("formula") or "")
+        return (
+            _species_structure_detail_children(
+                items,
+                title="中间体结构",
+            ),
+            f"已选：{formula or '未知分子式'} · {smiles}",
+            {"display": "flex"},
+            False,
+            False,
+        )
+
+    @app.callback(
+        Output("evolution-targets", "value", allow_duplicate=True),
+        Input("inter-to-evolution-btn", "n_clicks"),
+        State("inter-grid", "selected_rows"),
+        State("inter-grid", "data"),
+        prevent_initial_call=True,
+    )
+    def _send_intermediate_to_evolution(n_clicks, selected_rows, rows):
+        if n_clicks is None:
+            raise PreventUpdate
+        row = _selected_table_row(selected_rows, rows)
+        smiles = str((row or {}).get("smiles") or "").strip()
+        if not smiles:
+            raise PreventUpdate
+        formula = str((row or {}).get("formula") or "").strip()
+        return f"{formula}::{smiles}" if formula else smiles
+
     # ── CSV export: species ─────────────────────────────────────────
 
     @app.callback(
@@ -1925,38 +2124,63 @@ def register_callbacks(app: Any) -> None:
         import io
 
         buf = io.StringIO()
-        keys = ["smiles", "formula", "exact_mass", "nominal_mass", "tp_as_reactant", "tp_as_product", "total_throughput", "n_consume_rxns", "n_produce_rxns"]
+        if grid_store.get("query_kind") == "mass":
+            keys = [
+                "formula",
+                "exact_mass",
+                "nominal_mass",
+                "mass_error",
+                "ppm_error",
+                "structure_count",
+                "smiles",
+                "tp_as_reactant",
+                "tp_as_product",
+                "total_throughput",
+            ]
+            filename = "mass_formula_search.csv"
+        else:
+            keys = ["smiles", "formula", "exact_mass", "nominal_mass", "tp_as_reactant", "tp_as_product", "total_throughput", "n_consume_rxns", "n_produce_rxns"]
+            filename = "species_search.csv"
         writer = csv.DictWriter(buf, fieldnames=keys, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-        return {"content": buf.getvalue(), "filename": "species_search.csv", "type": "text/csv"}
-
-    # ── CSV export: transitions ─────────────────────────────────────
+        return {"content": buf.getvalue(), "filename": filename, "type": "text/csv"}
 
     @app.callback(
-        Output("transitions-csv-download", "data"),
-        Input("transitions-csv-btn", "n_clicks"),
-        State("transitions-grid-store", "data"),
+        Output("species-structure-csv-download", "data"),
+        Input("species-structure-csv-btn", "n_clicks"),
+        State("species-structure-grid", "data"),
         prevent_initial_call=True,
     )
-    def _export_transitions_csv(n_clicks, grid_store):
-        if n_clicks is None:
-            raise PreventUpdate
-        grid_store = grid_store or {}
-        rows = grid_store.get("rows") or []
-        if not rows:
+    def _export_species_structure_csv(n_clicks, rows):
+        if n_clicks is None or not rows:
             raise PreventUpdate
         import csv
         import io
 
         buf = io.StringIO()
-        keys = ["role", "reaction_smiles", "reaction_formulas", "forward_tp", "reverse_tp", "net_tp", "ratio_pct", "tp"]
+        keys = [
+            "smiles",
+            "formula",
+            "exact_mass",
+            "nominal_mass",
+            "tp_as_reactant",
+            "tp_as_product",
+            "total_throughput",
+            "n_consume_rxns",
+            "n_produce_rxns",
+        ]
         writer = csv.DictWriter(buf, fieldnames=keys, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-        return {"content": buf.getvalue(), "filename": "transitions.csv", "type": "text/csv"}
+        formula = str((rows[0] or {}).get("formula") or "formula")
+        return {
+            "content": buf.getvalue(),
+            "filename": f"{formula}_structures.csv",
+            "type": "text/csv",
+        }
 
     @app.callback(
         Output("rxn-csv-download", "data"),
@@ -2008,6 +2232,18 @@ def register_callbacks(app: Any) -> None:
         State("evolution-curve-filter", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output("evolution-progress", "children"),
+                "正在读取时间序列、对齐多体系并生成曲线…",
+                "",
+            ),
+            (
+                Output("evolution-progress", "className"),
+                "rs-analysis-progress is-running",
+                "rs-analysis-progress",
+            ),
+        ],
     )
     def _build_evolution(
         n_clicks,
@@ -2090,7 +2326,11 @@ def register_callbacks(app: Any) -> None:
             legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "left", "x": 0},
             hovermode="x unified",
         )
-        return fig, None, payload
+        visible_names = [
+            str(curve.get("name") or curve.get("query") or "")
+            for curve in curves
+        ]
+        return fig, None, {**payload, "visible_curve_names": visible_names}
 
     # ── CSV export: evolution ───────────────────────────────────────
 
@@ -2106,7 +2346,221 @@ def register_callbacks(app: Any) -> None:
         csv_text = svc.evolution_to_csv(payload)
         return {"content": csv_text, "filename": "evolution.csv", "type": "text/csv"}
 
+    @app.callback(
+        Output("evolution-structure-detail", "children"),
+        Input("evolution-graph", "clickData"),
+        Input("evolution-structure-show-h", "value"),
+        State("evolution-payload-store", "data"),
+    )
+    def _show_evolution_curve_structures(click_data, show_h, payload):
+        points = (click_data or {}).get("points") or []
+        if not points or not payload:
+            return "点击一条演化曲线，查看其成员物种结构。"
+        curve_number = int(points[0].get("curveNumber") or 0)
+        visible_names = payload.get("visible_curve_names") or []
+        if curve_number < 0 or curve_number >= len(visible_names):
+            return "无法定位所选曲线。"
+        selected_name = str(visible_names[curve_number])
+        curve = next(
+            (
+                item
+                for item in (payload.get("curves") or [])
+                if str(item.get("name") or item.get("query") or "") == selected_name
+            ),
+            None,
+        )
+        members = list((curve or {}).get("members") or [])
+        if not members:
+            return "所选曲线没有可显示的 SMILES 成员。"
+        items = svc.build_species_structure_items(
+            members,
+            show_h=bool(show_h),
+            max_items=24,
+        )
+        note = (
+            f"显示前 24 / {len(members)} 个成员"
+            if len(members) > 24
+            else f"{len(members)} 个成员"
+        )
+        return _species_structure_detail_children(
+            items,
+            title=selected_name,
+            note=note,
+        )
+
     # ── Carbon-number evolution ────────────────────────────────────
+
+    @app.callback(
+        Output("carbon-advanced-alert", "children"),
+        Output("carbon-advanced-viewer", "children"),
+        Output("carbon-advanced-store", "data"),
+        Input("carbon-advanced-search-btn", "n_clicks"),
+        State("carbon-advanced-data", "value"),
+        State("carbon-advanced-species-file", "value"),
+        State("carbon-advanced-species-files", "value"),
+        State("carbon-advanced-xaxis", "value"),
+        State("carbon-advanced-mode", "value"),
+        State("carbon-advanced-time-align", "value"),
+        State("carbon-advanced-top-k", "value"),
+        State("carbon-advanced-max-exact", "value"),
+        State("carbon-advanced-bins", "value"),
+        State("carbon-advanced-display-ranges", "value"),
+        State("carbon-advanced-merge-ranges", "value"),
+        State("carbon-advanced-parent", "value"),
+        State("carbon-advanced-small", "value"),
+        State("carbon-advanced-large", "value"),
+        State("carbon-advanced-smoothing", "value"),
+        State("carbon-advanced-window", "value"),
+        State("carbon-advanced-polyorder", "value"),
+        State("carbon-advanced-layout", "value"),
+        State("carbon-advanced-regions", "value"),
+        State("carbon-advanced-system-mode", "value"),
+        State("carbon-advanced-theme", "value"),
+        State("carbon-advanced-legend", "value"),
+        State("carbon-advanced-width", "value"),
+        State("carbon-advanced-height", "value"),
+        State("carbon-advanced-max-formulas", "value"),
+        State("carbon-timestep", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[
+            (
+                Output("carbon-advanced-progress", "children"),
+                "正在构建高级 Carbon Plot…",
+                "",
+            ),
+            (
+                Output("carbon-advanced-progress", "className"),
+                "rs-analysis-progress is-running",
+                "rs-analysis-progress",
+            ),
+        ],
+    )
+    def _build_advanced_carbon(
+        n_clicks,
+        data_path,
+        species_file,
+        species_files,
+        x_axis,
+        mode,
+        time_align,
+        top_k,
+        max_exact,
+        carbon_bins,
+        display_ranges,
+        merge_ranges,
+        parent,
+        highlight_small,
+        highlight_large,
+        smoothing,
+        smooth_window,
+        smooth_polyorder,
+        layout,
+        layout_regions,
+        system_mode,
+        theme,
+        legend_mode,
+        fig_width,
+        fig_height,
+        max_formula_list,
+        timestep,
+        store,
+    ):
+        if n_clicks is None:
+            raise PreventUpdate
+        try:
+            payload = svc.build_carbon_evolution(
+                (store or {}).get("artifacts") or {},
+                data_path=str(data_path or "").strip(),
+                species_file=str(species_file or "").strip(),
+                species_files=str(species_files or "").strip(),
+                x_axis=x_axis or "ps",
+                timestep_ps=float(0.0001 if timestep is None else timestep),
+                mode=mode or "exact",
+                top_k=int(top_k or 12),
+                max_exact_lines=int(max_exact or 24),
+                display_ranges=str(display_ranges or "").strip(),
+                merge_ranges=str(merge_ranges or "").strip(),
+                carbon_bins=str(carbon_bins or "").strip(),
+                parent_carbon_number=int(parent) if parent not in (None, "") else None,
+                highlight_small=str(highlight_small or "1-4"),
+                highlight_large=int(highlight_large or 30),
+                smoothing=smoothing or "none",
+                smooth_window=int(smooth_window or 5),
+                smooth_polyorder=int(smooth_polyorder or 2),
+                layout=layout or "single",
+                layout_regions=str(layout_regions or "").strip(),
+                theme=theme or "light",
+                time_align=time_align or "raw",
+                system_mode=system_mode or "",
+                legend_mode=legend_mode or "compact",
+                fig_width=float(fig_width or 11.5),
+                fig_height=float(fig_height or 8.0),
+                max_formula_list=int(max_formula_list or 30),
+            )
+        except (svc.ServiceError, TypeError, ValueError) as exc:
+            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            return dbc.Alert(message, color="warning"), [], None
+        svg = str(payload.get("svg") or "")
+        if not svg:
+            return dbc.Alert("高级 Carbon Plot 没有生成可显示的 SVG。", color="warning"), [], payload
+        meta = payload.get("meta") or {}
+        summary = payload.get("summary") or {}
+        viewer = [
+            html.Div(
+                [
+                    html.Span(
+                        f"{int(meta.get('rows') or len(payload.get('plot_data') or []))} 数据行",
+                        className="rs-stat-chip",
+                    ),
+                    html.Span(
+                        f"{int(meta.get('n_systems') or 1)} 体系",
+                        className="rs-stat-chip",
+                    ),
+                    html.Span(
+                        str(summary.get("message") or payload.get("mode") or "carbon"),
+                        className="rs-stat-chip",
+                    ),
+                ],
+                className="rs-stat-row",
+            ),
+            html.Iframe(
+                srcDoc=_wrap_svg_doc(svg),
+                className="rs-carbon-advanced-frame",
+                title="高级 Carbon Plot",
+            ),
+        ]
+        return None, viewer, payload
+
+    @app.callback(
+        Output("carbon-advanced-csv-download", "data"),
+        Input("carbon-advanced-csv-btn", "n_clicks"),
+        State("carbon-advanced-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _export_advanced_carbon_csv(n_clicks, payload):
+        if n_clicks is None or not payload:
+            raise PreventUpdate
+        return {
+            "content": svc.carbon_plot_to_csv(payload),
+            "filename": "carbon_plot.csv",
+            "type": "text/csv",
+        }
+
+    @app.callback(
+        Output("carbon-advanced-svg-download", "data"),
+        Input("carbon-advanced-svg-btn", "n_clicks"),
+        State("carbon-advanced-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _export_advanced_carbon_svg(n_clicks, payload):
+        if n_clicks is None or not payload or not payload.get("svg"):
+            raise PreventUpdate
+        return {
+            "content": str(payload["svg"]),
+            "filename": "carbon_plot.svg",
+            "type": "image/svg+xml",
+        }
 
     @app.callback(
         Output("carbon-alert", "children"),
@@ -2214,14 +2668,39 @@ def register_callbacks(app: Any) -> None:
         return columns, detail["rows"], title
 
     @app.callback(
+        Output("carbon-structure-detail", "children"),
+        Input("carbon-composition-table", "selected_rows"),
+        Input("carbon-structure-show-h", "value"),
+        State("carbon-composition-table", "data"),
+    )
+    def _show_carbon_species_structure(selected_rows, show_h, rows):
+        row = _selected_table_row(selected_rows, rows)
+        smiles = str((row or {}).get("smiles") or "").strip()
+        if not smiles:
+            return "选择一个代表物种后显示结构、分子式与 SMILES。"
+        items = svc.build_species_structure_items(
+            [smiles],
+            formula_values=[(row or {}).get("formula") or ""],
+            show_h=bool(show_h),
+        )
+        return _species_structure_detail_children(
+            items,
+            title="代表物种结构",
+        )
+
+    @app.callback(
         Output("carbon-dataset-name", "value"),
         Output("carbon-index-status", "children"),
         Output("carbon-index-status", "className"),
         Output("carbon-index-progress", "value"),
+        Output("carbon-index-refresh", "disabled"),
         Input("app-store", "data"),
+        Input("page-store", "data"),
         Input("carbon-index-refresh", "n_intervals"),
     )
-    def _refresh_carbon_index_status(store, _n_intervals):
+    def _refresh_carbon_index_status(store, page_store, _n_intervals):
+        if str((page_store or {}).get("page") or "") != "carbon":
+            return no_update, no_update, no_update, no_update, True
         store = store or {}
         label = str(store.get("label") or store.get("folder") or "未选择")
         status = svc.composition_index_status(store.get("artifacts") or {})
@@ -2249,7 +2728,7 @@ def register_callbacks(app: Any) -> None:
         else:
             text = "组成索引尚未建立：运行 reacnet-scope-prepare <目录> --composition-only"
             class_name = "rs-index-status is-warning"
-        return label, text, class_name, percent
+        return label, text, class_name, percent, state != "building"
 
     # ── Event evidence ──────────────────────────────────────────────
 
@@ -2346,6 +2825,8 @@ def register_callbacks(app: Any) -> None:
         Output("event-viewer-card", "style"),
         Output("event-viewer-summary", "children"),
         Output("event-viewer-paths", "children"),
+        Output("event-atom-ids-text", "children"),
+        Output("event-ovito-expression-text", "children"),
         Output("event-frame-slider", "min"),
         Output("event-frame-slider", "max"),
         Output("event-frame-slider", "value"),
@@ -2377,7 +2858,7 @@ def register_callbacks(app: Any) -> None:
                 raise svc.ServiceError("请先从定位结果中选择一个事件", reason="missing_selection")
         except (svc.ServiceError, TypeError, ValueError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return None, {"display": "none"}, [], [], 0, 0, 0, {}, [], message
+            return None, {"display": "none"}, [], [], "", "", 0, 0, 0, {}, [], message
 
         frames = viewer.get("frames") or []
         anchor = row.get("anchor_frame")
@@ -2409,7 +2890,11 @@ def register_callbacks(app: Any) -> None:
         path_items = [f"轨迹: {paths.get('trajectory') or '-'}"]
         if paths.get("type_map"):
             path_items.append(f"类型映射: {paths['type_map']}")
-        return viewer, {"display": "block"}, summary, " · ".join(path_items), 0, len(frames) - 1, anchor_index, marks, storyboard, "局部轨迹已提取，可在下方逐帧核查反应上下文。"
+        atom_ids_text = " ".join(
+            str(value) for value in svc.event_viewer_atom_ids(viewer)
+        )
+        ovito_expression = svc.event_viewer_ovito_expression(viewer)
+        return viewer, {"display": "block"}, summary, " · ".join(path_items), atom_ids_text, ovito_expression, 0, len(frames) - 1, anchor_index, marks, storyboard, "局部轨迹已提取，可在下方逐帧核查反应上下文。"
 
     @app.callback(
         Output("event-trajectory-3d", "figure"),
@@ -2442,6 +2927,58 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         return {"content": svc.rows_to_csv(rows), "filename": "event_evidence.csv", "type": "text/csv"}
 
+    @app.callback(
+        Output("event-frames-csv-download", "data"),
+        Input("event-frames-csv-btn", "n_clicks"),
+        State("event-viewer-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_event_frames(n_clicks, viewer):
+        if n_clicks is None or not viewer:
+            raise PreventUpdate
+        event_id = str(viewer.get("event_id") or "event")
+        return {
+            "content": svc.event_viewer_frames_csv(viewer),
+            "filename": f"{event_id}_frames.csv",
+            "type": "text/csv",
+        }
+
+    @app.callback(
+        Output("event-trajectory-download", "data"),
+        Input("event-trajectory-btn", "n_clicks"),
+        State("event-viewer-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_event_trajectory(n_clicks, viewer):
+        if n_clicks is None or not viewer:
+            raise PreventUpdate
+        event_id = str(viewer.get("event_id") or "event")
+        return {
+            "content": svc.event_viewer_trajectory_text(viewer),
+            "filename": f"{event_id}_subset.lammpstrj",
+            "type": "text/plain",
+        }
+
+    @app.callback(
+        Output("event-vmd-download", "data"),
+        Input("event-vmd-btn", "n_clicks"),
+        State("event-viewer-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_event_vmd(n_clicks, viewer):
+        if n_clicks is None or not viewer:
+            raise PreventUpdate
+        event_id = str(viewer.get("event_id") or "event")
+        trajectory_name = f"{event_id}_subset.lammpstrj"
+        return {
+            "content": svc.event_viewer_vmd_script(
+                viewer,
+                trajectory_name=trajectory_name,
+            ),
+            "filename": f"{event_id}_view.tcl",
+            "type": "text/plain",
+        }
+
     # ── Candidate pathways ─────────────────────────────────────────
 
     @app.callback(
@@ -2452,6 +2989,7 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-store", "data"),
         Output("pathway-context-store", "data"),
         Output("pathway-grid", "selected_rows"),
+        Output("pathway-terminal-summary", "children"),
         Input("pathway-search-btn", "n_clicks"),
         State("pathway-start-smiles", "value"),
         State("pathway-direction", "value"),
@@ -2460,6 +2998,8 @@ def register_callbacks(app: Any) -> None:
         State("pathway-max-paths", "value"),
         State("pathway-min-net-tp", "value"),
         State("pathway-min-directionality", "value"),
+        State("pathway-goal", "value"),
+        State("pathway-target-max-carbon", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
     )
@@ -2472,6 +3012,8 @@ def register_callbacks(app: Any) -> None:
         max_paths,
         min_net_tp,
         min_directionality,
+        goal,
+        target_max_carbon,
         store,
     ):
         if n_clicks is None:
@@ -2479,24 +3021,53 @@ def register_callbacks(app: Any) -> None:
         start = str(start_smiles or "")
         artifacts = (store or {}).get("artifacts") or {}
         try:
-            payload = svc.find_pathways(
-                artifacts,
-                start,
-                direction=direction if direction is not None else "downstream",
-                max_depth=int(3 if max_depth is None else max_depth),
-                max_branches=int(5 if max_branches is None else max_branches),
-                max_paths=int(20 if max_paths is None else max_paths),
-                min_net_tp=int(1 if min_net_tp is None else min_net_tp),
-                min_directionality=float(
+            limits = {
+                "direction": (
+                    direction if direction is not None else "downstream"
+                ),
+                "max_depth": int(3 if max_depth is None else max_depth),
+                "max_branches": int(
+                    5 if max_branches is None else max_branches
+                ),
+                "max_paths": int(20 if max_paths is None else max_paths),
+                "min_net_tp": int(1 if min_net_tp is None else min_net_tp),
+                "min_directionality": float(
                     0.05
                     if min_directionality is None
                     else min_directionality
                 ),
-            )
+            }
+            if goal == "small_fragments":
+                limits["target_max_carbon"] = int(
+                    4
+                    if target_max_carbon is None
+                    else target_max_carbon
+                )
+                limits["max_expansions"] = 300
+                limits["evidence_mode"] = "network_only"
+            payload = svc.find_pathways(artifacts, start, **limits)
         except (TypeError, ValueError) as exc:
-            return [], _pathway_columns(), [], str(exc), None, None, []
+            return (
+                [],
+                _pathway_columns(),
+                [],
+                str(exc),
+                None,
+                None,
+                [],
+                [],
+            )
         except svc.ServiceError as exc:
-            return [], _pathway_columns(), [], str(exc.message), None, None, []
+            return (
+                [],
+                _pathway_columns(),
+                [],
+                str(exc.message),
+                None,
+                None,
+                [],
+                [],
+            )
 
         rows = _pathway_rows(payload)
         elements = svc.build_pathway_elements(payload)
@@ -2504,6 +3075,8 @@ def register_callbacks(app: Any) -> None:
             "species_absent": "起始物种不在当前反应网络中。",
             "no_positive_net_continuation": "该物种没有正净通量的可继续反应。",
             "filtered_by_thresholds": "候选路径均被当前净通量或方向性阈值过滤。",
+            "target_not_reached": "在当前深度、分支和阈值内尚未到达目标碳数的小分子。",
+            "target_already_reached": "起始物种本身已满足目标碳数；请选择更大的母体物种。",
         }
         if rows:
             message = f"找到 {len(rows)} 条候选路径；已展开 {int(payload.get('expansions') or 0)} 个状态。"
@@ -2517,9 +3090,14 @@ def register_callbacks(app: Any) -> None:
                 f" 搜索达到展开上限，结果已截断（expansions="
                 f"{int(payload.get('expansions') or 0)}）。"
             )
+        if payload.get("search_stage") == "network_shortlist":
+            message += (
+                " 当前为快速网络粗筛：未读取事件、Route 或 species 时间索引；"
+                "请在选定具体反应后再做时间验证。"
+            )
         pathway_context = {
             "schema_version": "reacnet-scope/pathway-context/v1",
-            "dataset_id": _network_dataset_id(store),
+            "dataset_id": _current_dataset_id(store),
             "source_signatures": dict(
                 payload.get("source_signatures") or {}
             ),
@@ -2532,6 +3110,7 @@ def register_callbacks(app: Any) -> None:
             payload,
             pathway_context,
             [],
+            _pathway_terminal_cards(payload),
         )
 
     @app.callback(
@@ -2539,8 +3118,6 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-selected-step", "data"),
         Output("pathway-selection-summary", "children"),
         Output("pathway-open-events-btn", "disabled"),
-        Output("pathway-highlight-network-btn", "disabled"),
-        Output("pathway-highlight-store", "data"),
         Input("pathway-store", "data"),
         Input("pathway-grid", "selected_rows"),
         Input("pathway-cytoscape", "tapNodeData"),
@@ -2550,10 +3127,31 @@ def register_callbacks(app: Any) -> None:
         payload = payload or {}
         paths = payload.get("paths") or []
         if ctx.triggered_id == "pathway-store" or not paths:
-            return None, None, "选择一条路径或一个反应节点。", True, True, None
+            return None, None, "选择一条路径或一个反应节点。", True
 
         selected_path = None
         selected_step = None
+
+        def step_handoff(path, step_index):
+            steps = path.get("steps") or []
+            if step_index < 1 or step_index > len(steps):
+                return None
+            candidate = steps[step_index - 1]
+            reactants = [
+                str(value) for value in candidate.get("reactants") or []
+            ]
+            products = [
+                str(value) for value in candidate.get("products") or []
+            ]
+            return {
+                **candidate,
+                "path_rank": int(path.get("rank") or 0),
+                "step_index": step_index,
+                "reaction_text": (
+                    f"{' + '.join(reactants)} -> {' + '.join(products)}"
+                ),
+            }
+
         if ctx.triggered_id == "pathway-grid":
             rows = grid_rows or []
             if selected_rows:
@@ -2568,6 +3166,11 @@ def register_callbacks(app: Any) -> None:
                         ),
                         None,
                     )
+                    if (
+                        selected_path is not None
+                        and len(selected_path.get("steps") or []) == 1
+                    ):
+                        selected_step = step_handoff(selected_path, 1)
         elif (
             ctx.triggered_id == "pathway-cytoscape"
             and isinstance(node_data, dict)
@@ -2589,25 +3192,12 @@ def register_callbacks(app: Any) -> None:
                 if 1 <= step_index <= len(steps):
                     candidate = steps[step_index - 1]
                     if str(candidate.get("reaction_key") or "") == reaction_key:
-                        reactants = [
-                            str(value)
-                            for value in candidate.get("reactants") or []
-                        ]
-                        products = [
-                            str(value)
-                            for value in candidate.get("products") or []
-                        ]
-                        selected_step = {
-                            **candidate,
-                            "path_rank": rank,
-                            "step_index": step_index,
-                            "reaction_text": (
-                                f"{' + '.join(reactants)} -> "
-                                f"{' + '.join(products)}"
-                            ),
-                        }
+                        selected_step = step_handoff(
+                            selected_path,
+                            step_index,
+                        )
         if selected_path is None:
-            return None, None, "选择一条有效路径或反应节点。", True, True, None
+            return None, None, "选择一条有效路径或反应节点。", True
         path_handoff = {
             "path_rank": int(selected_path.get("rank") or 0),
             "species_ids": [
@@ -2619,9 +3209,15 @@ def register_callbacks(app: Any) -> None:
             ],
         }
         if selected_step is not None:
+            automatic = (
+                " · 已自动选中唯一反应步骤"
+                if len(selected_path.get("steps") or []) == 1
+                and ctx.triggered_id == "pathway-grid"
+                else ""
+            )
             summary = (
                 f"路径 {path_handoff['path_rank']} · 第 "
-                f"{selected_step['step_index']} 步 · "
+                f"{selected_step['step_index']} 步{automatic} · "
                 f"{selected_step['reaction_text']}"
             )
         else:
@@ -2634,9 +3230,66 @@ def register_callbacks(app: Any) -> None:
             selected_step,
             summary,
             selected_step is None,
-            False,
-            None,
         )
+
+    @app.callback(
+        Output("pathway-evidence-grid", "data"),
+        Output("pathway-evidence-grid", "columns"),
+        Output("pathway-evidence-alert", "children"),
+        Input("pathway-selected-path", "data"),
+        Input("pathway-selected-step", "data"),
+        Input("app-store", "data"),
+    )
+    def _validate_selected_pathway_step(
+        selected_path,
+        selected_step,
+        app_store,
+    ):
+        if not selected_path:
+            return [], [], "选择一条路径开始验证。"
+        step_count = len(selected_path.get("reaction_keys") or [])
+        if not selected_step:
+            return (
+                [],
+                [],
+                (
+                    f"所选路径包含 {step_count} 步；请点击下方超图中的"
+                    "黄色反应节点，逐步验证其时间事件。整条网络路径"
+                    "本身不代表时间连续事件链。"
+                ),
+            )
+        try:
+            result = svc.validate_pathway_step_occurrences(
+                (app_store or {}).get("artifacts") or {},
+                selected_step,
+                max_occurrences=20,
+            )
+        except svc.ServiceError as exc:
+            return [], [], exc.message
+        rows = list(result.get("rows") or [])
+        evidence_level = str(result.get("evidence_level") or "network_only")
+        if evidence_level == "rng_event":
+            columns = _event_columns(rows)
+        elif evidence_level == "route":
+            columns = _columns_from_rows(
+                rows,
+                [
+                    "occurrence_rank",
+                    "evidence_source",
+                    "start_frame",
+                    "end_frame",
+                    "frame_span",
+                    "reaction_smiles",
+                ],
+            )
+        else:
+            columns = []
+        prefix = (
+            "该候选路径只有 1 步，不存在两步连续性；"
+            if step_count == 1
+            else f"当前验证第 {int(selected_step.get('step_index') or 0)} 步；"
+        )
+        return rows, columns, prefix + str(result.get("message") or "")
 
     @app.callback(
         Output("event-reaction-text", "value", allow_duplicate=True),
@@ -2651,55 +3304,6 @@ def register_callbacks(app: Any) -> None:
         if not reaction_text:
             raise PreventUpdate
         return reaction_text
-
-    @app.callback(
-        Output("pathway-highlight-store", "data", allow_duplicate=True),
-        Output("network-anchor-smiles", "value", allow_duplicate=True),
-        Output("network-semantics", "value", allow_duplicate=True),
-        Input("pathway-highlight-network-btn", "n_clicks"),
-        State("pathway-selected-path", "data"),
-        State("pathway-context-store", "data"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _send_pathway_to_network(
-        n_clicks,
-        selected_path,
-        pathway_context,
-        app_store,
-    ):
-        if n_clicks is None or not selected_path:
-            raise PreventUpdate
-        context = (
-            pathway_context
-            if isinstance(pathway_context, dict)
-            else {}
-        )
-        source_dataset_id = str(context.get("dataset_id") or "")
-        current_dataset_id = _network_dataset_id(app_store)
-        if (
-            context.get("schema_version")
-            != "reacnet-scope/pathway-context/v1"
-            or not source_dataset_id
-            or source_dataset_id != current_dataset_id
-        ):
-            return None, "", no_update
-        species_ids = list(selected_path.get("species_ids") or [])
-        if not species_ids:
-            return None, "", no_update
-        handoff = {
-            "schema_version": "reacnet-scope/pathway-highlight/v1",
-            "source": "pathway",
-            "pending": True,
-            "dataset_id": source_dataset_id,
-            "source_signatures": dict(
-                context.get("source_signatures") or {}
-            ),
-            "path_rank": selected_path.get("path_rank"),
-            "species_ids": species_ids,
-            "reaction_keys": list(selected_path.get("reaction_keys") or []),
-        }
-        return handoff, str(species_ids[0]), "mechanism"
 
     @app.callback(
         Output("pathway-json-download", "data"),
@@ -2734,73 +3338,26 @@ def register_callbacks(app: Any) -> None:
             "candidate_pathways.csv",
         )
 
-    # ── Dual-semantics network workspace ────────────────────────────
-
-    @app.callback(
-        Output("network-observation-controls", "style"),
-        Output("network-mechanism-controls", "style"),
-        Output("network-json-btn", "disabled"),
-        Output("network-graphml-btn", "disabled"),
-        Output("network-gexf-btn", "disabled"),
-        Output("network-node-csv-btn", "disabled"),
-        Output("network-edge-csv-btn", "disabled"),
-        Input("network-semantics", "value"),
-        Input("network-store", "data"),
-        Input("app-store", "data"),
-    )
-    def _switch_network_semantics(semantics, payload, app_store):
-        mechanism = semantics == "mechanism"
-        export_ready = (
-            mechanism
-            and isinstance(payload, dict)
-            and payload.get("network_semantics") == "mechanism"
-            and str(payload.get("dataset_id") or "")
-            == _network_dataset_id(app_store)
-        )
-        return (
-            {"display": "none"} if mechanism else {"display": "flex"},
-            {"display": "flex"} if mechanism else {"display": "none"},
-            not export_ready,
-            not export_ready,
-            not export_ready,
-            not export_ready,
-            not export_ready,
-        )
-
-    @app.callback(
-        Output("network-anchor-smiles", "value"),
-        Output("network-semantics", "value"),
-        Input("app-store", "data"),
-    )
-    def _network_anchor_from_dataset(app_store):
-        selected = str((app_store or {}).get("selected_smiles") or "")
-        return selected, ("mechanism" if selected else no_update)
-
     @app.callback(
         Output("pathway-store", "data", allow_duplicate=True),
         Output("pathway-context-store", "data", allow_duplicate=True),
         Output("pathway-selected-path", "data", allow_duplicate=True),
         Output("pathway-selected-step", "data", allow_duplicate=True),
-        Output("pathway-highlight-store", "data", allow_duplicate=True),
         Output("pathway-grid", "selected_rows", allow_duplicate=True),
         Output("pathway-grid", "data", allow_duplicate=True),
         Output("pathway-cytoscape", "elements", allow_duplicate=True),
         Output("pathway-cytoscape", "tapNodeData", allow_duplicate=True),
         Output("pathway-selection-summary", "children", allow_duplicate=True),
         Output("pathway-open-events-btn", "disabled", allow_duplicate=True),
-        Output("pathway-highlight-network-btn", "disabled", allow_duplicate=True),
         Output("pathway-alert", "children", allow_duplicate=True),
+        Output("pathway-terminal-summary", "children", allow_duplicate=True),
         Input("app-store", "data"),
-        Input("network-semantics", "value"),
         State("pathway-context-store", "data"),
-        State("pathway-highlight-store", "data"),
         prevent_initial_call=True,
     )
     def _reset_cross_context_pathway_state(
         app_store,
-        network_semantics,
         pathway_context,
-        pathway_handoff,
     ):
         reset_kind = _pathway_reset_trigger_kind(
             ctx,
@@ -2813,580 +3370,16 @@ def register_callbacks(app: Any) -> None:
                 None,
                 None,
                 None,
-                None,
                 [],
                 [],
                 [],
                 None,
                 "选择一条路径或一个反应节点。",
-                True,
                 True,
                 "",
-            )
-        if reset_kind == "semantics":
-            handoff = (
-                pathway_handoff
-                if isinstance(pathway_handoff, dict)
-                else {}
-            )
-            preserve_pending_handoff = (
-                network_semantics == "mechanism"
-                and handoff.get("pending") is True
-                and str(handoff.get("dataset_id") or "")
-                == _network_dataset_id(app_store)
-            )
-            return (
-                no_update,
-                no_update,
-                None,
-                None,
-                no_update if preserve_pending_handoff else None,
                 [],
-                no_update,
-                no_update,
-                None,
-                "选择一条路径或一个反应节点。",
-                True,
-                True,
-                no_update,
             )
         raise PreventUpdate
-
-    @app.callback(
-        Output("network-alert", "children"),
-        Output("network-raw-store", "data"),
-        Output("network-store", "data"),
-        Output("network-cytoscape", "tapNodeData"),
-        Output("network-context-store", "data"),
-        Input("network-search-btn", "n_clicks"),
-        Input("network-semantics", "value"),
-        Input("network-evidence-filter", "value"),
-        Input("app-store", "data"),
-        State("network-min-count", "value"),
-        State("network-max-species", "value"),
-        State("network-top-edges", "value"),
-        State("network-anchor-smiles", "value"),
-        State("network-direction", "value"),
-        State("network-depth", "value"),
-        State("network-min-net-tp", "value"),
-        State("network-max-nodes", "value"),
-        State("network-layout", "value"),
-        State("network-raw-store", "data"),
-        State("network-context-store", "data"),
-        State("pathway-highlight-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _update_network_state(
-        n_clicks,
-        semantics,
-        evidence_filter,
-        store,
-        min_count,
-        max_species,
-        top_edges,
-        anchor_smiles,
-        direction,
-        max_depth,
-        min_net_tp,
-        max_nodes,
-        layout_name,
-        raw_payload,
-        previous_context,
-        pathway_handoff,
-    ):
-        store = store or {}
-        semantics = (
-            "mechanism" if semantics == "mechanism" else "event_transfer"
-        )
-        dataset_id = _network_dataset_id(store)
-        current_context = {
-            "dataset_id": dataset_id,
-            "network_semantics": semantics,
-        }
-        previous_context = (
-            previous_context
-            if isinstance(previous_context, dict)
-            else {}
-        )
-        if ctx.triggered_id in {"network-semantics", "app-store"}:
-            if previous_context == current_context:
-                raise PreventUpdate
-            return "", None, None, None, current_context
-
-        if ctx.triggered_id == "network-evidence-filter":
-            if (
-                not isinstance(raw_payload, dict)
-                or raw_payload.get("network_semantics") != semantics
-                or str(raw_payload.get("dataset_id") or "") != dataset_id
-            ):
-                return "", no_update, None, None, current_context
-            try:
-                displayed = svc.project_network_evidence(
-                    raw_payload,
-                    str(evidence_filter or "all"),
-                )
-            except (TypeError, ValueError) as exc:
-                return (
-                    dbc.Alert(str(exc), color="danger", className="py-2"),
-                    no_update,
-                    None,
-                    None,
-                    current_context,
-                )
-            return (
-                _network_status_alert(displayed),
-                no_update,
-                displayed,
-                None,
-                current_context,
-            )
-
-        if ctx.triggered_id != "network-search-btn" or n_clicks is None:
-            raise PreventUpdate
-        artifacts = store.get("artifacts", {}) or {}
-        try:
-            if semantics == "mechanism":
-                anchor_smiles = str(anchor_smiles or "").strip()
-                if not anchor_smiles:
-                    return (
-                        dbc.Alert(
-                            "请输入锚点物种的精确 SMILES；这与“锚点不在网络中”的空结果不同。",
-                            color="warning",
-                            className="py-2",
-                        ),
-                        None,
-                        None,
-                        None,
-                        current_context,
-                    )
-                result = svc.build_mechanism_elements(
-                    artifacts,
-                    anchor_smiles=anchor_smiles,
-                    direction=(
-                        "both"
-                        if direction is None
-                        else str(direction)
-                    ),
-                    max_depth=int(2 if max_depth is None else max_depth),
-                    min_net_tp=int(
-                        1 if min_net_tp is None else min_net_tp
-                    ),
-                    max_nodes=int(200 if max_nodes is None else max_nodes),
-                )
-            else:
-                result = svc.build_observation_elements(
-                    artifacts,
-                    min_count=int(1 if min_count is None else min_count),
-                    max_species=int(
-                        60 if max_species is None else max_species
-                    ),
-                    top_edges=int(40 if top_edges is None else top_edges),
-                )
-        except (TypeError, ValueError) as exc:
-            return (
-                dbc.Alert(str(exc), color="danger", className="py-2"),
-                None,
-                None,
-                None,
-                current_context,
-            )
-        except svc.ServiceError as exc:
-            message = (
-                "请输入锚点物种的精确 SMILES。"
-                if exc.reason == "bad_mechanism_query"
-                and not str(anchor_smiles or "").strip()
-                else str(exc.message)
-            )
-            return (
-                dbc.Alert(message, color="danger", className="py-2"),
-                None,
-                None,
-                None,
-                current_context,
-            )
-
-        raw = {
-            **result,
-            "dataset_id": dataset_id or "dataset",
-            "_ui_layout": str(layout_name or "concentric"),
-        }
-        handoff = (
-            pathway_handoff
-            if isinstance(pathway_handoff, dict)
-            else {}
-        )
-        handoff_dataset = str(handoff.get("dataset_id") or "")
-        species_ids = [
-            str(value) for value in handoff.get("species_ids") or []
-        ]
-        if (
-            semantics == "mechanism"
-            and species_ids
-            and anchor_smiles in species_ids
-            and handoff_dataset
-            and handoff_dataset == dataset_id
-        ):
-            raw["_ui_pathway_highlight"] = {
-                "path_rank": handoff.get("path_rank"),
-                "species_ids": species_ids,
-                "reaction_keys": [
-                    str(value)
-                    for value in handoff.get("reaction_keys") or []
-                ],
-            }
-        try:
-            displayed = svc.project_network_evidence(
-                raw,
-                str(evidence_filter or "all"),
-            )
-        except (TypeError, ValueError) as exc:
-            return (
-                dbc.Alert(str(exc), color="danger", className="py-2"),
-                None,
-                None,
-                None,
-                current_context,
-            )
-        return (
-            _network_status_alert(displayed),
-            raw,
-            displayed,
-            None,
-            current_context,
-        )
-
-    @app.callback(
-        Output("network-cytoscape", "elements"),
-        Output("network-cytoscape", "layout"),
-        Output("network-cytoscape", "stylesheet"),
-        Output("network-semantics-badge", "children"),
-        Input("network-store", "data"),
-        Input("network-layout", "value"),
-    )
-    def _render_network(payload, layout_name):
-        payload = payload or {}
-        elements = [
-            {
-                **item,
-                "data": dict(item.get("data") or {}),
-                "classes": str(item.get("classes") or ""),
-            }
-            for item in payload.get("elements") or []
-            if isinstance(item, dict)
-        ]
-        handoff = (
-            payload.get("_ui_pathway_highlight")
-            if isinstance(payload.get("_ui_pathway_highlight"), dict)
-            else {}
-        )
-        species_ids = {
-            str(value) for value in handoff.get("species_ids") or []
-        }
-        reaction_keys = {
-            str(value) for value in handoff.get("reaction_keys") or []
-        }
-        for item in elements:
-            data = item["data"]
-            matched = (
-                str(data.get("smiles") or "") in species_ids
-                or str(data.get("reaction_key") or "") in reaction_keys
-            )
-            if matched:
-                classes = {
-                    value
-                    for value in str(item.get("classes") or "").split()
-                    if value
-                }
-                classes.add("is-path-highlight")
-                item["classes"] = " ".join(sorted(classes))
-
-        selected_layout = (
-            layout_name
-            if layout_name
-            in {"concentric", "cose", "grid", "circle", "breadthfirst"}
-            else "concentric"
-        )
-        semantics = str(payload.get("network_semantics") or "")
-        if semantics == "mechanism":
-            badge = "mechanism · reaction passage counts"
-        elif semantics == "event_transfer":
-            badge = "event_transfer · aggregate observation"
-        else:
-            badge = "尚未构建网络"
-        return elements, {"name": selected_layout}, NETWORK_STYLESHEET, badge
-
-    @app.callback(
-        Output("network-detail-panel", "children"),
-        Output("network-open-events-btn", "disabled"),
-        Input("network-cytoscape", "tapNodeData"),
-        Input("network-store", "data"),
-    )
-    def _network_node_detail(node_data, payload):
-        if (
-            ctx.triggered_id == "network-store"
-            or not isinstance(node_data, dict)
-        ):
-            return "选择一个物种或反应节点查看详情。", True
-        node_id = str(node_data.get("id") or "")
-        canonical = next(
-            (
-                node
-                for node in (payload or {}).get("nodes") or []
-                if str(node.get("id") or "") == node_id
-            ),
-            node_data,
-        )
-        if canonical.get("kind") == "reaction":
-            reactants = [
-                str(value) for value in canonical.get("reactants") or []
-            ]
-            products = [
-                str(value) for value in canonical.get("products") or []
-            ]
-            reaction_text = (
-                f"{' + '.join(reactants)} → {' + '.join(products)}"
-            )
-            metrics = [
-                ("正向 TP", canonical.get("forward_tp")),
-                ("反向 TP", canonical.get("reverse_tp")),
-                ("净 TP", canonical.get("net_tp")),
-                ("事件总数", canonical.get("event_total")),
-                ("匹配事件", canonical.get("matched_event_total")),
-                ("事件覆盖率", canonical.get("event_coverage")),
-                ("证据状态", canonical.get("evidence_status")),
-            ]
-            return (
-                html.Div(
-                    [
-                        html.Div(reaction_text, className="rs-network-detail-title"),
-                        html.Dl(
-                            [
-                                item
-                                for label, value in metrics
-                                for item in (
-                                    html.Dt(label),
-                                    html.Dd("—" if value is None else str(value)),
-                                )
-                            ]
-                        ),
-                    ]
-                ),
-                not bool(reactants or products),
-            )
-        return (
-            html.Div(
-                [
-                    html.Div(
-                        str(canonical.get("formula") or canonical.get("label") or ""),
-                        className="rs-network-detail-title",
-                    ),
-                    html.Code(str(canonical.get("smiles") or "")),
-                ]
-            ),
-            True,
-        )
-
-    @app.callback(
-        Output("event-reaction-text", "value", allow_duplicate=True),
-        Input("network-open-events-btn", "n_clicks"),
-        State("network-cytoscape", "tapNodeData"),
-        prevent_initial_call=True,
-    )
-    def _send_network_reaction_to_events(n_clicks, node_data):
-        if n_clicks is None or not isinstance(node_data, dict):
-            raise PreventUpdate
-        reactants = [str(value) for value in node_data.get("reactants") or []]
-        products = [str(value) for value in node_data.get("products") or []]
-        if not reactants and not products:
-            raise PreventUpdate
-        return f"{' + '.join(reactants)} -> {' + '.join(products)}"
-
-    def _network_export_name(payload, suffix):
-        dataset_id = str((payload or {}).get("dataset_id") or "dataset")
-        semantics = str(
-            (payload or {}).get("network_semantics") or "network"
-        )
-        schema = str(
-            (payload or {}).get("schema_version")
-            or "reacnet-scope/mechanism-network/v1"
-        )
-        safe = lambda value: re.sub(  # noqa: E731
-            r"[^\w.-]+",
-            "-",
-            value,
-            flags=re.UNICODE,
-        ).strip("-._") or "unknown"
-        return (
-            f"{safe(dataset_id)}_{safe(semantics)}_"
-            f"{safe(schema.replace('/', '-'))}{suffix}"
-        )
-
-    def _network_export(payload, format_name, suffix):
-        if (
-            not isinstance(payload, dict)
-            or payload.get("network_semantics") != "mechanism"
-        ):
-            return no_update
-        try:
-            exported = svc.export_mechanism_graph(payload, format_name)
-        except (TypeError, ValueError):
-            return no_update
-        filename = _network_export_name(payload, suffix)
-        if format_name == "cytoscape-json":
-            return dcc.send_string(
-                json.dumps(
-                    exported,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ),
-                filename,
-            )
-        if format_name in {"graphml", "gexf"}:
-            return dcc.send_bytes(exported, filename)
-        return dcc.send_string(str(exported), filename)
-
-    @app.callback(
-        Output("network-json-download", "data"),
-        Input("network-json-btn", "n_clicks"),
-        State("network-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_network_json(n_clicks, payload):
-        if n_clicks is None:
-            raise PreventUpdate
-        return _network_export(payload, "cytoscape-json", ".json")
-
-    @app.callback(
-        Output("network-graphml-download", "data"),
-        Input("network-graphml-btn", "n_clicks"),
-        State("network-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_network_graphml(n_clicks, payload):
-        if n_clicks is None:
-            raise PreventUpdate
-        return _network_export(payload, "graphml", ".graphml")
-
-    @app.callback(
-        Output("network-gexf-download", "data"),
-        Input("network-gexf-btn", "n_clicks"),
-        State("network-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_network_gexf(n_clicks, payload):
-        if n_clicks is None:
-            raise PreventUpdate
-        return _network_export(payload, "gexf", ".gexf")
-
-    @app.callback(
-        Output("network-node-csv-download", "data"),
-        Input("network-node-csv-btn", "n_clicks"),
-        State("network-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_network_node_csv(n_clicks, payload):
-        if n_clicks is None:
-            raise PreventUpdate
-        return _network_export(payload, "node-csv", "_nodes.csv")
-
-    @app.callback(
-        Output("network-edge-csv-download", "data"),
-        Input("network-edge-csv-btn", "n_clicks"),
-        State("network-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_network_edge_csv(n_clicks, payload):
-        if n_clicks is None:
-            raise PreventUpdate
-        return _network_export(payload, "edge-csv", "_edges.csv")
-
-    @app.callback(
-        Output("network-cytoscape", "generateImage"),
-        Input("network-png-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def _export_network_png(n_clicks):
-        if n_clicks is None:
-            raise PreventUpdate
-        return {"type": "png", "action": "download", "filename": "observation_network"}
-
-    # ── Literature mechanism verification ────────────────────────────
-
-    @app.callback(
-        Output("literature-grid", "data"),
-        Output("literature-grid", "columns"),
-        Output("literature-alert", "children"),
-        Output("literature-grid-store", "data"),
-        Output("literature-summary", "children"),
-        Output("literature-summary-card", "style"),
-        Input("literature-verify-btn", "n_clicks"),
-        State("literature-reactions-input", "value"),
-        State("literature-verify-mode", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _verify_literature_mechanism(n_clicks, reaction_text, verify_mode, store):
-        if n_clicks is None:
-            raise PreventUpdate
-        if not reaction_text or not str(reaction_text).strip():
-            from dash import no_update
-            return no_update, no_update, "请输入至少一个反应式", no_update, no_update, no_update
-
-        from rng_tools.mechanism_verify import parse_literature_reaction_text
-        reaction_lines = parse_literature_reaction_text(str(reaction_text))
-        if not reaction_lines:
-            from dash import no_update
-            return no_update, no_update, "未能解析任何有效反应式", no_update, no_update, no_update
-
-        artifacts = (store or {}).get("artifacts", {}) or {}
-        try:
-            payload = svc.verify_literature_mechanism(
-                artifacts,
-                reaction_lines,
-                verify_mode=verify_mode or "species",
-            )
-        except svc.ServiceError as exc:
-            return [], _literature_columns(), str(exc.message), {"rows": []}, None, {"display": "none"}
-
-        rows = payload.get("rows") or []
-        summary = payload.get("summary") or {}
-        from dash import html
-
-        summary_children = html.Div(
-            [
-                html.Div(
-                    [
-                        html.Span(f"共 {summary.get('total_reactions', 0)} 个反应", className="me-3"),
-                        html.Span(f"检出 {summary.get('detected', 0)} 个", className="me-3 rs-evidence-detected", style={"padding": "2px 8px", "borderRadius": 4}),
-                        html.Span(f"净通量 {summary.get('has_net_flux', 0)} 个", className="me-3 rs-evidence-net-flux", style={"padding": "2px 8px", "borderRadius": 4}),
-                        html.Span(f"未检出 {summary.get('not_detected', 0)} 个", className="rs-evidence-not-detected", style={"padding": "2px 8px", "borderRadius": 4}),
-                    ],
-                    className="rs-stat-row",
-                ),
-                html.Div(
-                    f"检出率: {summary.get('detection_rate', 0) * 100:.1f}%",
-                    className="small text-muted mt-2",
-                ),
-            ]
-        )
-        meta = payload.get("meta") or {}
-        message = meta.get("message") or None
-        return rows, _literature_columns(), message, {"rows": rows, "summary": summary}, summary_children, {"display": "block"}
-
-    @app.callback(
-        Output("literature-csv-download", "data"),
-        Input("literature-csv-btn", "n_clicks"),
-        State("literature-grid-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _export_literature_csv(n_clicks, grid_store):
-        if n_clicks is None:
-            raise PreventUpdate
-        rows = (grid_store or {}).get("rows") or []
-        if not rows:
-            raise PreventUpdate
-        return {"content": svc.rows_to_csv(rows), "filename": "literature_evidence_matrix.csv", "type": "text/csv"}
 
     # ── Batch comparison ────────────────────────────────────────────
 
@@ -3867,17 +3860,26 @@ def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
 
 
 def _species_columns(query_kind: str = ""):
+    if query_kind == "mass":
+        return _dt_columns([
+            {"field": "formula", "headerName": "候选分子式", "width": 120},
+            {"field": "exact_mass", "headerName": "匹配精确质量", "width": 120, "type": "numericColumn"},
+            {"field": "nominal_mass", "headerName": "匹配标称质量", "width": 110, "type": "numericColumn"},
+            {"field": "mass_error", "headerName": "质量误差", "width": 100, "type": "numericColumn"},
+            {"field": "ppm_error", "headerName": "误差 ppm", "width": 95, "type": "numericColumn"},
+            {"field": "structure_count", "headerName": "结构数", "width": 85, "type": "numericColumn"},
+            {"field": "smiles", "headerName": "代表 SMILES", "minWidth": 220},
+            {"field": "tp_as_reactant", "headerName": "TP(反应物汇总)", "width": 125, "type": "numericColumn"},
+            {"field": "tp_as_product", "headerName": "TP(产物汇总)", "width": 120, "type": "numericColumn"},
+            {"field": "total_throughput", "headerName": "总通量汇总", "width": 110, "type": "numericColumn"},
+        ])
+
     columns = [
         {"field": "formula", "headerName": "分子式", "width": 110},
         {"field": "smiles", "headerName": "SMILES", "flex": 2, "minWidth": 200},
         {"field": "exact_mass", "headerName": "精确质量", "width": 110, "type": "numericColumn"},
         {"field": "nominal_mass", "headerName": "标称质量", "width": 95, "type": "numericColumn"},
     ]
-    if query_kind == "mass":
-        columns.extend([
-            {"field": "mass_error", "headerName": "质量误差", "width": 100, "type": "numericColumn"},
-            {"field": "ppm_error", "headerName": "误差 ppm", "width": 95, "type": "numericColumn"},
-        ])
     columns.extend([
         {"field": "tp_as_reactant", "headerName": "TP(反应物)", "width": 105, "type": "numericColumn"},
         {"field": "tp_as_product", "headerName": "TP(产物)", "width": 100, "type": "numericColumn"},
@@ -3886,18 +3888,6 @@ def _species_columns(query_kind: str = ""):
         {"field": "n_produce_rxns", "headerName": "生成反应", "width": 95, "type": "numericColumn"},
     ])
     return _dt_columns(columns)
-
-
-def _transitions_columns():
-    return _dt_columns([
-        {"field": "role", "headerName": "方向", "width": 75},
-        {"field": "reaction_formulas", "headerName": "反应式", "flex": 2, "minWidth": 220},
-        {"field": "forward_tp", "headerName": "TP(正向)", "width": 100, "type": "numericColumn"},
-        {"field": "reverse_tp", "headerName": "TP(反向)", "width": 100, "type": "numericColumn"},
-        {"field": "net_tp", "headerName": "净 TP", "width": 90, "type": "numericColumn"},
-        {"field": "ratio_pct", "headerName": "占比%", "width": 85, "type": "numericColumn"},
-        {"field": "tp", "headerName": "总 TP", "width": 90, "type": "numericColumn"},
-    ])
 
 
 def _reaction_columns(*, with_share: bool = False):
@@ -3973,6 +3963,9 @@ def _pathway_columns():
             {"field": "rank", "headerName": "#", "type": "numericColumn"},
             {"field": "formula_chain", "headerName": "分子式路径"},
             {"field": "smiles_chain", "headerName": "SMILES 路径"},
+            {"field": "terminal_products", "headerName": "末步全部物种"},
+            {"field": "small_fragments", "headerName": "已见小分子碎片"},
+            {"field": "termination_label", "headerName": "终点状态"},
             {"field": "path_score", "headerName": "路径分数", "type": "numericColumn"},
             {"field": "weakest_step_score", "headerName": "最弱步分数", "type": "numericColumn"},
             {"field": "depth", "headerName": "深度", "type": "numericColumn"},
@@ -3999,6 +3992,23 @@ def _pathway_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "smiles_chain": " → ".join(
                     str(value) for value in path.get("species") or []
                 ),
+                "terminal_products": " + ".join(
+                    str(item.get("formula") or item.get("smiles") or "")
+                    for item in path.get("terminal_products") or []
+                ),
+                "small_fragments": "、".join(
+                    str(item.get("formula") or item.get("smiles") or "")
+                    for item in path.get("small_fragments") or []
+                ) or "—",
+                "termination_label": {
+                    "small_molecule_goal": "已到达小分子",
+                    "no_positive_continuation": "无正净后继",
+                    "depth_limit": "达到深度上限",
+                    "search_truncated": "搜索被截断",
+                }.get(
+                    str(path.get("termination_reason") or ""),
+                    "未标注",
+                ),
                 "path_score": path.get("score"),
                 "weakest_step_score": min(step_scores) if step_scores else None,
                 "depth": len(steps),
@@ -4012,18 +4022,82 @@ def _pathway_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _literature_columns():
-    return _dt_columns([
-        {"field": "index", "headerName": "#", "width": 50},
-        {"field": "reaction_text", "headerName": "文献反应式", "flex": 2, "minWidth": 200},
-        {"field": "evidence_label", "headerName": "证据等级", "width": 130},
-        {"field": "detected", "headerName": "是否检测到", "width": 100},
-        {"field": "forward_tp", "headerName": "正向次数", "width": 90},
-        {"field": "net_tp", "headerName": "净次数", "width": 90},
-        {"field": "is_transient", "headerName": "瞬时过程", "width": 90},
-        {"field": "atom_confirmed_count", "headerName": "原子确认数", "width": 100},
-        {"field": "notes", "headerName": "备注", "flex": 1, "minWidth": 150},
-    ])
+def _pathway_terminal_cards(payload: dict[str, Any]) -> list[Any]:
+    paths = payload.get("paths") or []
+    if not paths:
+        return []
+    labels = {
+        "small_molecule_goal": "已到达小分子目标",
+        "no_positive_continuation": "无正净通量后继",
+        "depth_limit": "仅到达当前深度上限",
+        "search_truncated": "搜索上限内的部分结果",
+    }
+    cards: list[Any] = [
+        html.Div(
+            [
+                html.H6("路线终点与末步全部物种", className="mb-1"),
+                html.P(
+                    "这里同时显示焦点终点和末步反应的全部物种；"
+                    "“达到深度上限”不等于真实终产物。",
+                    className="rs-step-note mb-0",
+                ),
+            ],
+            className="rs-pathway-terminal-heading",
+        )
+    ]
+    for path in paths[:20]:
+        products = path.get("terminal_products") or []
+        product_cards = []
+        for item in products:
+            classes = "rs-pathway-terminal-species"
+            if item.get("is_small_carbon_fragment"):
+                classes += " is-small-fragment"
+            product_cards.append(
+                html.Div(
+                    [
+                        html.Img(
+                            src=str(item.get("structure_url") or ""),
+                            alt=str(item.get("formula") or "终点物种"),
+                        ),
+                        html.Strong(str(item.get("formula") or "?")),
+                        html.Code(str(item.get("smiles") or "")),
+                        html.Span(
+                            (
+                                f"C{int(item.get('carbon_count') or 0)}"
+                                if int(item.get("carbon_count") or 0) > 0
+                                else "无碳物种"
+                            )
+                        ),
+                    ],
+                    className=classes,
+                )
+            )
+        cards.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Strong(f"路径 {int(path.get('rank') or 0)}"),
+                            html.Span(
+                                labels.get(
+                                    str(path.get("termination_reason") or ""),
+                                    "终点未标注",
+                                ),
+                                className="rs-pathway-terminal-badge",
+                            ),
+                        ],
+                        className="rs-pathway-terminal-meta",
+                    ),
+                    html.Div(
+                        product_cards
+                        or [html.Span("末步物种不可用。")],
+                        className="rs-pathway-terminal-products",
+                    ),
+                ],
+                className="rs-pathway-terminal-route",
+            )
+        )
+    return cards
 
 
 def _batch_comparison_columns(condition_names=None):
@@ -4119,7 +4193,6 @@ def _render_artifacts(artifacts: dict[str, str]) -> Any:
         "species": "Species",
         "trajectory": "Trajectory",
         "route": "Route",
-        "table": "Table",
     }
     chips: list[Any] = []
     for key, label in labels.items():

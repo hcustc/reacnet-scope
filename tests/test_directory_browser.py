@@ -353,7 +353,7 @@ def test_browser_snapshot_exposes_breadcrumbs_and_one_dataset(tmp_path, monkeypa
         "path": str(data_dir),
     }
     assert snapshot["datasets"][0]["auto_selected"] is True
-    assert snapshot["datasets"][0]["completeness"] == "2/8"
+    assert snapshot["datasets"][0]["completeness"] == "2/7"
     assert set(snapshot["datasets"][0]["index_states"]) == {
         "event",
         "trajectory",

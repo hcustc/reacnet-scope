@@ -12,6 +12,7 @@ from rng_tools import dir_browser
 from scripts import rng_query_cli as cli
 from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash.navigation import NAV_GROUPS, TOP_NAV_PAGE_IDS
 from scripts.webapp_dash import services as svc
 
 
@@ -61,7 +62,55 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
 
     layout = layout_response.get_json()
     layout_ids = _layout_string_ids(layout)
+    for navigation_id in {
+        "nav-species",
+        "nav-intermediate",
+        "inter-to-pathway-btn",
+        "inter-to-evolution-btn",
+        "species-to-channels-btn",
+        "species-structure-grid",
+        "species-structure-results",
+        "species-structure-csv-btn",
+        "rxn-production-grid",
+        "rxn-consumption-grid",
+        "event-back-btn",
+        "data-open-batch-compare-btn",
+    }:
+        assert navigation_id in layout_ids
+    for removed_id in {
+        "nav-workflow",
+        "page-workflow",
+        "nav-literature",
+        "page-literature",
+        "nav-batch-compare",
+        "species-mass-mode",
+        "species-top",
+    }:
+        assert removed_id not in layout_ids
+    assert "page-home" not in layout_ids
+    assert "nav-home" not in layout_ids
+    assert "page-description" not in layout_ids
+    assert "rs-top-nav-item" in str(
+        ((_layout_node_by_id(layout, "nav-species") or {}).get("props") or {}).get(
+            "className"
+        )
+    )
+    species_grid = _layout_node_by_id(layout, "species-grid") or {}
+    structure_grid = _layout_node_by_id(layout, "species-structure-grid") or {}
+    assert (species_grid.get("props") or {}).get("page_action") == "native"
+    assert (species_grid.get("props") or {}).get("page_size") == 20
+    assert (structure_grid.get("props") or {}).get("page_action") == "native"
+    assert (structure_grid.get("props") or {}).get("page_size") == 50
+    assert (
+        ((_layout_node_by_id(layout, "page-store") or {}).get("props") or {}).get(
+            "data"
+        )
+        == {"page": "species"}
+    )
     assert "data-modal" in layout_ids
+    species_grid = _layout_node_by_id(layout, "species-grid")
+    assert species_grid is not None
+    assert (species_grid.get("props") or {}).get("row_selectable") == "single"
     assert "dir-browser-modal" not in layout_ids
     assert "data-overview-view" in layout_ids
     assert "data-browser-view" in layout_ids
@@ -83,9 +132,33 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-prep-refresh-btn" in layout_ids
     assert "data-rng-event-command" in layout_ids
     assert "data-clear-trajectory-btn" in layout_ids
+    assert "data-global-min-tp" in layout_ids
+    assert "data-overrides-apply-btn" in layout_ids
+    assert "global-operation-progress" in layout_ids
+    assert "data-override-reaction" in layout_ids
+    assert "data-override-reactionevent" in layout_ids
     assert "carbon-reference-smiles" in layout_ids
     assert "carbon-timestep" in layout_ids
     assert "carbon-parent-name" not in layout_ids
+    for advanced_carbon_id in {
+        "carbon-advanced-search-btn",
+        "carbon-advanced-species-files",
+        "carbon-advanced-mode",
+        "carbon-advanced-layout",
+        "carbon-advanced-smoothing",
+        "carbon-advanced-viewer",
+        "carbon-advanced-csv-download",
+        "carbon-advanced-svg-download",
+    }:
+        assert advanced_carbon_id in layout_ids
+    for event_tool_id in {
+        "event-frames-csv-download",
+        "event-trajectory-download",
+        "event-vmd-download",
+        "event-atom-ids-copy",
+        "event-ovito-expression-copy",
+    }:
+        assert event_tool_id in layout_ids
     for pathway_id in {
         "pathway-start-smiles",
         "pathway-direction",
@@ -100,39 +173,23 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-json-download",
         "pathway-csv-download",
         "pathway-open-events-btn",
-        "pathway-highlight-network-btn",
+        "pathway-evidence-alert",
+        "pathway-evidence-grid",
         "pathway-store",
         "pathway-context-store",
-        "pathway-highlight-store",
     }:
         assert pathway_id in layout_ids
-    for network_id in {
-        "network-semantics",
-        "network-observation-controls",
-        "network-mechanism-controls",
-        "network-anchor-smiles",
-        "network-direction",
-        "network-depth",
-        "network-min-net-tp",
-        "network-max-nodes",
-        "network-evidence-filter",
-        "network-raw-store",
-        "network-context-store",
-        "network-semantics-badge",
-        "network-json-btn",
-        "network-json-download",
-        "network-graphml-btn",
-        "network-graphml-download",
-        "network-gexf-btn",
-        "network-gexf-download",
-        "network-node-csv-btn",
-        "network-node-csv-download",
-        "network-edge-csv-btn",
-        "network-edge-csv-download",
-        "network-detail-panel",
-        "network-open-events-btn",
-    }:
-        assert network_id in layout_ids
+    assert (_layout_node_by_id(layout, "pathway-max-depth") or {})["props"]["value"] == 4
+    assert (_layout_node_by_id(layout, "pathway-max-branches") or {})["props"]["value"] == 4
+    assert (_layout_node_by_id(layout, "pathway-max-paths") or {})["props"]["value"] == 10
+    assert (
+        (_layout_node_by_id(layout, "pathway-goal") or {})["props"]["value"]
+        == "small_fragments"
+    )
+    assert "page-transitions" not in layout_ids
+    assert "nav-transitions" not in layout_ids
+    assert "page-network" not in layout_ids
+    assert "nav-network" not in layout_ids
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -150,9 +207,30 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "d-none" not in str((overview.get("props") or {}).get("className") or "")
     assert "d-none" in str((browser.get("props") or {}).get("className") or "")
     assert "data-recent-datasets" in _layout_string_ids(overview)
+    carbon_refresh = _layout_node_by_id(layout, "carbon-index-refresh")
+    operation_progress = _layout_node_by_id(layout, "global-operation-progress")
+    assert carbon_refresh is not None
+    assert operation_progress is not None
+    assert (carbon_refresh.get("props") or {}).get("disabled") is True
+    assert (operation_progress.get("props") or {}).get("role") == "status"
+    assert "progressbar" in json.dumps(operation_progress)
     layout_text = json.dumps(layout, ensure_ascii=False)
+    assert "rs-advanced-menu" not in layout_text
+    assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text
     assert "加载数据集" in layout_text
+
+
+def test_navigation_groups_cover_each_tool_once() -> None:
+    grouped_pages = [
+        page_id
+        for _group_label, page_ids in NAV_GROUPS
+        for page_id in page_ids
+    ]
+
+    assert len(grouped_pages) == 7
+    assert len(set(grouped_pages)) == len(grouped_pages)
+    assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
 
 
 def _callback_payload(
@@ -217,6 +295,490 @@ def _callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def test_top_navigation_opens_automatic_analysis_tool() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["nav-intermediate"] = 1
+    payload = _callback_payload(
+        client,
+        input_ids=input_ids,
+        changed="nav-intermediate.n_clicks",
+        input_values=input_values,
+        state_values={"page-store": {"page": "species"}},
+        output_id="page-species",
+    )
+
+    response = client.post("/_dash-update-component", json=payload)
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "intermediate"}
+    assert body["page-intermediate"]["className"] == "rs-page active"
+    assert body["nav-intermediate"]["className"] == "rs-top-nav-item active"
+    assert body["app-body"]["className"] == "rs-body rs-tool-shell"
+
+
+def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> None:
+    reaction = tmp_path / "mass-structures.reactionabcd"
+    structures = [
+        "[H][C]([H])[C]([H])[C]([H])[C][C][O]",
+        "[O][C][C][C]([H])[C]([H])[C]([H])[H]",
+        "[C]([H])([H])[C]([H])[C]([H])[C][C][O]",
+    ]
+    reaction.write_text(
+        "\n".join(
+            [
+                f"10 {structures[0]}->[C]",
+                f"6 {structures[1]}->[C]",
+                f"2 {structures[2]}->[C]",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifacts = {"reaction": str(reaction)}
+    client = create_app().server.test_client()
+
+    search_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-search-btn"],
+            changed="species-search-btn.n_clicks",
+            input_values={"species-search-btn": 1},
+            state_values={
+                "species-query": "80",
+                "species-query-kind": "mass",
+                "species-mass-tol": 0.1,
+                "app-store": {"artifacts": artifacts},
+            },
+            output_id="species-grid",
+        ),
+    )
+    assert search_response.status_code == 200
+    search_body = search_response.get_json()["response"]
+    formula_rows = search_body["species-grid"]["data"]
+    grid_store = search_body["species-grid-store"]["data"]
+    assert formula_rows[0]["formula"] == "C5H4O"
+    assert formula_rows[0]["structure_count"] == 3
+    assert search_body["species-grid"]["page_size"] == 20
+    assert "选择分子式可查看原始结构结果" in search_body["species-alert"]["children"]
+
+    structure_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-grid"],
+            changed="species-grid.selected_rows",
+            input_values={"species-grid.selected_rows": [0]},
+            state_values={
+                "species-grid.data": formula_rows,
+                "species-grid-store": grid_store,
+                "app-store": {"artifacts": artifacts},
+            },
+            output_id="species-structure-results",
+        ),
+    )
+    assert structure_response.status_code == 200
+    structure_body = structure_response.get_json()["response"]
+    structure_rows = structure_body["species-structure-grid"]["data"]
+    assert structure_body["species-structure-results"]["style"] == {
+        "display": "block"
+    }
+    assert len(structure_rows) == 3
+    assert [row["smiles"] for row in structure_rows] == structures
+    assert "共 3 个结构" in structure_body["species-structure-alert"]["children"]
+    assert "每页显示 50 条" in structure_body["species-structure-alert"]["children"]
+
+
+def test_batch_compare_opens_from_data_management() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["data-open-batch-compare-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="data-open-batch-compare-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "species"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "batch-compare"}
+    assert body["page-batch-compare"]["className"] == "rs-page active"
+    assert all(
+        body[f"nav-{page_id}"]["className"] == "rs-top-nav-item"
+        for page_id in TOP_NAV_PAGE_IDS
+    )
+
+
+def test_selected_species_channel_action_opens_reaction_search() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["species-to-channels-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="species-to-channels-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "species"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "reactions"}
+    assert body["page-reactions"]["className"] == "rs-page active"
+    assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
+
+
+def test_channel_view_returns_to_species_search() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["rxn-channel-back-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="rxn-channel-back-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "reactions"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "species"}
+    assert body["page-species"]["className"] == "rs-page active"
+    assert body["page-reactions"]["className"] == "rs-page"
+    assert body["nav-species"]["className"] == "rs-top-nav-item active"
+
+
+def test_selected_species_loads_exact_production_and_consumption_channels(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_collect(artifacts, smiles, *, top):
+        captured.update({"artifacts": artifacts, "smiles": smiles, "top": top})
+        base = {
+            "rank": 1,
+            "reaction_formulas": "C + O -> CO",
+            "reaction_smiles": "[C] + [O] -> [C][O]",
+            "reactant_smiles": ["[C]", "[O]"],
+            "product_smiles": ["[C][O]"],
+            "forward_tp": 10,
+            "reverse_tp": 2,
+            "net_tp": 8,
+            "ratio_pct": 80.0,
+        }
+        return {
+            "production_rows": [{**base, "role_label": "生成"}],
+            "consumption_rows": [
+                {
+                    **base,
+                    "role_label": "消耗",
+                    "reaction_formulas": "CO -> C + O",
+                    "reaction_smiles": "[C][O] -> [C] + [O]",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(svc, "collect_species_channels", fake_collect)
+    client = create_app().server.test_client()
+    view_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "species-to-channels-btn",
+                "rxn-channel-back-btn",
+                "nav-reactions",
+            ],
+            changed="species-to-channels-btn.n_clicks",
+            input_values={
+                "species-to-channels-btn": 1,
+                "rxn-channel-back-btn": 0,
+                "nav-reactions": 0,
+            },
+            state_values={},
+            output_id="rxn-channel-view",
+        ),
+    )
+    assert view_response.status_code == 200
+    view = view_response.get_json()["response"]
+    assert view["rxn-query-card"]["style"] == {"display": "none"}
+    assert view["rxn-results-card"]["style"] == {"display": "none"}
+    assert view["rxn-channel-view"]["style"] == {"display": "block"}
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-to-channels-btn"],
+            changed="species-to-channels-btn.n_clicks",
+            input_values={"species-to-channels-btn": 1},
+            state_values={
+                "rxn-top": 12,
+                "app-store": {
+                    "selected_smiles": "[C][O]",
+                    "selected_formula": "CO",
+                    "artifacts": {"reaction": "run.reactionabcd"},
+                },
+            },
+            output_id="rxn-production-grid",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert captured == {
+        "artifacts": {"reaction": "run.reactionabcd"},
+        "smiles": "[C][O]",
+        "top": 12,
+    }
+    assert body["rxn-production-grid"]["data"][0]["role_label"] == "生成"
+    assert body["rxn-consumption-grid"]["data"][0]["role_label"] == "消耗"
+    assert body["rxn-production-grid"]["columns"][0] == {
+        "id": "reaction_formulas",
+        "name": "反应式",
+    }
+    assert "生成通道 1 条，消耗通道 1 条" in body["rxn-channel-alert"]["children"]
+    assert body["rxn-production-grid"]["selected_rows"] == []
+    assert body["rxn-consumption-grid"]["selected_rows"] == []
+
+
+def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> None:
+    row = {
+        "role_label": "消耗",
+        "reaction_formulas": "CO -> C + O",
+        "reaction_smiles": "[C][O] -> [C] + [O]",
+    }
+    client = create_app().server.test_client()
+    selection_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "rxn-production-grid",
+                "rxn-consumption-grid",
+            ],
+            changed="rxn-consumption-grid.selected_rows",
+            input_values={
+                "rxn-production-grid.selected_rows": [],
+                "rxn-consumption-grid.selected_rows": [0],
+            },
+            state_values={
+                "rxn-production-grid.data": [],
+                "rxn-consumption-grid.data": [row],
+            },
+            output_id="rxn-channel-selection-store",
+        ),
+    )
+    assert selection_response.status_code == 200
+    selection = selection_response.get_json()["response"][
+        "rxn-channel-selection-store"
+    ]["data"]
+    assert selection == {"lane": "consumption", "row": row}
+
+    monkeypatch.setattr(
+        svc,
+        "build_channel_structure_detail",
+        lambda *_args, **_kwargs: {"ok": False},
+    )
+    render_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "rxn-channel-selection-store",
+                "rxn-channel-show-h",
+            ],
+            changed="rxn-channel-selection-store.data",
+            input_values={
+                "rxn-channel-selection-store": selection,
+                "rxn-channel-show-h": True,
+            },
+            state_values={},
+            output_id="rxn-channel-detail",
+        ),
+    )
+    assert render_response.status_code == 200
+    rendered = render_response.get_json()["response"]
+    assert rendered["rxn-channel-to-event-btn"]["disabled"] is False
+    assert "已选消耗通道" in rendered["rxn-channel-choice"]["children"]
+
+    event_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "rxn-to-event-btn",
+                "rxn-channel-to-event-btn",
+            ],
+            changed="rxn-channel-to-event-btn.n_clicks",
+            input_values={
+                "rxn-to-event-btn": 0,
+                "rxn-channel-to-event-btn": 1,
+            },
+            state_values={
+                "rxn-grid.selected_rows": [],
+                "rxn-grid.data": [],
+                "rxn-channel-selection-store": selection,
+            },
+            output_id="event-reaction-text",
+        ),
+    )
+    assert event_response.status_code == 200
+    assert (
+        event_response.get_json()["response"]["event-reaction-text"]["value"]
+        == "[C][O] -> [C] + [O]"
+    )
+
+
+def test_event_page_returns_to_originating_reaction_channel() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["rxn-channel-to-event-btn"] = 1
+
+    entered_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="rxn-channel-to-event-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "reactions"}},
+            output_id="page-species",
+        ),
+    )
+    assert entered_response.status_code == 200
+    entered = entered_response.get_json()["response"]
+    event_context = entered["page-store"]["data"]
+    assert event_context == {
+        "page": "events",
+        "return_page": "reactions",
+        "return_label": "返回反应通道",
+    }
+
+    button_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["page-store"],
+            changed="page-store.data",
+            input_values={"page-store": event_context},
+            state_values={},
+            output_id="event-back-btn",
+        ),
+    )
+    assert button_response.status_code == 200
+    button = button_response.get_json()["response"]["event-back-btn"]
+    assert button["children"] == "← 返回反应通道"
+    assert button["style"] == {}
+
+    back_values = {item["id"]: 0 for item in dependency["inputs"]}
+    back_values["event-back-btn"] = 1
+    back_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="event-back-btn.n_clicks",
+            input_values=back_values,
+            state_values={"page-store": event_context},
+            output_id="page-species",
+        ),
+    )
+    assert back_response.status_code == 200
+    returned = back_response.get_json()["response"]
+    assert returned["page-store"]["data"] == {"page": "reactions"}
+    assert returned["page-reactions"]["className"] == "rs-page active"
+    assert returned["nav-reactions"]["className"] == "rs-top-nav-item active"
+
+
+def test_selected_intermediate_can_become_pathway_start() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    input_ids = [
+        "species-to-pathway-btn",
+        "rxn-to-pathway-btn",
+        "inter-to-pathway-btn",
+    ]
+    payload = _callback_payload(
+        client,
+        input_ids=input_ids,
+        changed="inter-to-pathway-btn.n_clicks",
+        input_values={
+            "species-to-pathway-btn": 0,
+            "rxn-to-pathway-btn": 0,
+            "inter-to-pathway-btn": 1,
+        },
+        state_values={
+            "species-grid": [],
+            "rxn-grid": [],
+            "inter-grid.selected_rows": [0],
+            "inter-grid.data": [{"formula": "HO", "smiles": "[H][O]"}],
+            "app-store": {},
+        },
+        output_id="pathway-start-smiles",
+    )
+
+    response = client.post("/_dash-update-component", json=payload)
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["pathway-start-smiles"]["value"] == "[H][O]"
 
 
 def _pathway_payload() -> dict[str, Any]:
@@ -327,6 +889,47 @@ def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
     }
 
 
+def test_pathway_search_passes_small_fragment_carbon_goal(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_find(_artifacts, _start_smiles, **limits):
+        captured.update(limits)
+        return _pathway_payload()
+
+    monkeypatch.setattr(svc, "find_pathways", fake_find)
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["pathway-search-btn"],
+            changed="pathway-search-btn.n_clicks",
+            input_values={"pathway-search-btn": 1},
+            state_values={
+                "pathway-start-smiles": "[C][C][C][C][C][C]",
+                "pathway-direction": "downstream",
+                "pathway-max-depth": 6,
+                "pathway-max-branches": 10,
+                "pathway-max-paths": 20,
+                "pathway-min-net-tp": 1,
+                "pathway-min-directionality": 0,
+                "pathway-goal": "small_fragments",
+                "pathway-target-max-carbon": 3,
+                "app-store": {
+                    "dataset_id": "dataset-A",
+                    "artifacts": {"reaction": "/tmp/run.reactionabcd"},
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured["target_max_carbon"] == 3
+    assert captured["max_expansions"] == 300
+    assert captured["evidence_mode"] == "network_only"
+
+
 def test_pathway_search_reports_distinct_empty_reasons_and_truncation(monkeypatch) -> None:
     app = create_app()
     client = app.server.test_client()
@@ -405,17 +1008,24 @@ def test_species_and_reaction_handoffs_preserve_exact_smiles() -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["species-to-pathway-btn", "rxn-to-pathway-btn"],
+            input_ids=[
+                "species-to-pathway-btn",
+                "rxn-to-pathway-btn",
+                "inter-to-pathway-btn",
+            ],
             changed="species-to-pathway-btn.n_clicks",
             input_values={
                 "species-to-pathway-btn": 1,
                 "rxn-to-pathway-btn": None,
+                "inter-to-pathway-btn": None,
             },
             state_values={
                 "species-grid.selected_rows": [0],
                 "species-grid.data": [{"smiles": "[C@@H](O)[Cl]"}],
                 "rxn-grid.selected_rows": [],
                 "rxn-grid.data": [],
+                "inter-grid.selected_rows": [],
+                "inter-grid.data": [],
                 "app-store": {"selected_smiles": "wrong"},
             },
         ),
@@ -430,11 +1040,16 @@ def test_species_and_reaction_handoffs_preserve_exact_smiles() -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["species-to-pathway-btn", "rxn-to-pathway-btn"],
+            input_ids=[
+                "species-to-pathway-btn",
+                "rxn-to-pathway-btn",
+                "inter-to-pathway-btn",
+            ],
             changed="rxn-to-pathway-btn.n_clicks",
             input_values={
                 "species-to-pathway-btn": None,
                 "rxn-to-pathway-btn": 1,
+                "inter-to-pathway-btn": None,
             },
             state_values={
                 "species-grid.selected_rows": [],
@@ -446,6 +1061,8 @@ def test_species_and_reaction_handoffs_preserve_exact_smiles() -> None:
                         "reaction_smiles": "[13CH3] + [OH-] -> [13CH3][OH-]",
                     }
                 ],
+                "inter-grid.selected_rows": [],
+                "inter-grid.data": [],
                 "app-store": {},
             },
         ),
@@ -563,81 +1180,17 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
         "species_ids": ["[H]", "[H][O]"],
         "reaction_keys": ["[H]+[O]->[H][O]"],
     }
-    assert selection_response.get_json()["response"]["pathway-highlight-store"]["data"] is None
-
-    existing_network = {
-        "schema_version": "reacnet-scope/network/v1",
-        "nodes": [{"id": "existing"}],
-        "edges": [],
-    }
-    rejected_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-highlight-network-btn"],
-            changed="pathway-highlight-network-btn.n_clicks",
-            input_values={"pathway-highlight-network-btn": 1},
-            state_values={
-                "pathway-selected-path": selected,
-                "pathway-context-store": {
-                    "schema_version": "reacnet-scope/pathway-context/v1",
-                    "dataset_id": "dataset-A",
-                    "source_signatures": {"reaction": {"size": 10}},
-                },
-                "app-store": {"dataset_id": "dataset-B"},
-            },
-        ),
-    )
-    assert rejected_response.status_code == 200
+    selected_step = selection_response.get_json()["response"][
+        "pathway-selected-step"
+    ]["data"]
+    assert selected_step["step_index"] == 1
+    assert selected_step["reaction_text"] == "[H] + [O] -> [H][O]"
     assert (
-        rejected_response.get_json()["response"]["pathway-highlight-store"]["data"]
-        is None
+        selection_response.get_json()["response"]["pathway-open-events-btn"][
+            "disabled"
+        ]
+        is False
     )
-    assert (
-        rejected_response.get_json()["response"]["network-anchor-smiles"]["value"]
-        == ""
-    )
-
-    highlight_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-highlight-network-btn"],
-            changed="pathway-highlight-network-btn.n_clicks",
-            input_values={"pathway-highlight-network-btn": 2},
-            state_values={
-                "pathway-selected-path": selected,
-                "pathway-context-store": {
-                    "schema_version": "reacnet-scope/pathway-context/v1",
-                    "dataset_id": "dataset-A",
-                    "source_signatures": {"reaction": {"size": 10}},
-                },
-                "app-store": {"dataset_id": "dataset-A"},
-            },
-        ),
-    )
-    assert highlight_response.status_code == 200
-    response_payload = highlight_response.get_json()["response"]
-    assert "network-store" not in response_payload
-    assert existing_network == {
-        "schema_version": "reacnet-scope/network/v1",
-        "nodes": [{"id": "existing"}],
-        "edges": [],
-    }
-    handoff = response_payload["pathway-highlight-store"]["data"]
-    assert handoff == {
-        "schema_version": "reacnet-scope/pathway-highlight/v1",
-        "source": "pathway",
-        "pending": True,
-        "dataset_id": "dataset-A",
-        "source_signatures": {"reaction": {"size": 10}},
-        "path_rank": 1,
-        "species_ids": ["[H]", "[H][O]"],
-        "reaction_keys": ["[H]+[O]->[H][O]"],
-    }
-    assert response_payload["network-anchor-smiles"]["value"] == "[H]"
-    assert response_payload["network-semantics"]["value"] == "mechanism"
-
     clear_response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
@@ -659,754 +1212,72 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
     assert clear_response.status_code == 200
     cleared = clear_response.get_json()["response"]
     assert cleared["pathway-selected-path"]["data"] is None
-    assert cleared["pathway-highlight-store"]["data"] is None
 
 
-def _mechanism_network_payload() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "schema_version": "reacnet-scope/mechanism-network/v1",
-        "network_semantics": "mechanism",
-        "evidence_level": "event_evidence_linked",
-        "evidence_status": "evidence_linked",
-        "anchor_smiles": "[H]",
-        "query": {
-            "direction": "both",
-            "max_depth": 2,
-            "min_net_tp": 1,
-            "max_nodes": 200,
-        },
-        "source_signatures": {},
-        "dataset_id": "数据集 甲/1",
-        "nodes": [
-            {
-                "id": "species:h",
-                "kind": "species",
-                "label": "H",
-                "smiles": "[H]",
-                "formula": "H",
-            },
-            {
-                "id": "species:ho",
-                "kind": "species",
-                "label": "HO",
-                "smiles": "[H][O]",
-                "formula": "HO",
-            },
-            {
-                "id": "reaction:one",
-                "kind": "reaction",
-                "label": "H+O+O → HO+O",
-                "formula": "H+O+O->HO+O",
-                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-                "reactants": ["[H]", "[O]", "[O]"],
-                "products": ["[H][O]", "[O]"],
-                "forward_tp": 9,
-                "reverse_tp": 2,
-                "net_tp": 7,
-                "event_total": 5,
-                "matched_event_total": 4,
-                "event_coverage": 0.8,
-                "evidence_status": "evidence_linked",
-            },
-        ],
-        "edges": [
-            {
-                "id": "edge:h",
-                "source": "species:h",
-                "target": "reaction:one",
-                "role": "reactant",
-                "species_smiles": "[H]",
-                "coefficient": 1,
-                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-            },
-            {
-                "id": "edge:ho",
-                "source": "reaction:one",
-                "target": "species:ho",
-                "role": "product",
-                "species_smiles": "[H][O]",
-                "coefficient": 1,
-                "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-            },
-        ],
-        "elements": [
-            {
-                "data": {
-                    "id": "species:h",
-                    "kind": "species",
-                    "label": "H",
-                    "smiles": "[H]",
-                    "formula": "H",
-                },
-                "classes": "species",
-            },
-            {
-                "data": {
-                    "id": "species:ho",
-                    "kind": "species",
-                    "label": "HO",
-                    "smiles": "[H][O]",
-                    "formula": "HO",
-                },
-                "classes": "species",
-            },
-            {
-                "data": {
-                    "id": "reaction:one",
-                    "kind": "reaction",
-                    "label": "H+O+O → HO+O",
-                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-                    "reactants": ["[H]", "[O]", "[O]"],
-                    "products": ["[H][O]", "[O]"],
-                    "forward_tp": 9,
-                    "reverse_tp": 2,
-                    "net_tp": 7,
-                    "event_total": 5,
-                    "matched_event_total": 4,
-                    "event_coverage": 0.8,
-                    "evidence_status": "evidence_linked",
-                },
-                "classes": "reaction",
-            },
-            {
-                "data": {
-                    "id": "edge:h",
-                    "source": "species:h",
-                    "target": "reaction:one",
-                    "role": "reactant",
-                    "species_smiles": "[H]",
-                    "coefficient": 1,
-                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-                },
-                "classes": "reactant",
-            },
-            {
-                "data": {
-                    "id": "edge:ho",
-                    "source": "reaction:one",
-                    "target": "species:ho",
-                    "role": "product",
-                    "species_smiles": "[H][O]",
-                    "coefficient": 1,
-                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-                },
-                "classes": "product",
-            },
-        ],
-        "meta": {
-            "node_count": 3,
-            "edge_count": 2,
-            "reaction_count": 1,
-            "truncated": False,
-            "reason": "ok",
-        },
-    }
-
-
-def test_network_build_dispatches_exclusively_and_preserves_zero_values(
-    monkeypatch,
-) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
-    mechanism = _mechanism_network_payload()
-    observation = {
-        "ok": True,
-        "network_semantics": "event_transfer",
-        "evidence_level": "aggregate_observation",
-        "elements": [{"data": {"id": "observed"}}],
-        "meta": {},
-        "network": {},
-    }
-
-    def fake_mechanism(_artifacts, **query):
-        calls.append(("mechanism", query))
-        return mechanism
-
-    def fake_observation(_artifacts, **query):
-        calls.append(("observation", query))
-        return observation
-
-    monkeypatch.setattr(svc, "build_mechanism_elements", fake_mechanism)
-    monkeypatch.setattr(svc, "build_observation_elements", fake_observation)
-    monkeypatch.setattr(
-        svc,
-        "project_network_evidence",
-        lambda payload, evidence_filter: {
-            **payload,
-            "_ui_evidence_filter": evidence_filter,
-        },
-    )
-    app = create_app()
-    client = app.server.test_client()
-
-    def invoke(semantics: str, **overrides: Any) -> dict[str, Any]:
-        states = {
-            "network-min-count": 0,
-            "network-max-species": 0,
-            "network-top-edges": 0,
-            "network-anchor-smiles": "[H]",
-            "network-direction": "both",
-            "network-depth": 0,
-            "network-min-net-tp": 0,
-            "network-max-nodes": 1,
-            "network-layout": "grid",
-            "network-raw-store": None,
-            "network-context-store": {
-                "dataset_id": "run.lammpstrj",
-                "network_semantics": semantics,
-            },
-            "pathway-highlight-store": None,
+def test_selected_single_step_path_queries_time_evidence(monkeypatch) -> None:
+    def fake_validate(artifacts, step, *, max_occurrences):
+        assert artifacts == {"route": "/tmp/run.route"}
+        assert step["reaction_text"] == "[H] + [O] -> [H][O]"
+        assert max_occurrences == 20
+        return {
+            "rows": [
+                {
+                    "occurrence_rank": 1,
+                    "evidence_source": "Route 候选",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "frame_span": 10,
+                    "reaction_smiles": step["reaction_text"],
+                }
+            ],
+            "evidence_level": "route",
+            "message": "找到 1 个 Route 原子转移时间候选。",
         }
-        app_store = {
-                "base": "run.lammpstrj",
-                "artifacts": {
-                    "reaction": "/data/run.reactionabcd",
-                    "table": "/data/run.lammpstrj.table",
-                },
-            }
-        states.update(overrides)
-        response = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=[
-                    "network-search-btn",
-                    "network-semantics",
-                    "network-evidence-filter",
-                    "app-store",
-                ],
-                changed="network-search-btn.n_clicks",
-                input_values={
-                    "network-search-btn": 1,
-                    "network-semantics": semantics,
-                    "network-evidence-filter": "all",
-                    "app-store": app_store,
-                },
-                state_values=states,
-            ),
-        )
-        assert response.status_code == 200
-        return response.get_json()["response"]
 
-    mechanism_result = invoke("mechanism")
-    assert calls == [
-        (
-            "mechanism",
-            {
-                "anchor_smiles": "[H]",
-                "direction": "both",
-                "max_depth": 0,
-                "min_net_tp": 0,
-                "max_nodes": 1,
-            },
-        )
-    ]
-    assert mechanism_result["network-store"]["data"]["dataset_id"] == "run.lammpstrj"
-    assert mechanism_result["network-cytoscape"]["tapNodeData"] is None
-
-    observation_result = invoke("event_transfer")
-    assert calls[-1] == (
-        "observation",
-        {"min_count": 0, "max_species": 0, "top_edges": 0},
+    monkeypatch.setattr(
+        svc,
+        "validate_pathway_step_occurrences",
+        fake_validate,
     )
-    assert observation_result["network-store"]["data"]["network_semantics"] == "event_transfer"
-
-
-def test_network_controls_switch_by_semantics_and_handoff_exact_anchor() -> None:
     app = create_app()
     client = app.server.test_client()
-    controls = client.post(
+    response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["network-semantics", "network-store", "app-store"],
-            changed="network-semantics.value",
+            input_ids=[
+                "pathway-selected-path",
+                "pathway-selected-step",
+                "app-store",
+            ],
+            changed="pathway-selected-step.data",
             input_values={
-                "network-semantics": "mechanism",
-                "network-store": _mechanism_network_payload(),
-                "app-store": {"dataset_id": "数据集 甲/1"},
-            },
-            state_values={},
-        ),
-    )
-    assert controls.status_code == 200
-    control_result = controls.get_json()["response"]
-    assert control_result["network-mechanism-controls"]["style"]["display"] != "none"
-    assert control_result["network-observation-controls"]["style"]["display"] == "none"
-    assert control_result["network-json-btn"]["disabled"] is False
-
-    handoff = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["app-store"],
-            changed="app-store.data",
-            input_values={
+                "pathway-selected-path": {
+                    "path_rank": 1,
+                    "species_ids": ["[H]", "[H][O]"],
+                    "reaction_keys": ["[H]+[O]->[H][O]"],
+                },
+                "pathway-selected-step": {
+                    "step_index": 1,
+                    "reaction_text": "[H] + [O] -> [H][O]",
+                },
                 "app-store": {
-                    "dataset_id": "dataset-A",
-                    "selected_smiles": "[13CH3]",
+                    "artifacts": {"route": "/tmp/run.route"},
                 },
             },
             state_values={},
         ),
     )
-    assert handoff.status_code == 200
-    assert (
-        handoff.get_json()["response"]["network-anchor-smiles"]["value"]
-        == "[13CH3]"
-    )
-    assert (
-        handoff.get_json()["response"]["network-semantics"]["value"]
-        == "mechanism"
-    )
 
-
-def test_network_anchor_rejects_cross_dataset_or_missing_pathway_provenance() -> None:
-    app = create_app()
-    client = app.server.test_client()
-
-    selected_path = {
-        "path_rank": 1,
-        "species_ids": ["[H][O]"],
-        "reaction_keys": ["[H]+[O]->[H][O]"],
-    }
-    for pathway_context in (
-        None,
-        {
-            "schema_version": "reacnet-scope/pathway-context/v1",
-            "dataset_id": "dataset-A",
-            "source_signatures": {},
-        },
-    ):
-        response = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=["pathway-highlight-network-btn"],
-                changed="pathway-highlight-network-btn.n_clicks",
-                input_values={"pathway-highlight-network-btn": 1},
-                state_values={
-                    "pathway-selected-path": selected_path,
-                    "pathway-context-store": pathway_context,
-                    "app-store": {
-                        "dataset_id": "dataset-B",
-                        "selected_smiles": "[13CH3]",
-                    },
-                },
-            ),
-        )
-        assert response.status_code == 200
-        result = response.get_json()["response"]
-        assert result["network-anchor-smiles"]["value"] == ""
-        assert result["pathway-highlight-store"]["data"] is None
-
-
-def test_network_highlight_uses_exact_ids_without_removing_elements() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    payload = _mechanism_network_payload()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-store", "network-layout"],
-            changed="network-store.data",
-            input_values={
-                "network-store": {
-                    **payload,
-                    "_ui_pathway_highlight": {
-                    "species_ids": ["[H]"],
-                    "reaction_keys": ["[H]+[O]+[O]->[H][O]+[O]"],
-                    },
-                },
-                "network-layout": "grid",
-            },
-            state_values={},
-        ),
-    )
     assert response.status_code == 200
     result = response.get_json()["response"]
-    elements = result["network-cytoscape"]["elements"]
-    assert len(elements) == len(payload["elements"])
-    by_id = {item["data"]["id"]: item for item in elements}
-    assert "is-path-highlight" in by_id["species:h"]["classes"]
-    assert "is-path-highlight" in by_id["reaction:one"]["classes"]
-    assert "is-path-highlight" not in by_id["species:ho"]["classes"]
-    assert by_id["edge:ho"]["data"] == payload["elements"][4]["data"]
-    assert result["network-cytoscape"]["layout"] == {"name": "grid"}
-    assert "kinetic flux" not in json.dumps(result, ensure_ascii=False)
-
-
-def test_network_semantics_and_dataset_changes_atomically_clear_display_state() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    old = _mechanism_network_payload()
-    inputs = [
-        "network-search-btn",
-        "network-semantics",
-        "network-evidence-filter",
-        "app-store",
-    ]
-    states = {
-        "network-min-count": 1,
-        "network-max-species": 60,
-        "network-top-edges": 40,
-        "network-anchor-smiles": "[H]",
-        "network-direction": "both",
-        "network-depth": 2,
-        "network-min-net-tp": 1,
-        "network-max-nodes": 200,
-        "network-layout": "grid",
-        "network-raw-store": old,
-        "network-context-store": {
-            "dataset_id": "old",
-            "network_semantics": "mechanism",
-        },
-        "pathway-highlight-store": {
-            "dataset_id": "old",
-            "species_ids": ["[H]"],
-        },
-    }
-
-    switched = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=inputs,
-            changed="network-semantics.value",
-            input_values={
-                "network-search-btn": None,
-                "network-semantics": "event_transfer",
-                "network-evidence-filter": "all",
-                "app-store": {"dataset_id": "old"},
-            },
-            state_values=states,
-        ),
-    )
-    assert switched.status_code == 200
-    switched_result = switched.get_json()["response"]
-    assert switched_result["network-raw-store"]["data"] is None
-    assert switched_result["network-store"]["data"] is None
-    assert switched_result["network-cytoscape"]["tapNodeData"] is None
-    assert switched_result["network-alert"]["children"] == ""
-    rendered_reset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-store", "network-layout"],
-            changed="network-store.data",
-            input_values={
-                "network-store": None,
-                "network-layout": "grid",
-            },
-            state_values={},
-        ),
-    ).get_json()["response"]
-    assert rendered_reset["network-cytoscape"]["elements"] == []
-    assert (
-        rendered_reset["network-semantics-badge"]["children"]
-        == "尚未构建网络"
-    )
-    detail_reset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-cytoscape", "network-store"],
-            changed="network-store.data",
-            input_values={
-                "network-cytoscape": None,
-                "network-store": None,
-            },
-            state_values={},
-        ),
-    ).get_json()["response"]
-    assert detail_reset["network-open-events-btn"]["disabled"] is True
-    export_reset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-semantics", "network-store", "app-store"],
-            changed="network-store.data",
-            input_values={
-                "network-semantics": "event_transfer",
-                "network-store": None,
-                "app-store": {"dataset_id": "old"},
-            },
-            state_values={},
-        ),
-    ).get_json()["response"]
-    assert export_reset["network-json-btn"]["disabled"] is True
-    assert export_reset["network-edge-csv-btn"]["disabled"] is True
-
-    changed_dataset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=inputs,
-            changed="app-store.data",
-            input_values={
-                "network-search-btn": None,
-                "network-semantics": "mechanism",
-                "network-evidence-filter": "all",
-                "app-store": {"dataset_id": "new"},
-            },
-            state_values=states,
-        ),
-    )
-    assert changed_dataset.status_code == 200
-    changed_result = changed_dataset.get_json()["response"]
-    assert changed_result["network-context-store"]["data"]["dataset_id"] == "new"
-    assert changed_result["network-raw-store"]["data"] is None
-    assert changed_result["network-store"]["data"] is None
-
-
-def test_network_filter_projects_store_alert_canvas_and_all_exports_without_rebuild(
-    monkeypatch,
-) -> None:
-    raw = _mechanism_network_payload()
-    projected = {
-        **raw,
-        "nodes": [],
-        "edges": [],
-        "elements": [],
-        "meta": {
-            "node_count": 0,
-            "edge_count": 0,
-            "reaction_count": 0,
-            "truncated": False,
-            "reason": "filtered_by_evidence",
-        },
-        "_ui_evidence_filter": "network_only",
-    }
-    calls: list[tuple[dict[str, Any], str]] = []
-
-    monkeypatch.setattr(
-        svc,
-        "project_network_evidence",
-        lambda payload, evidence_filter: (
-            calls.append((payload, evidence_filter)) or projected
-        ),
-    )
-    monkeypatch.setattr(
-        svc,
-        "build_mechanism_elements",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("filter must not rebuild")
-        ),
-    )
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "network-search-btn",
-                "network-semantics",
-                "network-evidence-filter",
-                "app-store",
-            ],
-            changed="network-evidence-filter.value",
-            input_values={
-                "network-search-btn": 1,
-                "network-semantics": "mechanism",
-                "network-evidence-filter": "network_only",
-                "app-store": {"dataset_id": "数据集 甲/1"},
-            },
-            state_values={
-                "network-min-count": 1,
-                "network-max-species": 60,
-                "network-top-edges": 40,
-                "network-anchor-smiles": "[H]",
-                "network-direction": "both",
-                "network-depth": 2,
-                "network-min-net-tp": 1,
-                "network-max-nodes": 200,
-                "network-layout": "grid",
-                "network-raw-store": raw,
-                "network-context-store": {
-                    "dataset_id": "数据集 甲/1",
-                    "network_semantics": "mechanism",
-                },
-                "pathway-highlight-store": None,
-            },
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert calls == [(raw, "network_only")]
-    assert result["network-store"]["data"] == projected
-    assert "0 个节点" in str(result["network-alert"]["children"])
-
-    rendered = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-store", "network-layout"],
-            changed="network-store.data",
-            input_values={
-                "network-store": projected,
-                "network-layout": "grid",
-            },
-            state_values={},
-        ),
-    ).get_json()["response"]
-    assert rendered["network-cytoscape"]["elements"] == []
-
-    exported_payloads: list[dict[str, Any]] = []
-
-    def fake_export(payload, format_name):
-        exported_payloads.append(payload)
-        if format_name == "cytoscape-json":
-            return {"elements": {"nodes": [], "edges": []}}
-        if format_name in {"graphml", "gexf"}:
-            return b"<graph/>"
-        return "id\n"
-
-    monkeypatch.setattr(svc, "export_mechanism_graph", fake_export)
-    for button_id in (
-        "network-json-btn",
-        "network-graphml-btn",
-        "network-gexf-btn",
-        "network-node-csv-btn",
-        "network-edge-csv-btn",
-    ):
-        download = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=[button_id],
-                changed=f"{button_id}.n_clicks",
-                input_values={button_id: 1},
-                state_values={"network-store": projected},
-            ),
-        )
-        assert download.status_code == 200
-    assert exported_payloads == [projected] * 5
-
-
-def test_network_alert_exposes_domain_state_without_interpreting_html() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    payload = {
-        **_mechanism_network_payload(),
-        "nodes": [],
-        "edges": [],
-        "elements": [],
-        "evidence_level": "reaction_passage_counts",
-        "evidence_status": "network_only",
-        "preparation_command": "<img src=x onerror=alert(1)>",
-        "meta": {
-            "node_count": 0,
-            "edge_count": 0,
-            "reaction_count": 0,
-            "truncated": True,
-            "reason": "species_absent",
-        },
-    }
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "network-search-btn",
-                "network-semantics",
-                "network-evidence-filter",
-                "app-store",
-            ],
-            changed="network-evidence-filter.value",
-            input_values={
-                "network-search-btn": 1,
-                "network-semantics": "mechanism",
-                "network-evidence-filter": "all",
-                "app-store": {"dataset_id": "数据集 甲/1"},
-            },
-            state_values={
-                "network-min-count": 1,
-                "network-max-species": 60,
-                "network-top-edges": 40,
-                "network-anchor-smiles": "[H]",
-                "network-direction": "both",
-                "network-depth": 2,
-                "network-min-net-tp": 1,
-                "network-max-nodes": 200,
-                "network-layout": "grid",
-                "network-raw-store": payload,
-                "network-context-store": {
-                    "dataset_id": "数据集 甲/1",
-                    "network_semantics": "mechanism",
-                },
-                "pathway-highlight-store": None,
-            },
-        ),
-    )
-    assert response.status_code == 200
-    alert = response.get_json()["response"]["network-alert"]["children"]
-    alert_json = json.dumps(alert, ensure_ascii=False)
-    assert "锚点物种不在当前反应网络" in alert_json
-    assert "截断" in alert_json
-    assert "reaction_passage_counts" in alert_json
-    assert "network_only" in alert_json
-    assert "&lt;img" not in alert_json
-    assert "<img src=x onerror=alert(1)>" in alert_json
-
-
-def test_missing_mechanism_anchor_is_validation_not_an_empty_network(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        svc,
-        "build_mechanism_elements",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("missing anchor must be rejected before service")
-        ),
-    )
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "network-search-btn",
-                "network-semantics",
-                "network-evidence-filter",
-                "app-store",
-            ],
-            changed="network-search-btn.n_clicks",
-            input_values={
-                "network-search-btn": 1,
-                "network-semantics": "mechanism",
-                "network-evidence-filter": "all",
-                "app-store": {
-                    "dataset_id": "dataset",
-                    "artifacts": {"reaction": "/data/run.reactionabcd"},
-                },
-            },
-            state_values={
-                "network-min-count": 1,
-                "network-max-species": 60,
-                "network-top-edges": 40,
-                "network-anchor-smiles": " ",
-                "network-direction": "both",
-                "network-depth": 2,
-                "network-min-net-tp": 1,
-                "network-max-nodes": 200,
-                "network-layout": "grid",
-                "network-raw-store": None,
-                "network-context-store": {
-                    "dataset_id": "dataset",
-                    "network_semantics": "mechanism",
-                },
-                "pathway-highlight-store": None,
-            },
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert "精确 SMILES" in str(result["network-alert"]["children"])
-    assert result["network-raw-store"]["data"] is None
-    assert result["network-store"]["data"] is None
+    assert result["pathway-evidence-grid"]["data"][0]["start_frame"] == 10
+    assert "只有 1 步，不存在两步连续性" in result[
+        "pathway-evidence-alert"
+    ]["children"]
+    assert "Route 原子转移时间候选" in result[
+        "pathway-evidence-alert"
+    ]["children"]
 
 
 def test_loading_another_dataset_drops_cross_dataset_species_selection(
@@ -1535,60 +1406,6 @@ def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
     assert ids[0] != ids[2]
     assert ids[0] == ids[3]
 
-    old_network = {
-        **_mechanism_network_payload(),
-        "dataset_id": ids[0],
-    }
-    reset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "network-search-btn",
-                "network-semantics",
-                "network-evidence-filter",
-                "app-store",
-            ],
-            changed="app-store.data",
-            input_values={
-                "network-search-btn": None,
-                "network-semantics": "mechanism",
-                "network-evidence-filter": "all",
-                "app-store": loaded_stores[2],
-            },
-            state_values={
-                "network-min-count": 1,
-                "network-max-species": 60,
-                "network-top-edges": 40,
-                "network-anchor-smiles": "[H]",
-                "network-direction": "both",
-                "network-depth": 2,
-                "network-min-net-tp": 1,
-                "network-max-nodes": 200,
-                "network-layout": "grid",
-                "network-raw-store": old_network,
-                "network-context-store": {
-                    "dataset_id": ids[0],
-                    "network_semantics": "mechanism",
-                },
-                "pathway-highlight-store": {
-                    "dataset_id": ids[0],
-                    "species_ids": ["[H]"],
-                },
-            },
-        ),
-    )
-    assert reset.status_code == 200
-    cleared = reset.get_json()["response"]
-    assert cleared["network-raw-store"]["data"] is None
-    assert cleared["network-store"]["data"] is None
-    assert cleared["network-cytoscape"]["tapNodeData"] is None
-    assert cleared["network-context-store"]["data"] == {
-        "dataset_id": ids[2],
-        "network_semantics": "mechanism",
-    }
-
-
 def test_pathway_reset_trigger_kind_prioritizes_dataset_changes() -> None:
     class FakeContext:
         def __init__(
@@ -1603,40 +1420,15 @@ def test_pathway_reset_trigger_kind_prioritizes_dataset_changes() -> None:
             }
             self.triggered_id = triggered_id
 
-    class LegacyContext:
-        triggered = [
-            {"prop_id": "network-semantics.value"},
-            {"prop_id": "app-store.data"},
-        ]
-        triggered_id = "network-semantics"
-
     old_context = {
         "schema_version": "reacnet-scope/pathway-context/v1",
         "dataset_id": "dataset-A",
     }
-    for prop_ids in (
-        ["network-semantics.value", "app-store.data"],
-        ["app-store.data", "network-semantics.value"],
-    ):
-        assert cb._pathway_reset_trigger_kind(
-            FakeContext(prop_ids, triggered_id="network-semantics"),
-            {"dataset_id": "dataset-B"},
-            old_context,
-        ) == "dataset"
     assert cb._pathway_reset_trigger_kind(
-        LegacyContext(),
+        FakeContext(["app-store.data"], triggered_id="app-store"),
         {"dataset_id": "dataset-B"},
         old_context,
     ) == "dataset"
-
-    assert cb._pathway_reset_trigger_kind(
-        FakeContext(
-            ["network-semantics.value", "app-store.data"],
-            triggered_id="app-store",
-        ),
-        {"dataset_id": "dataset-A", "selected_smiles": "[H]"},
-        old_context,
-    ) == "semantics"
     assert cb._pathway_reset_trigger_kind(
         FakeContext(["app-store.data"], triggered_id="app-store"),
         {"dataset_id": "dataset-A", "selected_smiles": "[H]"},
@@ -1654,7 +1446,7 @@ def test_pathway_reset_trigger_kind_prioritizes_dataset_changes() -> None:
     ) is None
 
 
-def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -> None:
+def test_dataset_change_clears_pathway_selection() -> None:
     app = create_app()
     client = app.server.test_client()
     old_context = {
@@ -1663,234 +1455,30 @@ def test_dataset_and_semantics_changes_clear_pathway_selection_and_highlight() -
         "source_signatures": {},
     }
 
-    for changed_order in (
-        ["network-semantics.value", "app-store.data"],
-        ["app-store.data", "network-semantics.value"],
-    ):
-        changed_dataset = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=["app-store", "network-semantics"],
-                changed=changed_order,
-                input_values={
-                    "app-store": {"dataset_id": "dataset-B"},
-                    "network-semantics": "mechanism",
-                },
-                state_values={
-                    "pathway-context-store": old_context,
-                    "pathway-highlight-store": {
-                        "dataset_id": "dataset-A",
-                        "pending": False,
-                    },
-                },
-                output_id="pathway-context-store",
-            ),
-        )
-        assert changed_dataset.status_code == 200
-        changed = changed_dataset.get_json()["response"]
-        assert changed["pathway-store"]["data"] is None
-        assert changed["pathway-context-store"]["data"] is None
-        assert changed["pathway-selected-path"]["data"] is None
-        assert changed["pathway-selected-step"]["data"] is None
-        assert changed["pathway-highlight-store"]["data"] is None
-        assert changed["pathway-grid"]["selected_rows"] == []
-        assert changed["pathway-grid"]["data"] == []
-        assert changed["pathway-cytoscape"]["elements"] == []
-        assert changed["pathway-cytoscape"]["tapNodeData"] is None
-        assert changed["pathway-open-events-btn"]["disabled"] is True
-        assert changed["pathway-highlight-network-btn"]["disabled"] is True
-
-    changed_semantics = client.post(
+    changed_dataset = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["app-store", "network-semantics"],
-            changed="network-semantics.value",
-            input_values={
-                "app-store": {"dataset_id": "dataset-A"},
-                "network-semantics": "event_transfer",
-            },
+            input_ids=["app-store"],
+            changed="app-store.data",
+            input_values={"app-store": {"dataset_id": "dataset-B"}},
             state_values={
                 "pathway-context-store": old_context,
-                "pathway-highlight-store": {
-                    "dataset_id": "dataset-A",
-                    "pending": False,
-                },
             },
             output_id="pathway-context-store",
         ),
     )
-    assert changed_semantics.status_code == 200
-    semantics = changed_semantics.get_json()["response"]
-    assert "pathway-store" not in semantics
-    assert "pathway-context-store" not in semantics
-    assert semantics["pathway-selected-path"]["data"] is None
-    assert semantics["pathway-selected-step"]["data"] is None
-    assert semantics["pathway-highlight-store"]["data"] is None
-
-    same_dataset_multi_trigger = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["app-store", "network-semantics"],
-            changed=["app-store.data", "network-semantics.value"],
-            input_values={
-                "app-store": {
-                    "dataset_id": "dataset-A",
-                    "selected_smiles": "[H]",
-                },
-                "network-semantics": "event_transfer",
-            },
-            state_values={
-                "pathway-context-store": old_context,
-                "pathway-highlight-store": {
-                    "dataset_id": "dataset-A",
-                    "pending": False,
-                },
-            },
-            output_id="pathway-context-store",
-        ),
-    )
-    assert same_dataset_multi_trigger.status_code == 200
-    same_dataset = same_dataset_multi_trigger.get_json()["response"]
-    assert "pathway-store" not in same_dataset
-    assert "pathway-context-store" not in same_dataset
-    assert "data" not in same_dataset.get("pathway-grid", {})
-    assert "elements" not in same_dataset.get("pathway-cytoscape", {})
-    assert same_dataset["pathway-selected-path"]["data"] is None
-    assert same_dataset["pathway-selected-step"]["data"] is None
-    assert same_dataset["pathway-highlight-store"]["data"] is None
-
-    pending_handoff = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["app-store", "network-semantics"],
-            changed="network-semantics.value",
-            input_values={
-                "app-store": {"dataset_id": "dataset-A"},
-                "network-semantics": "mechanism",
-            },
-            state_values={
-                "pathway-context-store": old_context,
-                "pathway-highlight-store": {
-                    "dataset_id": "dataset-A",
-                    "pending": True,
-                    "species_ids": ["[H]"],
-                },
-            },
-            output_id="pathway-context-store",
-        ),
-    )
-    assert pending_handoff.status_code == 200
-    pending = pending_handoff.get_json()["response"]
-    assert "pathway-highlight-store" not in pending
-
-
-def test_network_reaction_detail_and_event_handoff_keep_repeated_sides() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    payload = _mechanism_network_payload()
-    reaction_data = payload["elements"][2]["data"]
-    detail_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-cytoscape", "network-store"],
-            changed="network-cytoscape.tapNodeData",
-            input_values={
-                "network-cytoscape": reaction_data,
-                "network-store": payload,
-            },
-            state_values={},
-        ),
-    )
-    assert detail_response.status_code == 200
-    detail_text = json.dumps(
-        detail_response.get_json()["response"]["network-detail-panel"]["children"],
-        ensure_ascii=False,
-    )
-    assert "[H] + [O] + [O] → [H][O] + [O]" in detail_text
-    for value in ("9", "2", "7", "5", "4", "0.8"):
-        assert value in detail_text
-    assert (
-        detail_response.get_json()["response"]["network-open-events-btn"]["disabled"]
-        is False
-    )
-
-    handoff_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["network-open-events-btn"],
-            changed="network-open-events-btn.n_clicks",
-            input_values={"network-open-events-btn": 1},
-            state_values={"network-cytoscape": reaction_data},
-        ),
-    )
-    assert handoff_response.status_code == 200
-    assert (
-        handoff_response.get_json()["response"]["event-reaction-text"]["value"]
-        == "[H] + [O] + [O] -> [H][O] + [O]"
-    )
-
-
-def test_network_exports_are_store_only_and_have_safe_traceable_names(
-    monkeypatch,
-) -> None:
-    payload = _mechanism_network_payload()
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("download must not rebuild a network")
-
-    monkeypatch.setattr(svc, "build_mechanism_elements", forbidden)
-    monkeypatch.setattr(svc, "build_observation_elements", forbidden)
-    export_calls: list[str] = []
-
-    def fake_export(_payload, format_name):
-        export_calls.append(format_name)
-        if format_name == "cytoscape-json":
-            return {"data": {"网络": "机制"}}
-        if format_name in {"graphml", "gexf"}:
-            return "<graph>机制</graph>".encode()
-        return "id,label\n1,机制\n"
-
-    monkeypatch.setattr(svc, "export_mechanism_graph", fake_export)
-    app = create_app()
-    client = app.server.test_client()
-    expected = {
-        "network-json-btn": ("network-json-download", ".json"),
-        "network-graphml-btn": ("network-graphml-download", ".graphml"),
-        "network-gexf-btn": ("network-gexf-download", ".gexf"),
-        "network-node-csv-btn": ("network-node-csv-download", "_nodes.csv"),
-        "network-edge-csv-btn": ("network-edge-csv-download", "_edges.csv"),
-    }
-    for button_id, (download_id, suffix) in expected.items():
-        response = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=[button_id],
-                changed=f"{button_id}.n_clicks",
-                input_values={button_id: 1},
-                state_values={"network-store": payload},
-            ),
-        )
-        assert response.status_code == 200
-        download = response.get_json()["response"][download_id]["data"]
-        filename = download["filename"]
-        assert "mechanism" in filename
-        assert "mechanism-network-v1" in filename
-        assert "/" not in filename
-        assert filename.endswith(suffix)
-    assert export_calls == [
-        "cytoscape-json",
-        "graphml",
-        "gexf",
-        "node-csv",
-        "edge-csv",
-    ]
+    assert changed_dataset.status_code == 200
+    changed = changed_dataset.get_json()["response"]
+    assert changed["pathway-store"]["data"] is None
+    assert changed["pathway-context-store"]["data"] is None
+    assert changed["pathway-selected-path"]["data"] is None
+    assert changed["pathway-selected-step"]["data"] is None
+    assert changed["pathway-grid"]["selected_rows"] == []
+    assert changed["pathway-grid"]["data"] == []
+    assert changed["pathway-cytoscape"]["elements"] == []
+    assert changed["pathway-cytoscape"]["tapNodeData"] is None
+    assert changed["pathway-open-events-btn"]["disabled"] is True
 
 
 def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:
@@ -1944,206 +1532,115 @@ def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> 
     assert captured["timestep_ps"] == 0.002
 
 
-def test_species_search_preserves_zero_mass_tolerance(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
+def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+    current_state = {"value": "building"}
 
-    def fake_search(_artifacts, _query, **kwargs):
-        captured.update(kwargs)
-        return {"rows": [], "meta": {"catalog_size": 0, "moname_available": False}}
-
-    monkeypatch.setattr(svc, "search_species_catalog", fake_search)
-    app = create_app()
-    client = app.server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]]
-        == ["workflow-species-search", "app-store"]
-    )
-    input_values = {
-        "workflow-species-search": 1,
-        "app-store": {"artifacts": {"species": "/tmp/example.species"}},
-    }
-    state_values = {
-        "workflow-species-query": "31",
-        "workflow-species-kind": "mass",
-        "workflow-mass-tolerance": 0,
-        "workflow-mass-mode": "exact",
-    }
-    payload = {
-        "output": dependency["output"],
-        "outputs": [
-            {"id": "workflow-species-grid", "property": "data"},
-            {"id": "workflow-species-grid", "property": "columns"},
-            {"id": "workflow-species-alert", "property": "children"},
-            {"id": "workflow-species-grid", "property": "selected_rows"},
-        ],
-        "changedPropIds": ["workflow-species-search.n_clicks"],
-        "inputs": [
-            {"id": item["id"], "property": item["property"], "value": input_values[item["id"]]}
-            for item in dependency["inputs"]
-        ],
-        "state": [
-            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
-            for item in dependency["state"]
-        ],
-    }
-
-    response = client.post("/_dash-update-component", json=payload)
-    assert response.status_code == 200
-    assert captured["mass_tolerance"] == 0
-
-
-def test_species_search_clears_stale_workflow_choices_before_new_selection(monkeypatch) -> None:
-    def fake_search(_artifacts, query, **_kwargs):
-        assert query == "CH3"
+    def fake_status(artifacts):
+        calls.append(artifacts)
         return {
-            "rows": [{"formula": "CH3", "smiles": "[H][C]([H])[H]"}],
-            "meta": {"catalog_size": 1, "moname_available": False},
+            "state": current_state["value"],
+            "progress": 0.5,
+            "timepoints": 3,
+            "unique_species": 4,
         }
 
-    monkeypatch.setattr(svc, "search_species_catalog", fake_search)
+    monkeypatch.setattr(svc, "composition_index_status", fake_status)
     app = create_app()
     client = app.server.test_client()
-    workflow = {
-        "dataset_key": "rp3",
-        "current_step": 2,
-        "species": {"formula": "H2", "smiles": "[H][H]"},
-        "channel": {"reaction_smiles": "[H]+[H]->[H][H]"},
-        "event": {"event_id": "old"},
-        "validations": [],
+    input_ids = ["app-store", "page-store", "carbon-index-refresh"]
+    store = {
+        "label": "example",
+        "artifacts": {"species": "/tmp/example.species"},
     }
 
-    search_dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]]
-        == ["workflow-species-search", "app-store"]
+    hidden_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="page-store.data",
+            input_values={
+                "app-store": store,
+                "page-store": {"page": "species"},
+                "carbon-index-refresh": 0,
+            },
+            state_values={},
+            output_id="carbon-index-refresh",
+        ),
     )
-    search_payload = {
-        "output": search_dependency["output"],
-        "outputs": [
-            {"id": "workflow-species-grid", "property": "data"},
-            {"id": "workflow-species-grid", "property": "columns"},
-            {"id": "workflow-species-alert", "property": "children"},
-            {"id": "workflow-species-grid", "property": "selected_rows"},
-        ],
-        "changedPropIds": ["workflow-species-search.n_clicks"],
-        "inputs": [
-            {"id": "workflow-species-search", "property": "n_clicks", "value": 1},
-            {"id": "app-store", "property": "data", "value": {"base": "rp3", "artifacts": {"species": "/tmp/example.species"}}},
-        ],
-        "state": [
-            {"id": "workflow-species-query", "property": "value", "value": "CH3"},
-            {"id": "workflow-species-kind", "property": "value", "value": "auto"},
-            {"id": "workflow-mass-tolerance", "property": "value", "value": 0.5},
-            {"id": "workflow-mass-mode", "property": "value", "value": "exact"},
-        ],
-    }
-    search_response = client.post("/_dash-update-component", json=search_payload)
-    assert search_response.status_code == 200
-    search_data = search_response.get_json()["response"]
-    assert search_data["workflow-species-grid"]["selected_rows"] == []
+    assert hidden_response.status_code == 200
+    assert hidden_response.get_json()["response"]["carbon-index-refresh"]["disabled"] is True
+    assert calls == []
 
-    workflow_dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]][:2]
-        == ["app-store", "workflow-species-search"]
+    building_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="page-store.data",
+            input_values={
+                "app-store": store,
+                "page-store": {"page": "carbon"},
+                "carbon-index-refresh": 0,
+            },
+            state_values={},
+            output_id="carbon-index-refresh",
+        ),
     )
-    input_values = {
-        "app-store": {"base": "rp3", "artifacts": {"species": "/tmp/example.species"}},
-        "workflow-species-search": 1,
-        "workflow-species-grid": [],
-        "workflow-species-confirm": None,
-        "workflow-production-grid": [],
-        "workflow-consumption-grid": [],
-        "workflow-channel-confirm": None,
-        "workflow-event-grid": [],
-        "workflow-event-confirm": None,
-        "workflow-validation-save": None,
-        "workflow-step-1": None,
-        "workflow-step-2": None,
-        "workflow-step-3": None,
-        "workflow-step-4": None,
-    }
-    state_values = {
-        "workflow-store": workflow,
-        "workflow-species-grid": search_data["workflow-species-grid"]["data"],
-        "workflow-production-grid": [],
-        "workflow-consumption-grid": [],
-        "workflow-event-grid": [],
-        "workflow-validation-outcome": "support",
-        "workflow-validation-note": "",
-    }
-    workflow_payload = {
-        "output": workflow_dependency["output"],
-        "outputs": {"id": "workflow-store", "property": "data"},
-        "changedPropIds": ["workflow-species-search.n_clicks"],
-        "inputs": [
-            {"id": item["id"], "property": item["property"], "value": input_values[item["id"]]}
-            for item in workflow_dependency["inputs"]
-        ],
-        "state": [
-            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
-            for item in workflow_dependency["state"]
-        ],
-    }
-    workflow_response = client.post("/_dash-update-component", json=workflow_payload)
-    assert workflow_response.status_code == 200
-    workflow_data = workflow_response.get_json()["response"]["workflow-store"]["data"]
-    assert workflow_data["species"] is None
-    assert workflow_data["channel"] is None
-    assert workflow_data["event"] is None
-    assert workflow_data["current_step"] == 1
+    assert building_response.status_code == 200
+    assert building_response.get_json()["response"]["carbon-index-refresh"]["disabled"] is False
 
-    selection_payload = dict(workflow_payload)
-    selection_payload["changedPropIds"] = ["workflow-species-grid.selected_rows"]
-    selection_inputs = [dict(item) for item in workflow_payload["inputs"]]
-    for item in selection_inputs:
-        if item["id"] == "workflow-species-grid":
-            item["value"] = [0]
-    selection_payload["inputs"] = selection_inputs
-    selection_response = client.post("/_dash-update-component", json=selection_payload)
-    assert selection_response.status_code == 200
-    selection_data = selection_response.get_json()["response"]["workflow-store"]["data"]
-    assert selection_data["species"]["formula"] == "CH3"
-
-    state_dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]] == ["workflow-store"]
-        and "workflow-species-choice.children" in item["output"]
+    current_state["value"] = "ready"
+    ready_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="carbon-index-refresh.n_intervals",
+            input_values={
+                "app-store": store,
+                "page-store": {"page": "carbon"},
+                "carbon-index-refresh": 1,
+            },
+            state_values={},
+            output_id="carbon-index-refresh",
+        ),
     )
-    state_payload = {
-        "output": state_dependency["output"],
-        "outputs": [
-            *[
-                {"id": f"workflow-panel-{number}", "property": "style"}
-                for number in range(1, 5)
-            ],
-            *[
-                {"id": f"workflow-step-{number}", "property": "className"}
-                for number in range(1, 5)
-            ],
-            {"id": "workflow-summary", "property": "children"},
-            {"id": "workflow-species-choice", "property": "children"},
-            {"id": "workflow-channel-choice", "property": "children"},
-            {"id": "workflow-event-choice", "property": "children"},
-            {"id": "workflow-species-confirm", "property": "disabled"},
-            {"id": "workflow-channel-confirm", "property": "disabled"},
-            {"id": "workflow-event-confirm", "property": "disabled"},
-            {"id": "workflow-validation-status", "property": "children"},
-        ],
-        "changedPropIds": ["workflow-store.data"],
-        "inputs": [{"id": "workflow-store", "property": "data", "value": selection_data}],
-        "state": [],
+    assert ready_response.status_code == 200
+    ready_payload = ready_response.get_json()["response"]
+    assert ready_payload["carbon-index-refresh"]["disabled"] is True
+    assert ready_payload["carbon-index-status"]["children"].startswith("组成索引已就绪")
+    assert len(calls) == 2
+
+
+def test_structure_endpoint_honors_selected_channel_preview_dimensions(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_render(smiles, *, width, height, show_h):
+        captured.update(
+            {
+                "smiles": smiles,
+                "width": width,
+                "height": height,
+                "show_h": show_h,
+            }
+        )
+        return {"ok": True, "svg": "<svg></svg>", "message": ""}
+
+    monkeypatch.setattr(svc, "render_species_svg", fake_render)
+    client = create_app().server.test_client()
+    response = client.get(
+        "/api/structure.svg?smiles=%5BH%5D&width=180&height=116"
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "smiles": "[H]",
+        "width": 180,
+        "height": 116,
+        "show_h": True,
     }
-    state_response = client.post("/_dash-update-component", json=state_payload)
-    assert state_response.status_code == 200
-    rendered = state_response.get_json()["response"]
-    assert "CH3" in rendered["workflow-species-choice"]["children"]
-    assert rendered["workflow-species-confirm"]["disabled"] is False
 
 
 def _browser_callback_payload(
@@ -2310,6 +1807,66 @@ def _load_dataset_callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def test_manual_artifact_overrides_and_global_min_tp_are_applied_atomically(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    reaction = tmp_path / "manual.reactionabcd"
+    species = tmp_path / "manual.species"
+    reaction.write_text("8 [H] -> [H][H]\n", encoding="utf-8")
+    species.write_text("[H] 1\n", encoding="utf-8")
+    old_store = {
+        **cb.initial_store(),
+        "artifacts": {"reaction": "/auto/run.reactionabcd"},
+        "discovered_artifacts": {"reaction": "/auto/run.reactionabcd"},
+    }
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "data-overrides-apply-btn",
+                "data-overrides-reset-btn",
+            ],
+            changed="data-overrides-apply-btn.n_clicks",
+            input_values={
+                "data-overrides-apply-btn": 1,
+                "data-overrides-reset-btn": None,
+            },
+            state_values={
+                "data-global-min-tp": 7,
+                "data-override-reaction": str(reaction),
+                "data-override-species": str(species),
+                "data-override-moname": "",
+                "data-override-trajectory": "",
+                "data-override-route": "",
+                "data-override-reactionevent": "",
+                "data-override-molecules": "",
+                "app-store": old_store,
+            },
+            output_id="app-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    stored = result["app-store"]["data"]
+    assert stored["min_tp"] == 7
+    assert stored["artifacts"]["_min_tp"] == 7
+    assert stored["artifact_overrides"] == {
+        "reaction": str(reaction),
+        "species": str(species),
+    }
+    assert stored["artifacts"]["reaction"] == str(reaction)
+    assert "已应用 2 个文件覆盖" in json.dumps(
+        result["data-overrides-feedback"]["children"],
+        ensure_ascii=False,
+    )
 
 
 def _candidate_status_callback_payload(
@@ -3373,6 +2930,8 @@ def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_ca
     assert ".rs-browser-path-control .input-group" not in css
     assert ".rs-dataset-card" not in css
     assert ".rs-browser-path-control { flex-wrap: wrap; }" in css
+    assert 'body:has([data-dash-is-loading="true"]) .rs-global-operation-progress' in css
+    assert ".rs-analysis-progress.is-running::after" in css
 
 
 def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> None:
@@ -3441,9 +3000,7 @@ def test_legacy_core_queries_are_available_through_dash_services(tmp_path) -> No
         "10 [C]+[O]->[C][O]\n4 [C][O]->[C]+[O]\n",
         encoding="utf-8",
     )
-    artifacts = {"reaction": str(reaction), "species": "", "route": "", "trajectory": "", "table": ""}
+    artifacts = {"reaction": str(reaction), "species": "", "route": "", "trajectory": ""}
 
     assert svc.search_species(artifacts, "CO", kind="formula")["n_rows"] == 1
-    assert len(svc.collect_transitions(artifacts, "[C][O]")["rows"]) == 2
     assert len(svc.search_reactions_by_formula(artifacts, "C+O", "CO")["rows"]) == 1
-    assert svc.verify_literature_mechanism(artifacts, ["C + O -> CO"])["ok"] is True

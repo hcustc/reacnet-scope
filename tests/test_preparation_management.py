@@ -165,6 +165,22 @@ def test_event_only_discovers_paired_rng_outputs_without_reaction_file(
     ] == "ready"
 
 
+def test_event_only_prepares_unpaired_reactionevent(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    Path(f"{base}.reactionabcd").unlink()
+    molecules.unlink()
+
+    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+
+    status = EVENT_EVIDENCE_STORE.status(str(reactionevent), "")
+    assert status["state"] == "ready"
+    assert status["association_available"] is False
+    assert status["time_basis"] == "timestep_index"
+
+
 def test_prepare_can_clear_event_cache_after_sources_are_removed(
     tmp_path, monkeypatch
 ) -> None:
