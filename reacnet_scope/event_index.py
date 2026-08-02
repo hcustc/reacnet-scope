@@ -33,11 +33,19 @@ from .rng_events import (
     _trajectory_bond_id,
     canonical_reaction_key,
     changed_components,
+    net_reaction_key,
     reaction_key,
 )
 
 
 EVENT_EVIDENCE_SCHEMA_VERSION = 3
+EVENT_ASSOCIATION_ALGORITHM_VERSION = 2
+
+
+class EventNotFoundError(LookupError):
+    """Raised when a ready event index does not contain one event ID."""
+
+
 _REQUIRED_TABLE_COLUMNS = {
     "meta": {"key", "value"},
     "events": {
@@ -594,6 +602,13 @@ class EventEvidenceStore:
             "schema_version",
         ) != EVENT_EVIDENCE_SCHEMA_VERSION:
             raise IndexInvalidError("Event evidence index schema is incompatible")
+        if molecule_path and _strict_int(
+            meta.get("association_algorithm_version"),
+            "association_algorithm_version",
+        ) != EVENT_ASSOCIATION_ALGORITHM_VERSION:
+            raise IndexInvalidError(
+                "Event evidence index association algorithm is incompatible"
+            )
         if meta.get("build_state") != "ready":
             raise IndexInvalidError("Event evidence index is not complete")
         checks = (
@@ -742,17 +757,37 @@ class EventEvidenceStore:
                     connection.close()
             except IndexNotReadyError:
                 meta = {}
+        reactionevent_size = int(
+            meta.get("reactionevent_size", reaction_path.stat().st_size) or 0
+        )
+        reactionevent_offset = _safe_meta_int(
+            meta,
+            "reactionevent_offset",
+        )
+        molecules_size = int(meta.get("molecules_size", 0) or 0)
+        molecules_offset = _safe_meta_int(meta, "molecules_offset")
         return {
             "state": state,
             "index_path": str(index_path),
             "building_path": str(building_path),
             "index_size": active.stat().st_size if active.exists() else 0,
+            "source_size": reactionevent_size,
+            "source_offset": reactionevent_offset,
+            "progress": min(
+                max(
+                    reactionevent_offset / max(reactionevent_size, 1),
+                    0.0,
+                ),
+                1.0,
+            ),
             "reactionevent_file": str(reaction_path.resolve()),
             "molecules_file": (
                 str(molecule_path.resolve())
                 if molecule_path is not None and molecule_path.is_file()
                 else ""
             ),
+            "molecules_size": molecules_size,
+            "molecules_offset": molecules_offset,
             "association_available": bool(
                 details.get(
                     "association_available",
@@ -855,6 +890,7 @@ class EventEvidenceStore:
                     "molecules_size": 0,
                     "molecules_mtime_ns": 0,
                     "association_available": 0,
+                    "association_algorithm_version": 0,
                     "time_basis": "timestep_index",
                     "event_count": 0,
                     "reaction_type_count": 0,
@@ -1001,6 +1037,7 @@ class EventEvidenceStore:
                     "molecules_size": 0,
                     "molecules_mtime_ns": 0,
                     "association_available": 0,
+                    "association_algorithm_version": 0,
                     "time_basis": "timestep_index",
                     "reactionevent_offset": reaction_source[1],
                     "molecules_offset": 0,
@@ -1078,6 +1115,10 @@ class EventEvidenceStore:
                 and int(existing.get("reactionevent_mtime_ns", -1) or -1)
                 == reaction_source[2]
                 and existing.get("molecules_file") == molecule_source[0]
+                and int(
+                    existing.get("association_algorithm_version", 0) or 0
+                )
+                == EVENT_ASSOCIATION_ALGORITHM_VERSION
                 and int(existing.get("molecules_size", -1) or -1)
                 == molecule_source[1]
                 and int(existing.get("molecules_mtime_ns", -1) or -1)
@@ -1160,6 +1201,9 @@ class EventEvidenceStore:
                             "molecules_size": molecule_source[1],
                             "molecules_mtime_ns": molecule_source[2],
                             "association_available": 1,
+                            "association_algorithm_version": (
+                                EVENT_ASSOCIATION_ALGORITHM_VERSION
+                            ),
                             "time_basis": "physical_timestep",
                             "reactionevent_offset": event_offset,
                             "molecules_offset": molecule_offset,
@@ -1242,7 +1286,7 @@ class EventEvidenceStore:
                         for component in changed_components(
                             before_frame[2], after_frame[2]
                         ):
-                            pools[component.key].append(component)
+                            pools[component.net_key].append(component)
                         occurrences: dict[str, int] = defaultdict(int)
                         summary_counts: dict[str, list[int]] = defaultdict(
                             lambda: [0, 0]
@@ -1252,9 +1296,12 @@ class EventEvidenceStore:
                                 event["reaction_key_text"]
                             )
                             occurrences[normalized_key] += 1
+                            event_net_key = net_reaction_key(
+                                *event["reaction_key"]
+                            )
                             component = (
-                                pools[event["reaction_key"]].popleft()
-                                if pools[event["reaction_key"]]
+                                pools[event_net_key].popleft()
+                                if pools[event_net_key]
                                 else None
                             )
                             rng_atom_ids = (
@@ -1424,6 +1471,9 @@ class EventEvidenceStore:
                                 "molecules_size": molecule_source[1],
                                 "molecules_mtime_ns": molecule_source[2],
                                 "association_available": 1,
+                                "association_algorithm_version": (
+                                    EVENT_ASSOCIATION_ALGORITHM_VERSION
+                                ),
                                 "time_basis": "physical_timestep",
                                 "reactionevent_offset": next_event_offset,
                                 "molecules_offset": after_frame[3],
@@ -1509,6 +1559,9 @@ class EventEvidenceStore:
                             "molecules_size": molecule_source[1],
                             "molecules_mtime_ns": molecule_source[2],
                             "association_available": 1,
+                            "association_algorithm_version": (
+                                EVENT_ASSOCIATION_ALGORITHM_VERSION
+                            ),
                             "time_basis": "physical_timestep",
                             "reactionevent_offset": reaction_source[1],
                             "molecules_offset": molecule_source[1],
@@ -1546,6 +1599,41 @@ class EventEvidenceStore:
         result = self.open_required(reaction_source[0], molecule_source[0])
         result["resumed"] = resumed
         return result
+
+    def get_event(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        event_id: str,
+    ) -> dict[str, Any]:
+        """Return one validated event payload by its stable primary key."""
+        opened = self.open_required(reactionevent_file, molecules_file)
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            record = connection.execute(
+                f"""
+                SELECT {_EVENT_SELECT_COLUMNS}
+                FROM events
+                WHERE event_id=?
+                """,
+                (str(event_id),),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event evidence index is corrupt: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+        if record is None:
+            raise EventNotFoundError(
+                f"Event evidence index does not contain event {event_id}"
+            )
+        try:
+            return _event_payload_from_record(record, event_index=1)
+        except (TypeError, ValueError) as exc:
+            raise IndexInvalidError(
+                f"Event evidence index payload is invalid: {exc}"
+            ) from exc
 
     def query_events(
         self,

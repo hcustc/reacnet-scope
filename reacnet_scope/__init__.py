@@ -7,6 +7,13 @@ from .indexes import (
     IndexStaleError,
     clear_index,
 )
+from .event_paths import (
+    EVENT_PATH_SCHEMA_VERSION,
+    EventPathAnalysisError,
+    EventPathSource,
+    analyze_event_paths,
+    enumerate_aggregate_reaction_paths,
+)
 
 __all__ = [
     "IndexBuildInProgressError",
@@ -14,4 +21,9 @@ __all__ = [
     "IndexNotReadyError",
     "IndexStaleError",
     "clear_index",
+    "EVENT_PATH_SCHEMA_VERSION",
+    "EventPathAnalysisError",
+    "EventPathSource",
+    "analyze_event_paths",
+    "enumerate_aggregate_reaction_paths",
 ]

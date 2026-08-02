@@ -78,8 +78,12 @@ Prepare the trajectory frame index when needed:
 uv run reacnet-scope-prepare /srv/reacnet-data/case --trajectory-only
 ```
 
-The preparation command supports `--clear {route,trajectory,all}` and
-`--rebuild {route,trajectory,all}`. Ctrl+C preserves committed checkpoints.
+The preparation command supports event, trajectory, composition and legacy
+Route targets through `--clear`, `--rebuild` and the corresponding `--*-only`
+options. Ctrl+C preserves committed checkpoints. The same event, trajectory
+and composition jobs can be launched from **Manage Data → Data preparation**;
+Dash runs them in a separate background process and polls the shared index
+checkpoints.
 
 - A trajectory index is a SQLite database containing only timestep and byte
   offsets, never a copy of coordinates. Dash opens it with SQLite `mode=ro`
@@ -92,7 +96,9 @@ The preparation command supports `--clear {route,trajectory,all}` and
 - Trajectory indexes are SQLite databases under
   `$REACNET_SCOPE_CACHE_DIR/datasets/<dataset-id>/`. Partial builds use a `.building` file and
   resume from their last committed source offset. Missing, stale, or invalid
-  indexes cause a fast online error; Dash never builds or repairs them.
+  indexes cause a fast query error. Query callbacks never build them
+  implicitly; only an explicit management-page action or
+  `reacnet-scope-prepare` command starts a build.
 - Reaction-event search requires `.reactionevent.csv`; `.molecules.csv` is
   optional and adds atom, bond, and physical-timestep evidence. Generate the
   first with `--reaction-event`, and add `--show-molecule-time` when local

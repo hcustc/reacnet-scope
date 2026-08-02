@@ -14,16 +14,28 @@ env/
 build/
 dist/
 *.egg-info/
+.cache/
+
+# Test/analysis artifacts
 .pytest_cache/
 .pytest-*/
+.coverage
+.coverage.*
+htmlcov/
 .mypy_cache/
+.pyright/
 .ruff_cache/
 
-# Local subagent/review artifacts
+# Local tool state and review artifacts
+.claude/settings.local.json
+.playwright-cli/
 .superpowers/sdd/progress.md
 .superpowers/sdd/review-*.diff
 .superpowers/sdd/task-*-brief.md
 .superpowers/sdd/task-*-report.md
+
+# Runtime logs
+*.log
 
 # Reference data files (large, not for github)
 ref_data/
@@ -33,6 +45,3 @@ ref_data/
 .DS_Store
 .idea/
 .vscode/
-
-# Playwright test logs
-.playwright-cli/

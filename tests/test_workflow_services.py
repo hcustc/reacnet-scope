@@ -167,6 +167,148 @@ def test_representative_event_ranking_and_viewer_expose_bond_evidence(tmp_path: 
     assert viewer["frames"][1]["bond_state"] == "after"
 
 
+def test_event_viewer_builds_pbc_centered_environment_and_persists_type_map(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    trajectory = tmp_path / "pbc.lammpstrj"
+
+    def frame(timestep: int) -> str:
+        return (
+            "ITEM: TIMESTEP\n"
+            f"{timestep}\n"
+            "ITEM: NUMBER OF ATOMS\n4\n"
+            "ITEM: BOX BOUNDS pp pp pp\n0 10\n0 10\n0 10\n"
+            "ITEM: ATOMS id type x y z\n"
+            "1 1 0.2 0.1 0.1\n"
+            "2 2 9.8 0.1 0.1\n"
+            "3 3 0.7 0.1 0.1\n"
+            "4 3 5.0 5.0 5.0\n"
+        )
+
+    trajectory.write_text(frame(0) + frame(10), encoding="utf-8")
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    event = {
+        "event_id": "pbc-event",
+        "atom_id_list": [1, 2],
+        "before_timestep": 0,
+        "after_timestep": 10,
+        "anchor_frame": 10,
+        "reactant_bonds": "1-2-1",
+        "product_bonds": "",
+        "association_status": "matched",
+    }
+
+    viewer = svc.build_rng_event_visualization(
+        {"trajectory": str(trajectory)},
+        event,
+        before_frames=0,
+        after_frames=0,
+        environment_radius=1.0,
+        atom_type_map={"1": "C", "2": "O", "3": "H"},
+    )
+
+    assert viewer["atom_groups"] == {
+        "core": [1, 2],
+        "participants": [1, 2],
+        "reactant": [1, 2],
+        "product": [1, 2],
+        "environment": [3],
+        "context": [1, 2, 3],
+    }
+    assert viewer["meta"]["environment"]["raw_environment_count"] == 1
+    assert viewer["meta"]["environment"]["truncated"] is False
+    anchor_atoms = {
+        atom["id"]: atom
+        for atom in viewer["frames"][1]["atoms"]
+    }
+    assert anchor_atoms[3]["group"] == "environment"
+    assert anchor_atoms[3]["element"] == "H"
+    assert abs(anchor_atoms[1]["x"] - anchor_atoms[2]["x"]) > 9
+    assert abs(
+        anchor_atoms[1]["display_x"] - anchor_atoms[2]["display_x"]
+    ) < 1
+    assert Path(viewer["paths"]["type_map"]).is_file()
+
+    reloaded = svc.build_rng_event_visualization(
+        {"trajectory": str(trajectory)},
+        event,
+        before_frames=0,
+        after_frames=0,
+        environment_radius=1.0,
+    )
+    assert reloaded["meta"]["type_element_map"] == {
+        "1": "C",
+        "2": "O",
+        "3": "H",
+    }
+    exported = svc.event_viewer_trajectory_text(reloaded)
+    assert "ITEM: ATOMS id type element x y z" in exported
+    assert "2 2 O 9.8 0.1 0.1" in exported
+
+    cleared = svc.build_rng_event_visualization(
+        {"trajectory": str(trajectory)},
+        event,
+        before_frames=0,
+        after_frames=0,
+        environment_radius=1.0,
+        atom_type_map={},
+    )
+    assert cleared["meta"]["type_element_map"] == {}
+    assert all(
+        not atom["element"]
+        for atom in cleared["frames"][0]["atoms"]
+    )
+    reloaded_after_clear = svc.build_rng_event_visualization(
+        {"trajectory": str(trajectory)},
+        event,
+        before_frames=0,
+        after_frames=0,
+        environment_radius=1.0,
+    )
+    assert reloaded_after_clear["meta"]["type_element_map"] == {}
+
+
+def test_event_viewer_partial_type_map_keeps_visible_type_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    trajectory = tmp_path / "partial-map.lammpstrj"
+    trajectory.write_text(
+        "ITEM: TIMESTEP\n0\n"
+        "ITEM: NUMBER OF ATOMS\n2\n"
+        "ITEM: BOX BOUNDS pp pp pp\n0 10\n0 10\n0 10\n"
+        "ITEM: ATOMS id type x y z\n"
+        "1 1 1 1 1\n"
+        "2 2 2 1 1\n",
+        encoding="utf-8",
+    )
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    viewer = svc.build_rng_event_visualization(
+        {"trajectory": str(trajectory)},
+        {
+            "event_id": "partial-map",
+            "atom_id_list": [1, 2],
+            "before_timestep": 0,
+            "after_timestep": 0,
+            "reactant_bonds": "",
+            "product_bonds": "1-2-1",
+        },
+        before_frames=0,
+        after_frames=0,
+        environment_radius=0,
+        atom_type_map={"1": "C"},
+    )
+
+    atoms = {atom["id"]: atom for atom in viewer["frames"][0]["atoms"]}
+    assert atoms[1]["label"] == "C"
+    assert atoms[2]["label"] == "T2"
+    assert atoms[2]["element"] == ""
+    assert "ITEM: ATOMS id type x y z" in svc.event_viewer_trajectory_text(viewer)
+
+
 def test_event_viewer_exports_frames_trajectory_and_viewer_helpers() -> None:
     viewer = {
         "event_id": "event-1",
@@ -203,6 +345,10 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers() -> None:
     frames_csv = svc.event_viewer_frames_csv(viewer)
     trajectory = svc.event_viewer_trajectory_text(viewer)
     expression = svc.event_viewer_ovito_expression(viewer)
+    ovito = svc.event_viewer_ovito_script(
+        viewer,
+        trajectory_name="event-1_subset.lammpstrj",
+    )
     vmd = svc.event_viewer_vmd_script(
         viewer,
         trajectory_name="event-1_subset.lammpstrj",
@@ -213,6 +359,10 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers() -> None:
     assert "ITEM: NUMBER OF ATOMS\n2" in trajectory
     assert "ITEM: ATOMS id type element x y z" in trajectory
     assert "ParticleIdentifier == 1 || ParticleIdentifier == 2" == expression
+    assert "from ovito.io import import_file" in ovito
+    assert "ExpressionSelectionModifier" in ovito
+    assert "event-1_subset.lammpstrj" in ovito
+    compile(ovito, "event-1_view_ovito.py", "exec")
     assert 'mol new "event-1_subset.lammpstrj"' in vmd
     assert "Original LAMMPS atom IDs: 1 2" in vmd
 
@@ -457,3 +607,148 @@ def test_core_continuous_route_search_uses_strict_read_budgets(
         "route_hits_per_reaction": 200,
         "species_validation": False,
     }
+
+
+def test_dash_event_path_service_combines_current_and_additional_repeats(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    current = tmp_path / "current.lammpstrj"
+    second = tmp_path / "second.lammpstrj"
+    for prefix in (current, second):
+        Path(f"{prefix}.reactionevent.csv").touch()
+        Path(f"{prefix}.molecules.csv").touch()
+        Path(f"{prefix}.reactionabcd").touch()
+    captured = {}
+
+    def fake_analyze(sources, **limits):
+        captured["sources"] = list(sources)
+        captured["limits"] = limits
+        return {"schema_version": "event-path/v1", "summary": {}}
+
+    monkeypatch.setattr(svc, "analyze_event_paths", fake_analyze)
+    monkeypatch.setattr(
+        svc,
+        "validate_browse_path",
+        lambda value: Path(value).expanduser().resolve(),
+    )
+
+    result = svc.analyze_event_paths_for_dash(
+        {
+            "reactionevent": f"{current}.reactionevent.csv",
+            "molecules": f"{current}.molecules.csv",
+            "reaction": f"{current}.reactionabcd",
+        },
+        current_replicate="rep1",
+        additional_sources=f"rep2={second}",
+        path_length=4,
+        start_smiles="[C]",
+        max_interval_gap=2,
+        max_timestep_gap=100,
+        max_occurrence_details=25,
+    )
+
+    assert result["schema_version"] == "event-path/v1"
+    assert [item.replicate for item in captured["sources"]] == ["rep1", "rep2"]
+    assert captured["sources"][1].reactionevent_file == f"{second}.reactionevent.csv"
+    assert captured["limits"] == {
+        "path_length": 4,
+        "start_smiles": "[C]",
+        "max_interval_gap": 2,
+        "max_timestep_gap": 100,
+        "max_occurrence_details": 25,
+    }
+
+
+def test_dash_event_path_service_requires_molecule_association(tmp_path: Path) -> None:
+    event_file = tmp_path / "run.reactionevent.csv"
+    event_file.touch()
+
+    try:
+        svc.analyze_event_paths_for_dash(
+            {"reactionevent": str(event_file)},
+        )
+    except svc.ServiceError as exc:
+        assert exc.reason == "missing_event_path_source"
+        assert ".molecules.csv" in exc.message
+    else:  # pragma: no cover - atom continuity cannot be inferred without molecules
+        raise AssertionError("event paths accepted a source without molecules")
+
+
+def test_dash_event_path_source_validation_reports_ready_index(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    artifacts = _analysis_artifacts(tmp_path)
+    EVENT_EVIDENCE_STORE.build(
+        artifacts["reactionevent"],
+        artifacts["molecules"],
+    )
+
+    result = svc.validate_event_path_sources_for_dash(
+        artifacts,
+        current_replicate="rep1",
+    )
+
+    assert result["replicate_count"] == 1
+    assert result["total_event_count"] == 1
+    assert result["sources"][0]["state"] == "ready"
+    assert result["sources"][0]["replicate"] == "rep1"
+
+
+def test_event_path_rows_filters_and_concrete_graph_are_auditable() -> None:
+    report = {
+        "paths": [
+            {
+                "signature_id": "hydrogen",
+                "reaction_keys": [
+                    "[H]+[H]->[H][H]",
+                    "[H][H]->[H]+[H]",
+                    "[H]+[H]->[H][H]",
+                ],
+                "occurrence_count": 10,
+                "independent_atom_lineage_support_count": 20,
+                "independent_lineage_set_support_count": 10,
+                "replicate_support_count": 1,
+                "replicate_reproduction_rate": 0.5,
+                "anchor_timestep_span": {"median": 20},
+            },
+            {
+                "signature_id": "chemistry",
+                "reaction_keys": ["A->B", "B->C", "C->D"],
+                "occurrence_count": 2,
+                "independent_atom_lineage_support_count": 4,
+                "independent_lineage_set_support_count": 2,
+                "replicate_support_count": 2,
+                "replicate_reproduction_rate": 1.0,
+                "anchor_timestep_span": {"median": 30},
+            },
+        ]
+    }
+    rows = svc.event_path_signature_rows(report, hide_pure_h=True)
+
+    assert [row["signature_id"] for row in rows] == ["chemistry"]
+    assert rows[0]["atom_lineages"] == 4
+
+    occurrence = {
+        "events": [
+            {"event_id": "e1", "timestep_index": 1, "reaction_smiles": "A -> B"},
+            {"event_id": "e2", "timestep_index": 2, "reaction_smiles": "B -> C"},
+        ],
+        "edges": [
+            {
+                "from_event_id": "e1",
+                "to_event_id": "e2",
+                "molecule_instances": [{"species": "B", "atom_ids": [1, 2]}],
+                "carrier_atom_ids": [1, 2],
+                "interval_gap": 1,
+            }
+        ],
+    }
+    elements = svc.build_event_path_occurrence_elements(occurrence)
+
+    assert [item["data"]["id"] for item in elements[:2]] == ["e1", "e2"]
+    assert elements[2]["data"]["source"] == "e1"
+    assert elements[2]["data"]["target"] == "e2"
+    assert elements[2]["data"]["carrier_atom_ids"] == [1, 2]

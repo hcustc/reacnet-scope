@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from rng_tools.network import Reaction, ReactionNetwork, parse_reactionabcd
+from rng_tools.network import Reaction, ReactionNetwork
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ class SimulationCondition:
             parts.append(f"O2={self.o2_ratio}")
         if self.pressure is not None:
             parts.append(f"P={self.pressure}")
-        return "_".join(parts) if parts else self.name
+        return "_".join(parts) if parts else _fallback_group_name(self.name)
 
 
 @dataclass
@@ -92,35 +92,26 @@ class ReplicateStatistic:
     n_replicates: int = 0
     detected_count: int = 0
     detection_rate: float = 0.0
+    mean_net_tp: float = 0.0
+    std_net_tp: float = 0.0
+    ci_95_lower: float = 0.0
+    ci_95_upper: float = 0.0
 
 
 # ---------------------------------------------------------------------------
 # Directory scanner
 # ---------------------------------------------------------------------------
 
-# Patterns for extracting condition metadata from directory names
-_CONDITION_PATTERNS: List[Tuple[str, Tuple[str, ...]]] = [
-    # T300K_O2-0.1_rep1
-    (
-        r"T(\d+\.?\d*)K?[_-]O2[=_-](\d+\.?\d*)[_-]rep(\d+)",
-        ("temperature", "o2_ratio", "replicate"),
-    ),
-    # T300_O2-0.1_rep1
-    (
-        r"T(\d+\.?\d*)[_-]O2[=_-](\d+\.?\d*)[_-]rep(\d+)",
-        ("temperature", "o2_ratio", "replicate"),
-    ),
-    # T300K_P-1atm_O2-0.5_rep2
-    (
-        r"T(\d+\.?\d*)K?[_-]P[=_-](\d+\.?\d*)[_-]O2[=_-](\d+\.?\d*)[_-]rep(\d+)",
-        ("temperature", "pressure", "o2_ratio", "replicate"),
-    ),
-    # Generic: any dir with rep at the end
-    (
-        r".*[_-]rep(\d+)$",
-        ("replicate",),
-    ),
-]
+_CONDITION_FIELD_PATTERNS: Dict[str, str] = {
+    "temperature": r"(?:^|[_-])T(?:EMP)?[=_-]?(\d+(?:\.\d+)?)K?(?=$|[_-])",
+    "o2_ratio": r"(?:^|[_-])O2[=_-]?(\d+(?:\.\d+)?)(?=$|[_-])",
+    "pressure": r"(?:^|[_-])P(?:RESSURE)?[=_-]?(\d+(?:\.\d+)?)(?:ATM)?(?=$|[_-])",
+    "replicate": r"(?:^|[_-])(?:REP(?:LICATE)?|RUN|SEED)[=_-]?(\d+)(?=$|[_-])",
+}
+
+_REPLICATE_SUFFIX_RE = re.compile(
+    r"(?i)(?:[_-](?:rep(?:licate)?|run|seed)[=_-]?\d+)$"
+)
 
 
 def _parse_condition_name(dirname: str) -> Dict[str, Any]:
@@ -129,20 +120,136 @@ def _parse_condition_name(dirname: str) -> Dict[str, Any]:
 
     Returns a dict with keys that were successfully parsed.
     """
-    for pattern, fields in _CONDITION_PATTERNS:
-        m = re.match(pattern, dirname, re.IGNORECASE)
-        if m:
-            result: Dict[str, Any] = {}
-            for i, field in enumerate(fields):
-                try:
-                    val = float(m.group(i + 1))
-                    if val == int(val):
-                        val = int(val)
-                    result[field] = val
-                except (ValueError, IndexError):
-                    pass
-            return result
-    return {}
+    name = os.path.basename(str(dirname).rstrip(os.sep))
+    result: Dict[str, Any] = {}
+    for field_name, pattern in _CONDITION_FIELD_PATTERNS.items():
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match is None:
+            continue
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if value == int(value):
+            value = int(value)
+        result[field_name] = value
+    return result
+
+
+def _fallback_group_name(condition_name: str) -> str:
+    """Group generic ``case_repN`` directories without losing parent context."""
+    clean_name = str(condition_name or "").replace(os.sep, "/").rstrip("/")
+    parent, _, leaf = clean_name.rpartition("/")
+    grouped_leaf = _REPLICATE_SUFFIX_RE.sub("", leaf).rstrip("_-") or leaf
+    return f"{parent}/{grouped_leaf}" if parent else grouped_leaf
+
+
+def _split_top_level_terms(side: str) -> Tuple[str, ...]:
+    """Split a reaction side without treating charge signs as separators."""
+    terms: List[str] = []
+    current: List[str] = []
+    bracket_depth = 0
+    for character in str(side or ""):
+        if character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth:
+            bracket_depth -= 1
+        if character == "+" and bracket_depth == 0:
+            term = "".join(current).strip()
+            if term:
+                terms.append(term)
+            current = []
+            continue
+        current.append(character)
+    term = "".join(current).strip()
+    if term:
+        terms.append(term)
+    return tuple(terms)
+
+
+def _canonical_reaction_key(reaction_text: str) -> str:
+    text = str(reaction_text or "").strip()
+    if "->" not in text:
+        return text
+    left, right = text.split("->", 1)
+    reactants = _split_top_level_terms(left)
+    products = _split_top_level_terms(right)
+    return f"{'+'.join(sorted(reactants))}->{'+'.join(sorted(products))}"
+
+
+def _reverse_reaction_key(reaction_key: str) -> str:
+    if "->" not in reaction_key:
+        return ""
+    left, right = reaction_key.split("->", 1)
+    return f"{right}->{left}"
+
+
+_T_CRITICAL_95 = (
+    12.706,
+    4.303,
+    3.182,
+    2.776,
+    2.571,
+    2.447,
+    2.365,
+    2.306,
+    2.262,
+    2.228,
+    2.201,
+    2.179,
+    2.160,
+    2.145,
+    2.131,
+    2.120,
+    2.110,
+    2.101,
+    2.093,
+    2.086,
+    2.080,
+    2.074,
+    2.069,
+    2.064,
+    2.060,
+    2.056,
+    2.052,
+    2.048,
+    2.045,
+    2.042,
+)
+
+
+def _sample_standard_deviation(values: List[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _confidence_interval_95(values: List[float]) -> Tuple[float, float]:
+    if not values:
+        return (0.0, 0.0)
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return (mean, mean)
+    standard_error = _sample_standard_deviation(values) / math.sqrt(len(values))
+    degrees_of_freedom = len(values) - 1
+    if degrees_of_freedom <= len(_T_CRITICAL_95):
+        critical = _T_CRITICAL_95[degrees_of_freedom - 1]
+    else:
+        # Cornish-Fisher expansion for the two-sided 95% Student-t quantile.
+        # This avoids a SciPy runtime dependency while remaining continuous
+        # with the exact small-sample table above.
+        z = 1.959963984540054
+        df = float(degrees_of_freedom)
+        critical = (
+            z
+            + (z**3 + z) / (4 * df)
+            + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2)
+            + (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / (384 * df**3)
+        )
+    margin = critical * standard_error
+    return (mean - margin, mean + margin)
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +277,7 @@ class BatchComparator:
         self._reaction_index: Dict[str, Set[str]] = defaultdict(set)
         # Cache: condition_name -> {reaction_key -> Reaction}
         self._reaction_cache: Dict[str, Dict[str, Reaction]] = {}
+        self.scan_warnings: List[str] = []
 
     def add_condition(
         self,
@@ -178,24 +286,35 @@ class BatchComparator:
         **meta: Any,
     ) -> None:
         """Register a condition with its loaded reaction network."""
-        self._conditions[name] = network
-        self._condition_meta[name] = meta
-        self._reaction_cache[name] = {}
+        condition_name = str(name or "").strip()
+        if not condition_name:
+            raise ValueError("condition name cannot be empty")
+
+        # Replacing a condition must also remove its old reverse-index entries.
+        if condition_name in self._conditions:
+            for reaction_key in list(self._reaction_index):
+                condition_names = self._reaction_index[reaction_key]
+                condition_names.discard(condition_name)
+                if not condition_names:
+                    del self._reaction_index[reaction_key]
+
+        self._conditions[condition_name] = network
+        self._condition_meta[condition_name] = meta
+        self._reaction_cache[condition_name] = {}
 
         # Index reactions
         for rxn in network.reactions:
-            self._reaction_index[rxn.key].add(name)
-            self._reaction_cache[name][rxn.key] = rxn
-
-            # Also index by formula key
-            if hasattr(rxn, 'formula_key'):
-                self._reaction_index[rxn.formula_key].add(name)
+            self._reaction_index[rxn.key].add(condition_name)
+            self._reaction_cache[condition_name][rxn.key] = rxn
 
     def scan_directory_tree(
         self,
         root_dir: str,
         *,
         progress_callback: Any = None,
+        recursive: bool = True,
+        max_depth: int = 4,
+        max_conditions: int = 500,
     ) -> List[SimulationCondition]:
         """Recursively scan `root_dir` for directories containing
         ``.reactionabcd`` files.
@@ -203,33 +322,56 @@ class BatchComparator:
         Each such directory becomes a :class:`SimulationCondition`.
         """
         conditions: List[SimulationCondition] = []
+        self.scan_warnings = []
         root = os.path.abspath(root_dir)
 
         if not os.path.isdir(root):
             return conditions
 
-        entries = sorted(os.listdir(root))
-        total = len(entries)
+        ignored_directories = {".git", ".cache", "__pycache__", "node_modules"}
 
-        for i, entry in enumerate(entries):
-            entry_path = os.path.join(root, entry)
-            if not os.path.isdir(entry_path):
+        def record_walk_error(exc: OSError) -> None:
+            self.scan_warnings.append(
+                f"无法读取目录 {getattr(exc, 'filename', '') or root}: {exc}"
+            )
+
+        visited = 0
+        for entry_path, subdirectories, filenames in os.walk(
+            root,
+            topdown=True,
+            onerror=record_walk_error,
+            followlinks=False,
+        ):
+            visited += 1
+            relative = os.path.relpath(entry_path, root)
+            depth = 0 if relative == "." else len(relative.split(os.sep))
+            subdirectories[:] = sorted(
+                directory
+                for directory in subdirectories
+                if directory not in ignored_directories and not directory.startswith(".")
+            )
+            if not recursive or depth >= max(0, int(max_depth)):
+                subdirectories[:] = []
+
+            candidates = sorted(
+                filename
+                for filename in filenames
+                if filename.endswith(".reactionabcd")
+            )
+            if not candidates:
                 continue
 
-            reac_file = os.path.join(entry_path, f"{entry}.reactionabcd")
-            # Also check for bare name
-            if not os.path.isfile(reac_file):
-                # Try finding any .reactionabcd
-                candidates = [
-                    f for f in os.listdir(entry_path)
-                    if f.endswith(".reactionabcd")
-                ]
-                if candidates:
-                    reac_file = os.path.join(entry_path, candidates[0])
-                else:
-                    continue
+            reaction_path = os.path.join(entry_path, candidates[0])
+            if len(candidates) > 1:
+                self.scan_warnings.append(
+                    f"{entry_path} 含有多个 .reactionabcd 文件，使用 {candidates[0]}"
+                )
 
-            parsed = _parse_condition_name(entry)
+            if relative == ".":
+                entry = os.path.basename(root.rstrip(os.sep)) or root
+            else:
+                entry = relative.replace(os.sep, "/")
+            parsed = _parse_condition_name(os.path.basename(entry_path))
             cond = SimulationCondition(
                 name=entry,
                 folder=entry_path,
@@ -237,18 +379,39 @@ class BatchComparator:
                 o2_ratio=parsed.get("o2_ratio"),
                 pressure=parsed.get("pressure"),
                 replicate=int(parsed.get("replicate", 1)),
+                artifacts={"reaction": reaction_path},
             )
             conditions.append(cond)
+
+            # A simulation directory is a leaf for this scanner. This avoids
+            # walking generated caches nested below an already discovered run.
+            subdirectories[:] = []
 
             if progress_callback:
                 progress_callback(
                     {
-                        "progress": (i + 1) / max(total, 1),
+                        "progress": min(len(conditions) / max(max_conditions, 1), 0.99),
                         "phase": "scanning",
-                        "message": f"Scanned {i + 1}/{total} entries",
+                        "message": f"已检查 {visited} 个目录",
                         "found": len(conditions),
                     }
                 )
+
+            if len(conditions) >= max(1, int(max_conditions)):
+                self.scan_warnings.append(
+                    f"扫描结果已达到上限 {max_conditions}，其余目录未继续处理"
+                )
+                break
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "progress": 1.0,
+                    "phase": "complete",
+                    "message": f"扫描完成，共发现 {len(conditions)} 个条件",
+                    "found": len(conditions),
+                }
+            )
 
         return conditions
 
@@ -276,110 +439,44 @@ class BatchComparator:
         self,
         reaction_smiles: str,
     ) -> ReactionComparison:
-        """Compare a single reaction across all registered conditions.
+        """Compare one directed, exact-SMILES reaction across conditions.
 
-        Uses both exact SMILES matching and formula-level matching.
+        Formula-only matching is intentionally not used here: molecular
+        formulae cannot distinguish structural isomers and set-based formula
+        matching also loses stoichiometric multiplicity.  Exact RNG reaction
+        keys keep the comparison scientifically auditable.
         """
-        from rng_tools.network import smiles_to_formula_fast
-
+        reaction_key = _canonical_reaction_key(reaction_smiles)
+        reverse_key = _reverse_reaction_key(reaction_key)
         result = ReactionComparison(
-            reaction_smiles=reaction_smiles,
+            reaction_smiles=reaction_key,
             reaction_formulas="",
         )
-
-        # Parse the target reaction into formulas
-        try:
-            arrow = "->"
-            if arrow in reaction_smiles:
-                left, right = reaction_smiles.split(arrow, 1)
-                target_reactant_f = frozenset(
-                    smiles_to_formula_fast(s.strip()) for s in left.split("+") if s.strip()
-                )
-                target_product_f = frozenset(
-                    smiles_to_formula_fast(s.strip()) for s in right.split("+") if s.strip()
-                )
-            else:
-                target_reactant_f = frozenset()
-                target_product_f = frozenset()
-        except Exception:
-            target_reactant_f = frozenset()
-            target_product_f = frozenset()
-
         detected_count = 0
         total_conditions = len(self._conditions)
+        for name in self._conditions:
+            cache = self._reaction_cache.get(name, {})
+            forward_reaction = cache.get(reaction_key)
+            reverse_reaction = cache.get(reverse_key)
+            forward_tp = float(forward_reaction.tp if forward_reaction else 0)
+            reverse_tp = float(reverse_reaction.tp if reverse_reaction else 0)
+            net_tp = forward_tp - reverse_tp
 
-        for name, network in self._conditions.items():
-            tp = 0.0
-            net_tp = 0.0
-            forward_tp = 0.0
-            reverse_tp = 0.0
-
-            # Try formula-level matching first (more robust)
-            for rxn in network.reactions:
-                r_f = frozenset(rxn.reactant_formulas)
-                p_f = frozenset(rxn.product_formulas)
-
-                # Forward match
-                if target_reactant_f and target_product_f:
-                    if r_f == target_reactant_f and p_f == target_product_f:
-                        tp = rxn.tp
-                        forward_tp = rxn.tp
-                        # Try to find reverse
-                        for r2 in network.reactions:
-                            r2_f = frozenset(r2.reactant_formulas)
-                            p2_f = frozenset(r2.product_formulas)
-                            if r2_f == target_product_f and p2_f == target_reactant_f:
-                                reverse_tp = r2.tp
-                                break
-                        net_tp = forward_tp - reverse_tp
-                        if not result.reaction_formulas:
-                            result.reaction_formulas = (
-                                " + ".join(rxn.reactant_formulas) +
-                                " -> " +
-                                " + ".join(rxn.product_formulas)
-                            )
-                        break
-
-            # Fallback: exact SMILES string match
-            if tp == 0:
-                for rxn in network.reactions:
-                    rxn_str = (
-                        " + ".join(rxn.reactant_smiles) +
-                        " -> " +
-                        " + ".join(rxn.product_smiles)
+            if forward_reaction is not None:
+                result.reactions[name] = forward_reaction
+                if not result.reaction_formulas:
+                    result.reaction_formulas = (
+                        " + ".join(forward_reaction.reactant_formulas)
+                        + " -> "
+                        + " + ".join(forward_reaction.product_formulas)
                     )
-                    if rxn_str == reaction_smiles:
-                        tp = rxn.tp
-                        forward_tp = rxn.tp
-                        rev_smiles = (
-                            " + ".join(rxn.product_smiles) +
-                            " -> " +
-                            " + ".join(rxn.reactant_smiles)
-                        )
-                        for r2 in network.reactions:
-                            r2_str = (
-                                " + ".join(r2.reactant_smiles) +
-                                " -> " +
-                                " + ".join(r2.product_smiles)
-                            )
-                            if r2_str == rev_smiles:
-                                reverse_tp = r2.tp
-                                break
-                        net_tp = forward_tp - reverse_tp
-                        if not result.reaction_formulas:
-                            result.reaction_formulas = (
-                                " + ".join(rxn.reactant_formulas) +
-                                " -> " +
-                                " + ".join(rxn.product_formulas)
-                            )
-                        break
 
-            result.tp_by_condition[name] = tp
+            result.tp_by_condition[name] = forward_tp
             result.net_tp_by_condition[name] = net_tp
             result.forward_tp_by_condition[name] = forward_tp
             result.reverse_tp_by_condition[name] = reverse_tp
 
-            if tp > 0 or net_tp != 0:
+            if forward_tp > 0:
                 detected_count += 1
 
         result.detection_rate = (
@@ -398,8 +495,12 @@ class BatchComparator:
         Results are sorted by detection rate (descending), then total
         tp (descending).
         """
-        # Collect all unique reaction SMILES across all conditions
-        seen: Set[str] = set()
+        if not 0.0 <= float(min_detection_rate) <= 1.0:
+            raise ValueError("min_detection_rate must be between 0 and 1")
+        if int(top_n) < 1:
+            raise ValueError("top_n must be at least 1")
+
+        # The index contains exact directed SMILES keys only.
         all_reactions: List[Tuple[str, float, float]] = []
 
         for reaction_key, condition_set in self._reaction_index.items():
@@ -415,17 +516,16 @@ class BatchComparator:
                 if rxn:
                     total_tp += rxn.tp
 
-            if reaction_key not in seen:
-                seen.add(reaction_key)
-                all_reactions.append((reaction_key, detection_rate, total_tp))
+            all_reactions.append((reaction_key, detection_rate, total_tp))
 
         all_reactions.sort(key=lambda x: (-x[1], -x[2]))
-        all_reactions = all_reactions[:top_n]
+        all_reactions = all_reactions[: int(top_n)]
 
         results: List[ReactionComparison] = []
         for rxn_key, _, _ in all_reactions:
             comparison = self.compare_reaction(rxn_key)
-            results.append(comparison)
+            if comparison.detection_rate >= float(min_detection_rate):
+                results.append(comparison)
 
         return results
 
@@ -474,27 +574,44 @@ class BatchComparator:
             return {}
 
         tp_values: List[float] = []
+        net_values: List[float] = []
+        reverse_values: List[float] = []
+        replicate_rows: List[Dict[str, Any]] = []
         detected = 0
         for cond in condition_group.conditions:
             tp = float(comparison.tp_by_condition.get(cond.name, 0) or 0)
+            net_tp = float(
+                comparison.net_tp_by_condition.get(cond.name, 0) or 0
+            )
+            reverse_tp = float(
+                comparison.reverse_tp_by_condition.get(cond.name, 0) or 0
+            )
             tp_values.append(tp)
+            net_values.append(net_tp)
+            reverse_values.append(reverse_tp)
             if tp > 0:
                 detected += 1
+            replicate_rows.append(
+                {
+                    "name": str(cond.artifacts.get("display_name") or cond.name),
+                    "replicate": cond.replicate,
+                    "tp": round(tp, 3),
+                    "reverse_tp": round(reverse_tp, 3),
+                    "net_tp": round(net_tp, 3),
+                    "detected": tp > 0,
+                }
+            )
 
         n = len(tp_values)
         if n == 0:
             return {}
 
         mean = sum(tp_values) / n
-        variance = sum((x - mean) ** 2 for x in tp_values) / max(n - 1, 1)
-        std = math.sqrt(variance)
-
-        # 95% CI using t-distribution approximation (normal for n >= 30)
-        if n >= 2:
-            se = std / math.sqrt(n)
-            ci = 1.96 * se  # normal approximation
-        else:
-            ci = 0.0
+        std = _sample_standard_deviation(tp_values)
+        mean_net = sum(net_values) / n
+        std_net = _sample_standard_deviation(net_values)
+        mean_reverse = sum(reverse_values) / n
+        ci_lower, ci_upper = _confidence_interval_95(tp_values)
 
         return {
             "group_name": condition_group.group_name,
@@ -505,8 +622,12 @@ class BatchComparator:
             "max_tp": round(max(tp_values), 2),
             "detected_count": detected,
             "detection_rate": round(detected / n, 3),
-            "ci_95_lower": round(mean - ci, 2),
-            "ci_95_upper": round(mean + ci, 2),
+            "mean_reverse_tp": round(mean_reverse, 2),
+            "mean_net_tp": round(mean_net, 2),
+            "std_net_tp": round(std_net, 2),
+            "ci_95_lower": round(ci_lower, 2),
+            "ci_95_upper": round(ci_upper, 2),
+            "replicates": replicate_rows,
         }
 
 

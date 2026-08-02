@@ -1240,10 +1240,6 @@ function workspacePanel(key) {
   return q(`workspace-${key}`);
 }
 
-function workspaceLabel(key) {
-  return WORKSPACE_MODULES.find((item) => item.key === key)?.label || key;
-}
-
 function setWorkspaceModule(key, { focus = true } = {}) {
   const next = WORKSPACE_MODULES.some((item) => item.key === key) ? key : "species";
   state.ui.workspace = next;
@@ -1484,10 +1480,6 @@ function focusResultModule(moduleKey) {
   }
   bringResultPanelIntoView(moduleKey);
   flashResultPanel(moduleKey);
-}
-
-function setMeta(obj) {
-  setResultMeta(state.results.active || DEFAULT_RESULT_MODULE, obj);
 }
 
 function initializeResultWorkbench(initialMeta = {}) {
@@ -1771,11 +1763,6 @@ function parseReactionSmiles(rxn) {
   return out;
 }
 
-function looksLikeSmiles(s) {
-  const t = String(s || "");
-  return t.includes("[") || t.includes("=") || t.includes("#") || /\d/.test(t);
-}
-
 let smilesHoverTooltip = null;
 let smilesHoverTimer = 0;
 let smilesHoverTarget = null;
@@ -2052,10 +2039,6 @@ function renderStructureListFromRows(viewerKey, rows) {
     ? `自动显示前 ${items.length}${truncated ? `/${totalPreviewable}` : ""} 个可渲染结构；悬停 SMILES 可快速预览`
     : "当前结果没有可渲染的 SMILES";
   renderStructurePreviewItems(viewerKey, items, { note });
-}
-
-function renderTable(rows) {
-  setResultRows(state.results.active || DEFAULT_RESULT_MODULE, rows);
 }
 
 function csvEscape(v) {

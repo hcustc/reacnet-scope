@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import csv
 import html
 import io
 import json
@@ -29,7 +28,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import pandas as pd
@@ -825,12 +824,6 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
             except (OSError, ValueError, json.JSONDecodeError):
                 manifest_payload = {}
 
-    route_index_status: dict[str, Any] = {"state": "missing"}
-    if artifacts["route"]["exists"]:
-        try:
-            route_index_status = ROUTE_TRANSITION_INDEX_STORE.status(artifacts["route"]["path"])
-        except Exception as exc:
-            route_index_status = {"state": "invalid", "message": str(exc)}
     trajectory_index_status: dict[str, Any] = {"state": "missing"}
     if artifacts["trajectory"]["exists"]:
         try:
@@ -2270,38 +2263,6 @@ def _next_available_frame_strict(frames: list[int], target_frame: int) -> int:
     return int(frames[pos])
 
 
-def _expand_event_window_frames(
-    frames: list[int],
-    *,
-    route_event_start_frame: int,
-    route_event_end_frame: int,
-    before_frames: int,
-    after_frames: int,
-) -> list[int]:
-    if not frames:
-        return [int(route_event_start_frame), int(route_event_end_frame)]
-    start_pos = bisect_left(frames, int(route_event_start_frame))
-    if start_pos >= len(frames):
-        start_pos = len(frames) - 1
-    elif int(frames[start_pos]) > int(route_event_start_frame) and start_pos > 0:
-        start_pos -= 1
-    end_pos = bisect_left(frames, int(route_event_end_frame))
-    if end_pos >= len(frames):
-        end_pos = len(frames) - 1
-    start_idx = max(0, int(start_pos) - max(0, int(before_frames)))
-    end_idx = min(len(frames) - 1, int(end_pos) + max(0, int(after_frames)))
-    return [int(frame) for frame in frames[start_idx : end_idx + 1]]
-
-
-def _nearest_or_previous_available_frame(frames: list[int], target_frame: int) -> int:
-    if not frames:
-        return int(target_frame)
-    pos = bisect_right(frames, int(target_frame))
-    if pos <= 0:
-        return int(frames[0])
-    return int(frames[pos - 1])
-
-
 def _select_trajectory_event_frames(
     trajectory_frames: list[int],
     *,
@@ -3688,12 +3649,6 @@ def route_transition_index_path(route_file: str, *, mtime: float, size: int) -> 
     ).hexdigest()[:16]
     stem = _safe_name_fragment(Path(abs_path).stem, "route")
     return route_index_cache_root() / f"{stem}.{digest}.sqlite3"
-
-
-def write_context_trajectory_tempfile(text: str, filename: str) -> str:
-    target = context_tempfile_path(filename)
-    target.write_text(text, encoding="utf-8")
-    return str(target)
 
 
 def write_context_type_map_tempfile(mapping: dict[str, str], filename: str) -> str:
@@ -6761,17 +6716,6 @@ class ReactionSourceChangedError(RuntimeError):
     """Raised when a reaction source changes across one cache read."""
 
 
-def _reaction_source_identity(path: str) -> tuple[int, int, int, int, int]:
-    stat = os.stat(path)
-    return (
-        int(stat.st_dev),
-        int(stat.st_ino),
-        int(stat.st_size),
-        int(stat.st_mtime_ns),
-        int(stat.st_ctime_ns),
-    )
-
-
 _REACTION_SNAPSHOT_MEMORY_LIMIT = 16 * 1024 * 1024
 _REACTION_HASH_CHUNK_SIZE = 1024 * 1024
 
@@ -7662,7 +7606,6 @@ class _LegacyRouteTransitionIndexStore:
             }
 
         build_span = progress_span * 0.82
-        query_span = max(progress_span - build_span, 0.0)
         index_meta = self.get(
             route_file,
             progress_callback=progress_callback,
@@ -7891,57 +7834,6 @@ class ReactionEventLocateStore:
 
 
 REACTION_EVENT_LOCATE_STORE = ReactionEventLocateStore()
-
-
-class ReactionEventExtractStore:
-    """Bounded cache for repeatedly viewed local event trajectories."""
-
-    def __init__(self, max_entries: int = 16) -> None:
-        self._lock = threading.Lock()
-        self._cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
-        self._max_entries = max(4, int(max_entries))
-
-    def _build_key(self, params: dict[str, list[str]]) -> tuple[Any, ...]:
-        locate_key = REACTION_EVENT_LOCATE_STORE._build_key(params)
-        return (
-            locate_key,
-            (params.get("event_id", [""])[0] or "").strip(),
-            bool_param(params, "inline_viewer", False),
-        )
-
-    def get(
-        self,
-        params: dict[str, list[str]],
-        *,
-        progress_callback: Any = None,
-    ) -> dict[str, Any]:
-        key = self._build_key(params)
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-                if progress_callback is not None:
-                    progress_callback(
-                        {
-                            "progress": 1.0,
-                            "phase": "cached_reaction_event_extract",
-                            "message": "Using cached local event trajectory",
-                        }
-                    )
-                return cached
-        fresh = build_reaction_event_extract_payload(
-            params,
-            progress_callback=progress_callback,
-        )
-        with self._lock:
-            self._cache[key] = fresh
-            self._cache.move_to_end(key)
-            while len(self._cache) > self._max_entries:
-                self._cache.popitem(last=False)
-        return fresh
-
-
-REACTION_EVENT_EXTRACT_STORE = ReactionEventExtractStore()
 
 
 class _LegacyTrajectoryIndexStore:

@@ -20,10 +20,10 @@ import re
 import json
 import csv
 import os
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field, asdict
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import (
-    Dict, List, Set, Tuple, Optional, Sequence, Generator, Any, TextIO,
+    Dict, List, Set, Tuple, Optional, Sequence, Any, TextIO,
 )
 
 
@@ -992,8 +992,6 @@ def generate_full_report(
         fate = net.element_fate(start_smiles, element_track, top_n=15)
         lost = [f for f in fate if f['fate'] == 'lost']
         retained = [f for f in fate if f['fate'] == 'retained']
-        gained = [f for f in fate if f['fate'] == 'gained']
-
         lines.append(f'  {element_track}-loss channels: {len(lost)}')
         for f in lost[:10]:
             lines.append(f"    tp={f['tp']:>5}  {f['product_formula']:<16}  "

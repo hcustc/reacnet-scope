@@ -15,10 +15,9 @@ from __future__ import annotations
 import os
 import re
 import csv
-import json
 import datetime
 from collections import defaultdict
-from typing import Dict, Set, List, Tuple, Optional, Sequence
+from typing import Dict, Generator, Set, List, Tuple, Optional
 
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
@@ -652,8 +651,6 @@ def print_ranked_table(
 ):
     """终端打印排名表."""
     count_key = 'net_count' if net_flux else 'count'
-    flux_hdr = "  {'净通量':>8}  {'正向':>8}  {'逆向':>8}" if net_flux else ""
-
     if show_category:
         hdr = f"  {'排名':>4}  {'次数':>8}"
         if net_flux:

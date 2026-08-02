@@ -4,7 +4,7 @@
 
 **Goal:** Add deterministic, auditable multi-step candidate-path ranking with Python, CLI, export, and Dash interfaces linked to indexed RNG event evidence.
 
-**Architecture:** A new domain module treats reactions as hyperedges and performs bounded loopless best-first enumeration over the existing `ReactionNetwork`. Scoring remains independent of NetworkX and publishes every input metric. An optional read-only evidence provider enriches steps; unavailable evidence degrades explicitly to `network_only`.
+**Architecture:** A new domain module treats reactions as hyperedges and performs bounded loopless best-first enumeration over the existing `ReactionNetwork`. Scoring publishes every input metric. An optional read-only evidence provider enriches steps; unavailable evidence degrades explicitly to `network_only`.
 
 **Tech Stack:** Python 3.10+, dataclasses, heap-based best-first search, existing `rng_tools.network`, SQLite event-evidence provider, Dash/Cytoscape, pytest.
 
@@ -13,7 +13,8 @@
 - Complete Plan 1 first; do not build or scan an event source from a pathway request.
 - Preserve complete reactant/product stoichiometry at every step, including repeated species.
 - A “path” is a ranked candidate route, not proof of an atom-continuous mechanism.
-- Do not use NetworkX shortest-path functions for ranking. Static weights cannot represent query-time evidence and hyperedge continuation.
+- Rank directly from `ReactionNetwork` hyperedges; static additive edge weights
+  cannot represent query-time evidence and co-reactant continuation.
 - Defaults are fixed: downstream, depth 3, branches 5, results 20, expansions 5,000, minimum positive net TP 1, minimum directionality 0.05.
 - A focal species may not repeat within one path.
 - Every output includes `score_version="candidate-path/v1"`, unrounded metrics, query limits, truncation state, and evidence status.
@@ -453,7 +454,6 @@ pathway-cytoscape
 pathway-json-download
 pathway-csv-download
 pathway-open-events-btn
-pathway-highlight-network-btn
 pathway-store
 ```
 
@@ -479,13 +479,16 @@ Build Cytoscape elements directly from serialized path domain objects:
 - classes `species`, `reaction`, `f"path-rank-{rank}"`, and `network-only`
   where applicable.
 
-Do not call the mechanism-network adapter yet; Plan 3 will add cross-highlighting through stable reaction keys.
+Only event handoff is in scope; no graph-view handoff or cross-highlighting is
+reserved.
 
 - [ ] **Step 4: Wire searches, selection, handoffs, and downloads**
 
 The search callback returns three distinct empty messages: species absent, no positive-net continuation, or filtered by thresholds. Reaching the expansion cap shows `truncated` and the expansion count.
 
-Downloads serialize the exact store payload through `dcc.send_string`; do not recompute the search. Event handoff navigates to `events` and sets `event-reaction-text`. Network handoff stores selected path reaction/species IDs for Plan 3 without mutating its schema.
+Downloads serialize the exact store payload through `dcc.send_string`; do not
+recompute the search. Event handoff navigates to `events` and sets
+`event-reaction-text`. No network handoff is required in the current scope.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -540,4 +543,3 @@ git commit -m "docs: explain candidate pathway evidence and scoring"
 - Every step preserves the full hyperedge and publishes all score inputs.
 - Ready evidence is linked through one batched SQLite read; missing evidence degrades to `network_only`.
 - Cycle prevention, upstream symmetry, branch/depth/result/expansion limits, and deterministic truncation are tested.
-- Plan 3 may consume stable species/reaction keys and the `pathway-store` highlight payload without changing the scoring schema.

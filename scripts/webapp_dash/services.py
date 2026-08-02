@@ -21,7 +21,7 @@ import shlex
 import sqlite3
 import sys
 import time
-import traceback
+from contextlib import redirect_stdout
 from functools import lru_cache
 from bisect import bisect_left, bisect_right
 from pathlib import Path
@@ -49,9 +49,19 @@ from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE,
 )
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
+from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
     EventIndexEvidenceProvider,
+)
+from reacnet_scope.event_package import (  # noqa: E402
+    build_event_package,
+    event_trajectory_text,
+)
+from reacnet_scope.event_paths import (  # noqa: E402
+    EventPathAnalysisError,
+    EventPathSource,
+    analyze_event_paths,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -60,6 +70,17 @@ from reacnet_scope.rng_events import (  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
+)
+from reacnet_scope.trajectory import (  # noqa: E402
+    TrajectoryDependencyError,
+    TrajectoryFrameError,
+    dataset_settings_path,
+    load_type_element_map,
+    normalize_type_element_map,
+    read_lammps_frame_block,
+    recentered_positions,
+    save_type_element_map,
+    select_local_environment,
 )
 from scripts.webapp.server import (  # noqa: E402
     ReactionSourceChangedError,
@@ -85,7 +106,7 @@ from scripts.webapp.server import (  # noqa: E402
     smiles_formula_cached,
     smiles_to_svg,
     split_terms,
-    parse_lammpstrj_frame_block,
+    parse_type_element_map_specs,
     _group_reaction_hits_by_time,
     _prepare_reaction_query,
 )
@@ -98,17 +119,6 @@ class ServiceError(Exception):
         super().__init__(message)
         self.message = message
         self.reason = reason
-
-
-def _error_dict(exc: Exception) -> dict[str, Any]:
-    if isinstance(exc, ServiceError):
-        return {"ok": False, "reason": exc.reason, "message": exc.message}
-    return {
-        "ok": False,
-        "reason": "error",
-        "message": str(exc) or exc.__class__.__name__,
-        "traceback": traceback.format_exc(limit=4),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +205,6 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
 from rng_tools.dir_browser import (  # noqa: E402
     ALLOWED_ROOTS,
     DirBrowserError,
-    get_allowed_roots as _get_allowed_roots,
     list_directory as _core_list_directory,
     validate_browse_path as _core_validate_browse_path,
 )
@@ -407,6 +416,16 @@ def dataset_readiness(status: dict[str, Any]) -> dict[str, Any]:
 
 def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]:
     """Return the read-only preparation view for one selected dataset."""
+    configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    cache_writable = False
+    if configured_cache:
+        cache_target = Path(configured_cache).expanduser()
+        probe = cache_target
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        cache_writable = bool(
+            probe.is_dir() and os.access(probe, os.W_OK | os.X_OK)
+        )
     status = scan_dataset(folder, base=base)
     dataset = status.get("dataset", {}) or {}
     artifacts = artifacts_from_status(status)
@@ -424,6 +443,8 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     manifest = dataset.get("manifest", {}) or {}
     events = dict(readiness.get("event_search") or {"state": "missing"})
     trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
+    events["source_available"] = bool(artifacts.get("reactionevent"))
+    trajectory["source_available"] = bool(artifacts.get("trajectory"))
     species_source = artifacts.get("species", "")
     if species_source and Path(species_source).is_file():
         try:
@@ -432,6 +453,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             composition = {"state": "invalid", "message": str(exc)}
     else:
         composition = {"state": "missing"}
+    composition["source_available"] = bool(species_source)
     index_bytes = (
         int(events.get("index_size", 0) or 0)
         + int(trajectory.get("index_size", 0) or 0)
@@ -466,6 +488,9 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "manifest_path": str(manifest.get("path") or ""),
         "manifest_found": bool(manifest.get("found")),
         "cache_dir": cache_dir,
+        "cache_root": configured_cache,
+        "cache_configured": bool(configured_cache),
+        "cache_writable": cache_writable,
         "index_bytes": index_bytes,
         "last_updated_epoch": max(timestamps) if timestamps else None,
         "basic": dict(readiness.get("basic_analysis") or {"state": "missing"}),
@@ -487,18 +512,159 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     }
 
 
+def prepare_dataset_cache(
+    folder: str,
+    *,
+    base: str,
+    kind: str,
+) -> dict[str, Any]:
+    """Build or rebuild one derived cache via the shared preparation command."""
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"event", "trajectory", "composition"}:
+        raise ServiceError("无效缓存类型", reason="invalid_preparation_kind")
+    cache_root = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    if not cache_root:
+        raise ServiceError(
+            "未配置 REACNET_SCOPE_CACHE_DIR，无法建立缓存。",
+            reason="cache_not_configured",
+        )
+
+    folder_path = validate_browse_path(folder)
+    if not folder_path.is_dir():
+        raise ServiceError("数据集目录不存在", reason="missing_folder")
+    base_path = validate_browse_path(base)
+    candidate_bases = {
+        str(Path(item.get("base") or "").resolve())
+        for item in discover_dataset_candidates(folder_path)
+    }
+    if str(base_path) not in candidate_bases:
+        raise ServiceError(
+            "所选数据集已不存在，请重新选择。",
+            reason="invalid_dataset_candidate",
+        )
+
+    before = dataset_preparation_status(
+        str(folder_path),
+        base=str(base_path),
+    )
+    if not before.get("cache_writable"):
+        raise ServiceError(
+            "REACNET_SCOPE_CACHE_DIR 指向的目录不可写；请改为真实的可写路径后重启服务。",
+            reason="cache_not_writable",
+        )
+    item_key = {
+        "event": "events",
+        "trajectory": "trajectory",
+        "composition": "composition",
+    }[normalized_kind]
+    item = before.get(item_key) or {}
+    if not item.get("source_available"):
+        labels = {
+            "event": ".reactionevent.csv",
+            "trajectory": "轨迹",
+            "composition": ".species",
+        }
+        raise ServiceError(
+            f"当前数据集缺少 {labels[normalized_kind]} 源文件。",
+            reason="missing_source",
+        )
+
+    previous_state = str(item.get("state") or "missing")
+    rebuild = previous_state in {"ready", "stale", "invalid"}
+    arguments = [
+        str(folder_path),
+        "--base",
+        base_path.name,
+    ]
+    if rebuild:
+        arguments.extend(["--rebuild", normalized_kind])
+    else:
+        arguments.append(f"--{normalized_kind}-only")
+
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            exit_code = preparation.main(arguments)
+    except IndexBuildInProgressError as exc:
+        raise ServiceError(
+            "同类缓存正在由另一个后台任务或离线命令构建。",
+            reason="index_building",
+        ) from exc
+    except SystemExit as exc:
+        raise ServiceError(
+            f"缓存准备参数无效（退出码 {exc.code}）。",
+            reason="preparation_failed",
+        ) from exc
+    except Exception as exc:
+        raise ServiceError(
+            f"缓存准备失败: {exc}",
+            reason="preparation_failed",
+        ) from exc
+    if int(exit_code or 0) != 0:
+        raise ServiceError(
+            f"缓存准备失败（退出码 {exit_code}）。",
+            reason="preparation_failed",
+        )
+
+    after = dataset_preparation_status(
+        str(folder_path),
+        base=str(base_path),
+    )
+    result = after.get(item_key) or {}
+    if str(result.get("state") or "") != "ready":
+        raise ServiceError(
+            "缓存任务已结束，但索引尚未达到就绪状态；请查看状态详情。",
+            reason="preparation_incomplete",
+        )
+    log_lines = [line for line in output.getvalue().splitlines() if line.strip()]
+    return {
+        "ok": True,
+        "kind": normalized_kind,
+        "rebuilt": rebuild,
+        "previous_state": previous_state,
+        "status": result,
+        "dataset_id": after.get("dataset_id") or "",
+        "log_tail": log_lines[-8:],
+    }
+
+
 def clear_dataset_index(folder: str, *, base: str = "", kind: str) -> dict[str, Any]:
     """Safely clear one index through the shared preparation-layer API."""
     status = scan_dataset(folder, base=base)
     artifacts = artifacts_from_status(status)
     normalized_kind = str(kind or "").strip().lower()
-    source = artifacts.get("route", "") if normalized_kind == "route" else artifacts.get("trajectory", "")
-    if normalized_kind not in {"route", "trajectory"}:
+    if normalized_kind not in {"route", "trajectory", "event", "composition"}:
         raise ServiceError("无效索引类型", reason="invalid_index_kind")
+
+    source_key = {
+        "route": "route",
+        "trajectory": "trajectory",
+        "event": "reactionevent",
+        "composition": "species",
+    }[normalized_kind]
+    source = artifacts.get(source_key, "")
     if not source or not Path(source).is_file():
         raise ServiceError("当前数据集缺少对应源文件", reason="missing_source")
     try:
-        return clear_index(source, kind=normalized_kind)
+        if normalized_kind in {"route", "trajectory"}:
+            return clear_index(source, kind=normalized_kind)
+        if normalized_kind == "event":
+            return EVENT_EVIDENCE_STORE.clear(
+                source,
+                artifacts.get("molecules", ""),
+            )
+
+        before = SPECIES_COMPOSITION_STORE.status(
+            source,
+            metadata_only=True,
+        )
+        removed = SPECIES_COMPOSITION_STORE.clear(source)
+        return {
+            "kind": "composition",
+            "index_path": str(before.get("index_path") or ""),
+            "removed": removed,
+            "released_bytes": int(before.get("index_size", 0) or 0),
+        }
     except IndexBuildInProgressError as exc:
         raise ServiceError("索引正在由离线准备程序构建；请先停止该程序后再清理。", reason="index_building") from exc
     except Exception as exc:
@@ -1030,6 +1196,465 @@ def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         for smiles in species_order
     ]
     return [*species_nodes, *reaction_nodes, *edges]
+
+
+# ---------------------------------------------------------------------------
+# Concrete, atom-continuous event paths
+# ---------------------------------------------------------------------------
+
+
+def _event_path_source_from_prefix(
+    replicate: str,
+    prefix_text: str,
+) -> EventPathSource:
+    """Resolve one user-supplied RNG common prefix inside an allowed root."""
+    label = str(replicate or "").strip()
+    raw_prefix = Path(str(prefix_text or "").strip()).expanduser()
+    if not label:
+        raise ServiceError("重复实验标签不能为空", reason="bad_event_path_source")
+    if not str(prefix_text or "").strip():
+        raise ServiceError(
+            f"重复实验 {label!r} 缺少公共文件前缀",
+            reason="bad_event_path_source",
+        )
+    parent = validate_browse_path(str(raw_prefix.parent))
+    prefix = str((parent / raw_prefix.name).resolve())
+    reactionevent = f"{prefix}.reactionevent.csv"
+    molecules = f"{prefix}.molecules.csv"
+    reaction = f"{prefix}.reactionabcd"
+    if not Path(reactionevent).is_file():
+        raise ServiceError(
+            f"{label}: 找不到 {reactionevent}",
+            reason="missing_event_path_source",
+        )
+    if not Path(molecules).is_file():
+        raise ServiceError(
+            f"{label}: 找不到 {molecules}",
+            reason="missing_event_path_source",
+        )
+    return EventPathSource(
+        replicate=label,
+        reactionevent_file=reactionevent,
+        molecules_file=molecules,
+        reaction_file=reaction if Path(reaction).is_file() else "",
+    )
+
+
+def _additional_event_path_sources(source_text: str) -> list[EventPathSource]:
+    sources: list[EventPathSource] = []
+    for line_number, raw_line in enumerate(str(source_text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ServiceError(
+                f"附加重复第 {line_number} 行应为 label=/path/to/common-prefix",
+                reason="bad_event_path_source",
+            )
+        replicate, prefix = line.split("=", 1)
+        sources.append(_event_path_source_from_prefix(replicate, prefix))
+    return sources
+
+
+def _event_path_sources_for_dash(
+    artifacts: Mapping[str, Any],
+    *,
+    current_replicate: str = "current",
+    additional_sources: str = "",
+) -> list[EventPathSource]:
+    label = str(current_replicate or "current").strip() or "current"
+    reactionevent = str(artifacts.get("reactionevent") or "").strip()
+    molecules = str(artifacts.get("molecules") or "").strip()
+    reaction = str(artifacts.get("reaction") or "").strip()
+    if not reactionevent or not Path(reactionevent).is_file():
+        raise ServiceError(
+            "当前数据集缺少 .reactionevent.csv",
+            reason="missing_event_path_source",
+        )
+    if not molecules or not Path(molecules).is_file():
+        raise ServiceError(
+            "当前数据集缺少 .molecules.csv，无法证明原子连续性",
+            reason="missing_event_path_source",
+        )
+    sources = [
+        EventPathSource(
+            replicate=label,
+            reactionevent_file=reactionevent,
+            molecules_file=molecules,
+            reaction_file=(reaction if reaction and Path(reaction).is_file() else ""),
+        ),
+        *_additional_event_path_sources(additional_sources),
+    ]
+    labels = [source.replicate for source in sources]
+    if len(set(labels)) != len(labels):
+        raise ServiceError(
+            "当前数据集与附加重复的标签必须唯一",
+            reason="bad_event_path_source",
+        )
+    return sources
+
+
+def validate_event_path_sources_for_dash(
+    artifacts: Mapping[str, Any],
+    *,
+    current_replicate: str = "current",
+    additional_sources: str = "",
+) -> dict[str, Any]:
+    """Validate source files and prepared indexes before leaving wizard step 1."""
+    sources = _event_path_sources_for_dash(
+        artifacts,
+        current_replicate=current_replicate,
+        additional_sources=additional_sources,
+    )
+    documents: list[dict[str, Any]] = []
+    for source in sources:
+        try:
+            status = EVENT_EVIDENCE_STORE.status(
+                source.reactionevent_file,
+                source.molecules_file,
+            )
+        except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+            raise ServiceError(
+                f"{source.replicate}: 无法读取事件索引状态: {exc}",
+                reason="invalid_event_path_evidence",
+            ) from exc
+        state = str(status.get("state") or "missing")
+        if state != "ready":
+            raise ServiceError(
+                f"{source.replicate}: 事件索引状态为 {state}；"
+                "请先在“管理数据”中建立或重建事件索引",
+                reason="event_index_not_ready",
+            )
+        if not status.get("association_available"):
+            raise ServiceError(
+                f"{source.replicate}: 事件索引没有分子实例与原子 ID 关联",
+                reason="invalid_event_path_evidence",
+            )
+        documents.append(
+            {
+                "replicate": source.replicate,
+                "reactionevent_file": source.reactionevent_file,
+                "molecules_file": source.molecules_file,
+                "reaction_file": source.reaction_file,
+                "event_count": int(status.get("event_count") or 0),
+                "available_intervals": int(status.get("available_intervals") or 0),
+                "time_basis": str(status.get("time_basis") or ""),
+                "state": state,
+            }
+        )
+    return {
+        "replicate_count": len(documents),
+        "sources": documents,
+        "total_event_count": sum(item["event_count"] for item in documents),
+    }
+
+
+def analyze_event_paths_for_dash(
+    artifacts: Mapping[str, Any],
+    *,
+    current_replicate: str = "current",
+    additional_sources: str = "",
+    path_length: int = 3,
+    start_smiles: str = "",
+    max_interval_gap: int | None = None,
+    max_timestep_gap: int | None = None,
+    max_occurrence_details: int = 1_000,
+) -> dict[str, Any]:
+    """Run the strict event-path engine for the current Dash dataset."""
+    sources = _event_path_sources_for_dash(
+        artifacts,
+        current_replicate=current_replicate,
+        additional_sources=additional_sources,
+    )
+    try:
+        return analyze_event_paths(
+            sources,
+            path_length=int(path_length),
+            start_smiles=str(start_smiles or "").strip(),
+            max_interval_gap=(
+                None if max_interval_gap in (None, "") else int(max_interval_gap)
+            ),
+            max_timestep_gap=(
+                None if max_timestep_gap in (None, "") else int(max_timestep_gap)
+            ),
+            max_occurrence_details=int(max_occurrence_details),
+        )
+    except (IndexNotReadyError, IndexStaleError) as exc:
+        raise ServiceError(
+            "事件索引尚未准备或已经过期；请在“管理数据”中建立事件索引",
+            reason="event_index_not_ready",
+        ) from exc
+    except (IndexInvalidError, EventPathAnalysisError) as exc:
+        raise ServiceError(
+            f"事件路径证据不可用: {exc}",
+            reason="invalid_event_path_evidence",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ServiceError(str(exc), reason="missing_event_path_source") from exc
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无效的事件路径参数: {exc}",
+            reason="bad_event_path_query",
+        ) from exc
+
+
+def _compact_event_path_text(value: str, *, limit: int = 260) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+_PURE_H_EVENT_KEYS = {
+    "[H]+[H]->[H][H]",
+    "[H][H]->[H]+[H]",
+}
+
+
+def event_path_signature_rows(
+    report: Mapping[str, Any],
+    *,
+    hide_pure_h: bool = False,
+    hide_return_cycles: bool = False,
+    min_reproduction_rate: float = 0.0,
+    min_lineage_support: int = 0,
+) -> list[dict[str, Any]]:
+    """Create compact, filterable rows without losing report provenance."""
+    rows: list[dict[str, Any]] = []
+    for path in report.get("paths") or []:
+        keys = [str(value) for value in path.get("reaction_keys") or []]
+        pure_h = bool(keys) and set(keys).issubset(_PURE_H_EVENT_KEYS)
+        return_cycle = len(keys) >= 3 and keys[0] == keys[-1]
+        rate = float(path.get("replicate_reproduction_rate") or 0.0)
+        lineages = int(path.get("independent_atom_lineage_support_count") or 0)
+        if hide_pure_h and pure_h:
+            continue
+        if hide_return_cycles and return_cycle:
+            continue
+        if rate < float(min_reproduction_rate or 0.0):
+            continue
+        if lineages < int(min_lineage_support or 0):
+            continue
+        span = path.get("anchor_timestep_span") or {}
+        rows.append(
+            {
+                "rank": len(rows) + 1,
+                "signature_id": str(path.get("signature_id") or ""),
+                "reaction_path": _compact_event_path_text(" | ".join(keys)),
+                "occurrences": int(path.get("occurrence_count") or 0),
+                "atom_lineages": lineages,
+                "lineage_sets": int(
+                    path.get("independent_lineage_set_support_count") or 0
+                ),
+                "replicate_support": int(path.get("replicate_support_count") or 0),
+                "reproduction_rate": rate,
+                "median_timestep_span": span.get("median"),
+                "pure_h_cycle": pure_h,
+                "return_cycle": return_cycle,
+                "support_is_lower_bound": bool(path.get("support_is_lower_bound")),
+            }
+        )
+    return rows
+
+
+def event_path_comparison_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in (report.get("comparison") or {}).get("per_replicate") or []:
+        rows.append(
+            {
+                "replicate": str(item.get("replicate") or ""),
+                "aggregate_reachable": int(
+                    item.get("aggregate_reachable_path_count") or 0
+                ),
+                "actual": int(item.get("actual_path_signature_count") or 0),
+                "confirmed": int(item.get("confirmed_actual_path_count") or 0),
+                "aggregate_only": item.get("aggregate_only_path_count"),
+                "actual_only": int(item.get("actual_only_path_count") or 0),
+                "realization_rate": item.get("realization_rate"),
+                "complete": bool(item.get("comparison_complete")),
+            }
+        )
+    return rows
+
+
+def event_path_comparison_signature_rows(
+    report: Mapping[str, Any],
+    classification: str,
+) -> list[dict[str, Any]]:
+    safe_class = str(classification or "confirmed")
+    if safe_class not in {"confirmed", "aggregate_only", "actual_only"}:
+        safe_class = "confirmed"
+    rows: list[dict[str, Any]] = []
+    for item in (report.get("comparison") or {}).get("per_replicate") or []:
+        replicate = str(item.get("replicate") or "")
+        for signature in item.get(safe_class) or []:
+            keys = [str(value) for value in signature.get("reaction_keys") or []]
+            rows.append(
+                {
+                    "replicate": replicate,
+                    "classification": safe_class,
+                    "signature_id": str(signature.get("signature_id") or ""),
+                    "reaction_path": _compact_event_path_text(" | ".join(keys)),
+                }
+            )
+    return rows
+
+
+def event_path_occurrences_for_signature(
+    report: Mapping[str, Any],
+    signature_id: str,
+) -> list[dict[str, Any]]:
+    selected = next(
+        (
+            item
+            for item in report.get("paths") or []
+            if str(item.get("signature_id") or "") == str(signature_id or "")
+        ),
+        None,
+    )
+    if selected is None:
+        return []
+    keys = [str(value) for value in selected.get("reaction_keys") or []]
+    return [
+        dict(item)
+        for item in report.get("occurrences") or []
+        if [str(value) for value in item.get("reaction_keys") or []] == keys
+    ]
+
+
+def event_path_signature_time_rows(
+    report: Mapping[str, Any],
+    signature_id: str,
+) -> list[dict[str, Any]]:
+    selected = next(
+        (
+            item
+            for item in report.get("paths") or []
+            if str(item.get("signature_id") or "") == str(signature_id or "")
+        ),
+        None,
+    )
+    if selected is None:
+        return []
+    interval = list(selected.get("interval_gap_by_edge") or [])
+    idle = list(selected.get("idle_timestep_gap_by_edge") or [])
+    anchor = list(selected.get("anchor_timestep_gap_by_edge") or [])
+    row_count = max(len(interval), len(idle), len(anchor))
+    rows: list[dict[str, Any]] = []
+    for index in range(row_count):
+        interval_stats = interval[index] if index < len(interval) else {}
+        idle_stats = idle[index] if index < len(idle) else {}
+        anchor_stats = anchor[index] if index < len(anchor) else {}
+        rows.append(
+            {
+                "edge": index + 1,
+                "samples": interval_stats.get("count"),
+                "interval_min": interval_stats.get("min"),
+                "interval_median": interval_stats.get("median"),
+                "interval_mean": interval_stats.get("mean"),
+                "interval_max": interval_stats.get("max"),
+                "idle_min": idle_stats.get("min"),
+                "idle_median": idle_stats.get("median"),
+                "idle_mean": idle_stats.get("mean"),
+                "idle_max": idle_stats.get("max"),
+                "anchor_min": anchor_stats.get("min"),
+                "anchor_median": anchor_stats.get("median"),
+                "anchor_mean": anchor_stats.get("mean"),
+                "anchor_max": anchor_stats.get("max"),
+            }
+        )
+    return rows
+
+
+def event_path_occurrence_rows(
+    occurrence: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    event_rows: list[dict[str, Any]] = []
+    for index, event in enumerate(occurrence.get("events") or [], start=1):
+        event_rows.append(
+            {
+                "step": index,
+                "event_id": str(event.get("event_id") or ""),
+                "interval": event.get("timestep_index"),
+                "before_timestep": event.get("before_timestep"),
+                "after_timestep": event.get("after_timestep"),
+                "reaction": _compact_event_path_text(
+                    str(event.get("reaction_smiles") or ""), limit=360
+                ),
+                "participating_atoms": ";".join(
+                    str(value) for value in event.get("atom_ids") or []
+                ),
+            }
+        )
+    edge_rows: list[dict[str, Any]] = []
+    for index, edge in enumerate(occurrence.get("edges") or [], start=1):
+        molecule_labels = []
+        for molecule in edge.get("molecule_instances") or []:
+            atoms = [int(value) for value in molecule.get("atom_ids") or []]
+            molecule_labels.append(
+                f"{molecule.get('species') or '?'} @ {{{','.join(map(str, atoms))}}}"
+            )
+        edge_rows.append(
+            {
+                "edge": index,
+                "from_event_id": str(edge.get("from_event_id") or ""),
+                "to_event_id": str(edge.get("to_event_id") or ""),
+                "molecule_instances": _compact_event_path_text(
+                    " + ".join(molecule_labels), limit=360
+                ),
+                "carrier_atom_ids": ";".join(
+                    str(value) for value in edge.get("carrier_atom_ids") or []
+                ),
+                "interval_gap": edge.get("interval_gap"),
+                "idle_timestep_gap": edge.get("idle_timestep_gap"),
+                "anchor_timestep_gap": edge.get("anchor_timestep_gap"),
+            }
+        )
+    return event_rows, edge_rows
+
+
+def build_event_path_occurrence_elements(
+    occurrence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Build a concrete event-node graph for one audited occurrence."""
+    elements: list[dict[str, Any]] = []
+    for index, event in enumerate(occurrence.get("events") or [], start=1):
+        event_id = str(event.get("event_id") or f"event-{index}")
+        elements.append(
+            {
+                "data": {
+                    "id": event_id,
+                    "node_kind": "concrete_event",
+                    "label": f"E{index} · interval {event.get('timestep_index')}",
+                    "event_id": event_id,
+                    "step": index,
+                    "reaction": str(event.get("reaction_smiles") or ""),
+                    "before_timestep": event.get("before_timestep"),
+                    "after_timestep": event.get("after_timestep"),
+                },
+                "classes": "concrete-event",
+            }
+        )
+    for index, edge in enumerate(occurrence.get("edges") or [], start=1):
+        molecules = edge.get("molecule_instances") or []
+        species = " + ".join(str(item.get("species") or "?") for item in molecules)
+        carrier_atoms = [int(value) for value in edge.get("carrier_atom_ids") or []]
+        elements.append(
+            {
+                "data": {
+                    "id": f"event-path-edge-{index}",
+                    "source": str(edge.get("from_event_id") or ""),
+                    "target": str(edge.get("to_event_id") or ""),
+                    "label": _compact_event_path_text(
+                        f"{species} · {len(carrier_atoms)} atoms", limit=72
+                    ),
+                    "molecule_instances": molecules,
+                    "carrier_atom_ids": carrier_atoms,
+                    "interval_gap": edge.get("interval_gap"),
+                    "idle_timestep_gap": edge.get("idle_timestep_gap"),
+                },
+                "classes": "molecule-instance-edge",
+            }
+        )
+    return elements
 
 
 def _species_catalog_entry(
@@ -3224,7 +3849,6 @@ def validate_pathway_step_occurrences(
     preparation_hints: list[str] = []
     checked_sources: list[str] = []
     event_file = str(artifacts.get("reactionevent") or "").strip()
-    molecules_file = str(artifacts.get("molecules") or "").strip()
     event_absent = not event_file or not Path(event_file).is_file()
 
     if not event_absent:
@@ -3358,18 +3982,32 @@ def validate_pathway_step_occurrences(
     }
 
 
+def parse_event_type_element_map(text: str) -> dict[str, str]:
+    """Parse the compact mapping accepted by the event-viewer controls."""
+    try:
+        return normalize_type_element_map(parse_type_element_map_specs(text))
+    except (TrajectoryDependencyError, TrajectoryFrameError, ValueError) as exc:
+        raise ServiceError(str(exc), reason="invalid_type_element_map") from exc
+
+
 def build_rng_event_visualization(
     artifacts: dict[str, str],
     event_row: dict[str, Any],
     *,
     before_frames: int = 3,
     after_frames: int = 3,
+    environment_radius: float = 4.0,
+    max_environment_atoms: int = 500,
+    atom_type_map: Mapping[Any, Any] | None = None,
+    persist_type_map: bool = True,
 ) -> dict[str, Any]:
-    """Read only indexed trajectory frames for one RNG-authored event."""
+    """Build an ASE/PBC-aware local view from indexed trajectory frames."""
     trajectory_file = (artifacts.get("trajectory") or "").strip()
     if not trajectory_file or not Path(trajectory_file).is_file():
         raise ServiceError("缺少原始轨迹文件", reason="missing_trajectory")
-    atom_ids = sorted({int(value) for value in (event_row.get("atom_id_list") or [])})
+    atom_ids = sorted(
+        {int(value) for value in (event_row.get("atom_id_list") or [])}
+    )
     if not atom_ids:
         raise ServiceError(
             "该复杂事件无法由 molecules 时间线唯一关联原子；不会回退扫描 Route",
@@ -3388,7 +4026,9 @@ def build_rng_event_visualization(
 
     def nearest_index(value: int) -> int:
         pos = bisect_left(available, value)
-        choices = [idx for idx in (pos - 1, pos) if 0 <= idx < len(available)]
+        choices = [
+            idx for idx in (pos - 1, pos) if 0 <= idx < len(available)
+        ]
         return min(choices, key=lambda idx: abs(available[idx] - value))
 
     left = nearest_index(before_timestep)
@@ -3399,66 +4039,223 @@ def build_rng_event_visualization(
     stop = min(len(available), right + max(0, int(after_frames)) + 1)
     selected_frames = available[start:stop]
     offsets = index.offsets_for(selected_frames)
-    wanted = set(atom_ids)
+    if not offsets:
+        raise ServiceError(
+            "轨迹索引没有返回所需帧的字节范围",
+            reason="missing_frame_offsets",
+        )
+
     reactant_bonds = _bond_values(event_row.get("reactant_bonds"))
     product_bonds = _bond_values(event_row.get("product_bonds"))
     broken_bonds = sorted(set(reactant_bonds).difference(product_bonds))
     formed_bonds = sorted(set(product_bonds).difference(reactant_bonds))
-    core_atom_ids = _bond_atom_ids([*broken_bonds, *formed_bonds]) or atom_ids
+    core_atom_ids = sorted(
+        _bond_atom_ids([*broken_bonds, *formed_bonds]) or atom_ids
+    )
+
+    try:
+        if atom_type_map is not None:
+            resolved_type_map = normalize_type_element_map(atom_type_map)
+            if persist_type_map:
+                type_map_path = save_type_element_map(
+                    trajectory_file,
+                    resolved_type_map,
+                )
+            else:
+                type_map_path = dataset_settings_path(trajectory_file)
+                if not type_map_path.is_file():
+                    type_map_path = None
+        else:
+            resolved_type_map = load_type_element_map(trajectory_file)
+            type_map_path = dataset_settings_path(trajectory_file)
+            if not type_map_path.is_file():
+                type_map_path = None
+
+        parsed_frames: dict[int, dict[str, Any]] = {}
+        with open(trajectory_file, "rb") as source:
+            for frame in selected_frames:
+                byte_range = offsets.get(frame)
+                if byte_range is None:
+                    continue
+                source.seek(int(byte_range[0]))
+                block = source.read(
+                    int(byte_range[1]) - int(byte_range[0])
+                )
+                parsed_frames[int(frame)] = read_lammps_frame_block(
+                    block,
+                    type_element_map=resolved_type_map,
+                )
+
+        requested_anchor = event_row.get("anchor_frame")
+        anchor_value = (
+            int(requested_anchor)
+            if requested_anchor is not None
+            else available[right]
+        )
+        anchor_frame = min(
+            parsed_frames,
+            key=lambda frame: abs(int(frame) - anchor_value),
+        )
+        environment = select_local_environment(
+            parsed_frames[anchor_frame],
+            atom_ids,
+            radius=float(environment_radius),
+            max_environment_atoms=int(max_environment_atoms),
+        )
+        environment["max_environment_atoms"] = int(max_environment_atoms)
+    except TrajectoryDependencyError as exc:
+        raise ServiceError(str(exc), reason="missing_ase") from exc
+    except (TrajectoryFrameError, OSError, UnicodeError, ValueError) as exc:
+        raise ServiceError(
+            f"局部轨迹解析失败: {exc}",
+            reason="trajectory_frame_error",
+        ) from exc
+
+    environment_ids = list(environment["environment_ids"])
+    context_ids = sorted({*atom_ids, *environment_ids})
+    core_set = set(core_atom_ids)
+    participant_set = set(atom_ids)
+    environment_set = set(environment_ids)
     frames: list[dict[str, Any]] = []
-    with open(trajectory_file, "rb") as source:
+    try:
         for frame in selected_frames:
-            byte_range = offsets.get(frame)
-            if byte_range is None:
+            parsed = parsed_frames.get(int(frame))
+            if not parsed:
                 continue
-            source.seek(int(byte_range[0]))
-            parsed = parse_lammpstrj_frame_block(
-                source.read(int(byte_range[1]) - int(byte_range[0])),
-                atom_ids=wanted,
+            display_positions = recentered_positions(
+                parsed,
+                context_ids,
+                core_atom_ids,
             )
-            atoms = [
-                {
-                    "id": int(atom_id),
-                    "x": round(float(atom.get("x", 0.0)), 7),
-                    "y": round(float(atom.get("y", 0.0)), 7),
-                    "z": round(float(atom.get("z", 0.0)), 7),
-                    "element": str(atom.get("element") or ""),
-                    "type": str(atom.get("type") or ""),
-                    "group": "core",
-                }
-                for atom_id, atom in sorted((parsed.get("atoms") or {}).items())
-            ]
-            if atoms:
-                if int(frame) <= before_timestep:
-                    frame_bonds, bond_state = reactant_bonds, "before"
-                elif int(frame) >= after_timestep:
-                    frame_bonds, bond_state = product_bonds, "after"
-                else:
-                    # Coordinates are real for intermediate frames; RNG's
-                    # molecule timeline does not expose instantaneous bond
-                    # orders for those frames, so do not invent them.
-                    frame_bonds, bond_state = [], "intermediate"
-                frames.append(
+            atoms = []
+            for atom_id in context_ids:
+                atom = (parsed.get("atoms") or {}).get(atom_id)
+                if atom is None or atom_id not in display_positions:
+                    continue
+                display_x, display_y, display_z = display_positions[atom_id]
+                if atom_id in core_set:
+                    group = "core"
+                elif atom_id in participant_set:
+                    group = "participant"
+                elif atom_id in environment_set:
+                    group = "environment"
+                else:  # pragma: no cover - context is built from these groups
+                    group = "context"
+                atoms.append(
                     {
-                        "frame": int(frame),
-                        "box": parsed.get("box") or [],
-                        "atoms": atoms,
-                        "bonds": frame_bonds,
-                        "bond_state": bond_state,
+                        "id": int(atom_id),
+                        "x": round(float(atom.get("x", 0.0)), 7),
+                        "y": round(float(atom.get("y", 0.0)), 7),
+                        "z": round(float(atom.get("z", 0.0)), 7),
+                        "display_x": round(display_x, 7),
+                        "display_y": round(display_y, 7),
+                        "display_z": round(display_z, 7),
+                        "element": str(atom.get("element") or ""),
+                        "label": str(atom.get("label") or ""),
+                        "type": str(atom.get("type") or ""),
+                        "group": group,
                     }
                 )
+            if not atoms:
+                continue
+            if int(frame) <= before_timestep:
+                frame_bonds, bond_state = reactant_bonds, "before"
+            elif int(frame) >= after_timestep:
+                frame_bonds, bond_state = product_bonds, "after"
+            else:
+                # Coordinates are real for intermediate frames; RNG's
+                # molecule timeline does not expose instantaneous bond
+                # orders for those frames, so do not invent them.
+                frame_bonds, bond_state = [], "intermediate"
+            frames.append(
+                {
+                    "frame": int(frame),
+                    "box": parsed.get("box") or [],
+                    "box_header": parsed.get("box_header") or "",
+                    "box_lines": parsed.get("box_lines") or [],
+                    "cell": parsed.get("cell") or [],
+                    "cell_origin": parsed.get("cell_origin") or [],
+                    "pbc": parsed.get("pbc") or [],
+                    "atoms": atoms,
+                    "bonds": frame_bonds,
+                    "bond_state": bond_state,
+                }
+            )
+    except (TrajectoryDependencyError, TrajectoryFrameError) as exc:
+        raise ServiceError(
+            f"局部轨迹重定位失败: {exc}",
+            reason="trajectory_geometry_error",
+        ) from exc
     if not frames:
-        raise ServiceError("选中事件的参与原子未出现在轨迹窗口中", reason="no_coordinates")
+        raise ServiceError(
+            "选中事件的参与原子未出现在轨迹窗口中",
+            reason="no_coordinates",
+        )
 
-    storyboard = list(dict.fromkeys([frames[0]["frame"], available[left], available[right], frames[-1]["frame"]]))
+    storyboard = list(
+        dict.fromkeys(
+            [
+                frames[0]["frame"],
+                available[left],
+                available[right],
+                frames[-1]["frame"],
+            ]
+        )
+    )
     labels = {
         str(available[left]): "反应前",
         str(available[right]): "反应后",
     }
+    source_signatures: dict[str, dict[str, Any]] = {}
+
+    def add_signature(label: str, path_text: str) -> None:
+        path = Path(str(path_text or ""))
+        if not path.is_file():
+            return
+        stat = path.stat()
+        source_signatures[label] = {
+            "path": str(path.resolve()),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    add_signature("trajectory", trajectory_file)
+    add_signature("trajectory_index", str(index.index_path))
+    for kind in ("reactionevent", "molecules"):
+        add_signature(kind, str(artifacts.get(kind) or ""))
+    event_index = resolve_dataset_paths(trajectory_file).event_index
+    add_signature("event_index", str(event_index))
+
+    event_details = {
+        key: event_row.get(key)
+        for key in (
+            "event_id",
+            "source_row",
+            "timestep_index",
+            "before_timestep",
+            "after_timestep",
+            "anchor_frame",
+            "reactant",
+            "product",
+            "reaction_smiles",
+            "reactant_participants",
+            "product_participants",
+            "association_status",
+        )
+        if event_row.get(key) is not None
+    }
     return {
         "event_id": str(event_row.get("event_id") or ""),
+        "event": event_details,
         "frames": frames,
-        "atom_groups": {"core": core_atom_ids, "reactant": atom_ids, "product": atom_ids, "context": atom_ids},
+        "atom_groups": {
+            "core": core_atom_ids,
+            "participants": atom_ids,
+            "reactant": atom_ids,
+            "product": atom_ids,
+            "environment": environment_ids,
+            "context": context_ids,
+        },
         "bond_evidence": {
             "reactant": reactant_bonds,
             "product": product_bonds,
@@ -3466,13 +4263,40 @@ def build_rng_event_visualization(
             "formed": formed_bonds,
         },
         "storyboard_frames": storyboard,
-        "storyboard_labels": {str(frame): labels.get(str(frame), f"Frame {frame}") for frame in storyboard},
+        "storyboard_labels": {
+            str(frame): labels.get(str(frame), f"Frame {frame}")
+            for frame in storyboard
+        },
         "meta": {
             "status": "rng_event",
-            "verification_status": str(event_row.get("association_status") or "matched"),
+            "verification_status": str(
+                event_row.get("association_status") or "matched"
+            ),
             "reaction_smiles": str(event_row.get("reaction_smiles") or ""),
+            "coordinate_treatment": "ASE minimum-image, reaction-core centered",
+            "anchor_frame": anchor_frame,
+            "extraction": {
+                "before_frames": int(before_frames),
+                "after_frames": int(after_frames),
+                "environment_radius": float(environment_radius),
+                "max_environment_atoms": int(max_environment_atoms),
+            },
+            "environment": environment,
+            "type_element_map": resolved_type_map,
+            "native_element_column": "element"
+            in {
+                str(value).strip().lower()
+                for value in (
+                    parsed_frames[anchor_frame].get("atom_columns") or []
+                )
+            },
         },
-        "paths": {"trajectory": trajectory_file, "vmd": "", "type_map": ""},
+        "paths": {
+            "trajectory": trajectory_file,
+            "vmd": "",
+            "type_map": str(type_map_path) if type_map_path else "",
+        },
+        "source_signatures": source_signatures,
     }
 
 
@@ -3481,7 +4305,21 @@ def event_viewer_frames_csv(viewer: Mapping[str, Any] | None) -> str:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
-        ["frame", "atom_id", "type", "element", "x", "y", "z", "group", "bond_state"]
+        [
+            "frame",
+            "atom_id",
+            "type",
+            "element",
+            "x",
+            "y",
+            "z",
+            "group",
+            "bond_state",
+            "label",
+            "display_x",
+            "display_y",
+            "display_z",
+        ]
     )
     for frame in (viewer or {}).get("frames") or []:
         for atom in frame.get("atoms") or []:
@@ -3496,47 +4334,20 @@ def event_viewer_frames_csv(viewer: Mapping[str, Any] | None) -> str:
                     atom.get("z"),
                     atom.get("group"),
                     frame.get("bond_state"),
+                    atom.get("label"),
+                    atom.get("display_x"),
+                    atom.get("display_y"),
+                    atom.get("display_z"),
                 ]
             )
     return output.getvalue()
 
 
 def event_viewer_trajectory_text(viewer: Mapping[str, Any] | None) -> str:
-    """Serialize selected event atoms as a standalone LAMMPS trajectory."""
-    chunks: list[str] = []
-    for frame in (viewer or {}).get("frames") or []:
-        atoms = frame.get("atoms") or []
-        box = list(frame.get("box") or [])
-        while len(box) < 3:
-            box.append((0.0, 1.0))
-        chunks.extend(
-            [
-                "ITEM: TIMESTEP",
-                str(frame.get("frame") or 0),
-                "ITEM: NUMBER OF ATOMS",
-                str(len(atoms)),
-                "ITEM: BOX BOUNDS pp pp pp",
-                *[
-                    f"{float(bounds[0]):.10g} {float(bounds[1]):.10g}"
-                    for bounds in box[:3]
-                ],
-                "ITEM: ATOMS id type element x y z",
-            ]
-        )
-        for atom in atoms:
-            atom_type = str(atom.get("type") or "0")
-            element = str(atom.get("element") or "X")
-            chunks.append(
-                "{} {} {} {:.10g} {:.10g} {:.10g}".format(
-                    int(atom.get("id") or 0),
-                    atom_type,
-                    element,
-                    float(atom.get("x") or 0.0),
-                    float(atom.get("y") or 0.0),
-                    float(atom.get("z") or 0.0),
-                )
-            )
-    return "\n".join(chunks) + ("\n" if chunks else "")
+    """Serialize original event coordinates as an OVITO-ready LAMMPS dump."""
+    if not viewer:
+        return ""
+    return event_trajectory_text(viewer, scope="environment")
 
 
 def event_viewer_atom_ids(viewer: Mapping[str, Any] | None) -> list[int]:
@@ -3551,6 +4362,40 @@ def event_viewer_ovito_expression(viewer: Mapping[str, Any] | None) -> str:
     return " || ".join(
         f"ParticleIdentifier == {atom_id}"
         for atom_id in event_viewer_atom_ids(viewer)
+    )
+
+
+def event_viewer_ovito_script(
+    viewer: Mapping[str, Any] | None,
+    *,
+    trajectory_name: str = "event_subset.lammpstrj",
+) -> str:
+    """Build a portable OVITO Python helper for the downloaded subset."""
+    expression = event_viewer_ovito_expression(viewer)
+    event_id = str((viewer or {}).get("event_id") or "event")
+    return (
+        "# Generated by ReacNet Scope. Run with OVITO's ovitos interpreter:\n"
+        f"# ovitos {event_id}_view_ovito.py {trajectory_name}\n"
+        "from pathlib import Path\n"
+        "import sys\n\n"
+        "from ovito.io import import_file\n"
+        "from ovito.modifiers import ExpressionSelectionModifier\n\n"
+        f"default_trajectory = {trajectory_name!r}\n"
+        "trajectory = (\n"
+        "    Path(sys.argv[1]).expanduser().resolve()\n"
+        "    if len(sys.argv) > 1\n"
+        "    else Path(__file__).with_name(default_trajectory)\n"
+        ")\n"
+        "pipeline = import_file(str(trajectory), sort_particles=True)\n"
+        f"selection_expression = {expression!r}\n"
+        "if selection_expression:\n"
+        "    pipeline.modifiers.append(\n"
+        "        ExpressionSelectionModifier(expression=selection_expression)\n"
+        "    )\n"
+        "pipeline.add_to_scene()\n"
+        "data = pipeline.compute(0)\n"
+        "print(f'Loaded {pipeline.num_frames} frame(s) from {trajectory}')\n"
+        "print(f'Selected event atoms: {data.attributes.get(\"ExpressionSelection.count\", 0)}')\n"
     )
 
 
@@ -3596,6 +4441,34 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> str:
     return buf.getvalue()
 
 
+def batch_comparison_to_csv(payload: Mapping[str, Any] | None) -> str:
+    """Export displayed batch columns with user-facing headers for Excel."""
+    safe_payload = payload if isinstance(payload, Mapping) else {}
+    rows = safe_payload.get("rows") or []
+    columns = safe_payload.get("columns") or []
+    if not isinstance(rows, list) or not rows:
+        raise ServiceError("没有可导出的批量对比结果", reason="no_export_rows")
+    field_headers = [
+        (
+            str(column.get("field") or ""),
+            str(column.get("headerName") or column.get("field") or ""),
+        )
+        for column in columns
+        if isinstance(column, Mapping) and str(column.get("field") or "")
+    ]
+    if not field_headers:
+        raise ServiceError("批量对比结果缺少列定义", reason="no_export_columns")
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow([header for _, header in field_headers])
+    for row in rows:
+        safe_row = row if isinstance(row, Mapping) else {}
+        writer.writerow([safe_row.get(field, "") for field, _ in field_headers])
+    # UTF-8 BOM keeps Chinese headers readable in common spreadsheet tools.
+    return "\ufeff" + buffer.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Batch comparison
 # ---------------------------------------------------------------------------
@@ -3608,9 +4481,13 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
     if not root_dir.strip():
         raise ServiceError("请提供数据根目录", reason="missing_dir")
 
-    root = os.path.abspath(root_dir)
-    if not os.path.isdir(root):
-        raise ServiceError(f"目录不存在: {root}", reason="bad_dir")
+    try:
+        root_path = validate_browse_path(root_dir)
+    except ServiceError as exc:
+        raise ServiceError(exc.message, reason=exc.reason) from exc
+    if not root_path.is_dir():
+        raise ServiceError(f"目录不存在: {root_path}", reason="bad_dir")
+    root = str(root_path)
 
     comparator = BatchComparator()
     conditions = comparator.scan_directory_tree(root)
@@ -3631,6 +4508,7 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
             "pressure": c.pressure,
             "replicate": c.replicate,
             "group_key": c.group_key,
+            "reaction_file": str(c.artifacts.get("reaction") or ""),
         }
         for i, c in enumerate(conditions)
     ]
@@ -3652,9 +4530,288 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
         "groups": group_rows,
         "total_conditions": len(conditions),
         "total_groups": len(groups),
+        "warnings": list(comparator.scan_warnings),
         "meta": {
             "status": "ok",
             "message": f"扫描完成: {len(conditions)} 个条件, {len(groups)} 个条件组",
+            "warnings": list(comparator.scan_warnings),
+        },
+    }
+
+
+def _validate_batch_limits(
+    min_detection_rate: float,
+    top_n: int,
+) -> tuple[float, int]:
+    try:
+        detection_rate = float(min_detection_rate)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("最小检出率必须是 0 到 1 之间的数值", reason="bad_detection_rate") from exc
+    try:
+        row_number = float(top_n)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("Top N 必须是整数", reason="bad_top_n") from exc
+    if not row_number.is_integer():
+        raise ServiceError("Top N 必须是整数", reason="bad_top_n")
+    row_limit = int(row_number)
+    if not 0.0 <= detection_rate <= 1.0:
+        raise ServiceError("最小检出率必须在 0 到 1 之间", reason="bad_detection_rate")
+    if not 1 <= row_limit <= 500:
+        raise ServiceError("Top N 必须在 1 到 500 之间", reason="bad_top_n")
+    return detection_rate, row_limit
+
+
+def _resolve_batch_reaction_source(source: Mapping[str, Any]) -> dict[str, str]:
+    """Resolve one client-supplied source to one validated reaction file."""
+    folder_text = str(source.get("folder") or "").strip()
+    if not folder_text:
+        raise ServiceError("条件缺少数据目录", reason="missing_condition_folder")
+    folder = validate_browse_path(folder_text)
+    if not folder.is_dir():
+        raise ServiceError(f"条件目录不存在: {folder}", reason="missing_condition_folder")
+
+    base = str(source.get("base") or "").strip()
+    reaction_file = str(source.get("reaction_file") or "").strip()
+    if base:
+        status = scan_dataset(str(folder), base=base)
+        selected_base = str((status.get("dataset") or {}).get("selected_base") or "")
+        if selected_base != base:
+            raise ServiceError("所选数据集已不存在，请在数据管理中重新加载", reason="stale_dataset")
+        reaction_file = str(artifacts_from_status(status).get("reaction") or "")
+
+    if reaction_file:
+        reaction_path = Path(reaction_file).expanduser().resolve()
+        if not reaction_path.is_relative_to(folder.resolve()):
+            raise ServiceError("反应文件不属于所选数据目录", reason="reaction_out_of_bounds")
+        if reaction_path.suffix != ".reactionabcd" or not reaction_path.is_file():
+            raise ServiceError(f"反应文件不可用: {reaction_path}", reason="missing_reaction_file")
+    else:
+        candidates = sorted(folder.glob("*.reactionabcd"))
+        if not candidates:
+            raise ServiceError(f"目录中没有 .reactionabcd: {folder}", reason="missing_reaction_file")
+        if len(candidates) > 1:
+            names = "、".join(path.name for path in candidates[:3])
+            raise ServiceError(
+                f"目录中存在多个 .reactionabcd（{names}），请从数据管理选择明确的数据集",
+                reason="ambiguous_reaction_file",
+            )
+        reaction_path = candidates[0].resolve()
+
+    return {
+        "folder": str(folder.resolve()),
+        "base": base,
+        "reaction_file": str(reaction_path),
+        "name": str(source.get("name") or source.get("label") or folder.name),
+        "label": str(source.get("label") or source.get("name") or folder.name),
+    }
+
+
+def run_grouped_batch_comparison(
+    group_requests: list[dict[str, Any]],
+    *,
+    min_detection_rate: float = 0.0,
+    top_n: int = 50,
+) -> dict[str, Any]:
+    """Compare exact reactions and aggregate replicate statistics by group.
+
+    The operation is all-or-nothing: every selected replicate must resolve and
+    parse successfully, otherwise a concrete error is returned instead of a
+    silently incomplete comparison.
+    """
+    from rng_tools.batch_compare import (
+        BatchComparator,
+        ConditionGroup,
+        SimulationCondition,
+        reaction_key_to_display,
+    )
+
+    detection_rate, row_limit = _validate_batch_limits(
+        min_detection_rate,
+        top_n,
+    )
+    if not isinstance(group_requests, list) or not group_requests:
+        raise ServiceError("请至少选择一个条件组或已管理数据集", reason="no_conditions")
+
+    comparator = BatchComparator()
+    loaded_groups: list[ConditionGroup] = []
+    seen_group_names: set[str] = set()
+    seen_reaction_files: dict[str, str] = {}
+    load_errors: list[str] = []
+
+    for group_index, raw_group in enumerate(group_requests, start=1):
+        if not isinstance(raw_group, Mapping):
+            load_errors.append(f"第 {group_index} 个条件组格式无效")
+            continue
+        group_name = str(raw_group.get("group_name") or "").strip()
+        if not group_name:
+            load_errors.append(f"第 {group_index} 个条件组缺少名称")
+            continue
+        if group_name in seen_group_names:
+            load_errors.append(f"条件组名称重复: {group_name}")
+            continue
+        seen_group_names.add(group_name)
+        raw_conditions = raw_group.get("conditions") or []
+        if not isinstance(raw_conditions, list) or not raw_conditions:
+            load_errors.append(f"条件组 {group_name} 没有可用的重复实验")
+            continue
+
+        condition_group = ConditionGroup(
+            group_name=group_name,
+            temperature=raw_group.get("temperature"),
+            o2_ratio=raw_group.get("o2_ratio"),
+            pressure=raw_group.get("pressure"),
+        )
+        for condition_index, raw_source in enumerate(raw_conditions, start=1):
+            source_mapping = raw_source if isinstance(raw_source, Mapping) else {}
+            source_label = str(
+                source_mapping.get("label")
+                or source_mapping.get("name")
+                or f"重复 {condition_index}"
+            )
+            try:
+                if not isinstance(raw_source, Mapping):
+                    raise ServiceError("数据源格式无效", reason="bad_condition_source")
+                source = _resolve_batch_reaction_source(raw_source)
+                previous_group = seen_reaction_files.get(source["reaction_file"])
+                if previous_group:
+                    raise ServiceError(
+                        f"与条件组 {previous_group} 使用了同一反应文件",
+                        reason="duplicate_reaction_file",
+                    )
+                reactions = parse_reactionabcd(source["reaction_file"], min_tp=1)
+                if not reactions:
+                    raise ServiceError("反应文件没有可比较记录", reason="empty_reaction_file")
+                network = ReactionNetwork(reactions)
+                replicate = int(raw_source.get("replicate") or condition_index)
+                if replicate < 1:
+                    raise ValueError("重复编号必须大于 0")
+            except ServiceError as exc:
+                load_errors.append(f"{group_name} / {source_label}: {exc.message}")
+                continue
+            except Exception as exc:
+                load_errors.append(f"{group_name} / {source_label}: 解析失败（{exc}）")
+                continue
+
+            seen_reaction_files[source["reaction_file"]] = group_name
+            internal_name = f"group_{group_index}:replicate_{condition_index}"
+            comparator.add_condition(
+                internal_name,
+                network,
+                group_name=group_name,
+                source=source,
+            )
+            condition_group.conditions.append(
+                SimulationCondition(
+                    name=internal_name,
+                    folder=source["folder"],
+                    temperature=raw_source.get("temperature"),
+                    o2_ratio=raw_source.get("o2_ratio"),
+                    pressure=raw_source.get("pressure"),
+                    replicate=replicate,
+                    artifacts={
+                        "reaction": source["reaction_file"],
+                        "display_name": source["name"],
+                    },
+                )
+            )
+        if condition_group.conditions:
+            loaded_groups.append(condition_group)
+
+    if load_errors:
+        preview = "；".join(load_errors[:8])
+        if len(load_errors) > 8:
+            preview += f"；另有 {len(load_errors) - 8} 项错误"
+        raise ServiceError(f"批量对比未执行：{preview}", reason="condition_load_failed")
+    if not loaded_groups:
+        raise ServiceError("未能加载任何条件组", reason="no_networks")
+
+    comparisons = comparator.compare_all_common(
+        min_detection_rate=detection_rate,
+        top_n=row_limit,
+    )
+    if not comparisons:
+        raise ServiceError("未找到符合检出率条件的反应", reason="no_results")
+
+    group_meta = [
+        {
+            "id": f"group_{index}",
+            "name": group.group_name,
+            "n_replicates": group.n_replicates,
+            "temperature": group.temperature,
+            "o2_ratio": group.o2_ratio,
+            "pressure": group.pressure,
+        }
+        for index, group in enumerate(loaded_groups, start=1)
+    ]
+    columns: list[dict[str, Any]] = [
+        {"field": "index", "headerName": "#", "type": "numericColumn"},
+        {"field": "reaction_smiles", "headerName": "反应式 (SMILES)"},
+        {"field": "reaction_formulas", "headerName": "反应式 (分子式)"},
+        {"field": "detection_rate", "headerName": "总体检出率", "type": "numericColumn"},
+        {"field": "total_tp", "headerName": "总 TP", "type": "numericColumn"},
+        {"field": "total_net_tp", "headerName": "总净 TP", "type": "numericColumn"},
+    ]
+    for group in group_meta:
+        prefix = group["id"]
+        label = group["name"]
+        columns.extend(
+            [
+                {"field": f"{prefix}_detection_rate", "headerName": f"{label} · 检出率", "type": "numericColumn"},
+                {"field": f"{prefix}_mean_tp", "headerName": f"{label} · 平均 TP", "type": "numericColumn"},
+                {"field": f"{prefix}_std_tp", "headerName": f"{label} · TP 标准差", "type": "numericColumn"},
+                {"field": f"{prefix}_mean_net_tp", "headerName": f"{label} · 平均净 TP", "type": "numericColumn"},
+            ]
+        )
+
+    rows: list[dict[str, Any]] = []
+    details: dict[str, dict[str, Any]] = {}
+    for index, comparison in enumerate(comparisons, start=1):
+        reaction_id = f"reaction_{index}"
+        group_statistics: list[dict[str, Any]] = []
+        row: dict[str, Any] = {
+            "id": reaction_id,
+            "index": index,
+            "reaction_smiles": reaction_key_to_display(comparison.reaction_smiles),
+            "reaction_formulas": comparison.reaction_formulas,
+            "detection_rate": round(comparison.detection_rate, 3),
+            "total_tp": int(sum(comparison.tp_by_condition.values())),
+            "total_net_tp": int(sum(comparison.net_tp_by_condition.values())),
+        }
+        for group_index, condition_group in enumerate(loaded_groups, start=1):
+            stats = comparator.statistical_summary(comparison, condition_group)
+            group_id = f"group_{group_index}"
+            stats["id"] = group_id
+            group_statistics.append(stats)
+            row[f"{group_id}_detection_rate"] = stats["detection_rate"]
+            row[f"{group_id}_mean_tp"] = stats["mean_tp"]
+            row[f"{group_id}_std_tp"] = stats["std_tp"]
+            row[f"{group_id}_mean_net_tp"] = stats["mean_net_tp"]
+        rows.append(row)
+        details[reaction_id] = {
+            "id": reaction_id,
+            "reaction_smiles": row["reaction_smiles"],
+            "reaction_formulas": row["reaction_formulas"],
+            "detection_rate": row["detection_rate"],
+            "total_tp": row["total_tp"],
+            "total_net_tp": row["total_net_tp"],
+            "groups": group_statistics,
+        }
+
+    return {
+        "ok": True,
+        "rows": rows,
+        "columns": columns,
+        "groups": group_meta,
+        "details": details,
+        "meta": {
+            "status": "ok",
+            "message": (
+                f"对比完成：{len(rows)} 个反应，{len(loaded_groups)} 个条件组，"
+                f"{sum(group.n_replicates for group in loaded_groups)} 个重复实验"
+            ),
+            "n_reactions": len(rows),
+            "n_groups": len(loaded_groups),
+            "n_conditions": sum(group.n_replicates for group in loaded_groups),
         },
     }
 
@@ -3666,37 +4823,49 @@ def run_batch_comparison(
     min_detection_rate: float = 0.0,
     top_n: int = 50,
 ) -> dict[str, Any]:
-    """Run cross-condition comparison for selected conditions."""
+    """Run a replicate-level comparison for compatibility with older callers."""
     from rng_tools.batch_compare import BatchComparator
 
     if not condition_folders:
         raise ServiceError("请选择至少一个条件组", reason="no_conditions")
     if len(condition_folders) != len(condition_names):
         raise ServiceError("条件名称与目录数量不匹配", reason="mismatch")
+    detection_rate, row_limit = _validate_batch_limits(min_detection_rate, top_n)
+    if len(set(condition_names)) != len(condition_names):
+        raise ServiceError("条件名称不能重复", reason="duplicate_condition_name")
 
     comparator = BatchComparator()
+    seen_files: set[str] = set()
+    errors: list[str] = []
     for folder, name in zip(condition_folders, condition_names):
-        folder_path = os.path.abspath(folder)
-        if not os.path.isdir(folder_path):
-            continue
-        candidates = [
-            f for f in os.listdir(folder_path) if f.endswith(".reactionabcd")
-        ]
-        if not candidates:
-            continue
-        reac_path = os.path.join(folder_path, candidates[0])
         try:
-            reactions = parse_reactionabcd(reac_path, min_tp=1)
-        except Exception:
+            source = _resolve_batch_reaction_source(
+                {"folder": folder, "name": name}
+            )
+            if source["reaction_file"] in seen_files:
+                raise ServiceError("重复选择了同一反应文件", reason="duplicate_reaction_file")
+            reactions = parse_reactionabcd(source["reaction_file"], min_tp=1)
+            if not reactions:
+                raise ServiceError("反应文件没有可比较记录", reason="empty_reaction_file")
+            network = ReactionNetwork(reactions)
+        except ServiceError as exc:
+            errors.append(f"{name}: {exc.message}")
             continue
-        comparator.add_condition(name, ReactionNetwork(reactions))
+        except Exception as exc:
+            errors.append(f"{name}: 解析失败（{exc}）")
+            continue
+        seen_files.add(source["reaction_file"])
+        comparator.add_condition(name, network)
 
-    if not comparator._conditions:
-        raise ServiceError("未能加载任何条件的反应网络", reason="no_networks")
+    if errors:
+        raise ServiceError(
+            "批量对比未执行：" + "；".join(errors),
+            reason="condition_load_failed",
+        )
 
     results = comparator.compare_all_common(
-        min_detection_rate=float(min_detection_rate),
-        top_n=int(top_n),
+        min_detection_rate=detection_rate,
+        top_n=row_limit,
     )
     if not results:
         raise ServiceError("未找到符合条件的共同反应", reason="no_results")
@@ -3705,16 +4874,21 @@ def run_batch_comparison(
     base_columns = [
         {"field": "index", "headerName": "#", "width": 50},
         {"field": "reaction_smiles", "headerName": "反应式", "flex": 2, "minWidth": 200},
-        {"field": "detection_rate", "headerName": "检出率", "width": 80},
+        {"field": "reaction_formulas", "headerName": "反应式 (分子式)", "flex": 2, "minWidth": 180},
+        {"field": "detection_rate", "headerName": "检出率", "width": 80, "type": "numericColumn"},
     ]
     cond_columns = [
-        {"field": f"tp_{cn}", "headerName": f"{cn} (tp)", "width": 100}
+        {"field": f"tp_{cn}", "headerName": f"{cn} (TP)", "width": 100, "type": "numericColumn"}
+        for cn in cond_names
+    ]
+    net_columns = [
+        {"field": f"net_{cn}", "headerName": f"{cn} (净 TP)", "width": 100, "type": "numericColumn"}
         for cn in cond_names
     ]
     return {
         "ok": True,
         "rows": rows,
-        "columns": base_columns + cond_columns,
+        "columns": base_columns + cond_columns + net_columns,
         "condition_names": cond_names,
         "meta": {
             "status": "ok",
@@ -3740,10 +4914,20 @@ __all__ = [
     "dataset_capabilities",
     "dataset_readiness",
     "dataset_preparation_status",
+    "prepare_dataset_cache",
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
     "find_pathways",
+    "validate_event_path_sources_for_dash",
+    "analyze_event_paths_for_dash",
+    "event_path_signature_rows",
+    "event_path_comparison_rows",
+    "event_path_comparison_signature_rows",
+    "event_path_occurrences_for_signature",
+    "event_path_signature_time_rows",
+    "event_path_occurrence_rows",
+    "build_event_path_occurrence_elements",
     "search_species_catalog",
     "search_species",
     "species_detail",
@@ -3765,13 +4949,18 @@ __all__ = [
     "rank_representative_events",
     "find_continuous_reactions",
     "compose_continuous_reaction_pair",
+    "parse_event_type_element_map",
     "build_rng_event_visualization",
     "event_viewer_frames_csv",
     "event_viewer_trajectory_text",
+    "build_event_package",
     "event_viewer_atom_ids",
     "event_viewer_ovito_expression",
+    "event_viewer_ovito_script",
     "event_viewer_vmd_script",
     "rows_to_csv",
+    "batch_comparison_to_csv",
     "scan_batch_conditions",
+    "run_grouped_batch_comparison",
     "run_batch_comparison",
 ]

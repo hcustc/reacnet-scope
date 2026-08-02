@@ -1,19 +1,25 @@
-# Real-Data Acceptance and Hardening Implementation Plan
+# Real-Data Acceptance and Hardening Implementation Plan — Scoped Record
+
+> **Scope update (2026-08-01):** Current acceptance covers event evidence,
+> bounded candidate paths, indexed trajectory views, deterministic event
+> packages, and source immutability.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Validate the complete evidence→pathway→network→trajectory workflow against the real `rng-test-rp3-0523` dataset, harden bounded I/O and deterministic behavior, and publish operator/interoperability documentation.
+**Goal:** Validate the evidence→candidate-path→event→trajectory/package workflow against the real `rng-test-rp3-0523` dataset, harden bounded I/O and deterministic behavior, and publish operator/interoperability documentation.
 
 **Architecture:** Repository-local real data becomes a read-only integration oracle. Acceptance tests prepare indexes only under a temporary cache, exercise public Python/service/CLI interfaces, and verify source hashes are unchanged. Performance tests use structural budgets—SQLite query plans, byte-range guards, expansion caps, and payload limits—instead of machine-dependent wall-clock thresholds.
 
-**Tech Stack:** Python 3.10+, pytest markers/fixtures, SQLite query-plan inspection, SHA-256 source snapshots, NetworkX, optional ASE, existing Dash/service/CLI layers.
+**Tech Stack:** Python 3.10+, pytest markers/fixtures, SQLite query-plan inspection, SHA-256 source snapshots, optional ASE, existing Dash/service/CLI layers.
 
 ## Global Constraints
 
-- Complete Plans 1–4 first.
+- Complete the event foundation, candidate-path, and event-package work first.
 - Never edit, regenerate, normalize, or delete any file under `ref_data/rng-test-rp3-0523`.
 - Real-data tests set `REACNET_SCOPE_CACHE_DIR` to `tmp_path`; no prepared artifact is written beside the source dataset.
-- Do not install dependencies. If NetworkX, ASE, pytest, or the prepared `.venv` is missing, stop and request the human-owned commands from Plans 1 and 4.
+- Do not install dependencies. If ASE, pytest, or the prepared `.venv` is
+  missing, stop and request the human-owned commands from the event-package
+  plan.
 - Do not launch OVITO in automated tests. ASE validates file syntax; OVITO opening is a documented human acceptance check.
 - Use structural performance assertions, not flaky elapsed-time limits.
 - Preserve the legacy static Web application. It may retain its private parser, but the new Dash workflow must not call it.
@@ -22,13 +28,13 @@
 
 ## Human-Owned Final Environment Gate
 
-Ask the human to confirm that the environment from Plans 1 and 4 is active. The worker may run:
+Ask the human to confirm that the event/package environment is active. The worker may run:
 
 ```bash
-.venv/bin/python -c "import networkx, ase, pytest; print(networkx.__version__, ase.__version__, pytest.__version__)"
+.venv/bin/python -c "import ase, pytest; print(ase.__version__, pytest.__version__)"
 ```
 
-Expected: NetworkX 3.x, ASE 3.x, and pytest 8.x (or a later compatible pytest chosen by the human). If imports fail, return these human-run commands and pause:
+Expected: ASE 3.x and pytest 8.x (or a later compatible pytest chosen by the human). If imports fail, return these human-run commands and pause:
 
 ```bash
 uv sync --extra web --extra trajectory
@@ -195,15 +201,14 @@ Before staging production files, omit any that did not change.
 
 ---
 
-### Task 3: Candidate-path and dual-network real-data acceptance
+### Task 3: Candidate-path real-data acceptance
 
 **Files:**
-- Create: `tests/realdata/test_real_pathway_network.py`
-- Modify only if tests expose a defect: `rng_tools/pathways.py`, `rng_tools/mechanism_graph.py`, `scripts/webapp_dash/services.py`
+- Create: `tests/realdata/test_real_pathway.py`
+- Modify only if tests expose a defect: `rng_tools/pathways.py`, `scripts/webapp_dash/services.py`
 
 **Interfaces:**
 - Validates chain: `C2H2 -> C2H3 -> C2H4`
-- Validates mechanism and observation schema separation
 - Validates deterministic repeated results
 
 - [ ] **Step 1: Write the failing hydrogen-addition chain test**
@@ -231,38 +236,26 @@ assert any(path["species"] == [acetylene, vinyl, ethylene] for path in result["p
 
 For the matching path assert formula chain `["C2H2", "C2H3", "C2H4"]`, step net TP `[1, 1]`, score version, and nonnegative evidence metrics.
 
-- [ ] **Step 2: Write failing network-semantics assertions**
+- [ ] **Step 2: Assert deterministic repeated results**
 
-```python
-mechanism = svc.build_mechanism_elements(
-    artifacts, anchor_smiles=acetylene, direction="both", max_depth=2
-)
-observation = svc.build_observation_elements(artifacts, min_count=1)
-
-assert mechanism["schema_version"] == "reacnet-scope/mechanism-network/v1"
-assert mechanism["network_semantics"] == "mechanism"
-assert observation["network_semantics"] == "event_transfer"
-assert observation["evidence_level"] == "aggregate_observation"
-assert mechanism["elements"] != observation["elements"]
-```
-
-Run each service twice and compare canonical JSON bytes to prove deterministic order.
+Run the pathway service twice and compare canonical JSON bytes.
 
 - [ ] **Step 3: Verify RED and fix only demonstrated defects**
 
 ```bash
-.venv/bin/python -m pytest -q -m realdata tests/realdata/test_real_pathway_network.py
+.venv/bin/python -m pytest -q -m realdata tests/realdata/test_real_pathway.py
 ```
 
-Expected before fixes: any failure identifies a deterministic search, reversible-pair, evidence-key, or schema-label defect.
+Expected before fixes: any failure identifies a deterministic search or
+evidence-key defect.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
 ```bash
-.venv/bin/python -m pytest -q -m realdata tests/realdata/test_real_pathway_network.py
-git add tests/realdata/test_real_pathway_network.py
-git add rng_tools/pathways.py rng_tools/mechanism_graph.py scripts/webapp_dash/services.py
-git commit -m "test: validate real candidate path and network semantics"
+.venv/bin/python -m pytest -q -m realdata tests/realdata/test_real_pathway.py
+git add tests/realdata/test_real_pathway.py
+git add rng_tools/pathways.py scripts/webapp_dash/services.py
+git commit -m "test: validate real candidate paths"
 ```
 
 Omit unchanged production files before committing.
@@ -280,7 +273,7 @@ Omit unchanged production files before committing.
 - Validates: indexed event query uses the reaction index
 - Validates: online source CSVs are never opened
 - Validates: trajectory bytes read equal requested frame ranges
-- Validates: path expansions and mechanism nodes honor hard caps
+- Validates: path expansions honor hard caps
 
 - [ ] **Step 1: Write failing SQLite query-plan tests**
 
@@ -325,9 +318,7 @@ Synthetic high-branch graphs assert:
 ```python
 assert result.expansions <= max_expansions
 assert len(result.paths) <= max_paths
-assert payload["meta"]["node_count"] <= max_nodes
 assert result.truncated is True
-assert payload["meta"]["truncated"] is True
 ```
 
 Run with reversed input order and require byte-identical canonical JSON.
@@ -343,7 +334,7 @@ If SQLite does not choose the intended index, adjust schema/query rather than we
 - [ ] **Step 5: Verify GREEN and commit**
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_evidence_performance_contract.py tests/test_online_index_contract.py tests/test_candidate_pathways.py tests/test_mechanism_graph.py
+.venv/bin/python -m pytest -q tests/test_evidence_performance_contract.py tests/test_online_index_contract.py tests/test_candidate_pathways.py
 git add tests/test_evidence_performance_contract.py tests/test_online_index_contract.py
 git add reacnet_scope/event_index.py reacnet_scope/trajectory.py rng_tools/pathways.py
 git commit -m "test: enforce bounded evidence queries"
@@ -362,7 +353,7 @@ Omit unchanged production files.
 - Modify only if necessary: `scripts/webapp_dash/callbacks.py`
 
 **Interfaces:**
-- Validates: focused workflow, event page, pathway page, and network page handoffs
+- Validates: focused workflow, event page, pathway page, and trajectory/package handoffs
 - Validates: Dash services do not import/call legacy LAMMPS parser
 - Preserves: `scripts/webapp/server.py` legacy behavior
 
@@ -372,9 +363,7 @@ Exercise callback functions directly:
 
 1. select exact species → pathway start;
 2. select pathway step → event reaction text;
-3. select pathway → mechanism-network anchor and highlight;
-4. select mechanism reaction node → event reaction text;
-5. select event → participant view → package download.
+3. select event → participant view → package download.
 
 Assert every handoff uses exact SMILES/reaction keys, not formula-only matching.
 
@@ -416,7 +405,6 @@ Omit unchanged callback files.
 Record:
 
 - ReacNetGenerator is the authoritative reaction/event source;
-- NetworkX handles graph containers, algorithms, and graph formats;
 - ASE handles bounded LAMMPS frame parsing, PBC/MIC geometry, and ExtXYZ;
 - OVITO 3.15+ is an external viewer target, not a runtime dependency;
 - ReaxTools source was not copied because current repository licensing is unclear;
@@ -463,7 +451,7 @@ No automated step installs or launches OVITO.
 - [ ] **Step 4: Verify documentation links and commit**
 
 ```bash
-rg -n "ReacNetGenerator|NetworkX|ASE|OVITO|ReaxTools|kinetic_flux" README.md docs/open-source-components.md docs/real-data-acceptance.md
+rg -n "ReacNetGenerator|ASE|OVITO|ReaxTools" README.md docs/open-source-components.md docs/real-data-acceptance.md
 git diff --check
 git add README.md docs/open-source-components.md docs/real-data-acceptance.md
 git commit -m "docs: publish evidence workflow acceptance runbook"
@@ -496,7 +484,6 @@ Report schema:
   "indexes": {},
   "event_oracle": {},
   "pathway_oracle": {},
-  "network_semantics": {},
   "trajectory_oracle": {},
   "checks": [],
   "passed": true
@@ -515,7 +502,9 @@ Expected: report module is missing.
 
 - [ ] **Step 3: Implement the report through public interfaces**
 
-Do not duplicate chemistry/index logic. Call the same stores, pathway service, mechanism/observation services, event view, and package validation used by tests. Include exact observed versus expected values and source signatures.
+Do not duplicate chemistry/index logic. Call the same stores, pathway service,
+event view, and package validation used by tests. Include exact observed versus
+expected values and source signatures.
 
 - [ ] **Step 4: Run focused, complete, and real-data verification**
 
@@ -540,7 +529,10 @@ REACNET_SCOPE_CACHE_DIR="$tmp_cache" \
   ref_data/rng-test-rp3-0523 --prepare
 ```
 
-Expected: JSON has `"passed": true`, 263 reaction types, 3,406 events, 100/99 H2O results, the C2 hydrogenation chain, distinct network semantics, and five selected frames. Remove only the exact temporary directory after validating it; never target a workspace or environment directory.
+Expected: JSON has `"passed": true`, 263 reaction types, 3,406 events, 100
+associated H2O results, the C2 hydrogenation chain, and five selected frames.
+Remove only the exact temporary directory after validating it; never target a
+workspace or environment directory.
 
 - [ ] **Step 6: Commit**
 
@@ -551,9 +543,12 @@ git commit -m "test: add reproducible real-data acceptance report"
 
 ## Final Acceptance
 
-- All five plans’ focused tests and the complete suite pass in the human-prepared environment.
-- The RP3 oracle matches 263 reaction types, 3,406 events, 100 H2O dissociation events with 99 associations, a five-frame broken O–H view, and the `C2H2 -> C2H3 -> C2H4` candidate path.
-- Mechanism and observation networks retain different schemas/evidence labels.
+- Current-scope focused tests and the complete suite pass in the
+  human-prepared environment.
+- The RP3 oracle matches 263 reaction types, 3,406 events, 100 associated H2O
+  dissociation events, a five-frame broken O–H view, and the
+  `C2H2 -> C2H3 -> C2H4` candidate path.
 - Source hashes and mtimes under `ref_data/rng-test-rp3-0523` are unchanged.
-- Online event/path/network queries do not open event source CSVs; trajectory reads equal requested indexed ranges.
+- Online event/path queries do not open event source CSVs; trajectory reads
+  equal requested indexed ranges.
 - ASE validates generated LAMMPS/ExtXYZ members; OVITO validation remains an explicit human checklist.
