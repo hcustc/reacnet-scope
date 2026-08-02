@@ -194,7 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
         parser.error("REACNET_SCOPE_CACHE_DIR must be set")
-    dataset = discover_dataset(args.case, args.base)
+    try:
+        dataset = discover_dataset(args.case, args.base)
+    except (FileNotFoundError, RuntimeError) as exc:
+        parser.error(str(exc))
     # RNG-authored event files replace Route reconstruction in the normal
     # workflow.  Route preparation remains explicit for compatibility only.
     explicit_only = bool(

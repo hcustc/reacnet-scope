@@ -26,6 +26,10 @@ ReacNet Scope 的候选路径功能从 `.reactionabcd` 中的聚合反应网络�
 体系条件与外部化学证据。`evidence_linked` 只表示“已关联事件索引并纳入
 评分”，不等于“实验确认”或“原子连续性确认”。
 
+若要验证具体 `event1 → event2 → event3` 是否按时间顺序共享同一原子谱系，使用
+[`reacnet-scope event-paths`](event-path-analysis.md)。该分析采用精确分子实例和
+原子 ID 连接事件，并可直接报告聚合可达但没有实际发生的路径。
+
 ## 路径和反应超边语义
 
 搜索起点必须是当前 `.reactionabcd` 网络中的精确 SMILES。

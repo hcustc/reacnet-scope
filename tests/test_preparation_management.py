@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from rng_tools import dir_browser
@@ -27,24 +28,142 @@ def _layout_node_by_id(node, component_id: str):
     return None
 
 
-def test_preparation_controls_are_inside_collapsed_advanced_details() -> None:
+def test_cache_management_is_visible_and_path_overrides_stay_collapsed() -> None:
     app = create_app()
     layout = app.server.test_client().get("/_dash-layout").get_json()
+    cache_card = _layout_node_by_id(layout, "data-cache-management")
     details = _layout_node_by_id(layout, "data-advanced-tools")
 
+    assert cache_card is not None
+    assert cache_card["type"] == "Div"
     assert details is not None
     assert details["type"] == "Details"
     assert not (details.get("props") or {}).get("open", False)
+    cache_text = json.dumps(cache_card, ensure_ascii=False)
     details_text = json.dumps(details, ensure_ascii=False)
-    assert "数据准备与高级工具" in details_text
+    assert "索引就绪状态" in cache_text
+    assert "危险操作：清理索引缓存" in cache_text
+    assert "路径覆盖与高级设置" in details_text
     for component_id in (
         "data-prep-status",
         "data-rng-event-command",
+        "data-prep-event-command",
         "data-prep-trajectory-command",
         "data-prep-composition-command",
+        "data-prep-event-btn",
+        "data-prep-trajectory-btn",
+        "data-prep-composition-btn",
+        "data-prep-cancel-btn",
+        "data-clear-event-btn",
         "data-clear-trajectory-btn",
+        "data-clear-composition-btn",
     ):
-        assert component_id in details_text
+        assert component_id in cache_text
+        assert component_id not in details_text
+    assert "data-global-min-tp" in details_text
+    assert "data-overrides-apply-btn" in details_text
+
+
+def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
+    app = create_app()
+    dependencies = app.server.test_client().get("/_dash-dependencies").get_json()
+    dependency = next(
+        item
+        for item in dependencies
+        if item.get("output") == "data-prep-action-alert.children"
+    )
+
+    assert [item["id"] for item in dependency["inputs"]] == [
+        "data-prep-event-btn",
+        "data-prep-trajectory-btn",
+        "data-prep-composition-btn",
+    ]
+    assert dependency.get("background") == {"interval": 1000}
+    assert dependency["running"]["running"]["data-prep-cancel-btn.disabled"] is False
+    assert dependency["running"]["runningOff"]["data-prep-cancel-btn.disabled"] is True
+
+
+def test_cache_build_background_callback_dispatches_and_returns(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionabcd").touch()
+    Path(f"{base}.species").touch()
+    candidate = {
+        "folder": str(tmp_path),
+        "base": str(base),
+        "label": base.name,
+    }
+
+    def fake_prepare(folder: str, *, base: str, kind: str):
+        return {
+            "ok": True,
+            "kind": kind,
+            "rebuilt": False,
+            "status": {"state": "ready", "event_count": 3},
+        }
+
+    monkeypatch.setattr(svc, "prepare_dataset_cache", fake_prepare)
+    app = create_app()
+    client = app.server.test_client()
+    payload = {
+        "output": "data-prep-action-alert.children",
+        "outputs": {
+            "id": "data-prep-action-alert",
+            "property": "children",
+        },
+        "changedPropIds": ["data-prep-event-btn.n_clicks"],
+        "inputs": [
+            {"id": "data-prep-event-btn", "property": "n_clicks", "value": 1},
+            {
+                "id": "data-prep-trajectory-btn",
+                "property": "n_clicks",
+                "value": 0,
+            },
+            {
+                "id": "data-prep-composition-btn",
+                "property": "n_clicks",
+                "value": 0,
+            },
+        ],
+        "state": [
+            {
+                "id": "dataset-browser-candidate",
+                "property": "data",
+                "value": candidate,
+            },
+            {"id": "app-store", "property": "data", "value": {}},
+        ],
+    }
+
+    launched = client.post("/_dash-update-component", json=payload)
+    assert launched.status_code == 200
+    job = launched.get_json()
+    assert job.get("cacheKey")
+    assert job.get("job")
+
+    completed = None
+    for _ in range(100):
+        polled = client.post(
+            "/_dash-update-component"
+            f"?cacheKey={job['cacheKey']}&job={job['job']}",
+            json=payload,
+        )
+        assert polled.status_code == 200
+        body = polled.get_json() or {}
+        if (body.get("response") or {}).get("data-prep-action-alert"):
+            completed = body
+            break
+        time.sleep(0.02)
+
+    assert completed is not None
+    assert "事件索引已建立" in json.dumps(
+        completed,
+        ensure_ascii=False,
+    )
 
 
 def test_normalise_recent_datasets_ignores_malformed_loaded_at() -> None:
@@ -84,8 +203,12 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     payload = svc.dataset_preparation_status(str(tmp_path))
     assert payload["dataset_id"]
     assert "/datasets/" in payload["cache_dir"]
+    assert payload["cache_configured"] is True
+    assert payload["cache_writable"] is True
     assert payload["events"]["state"] == "needs_preparation"
+    assert payload["events"]["source_available"] is True
     assert payload["trajectory"]["state"] == "missing"
+    assert payload["trajectory"]["source_available"] is True
     assert payload["rng_event_command"] == "--reaction-event --show-molecule-time"
 
     cleared = svc.clear_dataset_index(str(tmp_path), kind="route")
@@ -113,6 +236,27 @@ def _event_only_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
     return base, reactionevent, molecules
 
 
+def test_prepare_reports_ambiguous_dataset_as_cli_error(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    Path(f"{tmp_path / 'run-a.lammpstrj'}.reactionabcd").touch()
+    Path(f"{tmp_path / 'run-b.lammpstrj'}.reactionabcd").touch()
+
+    try:
+        prepare.main([str(tmp_path), "--event-only"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:  # pragma: no cover - argparse errors must terminate the command
+        raise AssertionError("ambiguous dataset was accepted")
+
+    stderr = capsys.readouterr().err
+    assert "dataset directory is ambiguous; pass --base" in stderr
+    assert "Traceback" not in stderr
+
+
 def test_prepare_event_only_builds_manifest_v2_and_safe_clear(
     tmp_path, monkeypatch
 ) -> None:
@@ -136,6 +280,141 @@ def test_prepare_event_only_builds_manifest_v2_and_safe_clear(
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
     ] == "missing"
+
+
+def test_ui_preparation_service_builds_and_rebuilds_rng_event_cache(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
+
+    built = svc.prepare_dataset_cache(
+        str(tmp_path),
+        base=str(base),
+        kind="event",
+    )
+    rebuilt = svc.prepare_dataset_cache(
+        str(tmp_path),
+        base=str(base),
+        kind="event",
+    )
+
+    assert built["ok"] is True
+    assert built["rebuilt"] is False
+    assert built["status"]["state"] == "ready"
+    assert built["status"]["progress"] == 1.0
+    assert built["status"]["source_offset"] == reactionevent.stat().st_size
+    assert rebuilt["rebuilt"] is True
+    assert rebuilt["status"]["state"] == "ready"
+    assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes
+
+
+def test_ui_preparation_service_rejects_an_unwritable_cache_target(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cache_file = tmp_path / "not-a-cache-directory"
+    cache_file.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(cache_file))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+
+    status = svc.dataset_preparation_status(str(tmp_path), base=str(base))
+    assert status["cache_writable"] is False
+
+    try:
+        svc.prepare_dataset_cache(
+            str(tmp_path),
+            base=str(base),
+            kind="event",
+        )
+    except svc.ServiceError as exc:
+        assert exc.reason == "cache_not_writable"
+    else:  # pragma: no cover - the service must reject this target
+        raise AssertionError("unwritable cache target was accepted")
+
+
+def test_ui_preparation_service_builds_trajectory_and_composition_caches(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    base.write_text(
+        "ITEM: TIMESTEP\n0\nITEM: TIMESTEP\n10\n",
+        encoding="utf-8",
+    )
+    species = Path(f"{base}.species")
+    species.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    source_bytes = base.read_bytes(), species.read_bytes()
+
+    trajectory = svc.prepare_dataset_cache(
+        str(tmp_path),
+        base=str(base),
+        kind="trajectory",
+    )
+    composition = svc.prepare_dataset_cache(
+        str(tmp_path),
+        base=str(base),
+        kind="composition",
+    )
+
+    assert trajectory["status"]["state"] == "ready"
+    assert trajectory["status"]["frames"] == 2
+    assert composition["status"]["state"] == "ready"
+    assert composition["status"]["timepoints"] == 1
+    assert (base.read_bytes(), species.read_bytes()) == source_bytes
+
+
+def test_ui_clear_service_manages_all_visible_index_types(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    base.write_text(
+        "ITEM: TIMESTEP\n0\nITEM: TIMESTEP\n10\n",
+        encoding="utf-8",
+    )
+    species = Path(f"{base}.species")
+    species.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    source_bytes = {
+        path: path.read_bytes()
+        for path in (base, species, reactionevent, molecules)
+    }
+
+    for kind in ("event", "trajectory", "composition"):
+        built = svc.prepare_dataset_cache(
+            str(tmp_path),
+            base=str(base),
+            kind=kind,
+        )
+        assert built["status"]["state"] == "ready"
+
+    for kind in ("event", "trajectory", "composition"):
+        cleared = svc.clear_dataset_index(
+            str(tmp_path),
+            base=str(base),
+            kind=kind,
+        )
+        assert cleared["kind"] == kind
+        assert cleared["removed"]
+        assert cleared["released_bytes"] > 0
+
+    assert {path: path.read_bytes() for path in source_bytes} == source_bytes
+    status = svc.dataset_preparation_status(str(tmp_path), base=str(base))
+    assert status["events"]["state"] == "needs_preparation"
+    assert status["trajectory"]["state"] == "missing"
+    assert status["composition"]["state"] == "missing"
 
 
 def test_default_preparation_builds_available_event_index(

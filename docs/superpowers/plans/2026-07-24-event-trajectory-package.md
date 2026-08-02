@@ -1,5 +1,8 @@
 # Event Trajectory and Evidence Package Implementation Plan
 
+> **Status (2026-08-01): CURRENT.** This work remains part of the supported
+> evidence workflow and does not depend on a graph-view feature.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the event viewer’s custom coordinate parser with indexed ASE-backed frame handling, add reaction-core/participant/environment scopes, and export a reproducible OVITO-compatible evidence package.
@@ -10,7 +13,8 @@
 
 ## Global Constraints
 
-- Complete Plans 1–3 first.
+- Complete the event-evidence foundation and candidate-path prerequisites
+  (Plans 1–2) first.
 - ASE is an optional human-installed dependency. The implementation worker must never install it.
 - Every online frame read must seek to offsets returned by `TRAJECTORY_INDEX_STORE`; do not call ASE on the complete trajectory path.
 - Do not perform bond perception or reaction detection from coordinates.

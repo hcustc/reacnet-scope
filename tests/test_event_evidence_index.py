@@ -7,7 +7,10 @@ import pytest
 
 import reacnet_scope.event_index as event_index_module
 import reacnet_scope.rng_events as rng_events
-from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+from reacnet_scope.event_index import (
+    EVENT_EVIDENCE_STORE,
+    EventNotFoundError,
+)
 from reacnet_scope.indexes import (
     IndexInvalidError,
     IndexStaleError,
@@ -64,6 +67,26 @@ def write_continuous_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return reactionevent, molecules
 
 
+def write_spectator_exchange_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    reactionevent = tmp_path / "exchange.reactionevent.csv"
+    molecules = tmp_path / "exchange.molecules.csv"
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "0,[H][C]([H])[O],[C]+[H][O][H]\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "0,[H],0,\n"
+        "0,[H][C]([H])[O],1;2;3;4,\n"
+        "10,[C],1,\n"
+        "10,[H],2,\n"
+        "10,[H][O][H],0;3;4,\n",
+        encoding="utf-8",
+    )
+    return reactionevent, molecules
+
+
 def test_event_index_uses_dataset_local_cache_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent, _molecules = write_rng_fixture(tmp_path)
@@ -113,6 +136,38 @@ def test_event_store_publishes_dataset_local_index_and_pages(
     assert first["rows"][0]["product_participants"] == [
         {"species": "[H][O]", "atom_ids": [1, 2]}
     ]
+
+    selected = EVENT_EVIDENCE_STORE.get_event(
+        str(reactionevent),
+        str(molecules),
+        first["rows"][0]["event_id"],
+    )
+    assert selected == first["rows"][0]
+    with pytest.raises(EventNotFoundError, match="does not contain event"):
+        EVENT_EVIDENCE_STORE.get_event(
+            str(reactionevent), str(molecules), "missing-event"
+        )
+
+
+def test_event_index_matches_net_component_after_spectator_cancellation(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_spectator_exchange_fixture(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+
+    result = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent),
+        str(molecules),
+        "[H][C]([H])[O]->[C]+[H][O][H]",
+        limit=1,
+    )
+
+    row = result["rows"][0]
+    assert row["association_status"] == "matched"
+    assert row["atom_id_list"] == [1, 2, 3, 4, 5]
+    assert len(row["reactant_participants"]) == 2
+    assert len(row["product_participants"]) == 3
 
 
 def test_event_species_index_finds_exact_predecessor_by_interval(
@@ -321,6 +376,34 @@ def test_event_index_with_missing_required_column_is_invalid(
 
     with pytest.raises(IndexInvalidError, match="columns"):
         EVENT_EVIDENCE_STORE.open_required(str(reactionevent), str(molecules))
+
+
+def test_event_index_versions_association_data_without_changing_schema(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    built = EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    connection = sqlite3.connect(built["index_path"])
+    try:
+        metadata = dict(connection.execute("SELECT key,value FROM meta"))
+        assert metadata["schema_version"] == "3"
+        assert metadata["association_algorithm_version"] == "2"
+        connection.execute(
+            "UPDATE meta SET value='1' "
+            "WHERE key='association_algorithm_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexInvalidError, match="association algorithm"):
+        EVENT_EVIDENCE_STORE.open_required(
+            str(reactionevent), str(molecules)
+        )
+    assert EVENT_EVIDENCE_STORE.status(
+        str(reactionevent), str(molecules)
+    )["state"] == "invalid"
 
 
 def test_malformed_event_json_is_reported_as_invalid_index(

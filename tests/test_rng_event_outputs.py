@@ -10,6 +10,7 @@ from rng_tools import dir_browser
 from reacnet_scope.rng_events import (
     canonical_reaction_key,
     event_output_status,
+    net_reaction_key,
     query_rng_events,
     reaction_key,
 )
@@ -46,9 +47,36 @@ def _rng_outputs(tmp_path: Path) -> tuple[Path, Path]:
     return reactionevent, molecules
 
 
+def _spectator_exchange_outputs(tmp_path: Path) -> tuple[Path, Path]:
+    reactionevent = tmp_path / "exchange.reactionevent.csv"
+    molecules = tmp_path / "exchange.molecules.csv"
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n"
+        "0,[H][C]([H])[O],[C]+[H][O][H]\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n"
+        "0,[H],0,\n"
+        "0,[H][C]([H])[O],1;2;3;4,\n"
+        "10,[C],1,\n"
+        "10,[H],2,\n"
+        "10,[H][O][H],0;3;4,\n",
+        encoding="utf-8",
+    )
+    return reactionevent, molecules
+
+
 def test_canonical_reaction_key_sorts_each_side_and_preserves_multiplicity() -> None:
     assert canonical_reaction_key(("[O]", "[H]", "[H]"), ("[H][O][H]",)) == (
         "[H]+[H]+[O]->[H][O][H]"
+    )
+
+
+def test_net_reaction_key_cancels_common_species_with_multiplicity() -> None:
+    assert net_reaction_key(("A", "A", "B"), ("A", "C")) == (
+        ("A", "B"),
+        ("C",),
     )
 
 
@@ -78,6 +106,23 @@ def test_rng_event_query_preserves_stoichiometry_and_maps_atoms(tmp_path) -> Non
     assert row["atom_id_list"] == [1, 2]
     assert row["product_bonds"] == "1-2-1"
     assert row["association_status"] == "matched"
+
+
+def test_rng_event_query_matches_net_component_after_spectator_cancellation(
+    tmp_path,
+) -> None:
+    reactionevent, molecules = _spectator_exchange_outputs(tmp_path)
+
+    result = query_rng_events(
+        str(reactionevent),
+        str(molecules),
+        "[H][C]([H])[O] -> [H][O][H] + [C]",
+    )
+
+    row = result["rows"][0]
+    assert row["association_status"] == "matched"
+    assert row["atom_id_list"] == [1, 2, 3, 4, 5]
+    assert row["atom_count"] == 5
 
 
 def test_dataset_scan_uses_rng_event_outputs_instead_of_route(tmp_path, monkeypatch) -> None:

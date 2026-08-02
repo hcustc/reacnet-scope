@@ -68,6 +68,29 @@ def canonical_reaction_key(
     return f"{left}->{right}"
 
 
+def net_reaction_key(
+    reactants: Iterable[str],
+    products: Iterable[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Cancel equal species on both sides of one atom-connected component.
+
+    ``reactionevent.csv`` records the net reaction.  A component reconstructed
+    from adjacent ``molecules.csv`` frames can additionally contain species
+    that exchange atoms but have the same stoichiometric count before and
+    after.  Cancelling those common terms makes the two RNG outputs comparable
+    without guessing atom identities from coordinates.
+    """
+    left = Counter(str(item) for item in reactants if str(item))
+    right = Counter(str(item) for item in products if str(item))
+    common = left & right
+    left -= common
+    right -= common
+    return (
+        tuple(sorted(left.elements())),
+        tuple(sorted(right.elements())),
+    )
+
+
 def _trajectory_bond_id(rng_bond: str) -> str:
     parts = str(rng_bond or "").split("-")
     if len(parts) < 3:
@@ -98,6 +121,10 @@ class MoleculeComponent:
     @property
     def key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         return self.reactants, self.products
+
+    @property
+    def net_key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return net_reaction_key(self.reactants, self.products)
 
 
 def changed_components(
@@ -342,9 +369,10 @@ def query_rng_events(
         after_timestep = timesteps[interval + 1]
         pools: dict[tuple[tuple[str, ...], tuple[str, ...]], deque[MoleculeComponent]] = defaultdict(deque)
         for component in _changed_components(molecules[interval], molecules[interval + 1]):
-            pools[component.key].append(component)
+            pools[component.net_key].append(component)
         for occurrence, row in enumerate(by_interval[interval], 1):
-            component = pools[row["reaction_key"]].popleft() if pools[row["reaction_key"]] else None
+            event_key = net_reaction_key(*row["reaction_key"])
+            component = pools[event_key].popleft() if pools[event_key] else None
             status = "matched" if component is not None else "unresolved_hmm_timeline"
             association_counts[status] += 1
             rng_atom_ids = list(component.atom_ids) if component else []

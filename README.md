@@ -7,7 +7,7 @@
 
 - Web 前端：分子式/SMILES/质量数检索、结构渲染、时间曲线绘图、中间体候选筛选
 - Web 前端：RNG 事件检索、参与原子与键展示和索引化局部轨迹提取
-- CLI：批量检索、路径导出、TOP-N 统计、曲线绘制
+- CLI：批量检索、候选路径与原子连续实际事件路径、事件证据包、TOP-N 统计、曲线绘制
 
 它的核心定位是反应 MD 后处理与 ReacNetGenerator 输出解析；质谱实验解释是下游对接场景，而不是把本项目做成峰检测、色谱处理或通用质谱软件。
 
@@ -28,32 +28,34 @@ The project includes both CLI and web interfaces so the same core logic can be u
 
 ## 目录结构
 
-- `run_web.sh` / `run_rng_query_web.sh`: 启动 Web 后端
-- `run_cli.sh` / `run_rng_query.sh`: 启动 CLI
-- `scripts/webapp/server.py`: Web API 与静态页面服务
-- `scripts/webapp/static/`: 前端页面与脚本
-- `scripts/rng_query_cli.py`: 终端检索入口
-- `rng_tools/`: 反应网络解析与统计核心逻辑
+- `reacnet_scope/`：数据集发现、事件/轨迹/组成索引与离线准备流程
+- `rng_tools/`：反应网络解析、统计、路径分析和绘图核心逻辑
+- `scripts/webapp_dash/`：推荐使用的 Dash Web 界面
+- `scripts/webapp/`：兼容保留的轻量 Web API 与静态页面
+- `scripts/rng_query_cli.py`：终端检索入口
+- `tests/`：自动化测试；`examples/`：最小数据与可复现实例
+- `docs/`：专题说明与设计记录；`deploy/`：远程部署配置示例
+- `run_dash.sh`、`run_cli.sh`、`run_web.sh`：本地启动脚本
 
 ## 快速开始
 
 1. 安装依赖
 
 ```bash
-uv sync --extra plot
+uv sync
 ```
 
-NetworkX 是基础依赖，会由 `uv sync` 自动安装。需要使用 ASE 轨迹适配能力时，
-启用 `trajectory` 可选依赖；Dash 与轨迹功能一起使用可执行：
+使用 Dash 界面时安装 `web` 可选依赖；需要 ASE 轨迹适配能力时再启用
+`trajectory`：
 
 ```bash
+uv sync --extra web
 uv sync --extra web --extra trajectory
 ```
 
 2. 启动 Dash Web（推荐）
 
 ```bash
-uv sync --extra web
 REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/media/$USER:/data:/mnt" \
   uv run ./run_dash.sh 127.0.0.1 8060
 ```
@@ -63,7 +65,7 @@ REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/media/$USER:/data:/mnt" \
 
 ### 加载 ReacNetGenerator 数据集
 
-在“管理数据”中点击“选择其他数据集”。服务器浏览器会标记当前目录中的
+进入侧栏“数据工作区”中的“管理数据”页面，点击“选择其他数据集”。服务器浏览器会标记当前目录中的
 ReacNetGenerator 数据集；目录中只有一个数据集时自动选中，存在多个数据集时
 按文件名前缀列出候选。选择后点击一次“加载数据集”即可。最近成功加载的十个
 数据集会保存在当前浏览器本地，方便再次选择；它们不会自动切换当前数据集。
@@ -72,21 +74,28 @@ ReacNetGenerator 数据集；目录中只有一个数据集时自动选中，存
 “手动输入服务器路径”中，可填写数据目录或完整公共前缀；所有路径仍受
 `REACNET_SCOPE_ALLOWED_ROOTS` 限制。
 
-Dash 默认进入“物种检索”。所有功能入口直接显示在页面顶部，不使用下拉菜单；
-不同类别仅以分隔关系组织：
+Dash 默认进入“物种检索”。分析与数据工作区入口直接显示在左侧栏，不使用下拉菜单；
+不同类别以分组关系组织：
 
-- **通用工具**：物种检索、反应式检索、时间演化、事件与轨迹。
+- **通用工具**：物种检索、反应式检索、时间演化、反应事件、轨迹查看。
 - **自动分析**：中间体筛选、候选路径、组成演化。
+- **数据工作区**：管理数据、批量对比。
 
 各工具保持独立，页面只显示当前工具名称、数据状态和操作区域。需要继续分析时，
-已选物种可以直接检索生成/消耗通道，再将所选通道送入事件与轨迹；也可作为
-候选路径起点或直接定位物种事件。批量对比从“管理数据”进入，不占用顶部工具栏。
+已选物种可以直接检索生成/消耗通道，再将所选通道送入“反应事件”；选中事件后
+再打开独立的“轨迹查看”。物种也可作为候选路径起点。数据集选择、文件状态与
+缓存准备集中在独立的“管理数据”页面；批量对比同属侧栏“数据工作区”。
+
+“批量对比”可以直接组合当前数据集与最近加载的数据集，也可以递归扫描包含
+多条件/多重复模拟的目录。结果按条件组汇总精确反应的检出率、平均 TP、标准差、
+平均净 TP 与 95% 置信区间；选中反应可查看各重复实验，表格可按显示列导出 CSV。
+为防止不完整结果，任何已选数据源缺失或解析失败都会终止本次比较并明确报错。
 
 候选路径发现采用两阶段
 检索：“多步碎片路径”页面首先只读取 `.reactionabcd`，默认限制为 4 步、每步
 4 分支、10 条结果和 300 次状态展开；
 不会在粗筛阶段读取事件、Route 或 species 时间索引。选中具体反应后，再按需
-进入事件与轨迹核查。
+进入“反应事件”定位，并在“轨迹查看”中核查。
 
 完整的信息架构、功能归属与后续去重计划见
 [`docs/usage-logic-redesign.md`](docs/usage-logic-redesign.md)。
@@ -99,11 +108,12 @@ Dash 默认进入“物种检索”。所有功能入口直接显示在页面顶
 --reaction-event --show-molecule-time
 ```
 
-事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 只读消费索引，
-不会构建索引，也不会顺序扫描完整事件 CSV 或轨迹：
+事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 查询只读消费
+已发布的索引，不会在查询中顺序扫描完整事件 CSV 或轨迹；“管理数据”页可启动
+使用同一准备命令的独立后台任务：
 
 ```bash
-export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
+export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
 uv run reacnet-scope-prepare /data/case
 uv run reacnet-scope-prepare /data/case --status
 ```
@@ -111,7 +121,7 @@ uv run reacnet-scope-prepare /data/case --status
 如果只需要准备事件检索，可以将索引放在高速缓存盘并使用 `--event-only`：
 
 ```bash
-export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
+export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
 uv run reacnet-scope-prepare /data/case --event-only
 ```
 
@@ -125,9 +135,67 @@ SMILES；有 `.molecules.csv` 时再补充参与原子、键变化和物理 time
 也可只准备组成索引：
 
 ```bash
-export REACNET_SCOPE_CACHE_DIR=/path/to/nvme/reacnet-cache
+export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
 uv run reacnet-scope-prepare /data/case --composition-only
 ```
+
+### 事件轨迹查看与 OVITO 复核
+
+“反应事件”页只负责检索和选择 RNG 事件；点击“打开轨迹查看”后进入独立页面。
+“轨迹查看”只读取轨迹索引返回的帧字节范围，并由 ASE 处理晶胞、周期边界和最小
+镜像重定位。页面中的 3Dmol.js 查看器默认只显示参与原子，也可在“完整上下文 /
+参与原子 / 仅反应核”之间切换。成键和断键信息始终来自 RNG 事件证据，不根据
+坐标重新猜键。
+
+事件索引先按相邻 `.molecules.csv` 帧中的原子连通组追踪参与原子，再约去反应
+两侧计量相同的净不变物种，与 RNG 的净反应事件匹配。升级前建立的事件索引需
+执行 `reacnet-scope-prepare /data/case --rebuild event` 后才能使用该关联规则。
+
+原始 dump 只有数值 `type` 时，页面会从当前局部轨迹检测 Type，并为
+每个 Type 提供可搜索的元素下拉框。点击“应用设置并重新提取”即确认该映射，
+设置会保存到当前数据集的缓存目录；轨迹自带 `element` 列时始终优先使用
+原始元素。
+
+点击“下载事件包 ZIP”可得到一个确定性、可复核的最小证据包：
+
+- `event.json`：事件内容、来源签名、原子分组/映射和轨迹提取参数；
+- `trajectory.lammpstrj`：当前原子范围的局部轨迹；
+- `trajectory.extxyz`：元素映射完整时提供，保留晶胞/PBC 和原子 ID；
+- `bonds.csv`：来自 RNG 事件证据的成键、断键与未变键；
+- `README.txt`：来源、坐标处理、限制和 ASE/OVITO 打开命令。
+
+元素映射不完整时仍可下载 ZIP 和 LAMMPS 轨迹，仅省略
+`trajectory.extxyz`。也可从终端导出同一格式：
+
+```bash
+export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
+uv run reacnet-scope export-event \
+  --case /data/case \
+  --event-id EVENT_ID \
+  --scope participants \
+  --type-map '1=C,2=H,3=O' \
+  --out EVENT_evidence.zip
+```
+
+命令默认不覆盖已有文件；需要替换时显式传入 `--force`。页面仍保留独立的
+“子轨迹”和“OVITO 脚本”下载；将两者放在同一目录后可运行：
+
+```bash
+ovitos EVENT_view_ovito.py EVENT_subset.lammpstrj
+```
+
+网页查看器固定使用 vendored 3Dmol.js 2.5.5，不依赖浏览器访问 CDN。3Dmol.js
+及其所含组件的许可证保存在
+[`scripts/webapp_dash/assets/3Dmol-min.js.LICENSE.txt`](scripts/webapp_dash/assets/3Dmol-min.js.LICENSE.txt)。
+
+### 当前范围与未来候选
+
+当前版本以“反应式检索 → 有界候选路径 → RNG 事件 → 局部轨迹/事件包”为主要
+分析链路。机理网络尚未形成可执行方案，不属于当前版本、发布验收或近期路线图；
+旧方案实现和专项实施计划已经删除。
+
+“机理网络”仅保留为未来候选功能名称，不预设数据模型、界面或导出格式。若以后
+重新启动，应基于届时确认的用户需求重新立项和设计，不恢复旧实现。
 
 组成索引以流式方式读取大型 `.species` 文件，把每个 timestep 压缩为
 `CₓOᵧClₙ → 数量`，同时保存每个物种的全程峰值和原始行字节偏移；Dash
@@ -139,10 +207,11 @@ uv run reacnet-scope-prepare /data/case --composition-only
 使用 Ctrl+C 取消时会保留最近的构建检查点。旧的两个
 `reacnet-scope-build-*-index` 命令暂时保留为兼容入口。
 
-在 Dash 的“管理数据”窗口中，“数据准备状态”区域会只读显示基础分析、
-RNG 事件输出和轨迹帧索引状态，并在离线构建运行时自动刷新检查点进度。
-该区域可复制 RNG 输出参数和各类索引准备命令，并可安全清理缓存索引；
-它不会启动构建任务，也不会删除原始 ReacNetGenerator 输出。
+在 Dash 的“管理数据”页面中，可见的“索引与缓存”区域会显示基础分析、事件、
+轨迹帧和组成索引状态、占用空间与缓存目录，并每 2 秒刷新检查点进度。可直接在
+界面中建立、续建、重建或按类型清理事件、轨迹和组成索引，也可复制完全等价的
+CLI 命令。所有操作仅读写 `REACNET_SCOPE_CACHE_DIR`；取消时保留已提交的检查点，
+清理时也不会修改或删除原始 ReacNetGenerator 输出。
 
 旧版静态 Web 界面仍可通过以下命令启动：
 
@@ -186,6 +255,35 @@ Dash 可把 C1–C4（或用户指定的最大碳数）设为搜索目标，并�
 4. `<cwd>/datas/1ER_2500K/rng_data/2CP_O2_1ER.lammpstrj.reactionabcd`
 
 建议在跨项目使用时显式传 `--reac` 或设置 `RNG_REACTION_FILE`。
+
+## 时间有序、原子连续的实际事件路径
+
+`reacnet-scope event-paths` 在已准备的事件索引上把每个具体 RNG 事件作为节点，
+只连接“严格更晚、同一精确分子实例、第一次后续消费”的事件；三事件路径还要求
+至少一个原子 ID 贯穿两条边。它会统计独立 `(重复实验, 原子 ID)` 谱系支持、
+事件时间间隔、跨重复复现率，并在 `.reactionabcd` 可用时列出聚合网络可达但
+轨迹中没有实际发生的路径。
+
+```bash
+uv run reacnet-scope event-paths \
+  --source rep1=/data/case/rep1/run.lammpstrj \
+  --source rep2=/data/case/rep2/run.lammpstrj \
+  --out-json event-paths.json
+```
+
+其中 `/data/case/...` 是路径占位符；请替换为真实公共前缀。例如仓库自带数据可用
+`--source rp3="$PWD/ref_data/rng-test-rp3-0523/rp3.lammpstrj"`。
+
+该分析必须使用同时含 `.reactionevent.csv` 与 `.molecules.csv` 的事件索引；只有
+事件时间而没有原子/分子实例映射时不会降级为物种名称拼接。完整语义、统计字段和
+边界说明见 [时间有序、原子连续的事件路径](docs/event-path-analysis.md)。
+
+Dash 中可在“反应路径 → ② 验证实际发生”通过四步向导运行同一分析引擎：确认数据、
+定义路径、确认并运行、查看结果。当前数据集及事件索引会自动识别；只分析当前数据集
+时无需手填路径，只有选择跨重复统计后才需追加 `label=公共前缀`。常用项逐步填写，
+时间间隔和审计明细上限收在高级设置中。结果展示路径签名、独立原子谱系支持、跨重复
+复现率、聚合/实际对照及具体事件—分子实例—原子 ID 图；选择路径签名后可逐次审计
+真实发生记录，并下载 JSON 或 CSV。
 
 ## 依赖
 
@@ -338,7 +436,13 @@ fig, ax, summary, plot_data = plot_carbon_number_evolution(
 
 ## 发布到 GitHub/PyPI
 
-- GitHub：建议提交 `README.md`、`LICENSE`、`pyproject.toml`、`uv.lock`、源码目录（`rng_tools` / `scripts`）。
-- PyPI：当前配置已提供可发布元数据与命令入口：
-  - `reacnet-scope`
-  - `reacnet-scope-web`
+- GitHub：提交源码、测试、文档、示例以及 `pyproject.toml` / `uv.lock`；构建产物、运行日志、缓存和本地环境均由 `.gitignore` 排除。
+- PyPI：`pyproject.toml` 已配置 CLI、Dash/兼容 Web、索引准备与缓存管理命令入口。
+
+## 开发与验证
+
+```bash
+uv sync --extra web --extra trajectory
+uv run pytest -q
+uv build
+```

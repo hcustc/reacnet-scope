@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -453,8 +453,6 @@ def classify_event(
         dedup_events = []
 
     net_events = [e for e in dedup_events if e.is_net_event]
-    has_forward = any(e.reaction_signature and "->" in e.reaction_signature for e in net_events)
-    has_reverse = False  # Determined by direction field if available
 
     if not dedup_events:
         if forward_tp == 0 and reverse_tp == 0:

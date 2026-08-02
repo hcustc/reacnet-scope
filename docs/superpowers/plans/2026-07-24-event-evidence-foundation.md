@@ -1,12 +1,16 @@
 # Event-Evidence Foundation Implementation Plan
 
+> **Scope update (2026-08-01):** The event-index foundation remains relevant.
+> It has no graph-adapter or graph-library dependency; the old graph stack is
+> outside this implementation plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Establish dependency contracts and replace online scans of ReacNetGenerator event CSVs with a resumable, read-only-at-runtime SQLite evidence index.
 
 **Architecture:** ReacNetGenerator remains the only event detector. An offline builder streams its `reactionevent.csv` and `molecules.csv` in timestep order, joins adjacent molecule frames, and atomically publishes one dataset-local SQLite index. Dash, Python, and later pathway code consume a stable read-only store; they never fall back to scanning source CSVs.
 
-**Tech Stack:** Python 3.10+, SQLite, NetworkX 3.2–3.x, pytest, existing ReacNet Scope cache/index infrastructure.
+**Tech Stack:** Python 3.10+, SQLite, pytest, existing ReacNet Scope cache/index infrastructure.
 
 ## Global Constraints
 
@@ -24,21 +28,21 @@ Before Task 1, the implementation worker must pause and ask the human operator t
 
 ```bash
 cd /home/huangchen/cal_proc/reacnet-scope
-uv pip install "networkx>=3.2,<4" "pytest>=8,<9"
+uv pip install "pytest>=8,<9"
 ```
 
 The worker may run only these read-only checks afterward:
 
 ```bash
-.venv/bin/python -c "import networkx; major=int(networkx.__version__.split('.')[0]); assert 3 <= major < 4; print(networkx.__version__)"
 .venv/bin/python -m pytest --version
 ```
 
-Expected: both commands exit `0`, NetworkX reports a 3.x version, and pytest reports its version. If either command fails, stop and return the exact failed check to the human; do not install or repair the environment.
+Expected: pytest reports its version. If the command fails, stop and return the
+exact failed check to the human; do not install or repair the environment.
 
 ---
 
-### Task 1: Dependency and canonical reaction-key contracts
+### Task 1: Trajectory-extra and canonical reaction-key contracts
 
 **Files:**
 - Create: `tests/test_dependency_contract.py`
@@ -48,7 +52,6 @@ Expected: both commands exit `0`, NetworkX reports a 3.x version, and pytest rep
 - Human refreshes after the edit: `uv.lock`
 
 **Interfaces:**
-- Produces: required dependency `networkx>=3.2,<4`
 - Produces: optional extra `trajectory = ["ase>=3.23,<4"]`
 - Produces: `canonical_reaction_key(reactants, products) -> str`
 - Preserves: `reaction_key(reactant, product) -> tuple[tuple[str, ...], tuple[str, ...]]`
@@ -61,9 +64,8 @@ from pathlib import Path
 import tomllib
 
 
-def test_graph_and_trajectory_dependency_contracts() -> None:
+def test_trajectory_dependency_contract() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    assert "networkx>=3.2,<4" in data["project"]["dependencies"]
     assert data["project"]["optional-dependencies"]["trajectory"] == ["ase>=3.23,<4"]
 ```
 
@@ -86,11 +88,12 @@ Run:
 .venv/bin/python -m pytest -q tests/test_dependency_contract.py tests/test_rng_event_outputs.py
 ```
 
-Expected: failures because NetworkX/trajectory declarations and `canonical_reaction_key` do not exist.
+Expected: failures because the trajectory declaration and
+`canonical_reaction_key` do not exist.
 
 - [ ] **Step 3: Add the declarations and minimal canonicalizer**
 
-Add NetworkX to `[project].dependencies` and create `[project.optional-dependencies].trajectory`. Implement:
+Create `[project.optional-dependencies].trajectory`. Implement:
 
 ```python
 def canonical_reaction_key(
@@ -117,11 +120,11 @@ uv sync --extra web
 After confirmation, run:
 
 ```bash
-.venv/bin/python -c "import networkx; print(networkx.__version__)"
+.venv/bin/python -m pytest --version
 git diff --check -- pyproject.toml uv.lock reacnet_scope/rng_events.py tests/test_dependency_contract.py tests/test_rng_event_outputs.py
 ```
 
-Expected: NetworkX imports and `git diff --check` prints nothing.
+Expected: pytest reports its version and `git diff --check` prints nothing.
 
 - [ ] **Step 5: Verify GREEN**
 
@@ -544,7 +547,8 @@ git commit -m "refactor: serve reaction events from offline evidence index"
 
 ## Milestone Acceptance
 
-- `networkx` and `trajectory` dependency boundaries are declared, but no automated installer was run.
+- The `trajectory` dependency boundary is declared, but no automated installer
+  was run.
 - Event index publication is atomic, resumable, source-signature validated, and safely clearable.
 - Default preparation builds the event index when both RNG event files exist.
 - Dash event queries perform no source-CSV scan and retain the current event-row contract.
@@ -554,4 +558,4 @@ git commit -m "refactor: serve reaction events from offline evidence index"
 .venv/bin/python -m pytest -q tests/test_dependency_contract.py tests/test_event_evidence_index.py tests/test_rng_event_outputs.py tests/test_online_index_contract.py tests/test_preparation_management.py
 ```
 
-Plan 2 may start only after this milestone is committed and the human confirms the NetworkX import check.
+Plan 2 may start after this milestone's focused tests pass.

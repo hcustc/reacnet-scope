@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
@@ -47,6 +48,23 @@ def _layout_node_by_id(node: Any, component_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _layout_node_by_class(node: Any, class_name: str) -> dict[str, Any] | None:
+    if isinstance(node, dict):
+        classes = str((node.get("props") or {}).get("className") or "").split()
+        if class_name in classes:
+            return node
+        for value in node.values():
+            found = _layout_node_by_class(value, class_name)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _layout_node_by_class(value, class_name)
+            if found is not None:
+                return found
+    return None
+
+
 def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -68,12 +86,19 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "inter-to-pathway-btn",
         "inter-to-evolution-btn",
         "species-to-channels-btn",
+        "species-to-evolution-btn",
         "species-structure-grid",
         "species-structure-results",
         "species-structure-csv-btn",
         "rxn-production-grid",
         "rxn-consumption-grid",
         "event-back-btn",
+        "nav-trajectory",
+        "page-trajectory",
+        "trajectory-back-events-btn",
+        "trajectory-refresh-btn",
+        "nav-data-management",
+        "page-data-management",
         "data-open-batch-compare-btn",
     }:
         assert navigation_id in layout_ids
@@ -83,13 +108,26 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "nav-literature",
         "page-literature",
         "nav-batch-compare",
+        "data-modal",
         "species-mass-mode",
         "species-top",
     }:
         assert removed_id not in layout_ids
     assert "page-home" not in layout_ids
     assert "nav-home" not in layout_ids
-    assert "page-description" not in layout_ids
+    assert "page-description" in layout_ids
+    assert "page-eyebrow-section" in layout_ids
+    assert "按分子式、SMILES" in str(
+        ((_layout_node_by_id(layout, "page-description") or {}).get("props") or {}).get(
+            "children"
+        )
+    )
+    assert (
+        (_layout_node_by_id(layout, "species-to-event-btn") or {})["props"][
+            "children"
+        ]
+        == "经反应通道定位事件"
+    )
     assert "rs-top-nav-item" in str(
         ((_layout_node_by_id(layout, "nav-species") or {}).get("props") or {}).get(
             "className"
@@ -97,17 +135,25 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     )
     species_grid = _layout_node_by_id(layout, "species-grid") or {}
     structure_grid = _layout_node_by_id(layout, "species-structure-grid") or {}
+    event_grid = _layout_node_by_id(layout, "event-grid") or {}
     assert (species_grid.get("props") or {}).get("page_action") == "native"
     assert (species_grid.get("props") or {}).get("page_size") == 20
     assert (structure_grid.get("props") or {}).get("page_action") == "native"
     assert (structure_grid.get("props") or {}).get("page_size") == 50
+    assert (event_grid.get("props") or {}).get("page_action") == "native"
+    assert (event_grid.get("props") or {}).get("page_size") == 25
+    event_results_card = _layout_node_by_id(layout, "event-results-card") or {}
+    event_results_classes = str(
+        (event_results_card.get("props") or {}).get("className") or ""
+    ).split()
+    assert "rs-event-results-card" in event_results_classes
+    assert "rs-flex-fill" not in event_results_classes
     assert (
         ((_layout_node_by_id(layout, "page-store") or {}).get("props") or {}).get(
             "data"
         )
         == {"page": "species"}
     )
-    assert "data-modal" in layout_ids
     species_grid = _layout_node_by_id(layout, "species-grid")
     assert species_grid is not None
     assert (species_grid.get("props") or {}).get("row_selectable") == "single"
@@ -131,7 +177,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-prep-status" in layout_ids
     assert "data-prep-refresh-btn" in layout_ids
     assert "data-rng-event-command" in layout_ids
+    assert "data-clear-event-btn" in layout_ids
     assert "data-clear-trajectory-btn" in layout_ids
+    assert "data-clear-composition-btn" in layout_ids
     assert "data-global-min-tp" in layout_ids
     assert "data-overrides-apply-btn" in layout_ids
     assert "global-operation-progress" in layout_ids
@@ -153,12 +201,44 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         assert advanced_carbon_id in layout_ids
     for event_tool_id in {
         "event-frames-csv-download",
+        "event-package-btn",
+        "event-package-download",
         "event-trajectory-download",
+        "event-ovito-download",
         "event-vmd-download",
         "event-atom-ids-copy",
         "event-ovito-expression-copy",
+        "event-type-map-editor",
+        "event-type-map-status",
+        "event-type-map-clear-btn",
+        "event-environment-radius",
+        "event-trajectory-3dmol",
+        "event-3dmol-status",
+        "event-core-label-toggle",
+        "event-atom-inspector",
+        "event-core-atom-list",
+        "event-atom-inspector-body",
     }:
         assert event_tool_id in layout_ids
+    event_scope = _layout_node_by_id(layout, "event-view-scope") or {}
+    assert [
+        option["value"]
+        for option in (event_scope.get("props") or {}).get("options", [])
+    ] == ["context", "participants", "core"]
+    assert (event_scope.get("props") or {}).get("value") == "participants"
+    events_page = _layout_node_by_id(layout, "page-events") or {}
+    trajectory_page = _layout_node_by_id(layout, "page-trajectory") or {}
+    event_page_ids = _layout_string_ids(events_page)
+    trajectory_page_ids = _layout_string_ids(trajectory_page)
+    assert "event-extract-btn" in event_page_ids
+    assert "event-viewer-card" not in event_page_ids
+    assert "event-viewer-card" in trajectory_page_ids
+    assert "event-trajectory-3dmol" in trajectory_page_ids
+    trajectory_body = _layout_node_by_class(trajectory_page, "rs-trajectory-card-body")
+    trajectory_tools = _layout_node_by_class(trajectory_page, "rs-trajectory-tools")
+    assert trajectory_body is not None
+    assert trajectory_tools is not None
+    assert (trajectory_tools.get("props") or {}).get("open") is not True
     for pathway_id in {
         "pathway-start-smiles",
         "pathway-direction",
@@ -200,6 +280,19 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
             if component_id not in layout_ids:
                 missing.append(component_id)
     assert missing == []
+    clientside_3dmol = next(
+        item
+        for item in dependency_response.get_json()
+        if item.get("output") == "event-3dmol-status.children"
+    )
+    assert clientside_3dmol["clientside_function"] == {
+        "namespace": "reacnetScope",
+        "function_name": "renderEventTrajectory",
+    }
+    assert {
+        "id": "event-core-label-toggle",
+        "property": "value",
+    } in clientside_3dmol["inputs"]
     overview = _layout_node_by_id(layout, "data-overview-view")
     browser = _layout_node_by_id(layout, "data-browser-view")
     assert overview is not None
@@ -228,7 +321,7 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         for page_id in page_ids
     ]
 
-    assert len(grouped_pages) == 7
+    assert len(grouped_pages) == 8
     assert len(set(grouped_pages)) == len(grouped_pages)
     assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
 
@@ -434,6 +527,42 @@ def test_batch_compare_opens_from_data_management() -> None:
     )
 
 
+def test_data_management_opens_as_workspace_page() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["open-data-modal"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="open-data-modal.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "species"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "data-management"}
+    assert body["page-species"]["className"] == "rs-page"
+    assert body["page-data-management"]["className"] == "rs-page rs-data-page active"
+    assert body["nav-data-management"]["className"] == (
+        "rs-top-nav-item rs-nav-utility active"
+    )
+    assert body["page-title"]["children"] == "管理数据"
+    assert body["page-eyebrow-section"]["children"] == "数据工作区"
+
+
 def test_selected_species_channel_action_opens_reaction_search() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -463,6 +592,140 @@ def test_selected_species_channel_action_opens_reaction_search() -> None:
     assert body["page-store"]["data"] == {"page": "reactions"}
     assert body["page-reactions"]["className"] == "rs-page active"
     assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
+
+
+def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
+    smiles = "[H][O][H]"
+    row = {"formula": "H2O", "smiles": smiles}
+    monkeypatch.setattr(
+        svc,
+        "species_detail",
+        lambda _artifacts, _smiles: {
+            "ok": True,
+            "formula": "H2O",
+            "smiles": _smiles,
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "render_species_svg",
+        lambda _smiles: {"ok": False, "message": "structure unavailable"},
+    )
+    app = create_app()
+    client = app.server.test_client()
+
+    detail_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["species-grid", "species-structure-grid"],
+            changed="species-grid.selected_rows",
+            input_values={
+                "species-grid.selected_rows": [0],
+                "species-structure-grid.selected_rows": [],
+            },
+            state_values={
+                "species-grid.data": [row],
+                "species-structure-grid.data": [],
+                "app-store.data": {"artifacts": {"species": "/tmp/run.species"}},
+                "species-grid-store.data": {
+                    "query_kind": "smiles",
+                    "rows": [row],
+                },
+            },
+            output_id="detail-panel",
+        ),
+    )
+
+    assert detail_response.status_code == 200
+    detail = detail_response.get_json()["response"]
+    assert detail["species-to-evolution-btn"]["disabled"] is False
+    assert detail["evolution-targets"]["value"] == smiles
+    assert detail["app-store"]["data"]["selected_smiles"] == smiles
+
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["species-to-evolution-btn"] = 1
+    navigation_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="species-to-evolution-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "species"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert navigation_response.status_code == 200
+    navigation = navigation_response.get_json()["response"]
+    assert navigation["page-store"]["data"] == {"page": "evolution"}
+    assert navigation["page-evolution"]["className"] == "rs-page active"
+    assert navigation["nav-evolution"]["className"] == "rs-top-nav-item active"
+
+
+def test_selected_species_event_action_opens_reaction_channels() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["species-to-event-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="species-to-event-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "species"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "reactions"}
+    assert body["page-reactions"]["className"] == "rs-page active"
+    assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
+
+    view_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "species-to-channels-btn",
+                "species-to-event-btn",
+                "rxn-channel-back-btn",
+                "nav-reactions",
+            ],
+            changed="species-to-event-btn.n_clicks",
+            input_values={
+                "species-to-channels-btn": 0,
+                "species-to-event-btn": 1,
+                "rxn-channel-back-btn": 0,
+                "nav-reactions": 0,
+            },
+            state_values={},
+            output_id="rxn-channel-view",
+        ),
+    )
+    assert view_response.status_code == 200
+    view = view_response.get_json()["response"]
+    assert view["rxn-query-card"]["style"] == {"display": "none"}
+    assert view["rxn-results-card"]["style"] == {"display": "none"}
+    assert view["rxn-channel-view"]["style"] == {"display": "block"}
 
 
 def test_channel_view_returns_to_species_search() -> None:
@@ -535,12 +798,14 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
             client,
             input_ids=[
                 "species-to-channels-btn",
+                "species-to-event-btn",
                 "rxn-channel-back-btn",
                 "nav-reactions",
             ],
             changed="species-to-channels-btn.n_clicks",
             input_values={
                 "species-to-channels-btn": 1,
+                "species-to-event-btn": 0,
                 "rxn-channel-back-btn": 0,
                 "nav-reactions": 0,
             },
@@ -558,9 +823,12 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["species-to-channels-btn"],
+            input_ids=["species-to-channels-btn", "species-to-event-btn"],
             changed="species-to-channels-btn.n_clicks",
-            input_values={"species-to-channels-btn": 1},
+            input_values={
+                "species-to-channels-btn": 1,
+                "species-to-event-btn": 0,
+            },
             state_values={
                 "rxn-top": 12,
                 "app-store": {
@@ -747,6 +1015,68 @@ def test_event_page_returns_to_originating_reaction_channel() -> None:
     assert returned["nav-reactions"]["className"] == "rs-top-nav-item active"
 
 
+def test_event_selection_opens_independent_trajectory_page_and_returns() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    event_context = {
+        "page": "events",
+        "return_page": "reactions",
+        "return_label": "返回反应通道",
+    }
+
+    open_values = {item["id"]: 0 for item in dependency["inputs"]}
+    open_values["event-extract-btn"] = 1
+    open_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="event-extract-btn.n_clicks",
+            input_values=open_values,
+            state_values={"page-store": event_context},
+            output_id="page-species",
+        ),
+    )
+
+    assert open_response.status_code == 200
+    opened = open_response.get_json()["response"]
+    trajectory_context = {
+        **event_context,
+        "page": "trajectory",
+    }
+    assert opened["page-store"]["data"] == trajectory_context
+    assert opened["page-events"]["className"] == "rs-page"
+    assert opened["page-trajectory"]["className"] == "rs-page active"
+    assert opened["nav-trajectory"]["className"] == "rs-top-nav-item active"
+
+    back_values = {item["id"]: 0 for item in dependency["inputs"]}
+    back_values["trajectory-back-events-btn"] = 1
+    back_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="trajectory-back-events-btn.n_clicks",
+            input_values=back_values,
+            state_values={"page-store": trajectory_context},
+            output_id="page-species",
+        ),
+    )
+
+    assert back_response.status_code == 200
+    returned = back_response.get_json()["response"]
+    assert returned["page-store"]["data"] == event_context
+    assert returned["page-events"]["className"] == "rs-page active"
+    assert returned["page-trajectory"]["className"] == "rs-page"
+    assert returned["nav-events"]["className"] == "rs-top-nav-item active"
+
+
 def test_selected_intermediate_can_become_pathway_start() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -826,6 +1156,439 @@ def _pathway_payload() -> dict[str, Any]:
     }
 
 
+def _event_path_dash_payload() -> dict[str, Any]:
+    chemistry_keys = ["A->B", "B->C", "C->D"]
+    hydrogen_keys = [
+        "[H]+[H]->[H][H]",
+        "[H][H]->[H]+[H]",
+        "[H]+[H]->[H][H]",
+    ]
+    return {
+        "schema_version": "event-path/v1",
+        "query": {"path_length": 3},
+        "summary": {
+            "replicate_count": 2,
+            "actual_path_occurrence_count": 3,
+            "actual_path_signature_count": 2,
+            "independent_atom_lineage_support_count": 6,
+            "statistics_complete": True,
+            "traversal_truncated": False,
+        },
+        "sources": [
+            {"replicate": "rep1", "event_node_count": 5},
+            {"replicate": "rep2", "event_node_count": 6},
+        ],
+        "paths": [
+            {
+                "signature_id": "sig-chemistry",
+                "reaction_keys": chemistry_keys,
+                "occurrence_count": 2,
+                "independent_atom_lineage_support_count": 4,
+                "independent_lineage_set_support_count": 2,
+                "replicate_support_count": 2,
+                "replicate_reproduction_rate": 1.0,
+                "interval_gap_by_edge": [
+                    {"count": 2, "min": 1, "median": 1, "mean": 1, "max": 1},
+                    {"count": 2, "min": 1, "median": 1, "mean": 1, "max": 1},
+                ],
+                "idle_timestep_gap_by_edge": [
+                    {"count": 2, "min": 0, "median": 0, "mean": 0, "max": 0},
+                    {"count": 2, "min": 0, "median": 0, "mean": 0, "max": 0},
+                ],
+                "anchor_timestep_gap_by_edge": [
+                    {"count": 2, "min": 10, "median": 10, "mean": 10, "max": 10},
+                    {"count": 2, "min": 10, "median": 10, "mean": 10, "max": 10},
+                ],
+                "anchor_timestep_span": {"median": 20},
+                "support_is_lower_bound": False,
+            },
+            {
+                "signature_id": "sig-hydrogen",
+                "reaction_keys": hydrogen_keys,
+                "occurrence_count": 1,
+                "independent_atom_lineage_support_count": 2,
+                "independent_lineage_set_support_count": 1,
+                "replicate_support_count": 1,
+                "replicate_reproduction_rate": 0.5,
+                "anchor_timestep_span": {"median": 20},
+                "support_is_lower_bound": False,
+            },
+        ],
+        "occurrences": [
+            {
+                "path_id": "path-1",
+                "replicate": "rep1",
+                "event_ids": ["event-1", "event-2", "event-3"],
+                "reaction_keys": chemistry_keys,
+                "lineage_atom_ids": [7],
+                "lineage_atom_support_count": 1,
+                "events": [
+                    {
+                        "event_id": "event-1",
+                        "timestep_index": 0,
+                        "before_timestep": 0,
+                        "after_timestep": 10,
+                        "reaction_smiles": "A -> B",
+                        "atom_ids": [7],
+                    },
+                    {
+                        "event_id": "event-2",
+                        "timestep_index": 1,
+                        "before_timestep": 10,
+                        "after_timestep": 20,
+                        "reaction_smiles": "B -> C",
+                        "atom_ids": [7],
+                    },
+                    {
+                        "event_id": "event-3",
+                        "timestep_index": 2,
+                        "before_timestep": 20,
+                        "after_timestep": 30,
+                        "reaction_smiles": "C -> D",
+                        "atom_ids": [7],
+                    },
+                ],
+                "edges": [
+                    {
+                        "from_event_id": "event-1",
+                        "to_event_id": "event-2",
+                        "molecule_instances": [{"species": "B", "atom_ids": [7]}],
+                        "carrier_atom_ids": [7],
+                        "interval_gap": 1,
+                        "idle_timestep_gap": 0,
+                        "anchor_timestep_gap": 10,
+                    },
+                    {
+                        "from_event_id": "event-2",
+                        "to_event_id": "event-3",
+                        "molecule_instances": [{"species": "C", "atom_ids": [7]}],
+                        "carrier_atom_ids": [7],
+                        "interval_gap": 1,
+                        "idle_timestep_gap": 0,
+                        "anchor_timestep_gap": 10,
+                    },
+                ],
+            }
+        ],
+        "occurrence_details_truncated": False,
+        "comparison": {
+            "comparison_available": True,
+            "comparison_complete": True,
+            "aggregate_reachable_pair_count": 10,
+            "confirmed_pair_count": 1,
+            "aggregate_only_pair_count": 9,
+            "actual_only_pair_count": 0,
+            "realization_rate": 0.1,
+            "per_replicate": [
+                {
+                    "replicate": "rep1",
+                    "aggregate_reachable_path_count": 10,
+                    "actual_path_signature_count": 1,
+                    "confirmed_actual_path_count": 1,
+                    "aggregate_only_path_count": 9,
+                    "actual_only_path_count": 0,
+                    "realization_rate": 0.1,
+                    "comparison_complete": True,
+                    "confirmed": [
+                        {"signature_id": "sig-chemistry", "reaction_keys": chemistry_keys}
+                    ],
+                    "aggregate_only": [],
+                    "actual_only": [],
+                }
+            ],
+        },
+    }
+
+
+def test_event_path_dash_layout_exposes_analysis_and_audit_controls() -> None:
+    app = create_app()
+    layout = app.server.test_client().get("/_dash-layout").get_json()
+    ids = _layout_string_ids(layout)
+
+    for component_id in {
+        "pathway-concept-guide",
+        "pathway-concept-aggregate",
+        "pathway-concept-actual",
+        "pathway-analysis-tabs",
+        "event-path-wizard-step",
+        "event-path-progress-1",
+        "event-path-step-1",
+        "event-path-step1-next",
+        "event-path-step-2",
+        "event-path-step2-next",
+        "event-path-step-3",
+        "event-path-run-btn",
+        "event-path-additional-sources",
+        "event-path-signature-grid",
+        "event-path-comparison-chart",
+        "event-path-comparison-grid",
+        "event-path-summary-explanation",
+        "event-path-occurrence-selector",
+        "event-path-time-grid",
+        "event-path-cytoscape",
+        "event-path-event-grid",
+        "event-path-edge-grid",
+        "event-path-store",
+    }:
+        assert component_id in ids
+
+
+def test_event_path_wizard_auto_detects_current_data_and_advances(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc,
+        "validate_event_path_sources_for_dash",
+        lambda *_args, **_kwargs: {
+            "replicate_count": 1,
+            "total_event_count": 3406,
+            "sources": [],
+        },
+    )
+    app = create_app()
+    client = app.server.test_client()
+    app_store = {
+        "base": "/data/rp3.lammpstrj",
+        "label": "rp3.lammpstrj",
+        "artifacts": {
+            "reactionevent": "/data/rp3.lammpstrj.reactionevent.csv",
+            "molecules": "/data/rp3.lammpstrj.molecules.csv",
+        },
+    }
+    source_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store"],
+            changed="app-store.data",
+            input_values={"app-store": app_store},
+            state_values={},
+            output_id="event-path-current-replicate",
+        ),
+    )
+    assert source_response.status_code == 200
+    source_body = source_response.get_json()["response"]
+    assert source_body["event-path-current-replicate"]["value"] == "rp3"
+    assert source_body["event-path-index-status"]["children"] == (
+        "事件索引已就绪 · 3,406 个事件"
+    )
+
+    input_ids = [
+        "event-path-step1-next",
+        "event-path-step2-back",
+        "event-path-step2-next",
+        "event-path-step3-back",
+        "event-path-step4-edit",
+        "event-path-store",
+        "app-store",
+    ]
+    advance_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="event-path-step1-next.n_clicks",
+            input_values={
+                "event-path-step1-next": 1,
+                "event-path-step2-back": 0,
+                "event-path-step2-next": 0,
+                "event-path-step3-back": 0,
+                "event-path-step4-edit": 0,
+                "event-path-store": None,
+                "app-store": app_store,
+            },
+            state_values={
+                "event-path-wizard-step": 1,
+                "event-path-current-replicate": "rp3",
+                "event-path-source-mode": "current",
+                "event-path-additional-sources": "",
+                "event-path-length": 3,
+            },
+            output_id="event-path-wizard-step",
+        ),
+    )
+    assert advance_response.status_code == 200
+    advance_body = advance_response.get_json()["response"]
+    assert advance_body["event-path-wizard-step"]["data"] == 2
+    assert "数据检查通过" in str(
+        advance_body["event-path-wizard-feedback"]["children"]
+    )
+
+    render_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-path-wizard-step"],
+            changed="event-path-wizard-step.data",
+            input_values={"event-path-wizard-step": 2},
+            state_values={},
+            output_id="event-path-step-1",
+        ),
+    )
+    assert render_response.status_code == 200
+    render_body = render_response.get_json()["response"]
+    assert render_body["event-path-step-1"]["style"] == {"display": "none"}
+    assert render_body["event-path-step-2"]["style"] == {}
+    assert "is-active" in render_body["event-path-progress-2"]["className"]
+
+
+def test_event_path_tab_reports_its_own_data_requirements() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["page-store", "app-store", "pathway-analysis-tabs"],
+            changed="pathway-analysis-tabs.active_tab",
+            input_values={
+                "page-store": {"page": "pathway"},
+                "app-store": {
+                    "artifacts": {
+                        "reactionevent": "/data/run.reactionevent.csv",
+                        "molecules": "/data/run.molecules.csv",
+                    }
+                },
+                "pathway-analysis-tabs": "concrete-event-paths",
+            },
+            state_values={},
+            output_id="page-data-status",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-data-status"]["children"] == "事件轨迹证据已就绪"
+    assert body["page-data-status"]["className"] == "rs-page-status is-ready"
+
+
+def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
+    monkeypatch,
+) -> None:
+    report = _event_path_dash_payload()
+    captured = {}
+
+    def fake_analyze(artifacts, **query):
+        captured["artifacts"] = artifacts
+        captured["query"] = query
+        return report
+
+    monkeypatch.setattr(svc, "analyze_event_paths_for_dash", fake_analyze)
+    app = create_app()
+    client = app.server.test_client()
+    run_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-path-run-btn"],
+            changed="event-path-run-btn.n_clicks",
+            input_values={"event-path-run-btn": 1},
+            state_values={
+                "event-path-current-replicate": "rep1",
+                "event-path-source-mode": "multiple",
+                "event-path-additional-sources": "rep2=/data/rep2/run.lammpstrj",
+                "event-path-length": 3,
+                "event-path-start-smiles": "A",
+                "event-path-max-interval-gap": 2,
+                "event-path-max-timestep-gap": 100,
+                "event-path-max-details": 50,
+                "app-store": {
+                    "artifacts": {
+                        "reactionevent": "/data/rep1/run.lammpstrj.reactionevent.csv",
+                        "molecules": "/data/rep1/run.lammpstrj.molecules.csv",
+                    }
+                },
+            },
+            output_id="event-path-alert",
+        ),
+    )
+
+    assert run_response.status_code == 200
+    assert captured["query"] == {
+        "current_replicate": "rep1",
+        "additional_sources": "rep2=/data/rep2/run.lammpstrj",
+        "path_length": 3,
+        "start_smiles": "A",
+        "max_interval_gap": 2,
+        "max_timestep_gap": 100,
+        "max_occurrence_details": 50,
+    }
+    run_body = run_response.get_json()["response"]
+    assert run_body["event-path-store"]["data"] == report
+    assert run_body["event-path-comparison-grid"]["data"][0]["confirmed"] == 1
+    reading_guide = str(
+        run_body["event-path-summary-explanation"]["children"]
+    )
+    assert "10.00%" in reading_guide
+    assert "不是产率、转化率或事件占比" in reading_guide
+
+    filter_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "event-path-store",
+                "event-path-filter-flags",
+                "event-path-min-reproduction",
+                "event-path-min-lineages",
+            ],
+            changed="event-path-store.data",
+            input_values={
+                "event-path-store": report,
+                "event-path-filter-flags": ["hide_pure_h"],
+                "event-path-min-reproduction": 0,
+                "event-path-min-lineages": 1,
+            },
+            state_values={},
+            output_id="event-path-signature-grid",
+        ),
+    )
+    assert filter_response.status_code == 200
+    filter_body = filter_response.get_json()["response"]
+    rows = filter_body["event-path-signature-grid"]["data"]
+    assert [row["signature_id"] for row in rows] == ["sig-chemistry"]
+
+    select_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-path-signature-grid"],
+            changed="event-path-signature-grid.selected_rows",
+            input_values={"event-path-signature-grid": [0]},
+            state_values={
+                "event-path-signature-grid.data": rows,
+                "event-path-store": report,
+            },
+            output_id="event-path-occurrence-selector",
+        ),
+    )
+    assert select_response.status_code == 200
+    select_body = select_response.get_json()["response"]
+    assert select_body["event-path-occurrence-selector"]["value"] == "path-1"
+    assert select_body["event-path-time-grid"]["data"][0]["anchor_median"] == 10
+
+    occurrence_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-path-occurrence-selector"],
+            changed="event-path-occurrence-selector.value",
+            input_values={"event-path-occurrence-selector": "path-1"},
+            state_values={"event-path-store": report},
+            output_id="event-path-cytoscape",
+        ),
+    )
+    assert occurrence_response.status_code == 200
+    occurrence_body = occurrence_response.get_json()["response"]
+    elements = occurrence_body["event-path-cytoscape"]["elements"]
+    assert [item["data"]["id"] for item in elements[:3]] == [
+        "event-1",
+        "event-2",
+        "event-3",
+    ]
+    assert occurrence_body["event-path-edge-grid"]["data"][0][
+        "carrier_atom_ids"
+    ] == "7"
+
+
 def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -880,7 +1643,7 @@ def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
     assert row["path_score"] == 0.7
     assert row["weakest_step_score"] == 0.6
     assert row["depth"] == 1
-    assert row["evidence_badge"] == "事件已关联"
+    assert row["evidence_badge"] == "各步可查事件（未证整链）"
     assert result["pathway-store"]["data"] == _pathway_payload()
     assert result["pathway-context-store"]["data"] == {
         "schema_version": "reacnet-scope/pathway-context/v1",
@@ -1705,6 +2468,7 @@ def _data_view_callback_payload(
         for item in client.get("/_dash-dependencies").get_json()
         if "data-overview-view.className" in item["output"]
         and "data-browser-view.className" in item["output"]
+        and any(value["id"] == "data-pick-btn" for value in item["inputs"])
     )
     return {
         "output": dependency["output"],
@@ -1780,10 +2544,11 @@ def _load_dataset_callback_payload(
         {"id": "topbar-rungroup", "property": "children"},
         {"id": "topbar-status", "property": "children"},
         {"id": "topbar-status", "property": "className"},
-        {"id": "data-modal", "property": "is_open"},
         {"id": "recent-datasets", "property": "data"},
         {"id": "dataset-browser-candidate", "property": "data"},
         {"id": "data-load-feedback", "property": "children"},
+        {"id": "data-overview-view", "property": "className"},
+        {"id": "data-browser-view", "property": "className"},
     ]
     state_values = {
         "dataset-browser-candidate": candidate,
@@ -1893,14 +2658,11 @@ def _candidate_status_callback_payload(
             {
                 "id": item["id"],
                 "property": item["property"],
-                "value": candidate,
+                "value": candidate if item["id"] == "dataset-browser-candidate" else store,
             }
             for item in dependency["inputs"]
         ],
-        "state": [
-            {"id": item["id"], "property": item["property"], "value": store}
-            for item in dependency["state"]
-        ],
+        "state": [],
     }
 
 
@@ -1913,10 +2675,10 @@ def _preparation_status_callback_payload(
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
-        if "data-prep-status.children" in item["output"]
+        if "data-prep-basic-status.children" in item["output"]
     )
     input_values = {
-        "data-modal": True,
+        "page-store": {"page": "data-management"},
         "data-prep-refresh-btn": 1,
         "data-prep-refresh": 0,
         "dataset-browser-candidate": candidate,
@@ -1924,15 +2686,31 @@ def _preparation_status_callback_payload(
     return {
         "output": dependency["output"],
         "outputs": [
-            {"id": "data-prep-status", "property": "children"},
+            {"id": "data-prep-basic-status", "property": "children"},
+            {"id": "data-prep-event-status", "property": "children"},
+            {"id": "data-prep-trajectory-status", "property": "children"},
+            {"id": "data-prep-composition-status", "property": "children"},
+            {"id": "data-prep-cache-meta", "property": "children"},
+            {"id": "data-prep-status-alert", "property": "children"},
+            {"id": "data-next-action", "property": "children"},
+            {"id": "topbar-index-status", "property": "children"},
+            {"id": "topbar-index-status", "property": "className"},
+            {"id": "data-prep-refresh-label", "property": "children"},
             {"id": "data-rng-event-command", "property": "children"},
+            {"id": "data-prep-event-command", "property": "children"},
             {"id": "data-prep-trajectory-command", "property": "children"},
             {"id": "data-prep-composition-command", "property": "children"},
             {"id": "data-rng-event-copy", "property": "content"},
+            {"id": "data-prep-event-copy", "property": "content"},
             {"id": "data-prep-trajectory-copy", "property": "content"},
             {"id": "data-prep-composition-copy", "property": "content"},
+            {"id": "data-clear-event-btn", "property": "disabled"},
             {"id": "data-clear-trajectory-btn", "property": "disabled"},
+            {"id": "data-clear-composition-btn", "property": "disabled"},
             {"id": "data-prep-refresh", "property": "disabled"},
+            {"id": "data-prep-event-btn", "property": "className"},
+            {"id": "data-prep-trajectory-btn", "property": "className"},
+            {"id": "data-prep-composition-btn", "property": "className"},
         ],
         "changedPropIds": ["data-prep-refresh-btn.n_clicks"],
         "inputs": [
@@ -1955,14 +2733,18 @@ def _clear_confirmation_callback_payload(
     *,
     candidate: dict[str, str] | None,
     store: dict[str, Any],
+    kind: str = "trajectory",
 ) -> dict[str, Any]:
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
         if any(value["id"] == "data-clear-trajectory-btn" for value in item["inputs"])
     )
+    trigger_id = f"data-clear-{kind}-btn"
     input_values = {
-        "data-clear-trajectory-btn": 1,
+        "data-clear-event-btn": 1 if kind == "event" else None,
+        "data-clear-trajectory-btn": 1 if kind == "trajectory" else None,
+        "data-clear-composition-btn": 1 if kind == "composition" else None,
         "data-clear-cancel-btn": None,
     }
     state_values = {
@@ -1977,7 +2759,7 @@ def _clear_confirmation_callback_payload(
             {"id": "data-clear-kind-store", "property": "data"},
             {"id": "data-prep-clear-alert", "property": "children"},
         ],
-        "changedPropIds": ["data-clear-trajectory-btn.n_clicks"],
+        "changedPropIds": [f"{trigger_id}.n_clicks"],
         "inputs": [
             {
                 "id": item["id"],
@@ -2241,6 +3023,44 @@ def test_clear_confirmation_keeps_discovered_app_store_fallback_usable(
     }
 
 
+def test_clear_confirmation_maps_each_visible_index_button(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        assert (folder, base) == (candidate["folder"], candidate["base"])
+        return {
+            "events": {"state": "ready", "index_size": 10},
+            "trajectory": {"state": "ready", "index_size": 20},
+            "composition": {"state": "ready", "index_size": 30},
+        }
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+
+    for kind in ("event", "trajectory", "composition"):
+        response = client.post(
+            "/_dash-update-component",
+            json=_clear_confirmation_callback_payload(
+                client,
+                candidate=candidate,
+                store={},
+                kind=kind,
+            ),
+        )
+        assert response.status_code == 200
+        request = response.get_json()["response"]["data-clear-kind-store"]["data"]
+        assert request == {
+            "kind": kind,
+            "folder": candidate["folder"],
+            "base": candidate["base"],
+        }
+
+
 def test_confirmed_clear_rejects_forged_request_before_clear_service(
     tmp_path, monkeypatch
 ) -> None:
@@ -2276,7 +3096,7 @@ def test_confirmed_clear_rejects_forged_request_before_clear_service(
     assert clear_calls == []
 
 
-def test_load_selected_dataset_updates_store_closes_modal_and_remembers_it(
+def test_load_selected_dataset_updates_store_returns_to_overview_and_remembers_it(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
@@ -2321,12 +3141,17 @@ def test_load_selected_dataset_updates_store_closes_modal_and_remembers_it(
     result = response.get_json()["response"]
     assert captured == {"folder": str(tmp_path), "base": candidate["base"]}
     assert result["app-store"]["data"]["base"] == candidate["base"]
-    assert result["data-modal"]["is_open"] is False
+    assert result["data-overview-view"]["className"] == "rs-data-view"
+    assert "d-none" in result["data-browser-view"]["className"]
+    assert result["dataset-browser-candidate"]["data"] is None
+    assert "已加载数据集" in json.dumps(
+        result["data-load-feedback"]["children"], ensure_ascii=False
+    )
     assert result["recent-datasets"]["data"][0]["folder"] == str(tmp_path)
     assert result["recent-datasets"]["data"][0]["base"] == candidate["base"]
 
 
-def test_load_failure_keeps_current_dataset_modal_and_recents(monkeypatch) -> None:
+def test_load_failure_keeps_current_dataset_browser_and_recents(monkeypatch) -> None:
     monkeypatch.setattr(
         svc,
         "scan_dataset",
@@ -2349,7 +3174,8 @@ def test_load_failure_keeps_current_dataset_modal_and_recents(monkeypatch) -> No
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["app-store"]["data"] == old_store
-    assert result["data-modal"]["is_open"] is True
+    assert "data-overview-view" not in result
+    assert "data-browser-view" not in result
     assert result["recent-datasets"]["data"] == old_recent
     assert result["dataset-browser-candidate"]["data"] is None
     assert "不可用" in json.dumps(result["data-load-feedback"]["children"], ensure_ascii=False)
@@ -2462,7 +3288,8 @@ def test_browser_load_applies_selected_candidate_atomically_in_one_click(
     assert load_response.status_code == 200
     result = load_response.get_json()["response"]
     assert result["app-store"]["data"]["base"] == selected["base"]
-    assert result["data-modal"]["is_open"] is False
+    assert result["data-overview-view"]["className"] == "rs-data-view"
+    assert "d-none" in result["data-browser-view"]["className"]
 
 
 def test_browser_load_rejects_forged_out_of_root_candidate_before_scan(
@@ -2523,7 +3350,8 @@ def test_browser_load_rejects_forged_out_of_root_candidate_before_scan(
     assert scan_calls == 0
     assert result["app-store"]["data"] == old_store
     assert result["recent-datasets"]["data"] == old_recent
-    assert result["data-modal"]["is_open"] is True
+    assert "data-overview-view" not in result
+    assert "data-browser-view" not in result
     assert result["dataset-browser-candidate"]["data"] is None
 
 
@@ -2934,6 +3762,38 @@ def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_ca
     assert ".rs-analysis-progress.is-running::after" in css
 
 
+def test_event_viewer_assets_are_vendored_and_offline_ready() -> None:
+    assets = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+    )
+    library = assets / "3Dmol-min.js"
+    license_file = assets / "3Dmol-min.js.LICENSE.txt"
+    integration = assets / "event_viewer.js"
+
+    assert library.stat().st_size > 500_000
+    assert "3dmol v2.5.5" in license_file.read_text(encoding="utf-8")
+    integration_text = integration.read_text(encoding="utf-8")
+    assert "renderEventTrajectory" in integration_text
+    assert "assignBonds" not in integration_text
+    assert "display_${axis}" in integration_text
+    assert "setHoverable" in integration_text
+    assert "setClickable" in integration_text
+    assert "renderAtomInspector" in integration_text
+    assert "addCoreHalo" in integration_text
+    assert "event-core-atom-list" in integration_text
+
+    client = create_app().server.test_client()
+    library_response = client.get("/assets/3Dmol-min.js")
+    integration_response = client.get("/assets/event_viewer.js")
+    assert library_response.status_code == 200
+    assert len(library_response.data) == library.stat().st_size
+    assert integration_response.status_code == 200
+    assert b"renderEventTrajectory" in integration_response.data
+
+
 def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
@@ -2990,8 +3850,311 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> Non
     response = client.post("/_dash-update-component", json=payload)
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["event-grid"]["data"][0]["atom_ids"] == "1,2"
+    table_row = result["event-grid"]["data"][0]
+    raw_row = result["event-grid-store"]["data"]["rows"][0]
+    assert table_row["atom_ids"] == "1,2"
+    assert table_row["id"] == raw_row["event_id"]
+    assert "atom_id_list" not in table_row
+    assert "reactant_participants" not in table_row
+    assert all(
+        isinstance(value, (str, int, float, bool)) or value is None
+        for value in table_row.values()
+    )
+    assert raw_row["atom_id_list"] == [1, 2]
     assert result["event-grid-store"]["data"]["kind"] == "rng_event"
+
+    selection_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-grid"],
+            changed="event-grid.selected_row_ids",
+            input_values={
+                "event-grid.selected_row_ids": [table_row["id"]],
+            },
+            state_values={
+                "event-grid-store": result["event-grid-store"]["data"],
+                "app-store": {
+                    "artifacts": {"trajectory": "/data/run.lammpstrj"}
+                },
+            },
+            output_id="event-selected-store",
+        ),
+    )
+    assert selection_response.status_code == 200
+    selected = selection_response.get_json()["response"]
+    assert selected["event-selected-store"]["data"]["row"]["atom_id_list"] == [1, 2]
+    assert selected["event-extract-id"]["value"] == table_row["id"]
+    assert selected["event-selection-card"]["style"] == {"display": "block"}
+    assert selected["event-extract-btn"]["disabled"] is False
+    assert selected["event-extract-btn"]["children"] == "打开轨迹查看"
+
+
+def test_unresolved_event_selection_does_not_open_a_blank_trajectory() -> None:
+    client = create_app().server.test_client()
+    row = {
+        "event_id": "rngevt-unresolved",
+        "association_status": "unresolved_hmm_timeline",
+        "atom_id_list": [],
+        "before_timestep": 10,
+        "after_timestep": 20,
+        "reaction_smiles": "A -> B",
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-grid"],
+            changed="event-grid.selected_row_ids",
+            input_values={
+                "event-grid.selected_row_ids": [row["event_id"]],
+            },
+            state_values={
+                "event-grid-store": {
+                    "rows": [row],
+                    "kind": "rng_event",
+                    "config": {},
+                },
+                "app-store": {
+                    "artifacts": {"trajectory": "/data/run.lammpstrj"}
+                },
+            },
+            output_id="event-selected-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    selected = response.get_json()["response"]
+    assert selected["event-extract-btn"]["disabled"] is True
+    assert selected["event-extract-btn"]["children"] == "该事件无法定位原子"
+    assert "轨迹不可用" in str(
+        selected["event-selected-summary"]["children"]
+    )
+
+
+def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_build(artifacts, row, **kwargs):
+        captured.update(
+            {
+                "artifacts": artifacts,
+                "row": row,
+                **kwargs,
+            }
+        )
+        return {
+            "event_id": row["event_id"],
+            "frames": [
+                {
+                    "frame": 20,
+                    "atoms": [],
+                    "bonds": [],
+                }
+            ],
+            "atom_groups": {
+                "core": [1],
+                "participants": [1, 2],
+                "context": [1, 2, 3],
+            },
+            "storyboard_frames": [],
+            "storyboard_labels": {},
+            "meta": {
+                "verification_status": "matched",
+                "environment": {
+                    "selected_environment_count": 1,
+                    "raw_environment_count": 1,
+                    "truncated": False,
+                },
+            },
+            "paths": {"trajectory": "/data/run.lammpstrj"},
+        }
+
+    monkeypatch.setattr(svc, "build_rng_event_visualization", fake_build)
+    client = create_app().server.test_client()
+    selected_row = {
+        "event_id": "rngevt-1",
+        "anchor_frame": 20,
+        "reactant": "[H]+[O]",
+        "product": "[H][O]",
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "event-extract-btn",
+                "trajectory-refresh-btn",
+                "event-type-map-clear-btn",
+            ],
+            changed="trajectory-refresh-btn.n_clicks",
+            input_values={
+                "event-extract-btn": 1,
+                "trajectory-refresh-btn": 1,
+                "event-type-map-clear-btn": 0,
+            },
+            state_values={
+                "event-selected-store": {
+                    "row": selected_row,
+                    "kind": "rng_event",
+                    "config": {"before_frames": 2, "after_frames": 4},
+                },
+                "app-store": {
+                    "artifacts": {"trajectory": "/data/run.lammpstrj"}
+                },
+                '{"atom_type":["ALL"],"type":"event-type-element-select"}.value': [
+                    "H",
+                    "O",
+                ],
+                '{"atom_type":["ALL"],"type":"event-type-element-select"}.id': [
+                    {
+                        "type": "event-type-element-select",
+                        "atom_type": "1",
+                    },
+                    {
+                        "type": "event-type-element-select",
+                        "atom_type": "2",
+                    },
+                ],
+                "event-environment-radius": 5.5,
+            },
+            output_id="event-viewer-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert captured == {
+        "artifacts": {"trajectory": "/data/run.lammpstrj"},
+        "row": selected_row,
+        "before_frames": 2,
+        "after_frames": 4,
+        "environment_radius": 5.5,
+        "atom_type_map": {"1": "H", "2": "O"},
+    }
+    assert result["event-viewer-card"]["style"] == {"display": "block"}
+    assert result["event-frame-slider"]["value"] == 0
+    assert "局部轨迹已按 PBC 重定位" in result["trajectory-alert"]["children"]
+
+    captured.clear()
+    clear_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "event-extract-btn",
+                "trajectory-refresh-btn",
+                "event-type-map-clear-btn",
+            ],
+            changed="event-type-map-clear-btn.n_clicks",
+            input_values={
+                "event-extract-btn": 1,
+                "trajectory-refresh-btn": 1,
+                "event-type-map-clear-btn": 1,
+            },
+            state_values={
+                "event-selected-store": {
+                    "row": selected_row,
+                    "kind": "rng_event",
+                    "config": {"before_frames": 2, "after_frames": 4},
+                },
+                "app-store": {
+                    "artifacts": {"trajectory": "/data/run.lammpstrj"}
+                },
+                '{"atom_type":["ALL"],"type":"event-type-element-select"}.value': [
+                    "H",
+                    "O",
+                ],
+                '{"atom_type":["ALL"],"type":"event-type-element-select"}.id': [
+                    {
+                        "type": "event-type-element-select",
+                        "atom_type": "1",
+                    },
+                    {
+                        "type": "event-type-element-select",
+                        "atom_type": "2",
+                    },
+                ],
+                "event-environment-radius": 5.5,
+            },
+            output_id="event-viewer-store",
+        ),
+    )
+
+    assert clear_response.status_code == 200
+    assert captured["atom_type_map"] == {}
+
+
+def test_event_type_map_editor_renders_detected_types_and_saved_values() -> None:
+    client = create_app().server.test_client()
+    viewer = {
+        "frames": [
+            {
+                "frame": 20,
+                "atoms": [
+                    {"id": 1, "type": "1"},
+                    {"id": 2, "type": "2"},
+                    {"id": 3, "type": "2"},
+                ],
+            }
+        ],
+        "meta": {
+            "anchor_frame": 20,
+            "type_element_map": {"1": "H"},
+            "native_element_column": False,
+        },
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-viewer-store"],
+            changed="event-viewer-store.data",
+            input_values={"event-viewer-store": viewer},
+            state_values={},
+            output_id="event-type-map-editor",
+        ),
+    )
+
+    assert response.status_code == 200
+    rendered = json.dumps(response.get_json()["response"], ensure_ascii=False)
+    assert "Type 1" in rendered
+    assert "Type 2" in rendered
+    assert "2 原子" in rendered
+    assert '"value": "H"' in rendered
+
+
+def test_event_package_download_uses_current_view_scope(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_package(viewer, *, scope):
+        captured.update(viewer=viewer, scope=scope)
+        return b"event-package-bytes"
+
+    monkeypatch.setattr(svc, "build_event_package", fake_package)
+    client = create_app().server.test_client()
+    viewer = {"event_id": "event-42", "frames": [{"frame": 10}]}
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-package-btn"],
+            changed="event-package-btn.n_clicks",
+            input_values={"event-package-btn": 1},
+            state_values={
+                "event-viewer-store": viewer,
+                "event-view-scope": "context",
+            },
+            output_id="event-package-download",
+        ),
+    )
+
+    assert response.status_code == 200
+    download = response.get_json()["response"]["event-package-download"]["data"]
+    assert captured == {"viewer": viewer, "scope": "environment"}
+    assert download["filename"] == "event-42_evidence.zip"
+    assert download["type"] == "application/zip"
+    assert base64.b64decode(download["content"]) == b"event-package-bytes"
 
 
 def test_legacy_core_queries_are_available_through_dash_services(tmp_path) -> None:

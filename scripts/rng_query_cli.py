@@ -6,6 +6,8 @@ Common use cases:
 2) Query next-step reactions for a given SMILES (consumption/production)
 3) Query reaction channels by formula equation (e.g. C6H4O2+C6H4->C12H8O2)
 4) Compute TOP-N share from a CSV metric column
+5) Export one indexed RNG event as a reproducible evidence ZIP
+6) Analyze time-ordered, exact-molecule, atom-continuous RNG event paths
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ import json
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
@@ -42,7 +45,6 @@ from rng_tools.carbon_plot import (  # noqa: E402
 )
 from rng_tools.pathway_export import (  # noqa: E402
     PATHWAY_CSV_FIELDS,
-    PATHWAY_SCHEMA_VERSION,
     pathway_csv_rows as _pathway_csv_rows,
     pathway_document as _pathway_document,
 )
@@ -170,6 +172,42 @@ def _write_json_atomic(path: str, document: dict) -> None:
             pass
 
 
+def _write_bytes_atomic(
+    path: str,
+    payload: bytes,
+    *,
+    force: bool = False,
+) -> Path:
+    target = Path(path).expanduser()
+    if target.exists() and not force:
+        raise FileExistsError(
+            f"output already exists: {target}; pass --force to replace it"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temporary_path), str(target))
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+    return target
+
+
 def _print_pathway_table(payload: dict) -> None:
     paths = payload.get("paths", [])
     print(
@@ -220,6 +258,197 @@ def cmd_pathway(args: argparse.Namespace) -> int:
     if args.out_csv:
         write_csv(args.out_csv, PATHWAY_CSV_FIELDS, _pathway_csv_rows(payload))
         print(f"[OK] wrote: {args.out_csv}")
+    return 0
+
+
+_EVENT_PATH_SOURCE_SUFFIXES = (
+    ".reactionevent.csv",
+    ".molecules.csv",
+    ".reactionabcd",
+)
+
+
+def _event_path_source_from_spec(spec: str):
+    """Parse ``REPLICATE=COMMON_PREFIX`` without opening source files."""
+    from reacnet_scope.event_paths import EventPathSource
+
+    label, separator, raw_base = str(spec or "").partition("=")
+    label = label.strip()
+    raw_base = raw_base.strip()
+    if not separator or not label or not raw_base:
+        raise ValueError(
+            "--source must use REPLICATE=COMMON_PREFIX, for example "
+            "rep1=/data/rep1/run.lammpstrj"
+        )
+    base = os.path.abspath(os.path.expanduser(raw_base))
+    for suffix in _EVENT_PATH_SOURCE_SUFFIXES:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    reaction_path = f"{base}.reactionabcd"
+    return EventPathSource(
+        replicate=label,
+        reactionevent_file=f"{base}.reactionevent.csv",
+        molecules_file=f"{base}.molecules.csv",
+        reaction_file=reaction_path if Path(reaction_path).is_file() else "",
+    )
+
+
+def _print_event_path_table(payload: dict[str, object], *, top: int) -> None:
+    summary = dict(payload.get("summary", {}))
+    comparison = dict(payload.get("comparison", {}))
+    print(
+        "# actual_occurrences={actual}, signatures={signatures}, "
+        "atom_lineages={lineages}, replicates={replicates}, complete={complete}".format(
+            actual=summary.get("actual_path_occurrence_count", 0),
+            signatures=summary.get("actual_path_signature_count", 0),
+            lineages=summary.get("independent_atom_lineage_support_count", 0),
+            replicates=summary.get("replicate_count", 0),
+            complete=summary.get("statistics_complete", False),
+        )
+    )
+    print(
+        "# aggregate_pairs={aggregate}, confirmed_pairs={confirmed}, "
+        "aggregate_only={aggregate_only}, realization_rate={rate}".format(
+            aggregate=comparison.get("aggregate_reachable_pair_count", 0),
+            confirmed=comparison.get("confirmed_pair_count", 0),
+            aggregate_only=comparison.get("aggregate_only_pair_count"),
+            rate=comparison.get("realization_rate"),
+        )
+    )
+    print(
+        "rank,signature_id,replicate_rate,lineage_support,occurrences,"
+        "reaction_keys"
+    )
+    paths = list(payload.get("paths", []))
+    for rank, path_value in enumerate(paths[:top], 1):
+        path = dict(path_value)
+        keys = " | ".join(str(key) for key in path.get("reaction_keys", []))
+        if len(keys) > 240:
+            keys = f"{keys[:237]}..."
+        print(
+            f"{rank},{path.get('signature_id')},"
+            f"{path.get('replicate_reproduction_rate')},"
+            f"{path.get('independent_atom_lineage_support_count')},"
+            f"{path.get('occurrence_count')},{keys}"
+        )
+
+
+def cmd_event_paths(args: argparse.Namespace) -> int:
+    """Analyze strict-time, exact-molecule, atom-continuous RNG paths."""
+    from reacnet_scope.event_paths import (
+        EventPathAnalysisError,
+        analyze_event_paths,
+    )
+    from reacnet_scope.indexes import (
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+    )
+
+    try:
+        sources = [_event_path_source_from_spec(value) for value in args.source]
+        payload = analyze_event_paths(
+            sources,
+            path_length=args.path_length,
+            start_smiles=args.start_smiles,
+            max_interval_gap=args.max_interval_gap,
+            max_timestep_gap=args.max_timestep_gap,
+            max_occurrence_details=args.max_occurrence_details,
+            max_expansions=args.max_expansions,
+            max_network_paths=args.max_network_paths,
+        )
+    except (
+        EventPathAnalysisError,
+        FileNotFoundError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        ValueError,
+    ) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
+    _print_event_path_table(payload, top=args.top)
+    if args.out_json:
+        _write_json_atomic(args.out_json, payload)
+        print(f"[OK] wrote: {args.out_json}")
+    return 0
+
+
+def cmd_export_event(args: argparse.Namespace) -> int:
+    """Export one prepared RNG event as a reproducible evidence ZIP."""
+    from reacnet_scope.event_index import (
+        EVENT_EVIDENCE_STORE,
+        EventNotFoundError,
+    )
+    from reacnet_scope.event_package import (
+        EventPackageError,
+        build_event_package,
+    )
+    from reacnet_scope.indexes import (
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+    )
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.trajectory import (
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+        load_type_element_map,
+    )
+    from scripts.webapp_dash import services as svc
+
+    try:
+        if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
+            raise RuntimeError("REACNET_SCOPE_CACHE_DIR must be set")
+        dataset = discover_dataset(args.case, args.base)
+        reactionevent = dataset["reactionevent"]
+        molecules = (
+            dataset["molecules"]
+            if Path(dataset["molecules"]).is_file()
+            else ""
+        )
+        event = EVENT_EVIDENCE_STORE.get_event(
+            reactionevent,
+            molecules,
+            args.event_id,
+        )
+        explicit_mapping = svc.parse_event_type_element_map(args.type_map)
+        atom_type_map = None
+        if str(args.type_map or "").strip():
+            atom_type_map = load_type_element_map(dataset["trajectory"])
+            atom_type_map.update(explicit_mapping)
+        viewer = svc.build_rng_event_visualization(
+            dataset,
+            event,
+            before_frames=args.before_frames,
+            after_frames=args.after_frames,
+            environment_radius=args.environment_radius,
+            max_environment_atoms=args.max_environment_atoms,
+            atom_type_map=atom_type_map,
+            persist_type_map=False,
+        )
+        package = build_event_package(viewer, scope=args.scope)
+        target = _write_bytes_atomic(args.out, package, force=args.force)
+    except (
+        EventNotFoundError,
+        EventPackageError,
+        FileExistsError,
+        FileNotFoundError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        RuntimeError,
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+        svc.ServiceError,
+        ValueError,
+    ) as exc:
+        message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+        print(f"[ERROR] {message}", file=sys.stderr)
+        return 2
+    print(f"[OK] wrote event package: {target} ({len(package)} bytes)")
     return 0
 
 
@@ -1044,9 +1273,26 @@ def _unit_float(name: str):
     return parse
 
 
+def _bounded_float(name: str, minimum: float, maximum: float):
+    def parse(value: str) -> float:
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+        if not minimum <= parsed <= maximum:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be in [{minimum}, {maximum}]"
+            )
+        return parsed
+
+    return parse
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ReacNetGenerator 常用检索终端工具 (formula/smiles/path/topshare/plot/carbon-plot)."
+        description=(
+            "ReacNetGenerator 检索、候选/实际事件路径、绘图与事件证据包导出工具。"
+        )
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1179,6 +1425,136 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选逐步扁平 CSV 输出路径",
     )
     sp_pathway.set_defaults(func=cmd_pathway)
+
+    sp_event_paths = sub.add_parser(
+        "event-paths",
+        help="统计真实发生的时间有序、分子实例与原子连续 RNG 事件路径",
+    )
+    sp_event_paths.add_argument(
+        "--source",
+        action="append",
+        required=True,
+        metavar="REPLICATE=COMMON_PREFIX",
+        help=(
+            "一个重复实验及其 RNG 公共文件前缀；可重复传入，例如 "
+            "rep1=/data/rep1/run.lammpstrj"
+        ),
+    )
+    sp_event_paths.add_argument(
+        "--path-length",
+        type=_bounded_int("path_length", 2, 8),
+        default=3,
+        help="事件节点数；默认 3，即 event1→event2→event3",
+    )
+    sp_event_paths.add_argument(
+        "--start-smiles",
+        default="",
+        help="可选：只分析首个事件消耗该精确 SMILES 的路径",
+    )
+    sp_event_paths.add_argument(
+        "--max-interval-gap",
+        type=_bounded_int("max_interval_gap", 0),
+        default=None,
+        help="可选：相邻事件允许的最大 RNG 区间差",
+    )
+    sp_event_paths.add_argument(
+        "--max-timestep-gap",
+        type=_bounded_int("max_timestep_gap", 0),
+        default=None,
+        help="可选：前一事件结束到后一事件开始的最大物理 timestep 间隔",
+    )
+    sp_event_paths.add_argument(
+        "--max-occurrence-details",
+        type=_bounded_int("max_occurrence_details", 0),
+        default=10_000,
+        help="JSON 中保留的具体事件路径明细上限；不影响完整统计",
+    )
+    sp_event_paths.add_argument(
+        "--max-expansions",
+        type=_bounded_int("max_expansions", 1),
+        default=1_000_000,
+        help="每个重复实验的实际路径展开上限",
+    )
+    sp_event_paths.add_argument(
+        "--max-network-paths",
+        type=_bounded_int("max_network_paths", 1),
+        default=100_000,
+        help="每个重复实验的聚合网络可达路径枚举上限",
+    )
+    sp_event_paths.add_argument(
+        "--top",
+        type=_bounded_int("top", 1),
+        default=20,
+        help="终端显示的路径签名数量",
+    )
+    sp_event_paths.add_argument(
+        "--out-json",
+        default="",
+        help="可选：完整、可审计 JSON 报告输出路径",
+    )
+    sp_event_paths.set_defaults(func=cmd_event_paths)
+
+    sp_export_event = sub.add_parser(
+        "export-event",
+        help="把一个已索引 RNG 事件导出为可复核 ZIP",
+    )
+    sp_export_event.add_argument(
+        "--case",
+        required=True,
+        help="数据集目录或公共前缀",
+    )
+    sp_export_event.add_argument(
+        "--base",
+        default="",
+        help="目录包含多个数据集时指定公共前缀",
+    )
+    sp_export_event.add_argument(
+        "--event-id",
+        required=True,
+        help="事件索引中的 event_id",
+    )
+    sp_export_event.add_argument(
+        "--scope",
+        choices=["core", "participants", "environment"],
+        default="participants",
+        help="导出的原子范围",
+    )
+    sp_export_event.add_argument(
+        "--before-frames",
+        type=_bounded_int("before_frames", 0, 100),
+        default=3,
+        help="反应前附加帧数",
+    )
+    sp_export_event.add_argument(
+        "--after-frames",
+        type=_bounded_int("after_frames", 0, 100),
+        default=3,
+        help="反应后附加帧数",
+    )
+    sp_export_event.add_argument(
+        "--environment-radius",
+        type=_bounded_float("environment_radius", 0.0, 20.0),
+        default=4.0,
+        help="局部环境半径（Å）",
+    )
+    sp_export_event.add_argument(
+        "--max-environment-atoms",
+        type=_bounded_int("max_environment_atoms", 0, 2000),
+        default=500,
+        help="环境原子数量上限",
+    )
+    sp_export_event.add_argument(
+        "--type-map",
+        default="",
+        help="本次导出的 Type→Element 覆盖，例如 1=C,2=H；不会写入数据集设置",
+    )
+    sp_export_event.add_argument("--out", required=True, help="输出 ZIP 路径")
+    sp_export_event.add_argument(
+        "--force",
+        action="store_true",
+        help="原子替换已有输出文件",
+    )
+    sp_export_event.set_defaults(func=cmd_export_event)
 
     sp_plot = sub.add_parser(
         "plot",
