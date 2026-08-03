@@ -357,6 +357,107 @@ def _valid_identity_record(record: Any) -> bool:
     )
 
 
+def _matching_legacy_manifest(
+    base_path: Path,
+    manifest: Path,
+) -> str:
+    """Validate one path-derived workspace against the active sources."""
+    legacy_id = manifest.parent.name
+    if not DATASET_ID_RE.fullmatch(legacy_id):
+        return ""
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    if str(payload.get("dataset_id") or "") != legacy_id:
+        return ""
+    recorded_base = str(payload.get("base") or "")
+    if not recorded_base:
+        return ""
+    recorded_base_path = Path(_dataset_base(recorded_base)).resolve()
+    if (
+        _path_derived_dataset_id(str(recorded_base_path)) != legacy_id
+        or recorded_base_path.name != base_path.name
+        or (
+            recorded_base_path != base_path
+            and _dataset_base_is_active(str(recorded_base_path))
+        )
+    ):
+        return ""
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return ""
+    suffixes = ("", *DATASET_SUFFIXES)
+    recorded_candidates = {
+        (
+            recorded_base_path
+            if not suffix
+            else Path(f"{recorded_base_path}{suffix}")
+        ).resolve(): suffix
+        for suffix in suffixes
+    }
+    recorded: dict[str, dict[str, Any]] = {}
+    for descriptor in artifacts.values():
+        if not isinstance(descriptor, dict) or not descriptor.get("exists"):
+            continue
+        path_text = str(descriptor.get("path") or "")
+        if not path_text:
+            return ""
+        resolved_path = Path(path_text).expanduser().resolve()
+        suffix = recorded_candidates.get(resolved_path)
+        if suffix is not None:
+            if suffix in recorded:
+                return ""
+            recorded[suffix] = descriptor
+    current = {
+        suffix: candidate
+        for suffix, candidate in zip(
+            suffixes,
+            _dataset_artifact_candidates(base_path),
+        )
+        if candidate.is_file()
+    }
+    if not current or set(recorded) != set(current):
+        return ""
+    for suffix, source_path in current.items():
+        descriptor = recorded[suffix]
+        try:
+            stat = source_path.stat()
+            if (
+                int(descriptor.get("size", -1)) != int(stat.st_size)
+                or int(descriptor.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+            ):
+                return ""
+        except (OSError, TypeError, ValueError):
+            return ""
+    return legacy_id
+
+
+def _matching_legacy_dataset_id(
+    base_path: Path,
+    workspace_root: Path,
+) -> str:
+    """Return one unambiguous path-derived identity from before the registry."""
+    datasets = workspace_root / "datasets"
+    try:
+        workspaces = tuple(datasets.iterdir())
+    except OSError:
+        return ""
+    matches = []
+    for workspace in workspaces:
+        matched = _matching_legacy_manifest(
+            base_path,
+            workspace / "manifest.json",
+        )
+        if matched:
+            matches.append(matched)
+            if len(matches) > 1:
+                return ""
+    return matches[0] if matches else ""
+
+
 @contextmanager
 def _workspace_identity_lock(registry: Path):
     lock_path = registry.with_suffix(".lock")
@@ -394,6 +495,7 @@ def _persistent_dataset_id(base_path: Path, workspace_root: Path) -> str:
     try:
         workspace_root.mkdir(parents=True, exist_ok=True)
         with _workspace_identity_lock(registry):
+            creating_registry = not registry.exists()
             try:
                 payload = json.loads(registry.read_text(encoding="utf-8"))
             except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -445,6 +547,23 @@ def _persistent_dataset_id(base_path: Path, workspace_root: Path) -> str:
                     ):
                         selected = candidate
                         selected["active_path"] = str(base_path.resolve())
+            if selected is None and creating_registry:
+                legacy_id = _matching_legacy_dataset_id(
+                    base_path,
+                    workspace_root,
+                )
+                if legacy_id and not any(
+                    str(record.get("dataset_id") or "") == legacy_id
+                    for record in records
+                ):
+                    selected = {
+                        "dataset_id": legacy_id,
+                        "base_name": base_name,
+                        "active_path": str(base_path.resolve()),
+                        "source_anchor": source_anchor,
+                        "source_fingerprint": source_fingerprint,
+                    }
+                    records.append(selected)
             if selected is None:
                 selected = {
                     "dataset_id": uuid.uuid4().hex[:20],

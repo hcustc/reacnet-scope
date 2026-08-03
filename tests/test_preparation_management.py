@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -43,6 +44,41 @@ def _layout_node_by_id(node, component_id: str):
     return None
 
 
+def _seed_legacy_workspace(
+    workspace_root: Path,
+    base: Path,
+    artifacts: dict[str, Path],
+    *,
+    index_content: bytes,
+) -> tuple[str, Path, Path]:
+    legacy_id = hashlib.sha256(str(base).encode("utf-8")).hexdigest()[:20]
+    legacy_workspace = workspace_root / "datasets" / legacy_id
+    legacy_workspace.mkdir(parents=True)
+    descriptors = {}
+    for name, artifact in artifacts.items():
+        stat = artifact.stat()
+        descriptors[name] = {
+            "path": str(artifact),
+            "exists": True,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    (legacy_workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 3,
+                "dataset_id": legacy_id,
+                "base": str(base),
+                "artifacts": descriptors,
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_index = legacy_workspace / "events.sqlite3"
+    legacy_index.write_bytes(index_content)
+    return legacy_id, legacy_workspace, legacy_index
+
+
 def test_workspace_storage_inspection_uses_nearest_existing_ancestor(
     tmp_path,
 ) -> None:
@@ -54,6 +90,195 @@ def test_workspace_storage_inspection_uses_nearest_existing_ancestor(
     assert status.existing_ancestor == tmp_path
     assert status.writable is True
     assert status.free_bytes is not None
+
+
+def test_first_identity_registry_adopts_matching_legacy_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(workspace_root))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    retired_route = tmp_path / "run.route"
+    retired_route.write_text("legacy route evidence\n", encoding="utf-8")
+    base = tmp_path / "run"
+    legacy_id, legacy_workspace, legacy_index = _seed_legacy_workspace(
+        workspace_root,
+        base,
+        {"species": source, "route": retired_route},
+        index_content=b"legacy-index-must-stay-in-place",
+    )
+
+    resolved = resolve_dataset_paths(source)
+
+    assert resolved.dataset_id == legacy_id
+    assert resolved.workspace_dir == legacy_workspace
+    assert legacy_index.read_bytes() == b"legacy-index-must-stay-in-place"
+    registry = json.loads(
+        (workspace_root / "workspace-manifest.json").read_text(encoding="utf-8")
+    )
+    assert registry["datasets"][0]["dataset_id"] == legacy_id
+
+
+def test_first_identity_registry_rejects_legacy_workspace_for_changed_source(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(workspace_root))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    base = tmp_path / "run"
+    legacy_id, legacy_workspace, legacy_index = _seed_legacy_workspace(
+        workspace_root,
+        base,
+        {"species": source},
+        index_content=b"index-for-an-older-source-revision",
+    )
+    source.write_text("Timestep 0: [O] 200\n", encoding="utf-8")
+
+    resolved = resolve_dataset_paths(source)
+
+    assert resolved.dataset_id != legacy_id
+    assert resolved.workspace_dir != legacy_workspace
+    assert legacy_index.read_bytes() == b"index-for-an-older-source-revision"
+
+
+def test_first_identity_registry_adopts_legacy_workspace_after_directory_move(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    source = original / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    legacy_id, _legacy_workspace, _legacy_index = _seed_legacy_workspace(
+        original / ".reacnet-scope",
+        original / "run",
+        {"species": source},
+        index_content=b"legacy-index-moved-with-sidecar",
+    )
+    moved = tmp_path / "moved"
+    shutil.move(str(original), moved)
+
+    resolved = resolve_dataset_paths(moved / "run.species")
+
+    moved_workspace = moved / ".reacnet-scope" / "datasets" / legacy_id
+    assert resolved.dataset_id == legacy_id
+    assert resolved.workspace_dir == moved_workspace
+    assert (moved_workspace / "events.sqlite3").read_bytes() == (
+        b"legacy-index-moved-with-sidecar"
+    )
+
+
+def test_first_identity_registry_rejects_copied_legacy_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    source = original / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    legacy_id, _legacy_workspace, legacy_index = _seed_legacy_workspace(
+        original / ".reacnet-scope",
+        original / "run",
+        {"species": source},
+        index_content=b"legacy-index-belongs-to-original",
+    )
+    copied = tmp_path / "copied"
+    shutil.copytree(original, copied)
+
+    resolved = resolve_dataset_paths(copied / "run.species")
+
+    copied_legacy_index = (
+        copied
+        / ".reacnet-scope"
+        / "datasets"
+        / legacy_id
+        / "events.sqlite3"
+    )
+    assert resolved.dataset_id != legacy_id
+    assert legacy_index.read_bytes() == b"legacy-index-belongs-to-original"
+    assert copied_legacy_index.read_bytes() == (
+        b"legacy-index-belongs-to-original"
+    )
+
+
+def test_existing_identity_registry_does_not_adopt_legacy_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(workspace_root))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    base = tmp_path / "run"
+    legacy_id, legacy_workspace, legacy_index = _seed_legacy_workspace(
+        workspace_root,
+        base,
+        {"species": source},
+        index_content=b"legacy-index-outside-migration-window",
+    )
+    (workspace_root / "workspace-manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "datasets": [
+                    {
+                        "dataset_id": "0123456789abcdefabcd",
+                        "base_name": "other-run",
+                        "active_path": str(tmp_path / "other-run"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_dataset_paths(source)
+
+    assert resolved.dataset_id != legacy_id
+    assert resolved.workspace_dir != legacy_workspace
+    assert legacy_index.read_bytes() == (
+        b"legacy-index-outside-migration-window"
+    )
+
+
+def test_first_identity_registry_rejects_ambiguous_legacy_workspaces(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(workspace_root))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    direct_id, direct_workspace, direct_index = _seed_legacy_workspace(
+        workspace_root,
+        tmp_path / "run",
+        {"species": source},
+        index_content=b"direct-legacy-index",
+    )
+    old_parent = tmp_path / "old"
+    old_parent.mkdir()
+    old_source = old_parent / "run.species"
+    shutil.copy2(source, old_source)
+    moved_id, moved_workspace, moved_index = _seed_legacy_workspace(
+        workspace_root,
+        old_parent / "run",
+        {"species": old_source},
+        index_content=b"moved-legacy-index",
+    )
+    shutil.rmtree(old_parent)
+
+    resolved = resolve_dataset_paths(source)
+
+    assert resolved.dataset_id not in {direct_id, moved_id}
+    assert resolved.workspace_dir not in {direct_workspace, moved_workspace}
+    assert direct_index.read_bytes() == b"direct-legacy-index"
+    assert moved_index.read_bytes() == b"moved-legacy-index"
 
 
 def test_dataset_identity_distinguishes_copy_made_after_unresolved_move(
