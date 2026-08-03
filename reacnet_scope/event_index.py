@@ -20,7 +20,6 @@ from .indexes import (
     IndexNotReadyError,
     IndexStaleError,
     _exclusive_build_lock,
-    _cache_root,
     _read_meta,
     _readonly_connection,
     _source_signature,
@@ -2511,15 +2510,15 @@ class EventEvidenceStore:
         molecules_file: str = "",
     ) -> dict[str, Any]:
         del molecules_file
-        index_path = resolve_dataset_paths(
+        workspace = resolve_dataset_paths(
             os.path.abspath(reactionevent_file)
-        ).event_index
-        cache_root = _cache_root().resolve()
+        )
+        index_path = workspace.event_index
         try:
-            index_path.resolve().relative_to(cache_root)
+            index_path.resolve().relative_to(workspace.cache_dir.resolve())
         except ValueError as exc:
             raise IndexInvalidError(
-                "event evidence index path escapes REACNET_SCOPE_CACHE_DIR"
+                "event evidence index path escapes Dataset Workspace"
             ) from exc
 
         targets = (

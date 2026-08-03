@@ -142,6 +142,13 @@ def find_pathways_service(
     return find_pathways(artifacts, start_smiles, **limits)
 
 
+def cmd_prepare(args: argparse.Namespace) -> int:
+    """Run offline preparation through the supported unified CLI surface."""
+    from reacnet_scope.prepare import main as prepare_main
+
+    return prepare_main(list(args.prepare_args))
+
+
 def _reaction_base(reaction_path: str) -> str:
     suffix = ".reactionabcd"
     return reaction_path[: -len(suffix)] if reaction_path.endswith(suffix) else reaction_path
@@ -407,8 +414,6 @@ def cmd_export_event(args: argparse.Namespace) -> int:
     from scripts.webapp_dash import services as svc
 
     try:
-        if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
-            raise RuntimeError("REACNET_SCOPE_CACHE_DIR must be set")
         dataset = discover_dataset(args.case, args.base)
         reactionevent = dataset["reactionevent"]
         molecules = (
@@ -1310,6 +1315,17 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"reactionabcd 文件路径 (default: {DEFAULT_REACTION_FILE})",
         )
         sp.add_argument("--min-tp", type=int, default=1, help="最低 tp 过滤阈值")
+
+    sp_prepare = sub.add_parser(
+        "prepare",
+        help="检查、建立、重建或清理 Dataset Workspace 索引",
+    )
+    sp_prepare.add_argument(
+        "prepare_args",
+        nargs=argparse.REMAINDER,
+        help="传递给准备流程的数据集路径和选项",
+    )
+    sp_prepare.set_defaults(func=cmd_prepare)
 
     sp_species = sub.add_parser("species", help="按分子式列出所有 SMILES")
     add_reac_flags(sp_species)

@@ -2850,10 +2850,10 @@ def _data_cache_management_card() -> html.Div:
             "复制轨迹索引 CLI 命令",
         ),
         (
-            "元素分布索引",
+            "C/O/Cl 组成索引",
             "data-prep-composition-command",
             "data-prep-composition-copy",
-            "复制元素分布索引 CLI 命令",
+            "复制 C/O/Cl 组成索引 CLI 命令",
         ),
     )
     return html.Div(

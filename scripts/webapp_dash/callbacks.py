@@ -524,21 +524,13 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
     alert: Any = ""
     if payload.get("cache_configured") is False:
         alert = dbc.Alert(
-            [
-                "启动 Dash 前请设置 ",
-                html.Code("REACNET_SCOPE_CACHE_DIR=/真实/可写目录"),
-                "；不要直接使用文档中的 /path/to/... 示例路径。",
-            ],
+            "无法为当前数据集确定 Dataset Workspace；请检查数据集路径和访问权限。",
             color="warning",
             className="py-2 mb-0",
         )
     elif payload.get("cache_writable") is False:
         alert = dbc.Alert(
-            [
-                "缓存根目录不可写；请检查启动环境中的 ",
-                html.Code("REACNET_SCOPE_CACHE_DIR"),
-                " 后重启 Dash。",
-            ],
+            "Dataset Workspace 不可写；请检查数据集目录，或由管理员配置集中位置。",
             color="danger",
             className="py-2 mb-0",
         )

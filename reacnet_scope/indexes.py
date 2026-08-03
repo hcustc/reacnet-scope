@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -65,11 +66,30 @@ class IndexBuildInProgressError(RuntimeError):
     """A requested index is locked by a live offline preparation process."""
 
 
+def _platform_workspace_root() -> Path:
+    if os.name == "nt":
+        parent = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or Path.home() / "AppData" / "Local"
+        )
+    elif sys.platform == "darwin":
+        parent = Path.home() / "Library" / "Application Support"
+    else:
+        parent = Path(
+            os.environ.get("XDG_DATA_HOME")
+            or Path.home() / ".local" / "share"
+        )
+    return (parent / "reacnet-scope" / "workspaces").expanduser().resolve()
+
+
 def _cache_root(*, create: bool = False) -> Path:
     configured = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-    if not configured:
-        raise RuntimeError("REACNET_SCOPE_CACHE_DIR must be set")
-    root = Path(configured).expanduser().resolve()
+    root = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else _platform_workspace_root()
+    )
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
@@ -107,7 +127,7 @@ def dataset_id_for_source(path: str) -> str:
 
 @dataclass(frozen=True)
 class DatasetPaths:
-    """The sole cache-layout contract shared by CLI, Dash and readers."""
+    """The sole Dataset Workspace layout shared by CLI, Dash and readers."""
 
     source_root: Path
     base: Path
@@ -137,12 +157,19 @@ def resolve_dataset_paths(
         candidate = root / candidate if root.is_dir() else root
     absolute = _dataset_base(str(candidate))
     base_path = Path(absolute)
-    resolved_cache = (
-        Path(cache_root).expanduser().resolve()
-        if cache_root is not None
-        else _cache_root()
-    )
     dataset_id = dataset_id_for_source(str(base_path))
+    configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    if cache_root is not None:
+        resolved_cache = Path(cache_root).expanduser().resolve()
+    elif configured_cache:
+        resolved_cache = _cache_root()
+    elif base_path.parent.is_dir() and os.access(
+        base_path.parent,
+        os.W_OK | os.X_OK,
+    ):
+        resolved_cache = base_path.parent / ".reacnet-scope"
+    else:
+        resolved_cache = _platform_workspace_root()
     cache_dir = resolved_cache / "datasets" / dataset_id
     return DatasetPaths(
         source_root=base_path.parent,
@@ -1017,8 +1044,8 @@ def clear_index(source_file: str, *, kind: str) -> dict[str, Any]:
     """Safely remove one current-source index after acquiring its build lock.
 
     This intentionally accepts only the source file and index kind.  The
-    target path is derived internally, constrained to the configured cache,
-    and cannot point at any ReacNetGenerator output file.
+    target path is derived internally, constrained to the resolved Dataset
+    Workspace, and cannot point at any ReacNetGenerator output file.
     """
     normalized_kind = str(kind or "").strip().lower()
     if normalized_kind == "route":
@@ -1029,11 +1056,11 @@ def clear_index(source_file: str, *, kind: str) -> dict[str, Any]:
     else:
         raise ValueError("kind must be 'route' or 'trajectory'")
 
-    cache_root = _cache_root().resolve()
+    workspace_root = resolve_dataset_paths(source_file).cache_dir.resolve()
     try:
-        index_path.resolve().relative_to(cache_root)
+        index_path.resolve().relative_to(workspace_root)
     except ValueError as exc:
-        raise IndexInvalidError("index path escapes REACNET_SCOPE_CACHE_DIR") from exc
+        raise IndexInvalidError("index path escapes Dataset Workspace") from exc
 
     source_path, _source_size, _source_mtime_ns = _source_signature(source_file)
     prefix = "route." if normalized_kind == "route" else "trajectory."

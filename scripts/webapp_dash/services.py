@@ -515,11 +515,18 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             break
     if not cache_dir and manifest.get("path"):
         cache_dir = str(Path(str(manifest["path"])).parent)
+    if paths and not configured_cache:
+        probe = paths.cache_dir
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        cache_writable = bool(
+            probe.is_dir() and os.access(probe, os.W_OK | os.X_OK)
+        )
     trajectory_source = artifacts.get("trajectory", "")
     command_prefix = ""
     if selected_base:
         command_prefix = (
-            f"uv run reacnet-scope-prepare {shlex.quote(str(Path(selected_base).parent))} "
+            f"reacnet-scope prepare {shlex.quote(str(Path(selected_base).parent))} "
             f"--base {shlex.quote(Path(selected_base).name)}"
         )
     return {
@@ -528,8 +535,8 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "manifest_path": str(manifest.get("path") or ""),
         "manifest_found": bool(manifest.get("found")),
         "cache_dir": cache_dir,
-        "cache_root": configured_cache,
-        "cache_configured": bool(configured_cache),
+        "cache_root": configured_cache or (str(paths.cache_dir) if paths else ""),
+        "cache_configured": bool(paths),
         "cache_writable": cache_writable,
         "index_bytes": index_bytes,
         "last_updated_epoch": max(timestamps) if timestamps else None,
@@ -562,12 +569,6 @@ def prepare_dataset_cache(
     normalized_kind = str(kind or "").strip().lower()
     if normalized_kind not in {"event", "trajectory", "composition"}:
         raise ServiceError("无效缓存类型", reason="invalid_preparation_kind")
-    cache_root = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-    if not cache_root:
-        raise ServiceError(
-            "未配置 REACNET_SCOPE_CACHE_DIR，无法建立缓存。",
-            reason="cache_not_configured",
-        )
 
     folder_path = validate_browse_path(folder)
     if not folder_path.is_dir():
@@ -589,7 +590,7 @@ def prepare_dataset_cache(
     )
     if not before.get("cache_writable"):
         raise ServiceError(
-            "REACNET_SCOPE_CACHE_DIR 指向的目录不可写；请改为真实的可写路径后重启服务。",
+            "Dataset Workspace 不可写；请检查数据集目录或管理员配置的集中位置。",
             reason="cache_not_writable",
         )
     item_key = {

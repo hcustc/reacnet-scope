@@ -2913,6 +2913,35 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
         assert result[component_id][property_name] == command
 
 
+def test_preparation_refresh_uses_local_sidecar_workspace_by_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    candidate = _discovered_candidate(tmp_path)
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_preparation_status_callback_payload(
+            client,
+            candidate=candidate,
+            store={},
+        ),
+    )
+
+    assert response.status_code == 200
+    workspace_meta = json.dumps(
+        response.get_json()["response"]["data-prep-cache-meta"]["children"],
+        ensure_ascii=False,
+    )
+    assert str(tmp_path / ".reacnet-scope") in workspace_meta
+    assert "未配置" not in workspace_meta
+
+
 def test_clear_confirmation_rejects_untrusted_candidate_before_status_service(
     tmp_path, monkeypatch
 ) -> None:

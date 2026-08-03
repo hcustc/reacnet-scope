@@ -208,9 +208,14 @@ def _capacity_check(
     include_composition: bool,
     include_event: bool,
 ) -> None:
-    cache = Path(os.environ["REACNET_SCOPE_CACHE_DIR"]).expanduser().resolve()
-    cache.mkdir(parents=True, exist_ok=True)
-    free = shutil.disk_usage(cache).free
+    workspace = resolve_dataset_paths(
+        Path(dataset["base"]).parent,
+        Path(dataset["base"]).name,
+    ).cache_dir
+    probe = workspace
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
     required = 1024**3
     if include_route and Path(dataset["route"]).is_file():
         # Building and rebuilding may temporarily coexist with the published
@@ -237,7 +242,7 @@ def _capacity_check(
     if free < required:
         raise RuntimeError(
             f"insufficient cache capacity: need about {required / 1024**3:.1f} GiB, "
-            f"have {free / 1024**3:.1f} GiB at {cache}"
+            f"have {free / 1024**3:.1f} GiB at {workspace}"
         )
 
 
@@ -260,8 +265,6 @@ def main(argv: list[str] | None = None) -> int:
         choices=("route", "trajectory", "composition", "event", "all"),
     )
     args = parser.parse_args(argv)
-    if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
-        parser.error("REACNET_SCOPE_CACHE_DIR must be set")
     try:
         dataset = discover_dataset(args.case, args.base)
     except (FileNotFoundError, RuntimeError) as exc:

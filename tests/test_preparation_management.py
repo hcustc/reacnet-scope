@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -64,6 +67,8 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "data-overrides-apply-btn" not in cache_text
     assert "等效 CLI 命令" in cache_text
     assert "data-rng-event-command" not in cache_text
+    assert "C/O/Cl 组成索引" in cache_text
+    assert "元素分布索引" not in cache_text
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
@@ -89,26 +94,15 @@ def test_cache_build_background_callback_dispatches_and_returns(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    base = tmp_path / "run.lammpstrj"
-    Path(f"{base}.reactionabcd").touch()
-    Path(f"{base}.species").touch()
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
     candidate = {
         "folder": str(tmp_path),
         "base": str(base),
         "label": base.name,
     }
-
-    def fake_prepare(folder: str, *, base: str, kind: str):
-        return {
-            "ok": True,
-            "kind": kind,
-            "rebuilt": False,
-            "status": {"state": "ready", "event_count": 3},
-        }
-
-    monkeypatch.setattr(svc, "prepare_dataset_cache", fake_prepare)
     app = create_app()
     client = app.server.test_client()
     payload = {
@@ -166,6 +160,9 @@ def test_cache_build_background_callback_dispatches_and_returns(
         completed,
         ensure_ascii=False,
     )
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    assert tmp_path / ".reacnet-scope" in paths.cache_dir.parents
+    assert paths.event_index.is_file()
 
 
 def test_normalise_recent_datasets_ignores_malformed_loaded_at() -> None:
@@ -212,6 +209,9 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     assert payload["trajectory"]["state"] == "missing"
     assert payload["trajectory"]["source_available"] is True
     assert payload["rng_event_command"] == "--reaction-event --show-molecule-time"
+    assert payload["event_command"].startswith("reacnet-scope prepare ")
+    assert "reacnet-scope-prepare" not in payload["event_command"]
+    assert "uv run" not in payload["event_command"]
 
     cleared = svc.clear_dataset_index(str(tmp_path), kind="route")
     assert cleared["released_bytes"] > 0
@@ -257,6 +257,137 @@ def test_prepare_reports_ambiguous_dataset_as_cli_error(
     stderr = capsys.readouterr().err
     assert "dataset directory is ambiguous; pass --base" in stderr
     assert "Traceback" not in stderr
+
+
+def test_installed_cli_exposes_prepare_command(tmp_path) -> None:
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionabcd").write_text(
+        "1 [H]+[O]->[H][O]\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["REACNET_SCOPE_CACHE_DIR"] = str(tmp_path / "workspace-root")
+    executable = Path(sys.executable).with_name("reacnet-scope")
+
+    completed = subprocess.run(
+        [
+            str(executable),
+            "prepare",
+            str(tmp_path),
+            "--base",
+            base.name,
+            "--status",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Manifest:" in completed.stdout
+
+
+def test_installed_prepare_uses_local_sidecar_without_cache_override(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("REACNET_SCOPE_CACHE_DIR", None)
+    executable = Path(sys.executable).with_name("reacnet-scope")
+
+    completed = subprocess.run(
+        [
+            str(executable),
+            "prepare",
+            str(tmp_path),
+            "--base",
+            base.name,
+            "--event-only",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    assert tmp_path / ".reacnet-scope" in paths.cache_dir.parents
+    assert paths.event_index.is_file()
+
+    source_bytes = Path(f"{base}.reactionevent.csv").read_bytes()
+    cleared = subprocess.run(
+        [
+            str(executable),
+            "prepare",
+            str(tmp_path),
+            "--base",
+            base.name,
+            "--clear",
+            "event",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert cleared.returncode == 0, cleared.stderr
+    assert Path(f"{base}.reactionevent.csv").read_bytes() == source_bytes
+    assert not paths.event_index.exists()
+
+
+def test_installed_prepare_safely_clears_local_sidecar_index(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base = tmp_path / "run.lammpstrj"
+    base.write_text(
+        "ITEM: TIMESTEP\n0\n"
+        "ITEM: NUMBER OF ATOMS\n1\n"
+        "ITEM: BOX BOUNDS pp pp pp\n0 10\n0 10\n0 10\n"
+        "ITEM: ATOMS id type x y z\n1 1 1 1 1\n",
+        encoding="utf-8",
+    )
+    Path(f"{base}.reactionabcd").write_text("1 [H]->[H]\n", encoding="utf-8")
+    source_bytes = base.read_bytes()
+    environment = os.environ.copy()
+    environment.pop("REACNET_SCOPE_CACHE_DIR", None)
+    executable = Path(sys.executable).with_name("reacnet-scope")
+    command = [
+        str(executable),
+        "prepare",
+        str(tmp_path),
+        "--base",
+        base.name,
+    ]
+
+    built = subprocess.run(
+        [*command, "--trajectory-only"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert built.returncode == 0, built.stderr
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    assert paths.trajectory_index.is_file()
+
+    cleared = subprocess.run(
+        [*command, "--clear", "trajectory"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert cleared.returncode == 0, cleared.stderr
+    assert base.read_bytes() == source_bytes
+    assert not paths.trajectory_index.exists()
 
 
 def test_prepare_event_only_builds_manifest_v3_and_safe_clear(
