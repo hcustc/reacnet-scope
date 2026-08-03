@@ -180,11 +180,12 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-clear-event-btn" in layout_ids
     assert "data-clear-trajectory-btn" in layout_ids
     assert "data-clear-composition-btn" in layout_ids
-    assert "data-global-min-tp" in layout_ids
-    assert "data-overrides-apply-btn" in layout_ids
+    assert "data-advanced-tools" not in layout_ids
+    assert "data-global-min-tp" not in layout_ids
+    assert "data-overrides-apply-btn" not in layout_ids
     assert "global-operation-progress" in layout_ids
-    assert "data-override-reaction" in layout_ids
-    assert "data-override-reactionevent" in layout_ids
+    assert "data-override-reaction" not in layout_ids
+    assert "data-override-reactionevent" not in layout_ids
     assert "carbon-reference-smiles" in layout_ids
     assert "carbon-timestep" in layout_ids
     assert "carbon-parent-name" not in layout_ids
@@ -2572,66 +2573,6 @@ def _load_dataset_callback_payload(
             for item in dependency["state"]
         ],
     }
-
-
-def test_manual_artifact_overrides_and_global_min_tp_are_applied_atomically(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    reaction = tmp_path / "manual.reactionabcd"
-    species = tmp_path / "manual.species"
-    reaction.write_text("8 [H] -> [H][H]\n", encoding="utf-8")
-    species.write_text("[H] 1\n", encoding="utf-8")
-    old_store = {
-        **cb.initial_store(),
-        "artifacts": {"reaction": "/auto/run.reactionabcd"},
-        "discovered_artifacts": {"reaction": "/auto/run.reactionabcd"},
-    }
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "data-overrides-apply-btn",
-                "data-overrides-reset-btn",
-            ],
-            changed="data-overrides-apply-btn.n_clicks",
-            input_values={
-                "data-overrides-apply-btn": 1,
-                "data-overrides-reset-btn": None,
-            },
-            state_values={
-                "data-global-min-tp": 7,
-                "data-override-reaction": str(reaction),
-                "data-override-species": str(species),
-                "data-override-moname": "",
-                "data-override-trajectory": "",
-                "data-override-route": "",
-                "data-override-reactionevent": "",
-                "data-override-molecules": "",
-                "app-store": old_store,
-            },
-            output_id="app-store",
-        ),
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    stored = result["app-store"]["data"]
-    assert stored["min_tp"] == 7
-    assert stored["artifacts"]["_min_tp"] == 7
-    assert stored["artifact_overrides"] == {
-        "reaction": str(reaction),
-        "species": str(species),
-    }
-    assert stored["artifacts"]["reaction"] == str(reaction)
-    assert "已应用 2 个文件覆盖" in json.dumps(
-        result["data-overrides-feedback"]["children"],
-        ensure_ascii=False,
-    )
 
 
 def _candidate_status_callback_payload(

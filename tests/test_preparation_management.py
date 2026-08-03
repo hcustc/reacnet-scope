@@ -28,7 +28,7 @@ def _layout_node_by_id(node, component_id: str):
     return None
 
 
-def test_cache_management_is_visible_and_path_overrides_stay_collapsed() -> None:
+def test_cache_management_is_visible_without_global_path_overrides() -> None:
     app = create_app()
     layout = app.server.test_client().get("/_dash-layout").get_json()
     cache_card = _layout_node_by_id(layout, "data-cache-management")
@@ -36,14 +36,10 @@ def test_cache_management_is_visible_and_path_overrides_stay_collapsed() -> None
 
     assert cache_card is not None
     assert cache_card["type"] == "Div"
-    assert details is not None
-    assert details["type"] == "Details"
-    assert not (details.get("props") or {}).get("open", False)
+    assert details is None
     cache_text = json.dumps(cache_card, ensure_ascii=False)
-    details_text = json.dumps(details, ensure_ascii=False)
     assert "索引就绪状态" in cache_text
     assert "危险操作：清理索引缓存" in cache_text
-    assert "路径覆盖与高级设置" in details_text
     for component_id in (
         "data-prep-status",
         "data-rng-event-command",
@@ -59,9 +55,9 @@ def test_cache_management_is_visible_and_path_overrides_stay_collapsed() -> None
         "data-clear-composition-btn",
     ):
         assert component_id in cache_text
-        assert component_id not in details_text
-    assert "data-global-min-tp" in details_text
-    assert "data-overrides-apply-btn" in details_text
+    assert "路径覆盖与高级设置" not in cache_text
+    assert "data-global-min-tp" not in cache_text
+    assert "data-overrides-apply-btn" not in cache_text
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:

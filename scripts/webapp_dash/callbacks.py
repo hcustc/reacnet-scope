@@ -253,9 +253,6 @@ def initial_store() -> dict[str, Any]:
         "capabilities": {},
         "readiness": {},
         "artifacts": {},
-        "discovered_artifacts": {},
-        "artifact_overrides": {},
-        "min_tp": 1,
         "selected_smiles": "",
         "selected_formula": "",
         "selected_species_source": "",
@@ -1236,145 +1233,6 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
-        Output("data-global-min-tp", "value"),
-        Output("data-override-reaction", "value"),
-        Output("data-override-species", "value"),
-        Output("data-override-moname", "value"),
-        Output("data-override-trajectory", "value"),
-        Output("data-override-route", "value"),
-        Output("data-override-reactionevent", "value"),
-        Output("data-override-molecules", "value"),
-        Input("page-store", "data"),
-        Input("app-store", "data"),
-    )
-    def _populate_data_overrides(page_store, app_store):
-        if (page_store or {}).get("page") != "data-management":
-            raise PreventUpdate
-        store = app_store if isinstance(app_store, dict) else {}
-        overrides = (
-            store.get("artifact_overrides")
-            if isinstance(store.get("artifact_overrides"), dict)
-            else {}
-        )
-        keys = (
-            "reaction",
-            "species",
-            "moname",
-            "trajectory",
-            "route",
-            "reactionevent",
-            "molecules",
-        )
-        return (
-            int(store.get("min_tp") or 1),
-            *(str(overrides.get(key) or "") for key in keys),
-        )
-
-    @app.callback(
-        Output("app-store", "data", allow_duplicate=True),
-        Output("data-overrides-feedback", "children"),
-        Input("data-overrides-apply-btn", "n_clicks"),
-        Input("data-overrides-reset-btn", "n_clicks"),
-        State("data-global-min-tp", "value"),
-        State("data-override-reaction", "value"),
-        State("data-override-species", "value"),
-        State("data-override-moname", "value"),
-        State("data-override-trajectory", "value"),
-        State("data-override-route", "value"),
-        State("data-override-reactionevent", "value"),
-        State("data-override-molecules", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _apply_data_overrides(
-        apply_clicks,
-        reset_clicks,
-        min_tp,
-        reaction,
-        species,
-        moname,
-        trajectory,
-        route,
-        reactionevent,
-        molecules,
-        app_store,
-    ):
-        del apply_clicks, reset_clicks
-        store = dict(app_store or {})
-        discovered = (
-            dict(store.get("discovered_artifacts") or {})
-            if isinstance(store.get("discovered_artifacts"), dict)
-            else {
-                key: value
-                for key, value in (store.get("artifacts") or {}).items()
-                if not str(key).startswith("_")
-            }
-        )
-        threshold = max(1, int(min_tp or 1))
-        if ctx.triggered_id == "data-overrides-reset-btn":
-            merged = {**discovered, "_min_tp": threshold}
-            return (
-                {
-                    **store,
-                    "artifacts": merged,
-                    "artifact_overrides": {},
-                    "discovered_artifacts": discovered,
-                    "min_tp": threshold,
-                },
-                dbc.Alert(
-                    f"已恢复自动检测文件；全局最小 TP = {threshold}。",
-                    color="success",
-                    className="py-2 mb-0",
-                ),
-            )
-
-        raw_values = {
-            "reaction": reaction,
-            "species": species,
-            "moname": moname,
-            "trajectory": trajectory,
-            "route": route,
-            "reactionevent": reactionevent,
-            "molecules": molecules,
-        }
-        overrides: dict[str, str] = {}
-        try:
-            for key, raw in raw_values.items():
-                text = str(raw or "").strip()
-                if not text:
-                    continue
-                path = svc.validate_browse_path(text)
-                if not path.is_file():
-                    raise svc.ServiceError(
-                        f"{key} 不是可读文件: {path}",
-                        reason="not_file",
-                    )
-                overrides[key] = str(path)
-        except (TypeError, ValueError, svc.ServiceError) as exc:
-            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return no_update, dbc.Alert(
-                f"未应用覆盖：{message}",
-                color="danger",
-                className="py-2 mb-0",
-            )
-
-        merged = {**discovered, **overrides, "_min_tp": threshold}
-        return (
-            {
-                **store,
-                "artifacts": merged,
-                "artifact_overrides": overrides,
-                "discovered_artifacts": discovered,
-                "min_tp": threshold,
-            },
-            dbc.Alert(
-                f"已应用 {len(overrides)} 个文件覆盖；全局最小 TP = {threshold}。",
-                color="success",
-                className="py-2 mb-0",
-            ),
-        )
-
-    @app.callback(
         Output("data-prep-basic-status", "children"),
         Output("data-prep-event-status", "children"),
         Output("data-prep-trajectory-status", "children"),
@@ -1911,8 +1769,6 @@ def register_callbacks(app: Any) -> None:
                 no_update,
             )
         artifacts = svc.artifacts_from_status(status)
-        min_tp = max(1, int(store.get("min_tp") or 1))
-        artifacts["_min_tp"] = min_tp
         capabilities = svc.dataset_capabilities(status)
         readiness = svc.dataset_readiness(status)
         ready = svc.dataset_ready_count(status)
@@ -1930,13 +1786,6 @@ def register_callbacks(app: Any) -> None:
             "capabilities": capabilities,
             "readiness": readiness,
             "artifacts": artifacts,
-            "discovered_artifacts": {
-                key: value
-                for key, value in artifacts.items()
-                if not str(key).startswith("_")
-            },
-            "artifact_overrides": {},
-            "min_tp": min_tp,
         }
         status_class = "rs-badge" if ready >= 3 else ("rs-badge rs-bad" if ready <= 1 else "rs-badge")
         recent = svc.normalise_recent_datasets(
