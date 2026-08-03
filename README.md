@@ -2,8 +2,8 @@
 
 `ReacNet Scope` 是面向 ReacNetGenerator 输出结果的交互式后处理与分析软件，主要用于解析和管理反应分子动力学模拟中生成的物种与反应事件，并提供物种检索、反应路径追踪、中间体筛选和时间演化分析等功能，从而提升 ReacNetGenerator 结果的可查询性、可解释性和应用效率，并为复杂反应机理分析及实验质谱结果解释提供辅助支持。
 
-当前支持的主要输出包括 `.reactionabcd`、`.species`、`.reactionevent.csv`、
-`.molecules.csv`：
+当前支持的主要输出包括 `.reactionabcd`、`.species`、原生
+`.timeline.h5`，以及兼容保留的 `.reactionevent.csv`、`.molecules.csv`：
 
 - Web 前端：分子式/SMILES/质量数检索、结构渲染、时间曲线绘图、中间体候选筛选
 - Web 前端：RNG 事件检索、参与原子与键展示和索引化局部轨迹提取
@@ -100,16 +100,17 @@ Dash 默认进入“物种检索”。分析与数据工作区入口直接显示
 完整的信息架构、功能归属与后续去重计划见
 [`docs/usage-logic-redesign.md`](docs/usage-logic-redesign.md)。
 
-生成数据时建议至少启用 RNG 的事件输出；`.molecules.csv` 是可选的原子、
-键与物理 timestep 补充证据：
+最新 ReacNetGenerator 生成的 schema-1 `.timeline.h5` 会被自动识别，其中
+Reaction Evidence 是事件检索所需能力，Molecular Evidence 是原子、键与物理
+timestep 的增强证据。旧版本仍可生成 CSV：
 
 ```bash
 # 添加到原 ReacNetGenerator 命令
 --reaction-event --show-molecule-time
 ```
 
-事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 查询只读消费
-已发布的索引，不会在查询中顺序扫描完整事件 CSV 或轨迹；“管理数据”页可启动
+原生 timeline/事件 CSV 和大轨迹都必须先在独立进程中建立索引。Dash 查询只读消费
+已发布的索引，不会在查询中顺序扫描 HDF5、完整事件 CSV 或轨迹；“管理数据”页可启动
 使用同一准备命令的独立后台任务：
 
 ```bash
@@ -125,10 +126,12 @@ export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
 uv run reacnet-scope-prepare /data/case --event-only
 ```
 
-事件索引 schema v3 始终记录反应式、`Timestep_Index` 和反应物/产物侧
-SMILES；有 `.molecules.csv` 时再补充参与原子、键变化和物理 timestep。
-配对构建支持检查点续建，只有 `.reactionevent.csv` 时也可直接准备事件区间
-索引。Dash 查询期间只打开索引，不回扫原始 CSV。已有旧索引升级后需执行
+事件索引 schema v4 始终记录反应式、Transition 和反应物/产物侧 SMILES；
+原生 Molecular Evidence 或 `.molecules.csv` 会补充参与原子、键变化和物理
+timestep。`.timeline.h5` 的聚合 `count` 会展开为独立逻辑事件，范围数据按 molecule
+分组、组内排序并合并后以有界内存和磁盘检查点构建。完整有效的原生文件优先；仅当
+它不存在时才回退 CSV，存在但 incomplete/损坏/schema 不兼容时会明确失败。
+Dash 查询期间只打开 SQLite 索引，不回扫原始证据。已有旧索引升级后需执行
 `reacnet-scope-prepare /data/case --rebuild event` 一次。
 
 统一命令默认准备可用的事件、轨迹以及 `.species` 的 C/O/Cl 组成索引；
@@ -147,7 +150,7 @@ uv run reacnet-scope-prepare /data/case --composition-only
 参与原子 / 仅反应核”之间切换。成键和断键信息始终来自 RNG 事件证据，不根据
 坐标重新猜键。
 
-事件索引先按相邻 `.molecules.csv` 帧中的原子连通组追踪参与原子，再约去反应
+事件索引先按相邻 Molecular Evidence 帧中的原子连通组追踪参与原子，再约去反应
 两侧计量相同的净不变物种，与 RNG 的净反应事件匹配。升级前建立的事件索引需
 执行 `reacnet-scope-prepare /data/case --rebuild event` 后才能使用该关联规则。
 
@@ -274,8 +277,9 @@ uv run reacnet-scope event-paths \
 其中 `/data/case/...` 是路径占位符；请替换为真实公共前缀。例如仓库自带数据可用
 `--source rp3="$PWD/ref_data/rng-test-rp3-0523/rp3.lammpstrj"`。
 
-该分析必须使用同时含 `.reactionevent.csv` 与 `.molecules.csv` 的事件索引；只有
-事件时间而没有原子/分子实例映射时不会降级为物种名称拼接。完整语义、统计字段和
+该分析必须使用含 Molecular Evidence 的原生 `.timeline.h5` 索引，或同时含
+`.reactionevent.csv` 与 `.molecules.csv` 的兼容索引；只有事件时间而没有原子/分子
+实例映射时不会降级为物种名称拼接。完整语义、统计字段和
 边界说明见 [时间有序、原子连续的事件路径](docs/event-path-analysis.md)。
 
 Dash 中可在“反应路径 → ② 验证实际发生”通过四步向导运行同一分析引擎：确认数据、

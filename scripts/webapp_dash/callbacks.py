@@ -426,6 +426,29 @@ def _preparation_item_detail(label: str, item: dict[str, Any]) -> str:
             )
     if item.get("message"):
         detail = str(item["message"])
+    if label == "事件索引" and item.get("source_kind"):
+        source_label = (
+            "原生 HDF5"
+            if item.get("source_kind") == "native_hdf5"
+            else "兼容 CSV"
+        )
+        schema = str(item.get("source_schema_version") or "")
+        capabilities = set(item.get("capabilities") or [])
+        capability_label = (
+            "反应 + 分子证据"
+            if "molecule" in capabilities
+            else "仅反应证据"
+        )
+        source_detail = " · ".join(
+            value
+            for value in (
+                source_label,
+                f"schema {schema}" if schema else "",
+                capability_label,
+            )
+            if value
+        )
+        detail = f"{source_detail} · {detail}" if detail else source_detail
     return detail
 
 

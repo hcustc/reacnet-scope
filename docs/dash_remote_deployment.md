@@ -99,10 +99,10 @@ checkpoints.
   indexes cause a fast query error. Query callbacks never build them
   implicitly; only an explicit management-page action or
   `reacnet-scope-prepare` command starts a build.
-- Reaction-event search requires `.reactionevent.csv`; `.molecules.csv` is
-  optional and adds atom, bond, and physical-timestep evidence. Generate the
-  first with `--reaction-event`, and add `--show-molecule-time` when local
-  atom-trajectory verification is needed.
+- Reaction-event search prefers a complete schema-1 `.timeline.h5` and falls
+  back to `.reactionevent.csv` only when the native source is absent.
+  Molecular Evidence (native or `.molecules.csv`) adds atom, bond, and
+  physical-timestep evidence.
 - `GET /api/health` reports service uptime, cache writability, and allowed data
   roots for monitoring.
 
@@ -111,7 +111,7 @@ checkpoints.
   catalog.
 - Send several target species in one request. The selected SMILES are read in
   one pass and converted into multiple curves together.
-- Keep the `.species`, `.reactionabcd`, `.reactionevent.csv`, `.molecules.csv`
+- Keep the `.species`, `.reactionabcd`, `.timeline.h5`, `.reactionevent.csv`, `.molecules.csv`
   and trajectory files on local
   NVMe storage on the remote host whenever possible. A network filesystem can
   dominate total runtime even with more CPU cores.

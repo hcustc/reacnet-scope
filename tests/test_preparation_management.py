@@ -257,7 +257,7 @@ def test_prepare_reports_ambiguous_dataset_as_cli_error(
     assert "Traceback" not in stderr
 
 
-def test_prepare_event_only_builds_manifest_v2_and_safe_clear(
+def test_prepare_event_only_builds_manifest_v3_and_safe_clear(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
@@ -267,7 +267,8 @@ def test_prepare_event_only_builds_manifest_v2_and_safe_clear(
 
     paths = resolve_dataset_paths(tmp_path, base.name)
     manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
-    assert manifest["manifest_version"] == 2
+    assert manifest["manifest_version"] == 3
+    assert manifest["indexes"]["rng_events"]["kind"] == "legacy_csv"
     assert manifest["indexes"]["event"]["state"] == "ready"
     assert manifest["settings"] == {
         "path": str(paths.cache_dir / "dataset-settings.json"),

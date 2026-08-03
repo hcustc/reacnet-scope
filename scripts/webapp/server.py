@@ -768,6 +768,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "moname": (params.get("moname_file", [""])[0] or "").strip(),
         "trajectory": (params.get("trajectory_file", [""])[0] or "").strip(),
         "route": (params.get("route_file", [""])[0] or "").strip(),
+        "timeline": (params.get("timeline_file", [""])[0] or "").strip(),
         "reactionevent": (params.get("reactionevent_file", [""])[0] or "").strip(),
         "molecules": (params.get("molecules_file", [""])[0] or "").strip(),
     }
@@ -791,11 +792,21 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "moname": f"{base}.moname" if base else "",
         "trajectory": base,
         "route": f"{base}.route" if base else "",
+        "timeline": f"{base}.timeline.h5" if base else "",
         "reactionevent": f"{base}.reactionevent.csv" if base else "",
         "molecules": f"{base}.molecules.csv" if base else "",
     }
     artifacts: dict[str, dict[str, Any]] = {}
-    for key in ("reaction", "species", "moname", "trajectory", "route", "reactionevent", "molecules"):
+    for key in (
+        "reaction",
+        "species",
+        "moname",
+        "trajectory",
+        "route",
+        "timeline",
+        "reactionevent",
+        "molecules",
+    ):
         selected = explicit[key] or folder_files.get(key, "") or inferred[key]
         # ``.moname`` is optional structure evidence.  Preserve the historic
         # artifact contract for datasets that do not produce it while still
@@ -809,7 +820,10 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "species": artifacts["reaction"]["exists"],
         "intermediate": artifacts["species"]["exists"],
         "reaction": artifacts["reaction"]["exists"],
-        "events": bool(artifacts["reactionevent"]["exists"] and artifacts["molecules"]["exists"]),
+        "events": bool(
+            artifacts["timeline"]["exists"]
+            or artifacts["reactionevent"]["exists"]
+        ),
         "evolution": artifacts["species"]["exists"],
     }
     manifest_payload: dict[str, Any] = {}
@@ -833,13 +847,15 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
 
     reactionevent_exists = bool(artifacts["reactionevent"]["exists"])
     molecules_exists = bool(artifacts["molecules"]["exists"])
+    timeline_exists = bool(artifacts["timeline"]["exists"])
     rng_event_status = {
-        "ready": bool(reactionevent_exists and molecules_exists),
+        "ready": bool(timeline_exists or reactionevent_exists),
         "state": (
             "ready"
-            if reactionevent_exists and molecules_exists
+            if timeline_exists or reactionevent_exists
             else "missing"
         ),
+        "timeline_exists": timeline_exists,
         "reactionevent_exists": reactionevent_exists,
         "molecules_exists": molecules_exists,
     }

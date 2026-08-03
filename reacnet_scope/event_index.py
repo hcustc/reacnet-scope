@@ -13,6 +13,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 
+import numpy as np
+
 from .indexes import (
     IndexInvalidError,
     IndexNotReadyError,
@@ -36,10 +38,15 @@ from .rng_events import (
     net_reaction_key,
     reaction_key,
 )
+from .timed_evidence import (
+    NativeHdf5EvidenceAdapter,
+    TimedEvidenceDataError,
+    select_timed_evidence,
+)
 
 
-EVENT_EVIDENCE_SCHEMA_VERSION = 3
-EVENT_ASSOCIATION_ALGORITHM_VERSION = 2
+EVENT_EVIDENCE_SCHEMA_VERSION = 4
+EVENT_ASSOCIATION_ALGORITHM_VERSION = 3
 
 
 class EventNotFoundError(LookupError):
@@ -291,11 +298,21 @@ def _write_meta(connection: sqlite3.Connection, values: dict[str, Any]) -> None:
     )
 
 
-def _event_id(timestep_index: int, source_row: int, atom_ids: list[int]) -> str:
+def _event_id(
+    timestep_index: int,
+    reaction_key_text: str,
+    atom_ids: list[int],
+    *,
+    unresolved_ordinal: int = 0,
+) -> str:
+    """Derive an ID from occurrence meaning, never source storage position."""
+
+    normalized_atoms = sorted(set(int(value) for value in atom_ids))
+    unresolved = int(unresolved_ordinal) if not normalized_atoms else 0
     digest = hashlib.sha1(
         (
-            f"{timestep_index}|{source_row}|"
-            f"{','.join(map(str, atom_ids))}"
+            f"{timestep_index}|{reaction_key_text}|"
+            f"{','.join(map(str, normalized_atoms))}|{unresolved}"
         ).encode("utf-8")
     ).hexdigest()[:12]
     return f"rngevt_{timestep_index}_{digest}"
@@ -602,7 +619,8 @@ class EventEvidenceStore:
             "schema_version",
         ) != EVENT_EVIDENCE_SCHEMA_VERSION:
             raise IndexInvalidError("Event evidence index schema is incompatible")
-        if molecule_path and _strict_int(
+        association_available = meta.get("association_available", "0") == "1"
+        if association_available and _strict_int(
             meta.get("association_algorithm_version"),
             "association_algorithm_version",
         ) != EVENT_ASSOCIATION_ALGORITHM_VERSION:
@@ -706,6 +724,8 @@ class EventEvidenceStore:
                 "association_available", "1"
             )
             == "1",
+            "source_kind": meta.get("source_kind", "legacy_csv"),
+            "source_schema_version": meta.get("source_schema_version", ""),
             "time_basis": meta.get("time_basis", "physical_timestep"),
             "query_only": query_only,
         }
@@ -714,10 +734,14 @@ class EventEvidenceStore:
         self,
         reactionevent_file: str,
         molecules_file: str = "",
+        *,
+        metadata_only: bool = False,
     ) -> dict[str, Any]:
         index_path = self._expected_path(reactionevent_file)
         building_path = Path(f"{index_path}.building")
         reaction_path = Path(reactionevent_file)
+        native_path = str(reaction_path).lower().endswith(".timeline.h5")
+        native_selection = None
         molecule_text = str(molecules_file or "").strip()
         molecule_path = Path(molecule_text) if molecule_text else None
         molecule_available = bool(
@@ -731,6 +755,25 @@ class EventEvidenceStore:
                 "reactionevent_file": str(reaction_path),
                 "molecules_file": molecule_text,
             }
+        if (
+            native_path
+            and not metadata_only
+        ):
+            try:
+                native_selection = select_timed_evidence(
+                    timeline_file=str(reaction_path)
+                )
+            except TimedEvidenceDataError as exc:
+                return {
+                    "state": exc.state,
+                    "index_path": str(index_path),
+                    "building_path": str(building_path),
+                    "primary_file": str(reaction_path.resolve()),
+                    "timeline_file": str(reaction_path.resolve()),
+                    "source_kind": "native_hdf5",
+                    "message": str(exc),
+                }
+            molecule_available = native_selection.molecule_enabled
         active = index_path if index_path.is_file() else building_path
         state = (
             "ready"
@@ -781,6 +824,35 @@ class EventEvidenceStore:
                 1.0,
             ),
             "reactionevent_file": str(reaction_path.resolve()),
+            "primary_file": str(reaction_path.resolve()),
+            "timeline_file": (
+                str(reaction_path.resolve()) if native_selection else ""
+            ),
+            "source_kind": str(
+                details.get(
+                    "source_kind",
+                    "native_hdf5"
+                    if native_path
+                    else "legacy_csv",
+                )
+            ),
+            "source_schema_version": str(
+                details.get(
+                    "source_schema_version",
+                    native_selection.schema_version
+                    if native_selection
+                    else "",
+                )
+            ),
+            "capabilities": list(
+                native_selection.capabilities
+                if native_selection
+                else (
+                    ("reaction", "molecule")
+                    if molecule_available
+                    else ("reaction",)
+                )
+            ),
             "molecules_file": (
                 str(molecule_path.resolve())
                 if molecule_path is not None and molecule_path.is_file()
@@ -952,8 +1024,13 @@ class EventEvidenceStore:
                     product = str(raw.get("Product", "")).strip()
                     terms = reaction_key(reactant, product)
                     normalized_key = canonical_reaction_key(*terms)
-                    event_id = _event_id(interval, source_row, [])
                     occurrence = interval_summary[normalized_key][0] + 1
+                    event_id = _event_id(
+                        interval,
+                        normalized_key,
+                        [],
+                        unresolved_ordinal=occurrence,
+                    )
                     participants = [
                         [
                             {"species": species, "atom_ids": []}
@@ -1070,6 +1147,495 @@ class EventEvidenceStore:
         result["resumed"] = False
         return result
 
+    def _build_native_hdf5_unlocked(
+        self,
+        selection: Any,
+        reaction_source: tuple[str, int, int],
+        *,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        """Stream one native timeline into the storage-independent index."""
+
+        index_path = event_evidence_index_path(reaction_source[0])
+        if index_path.is_file():
+            try:
+                opened = self.open_required(reaction_source[0], "")
+            except (IndexInvalidError, IndexStaleError):
+                index_path.unlink()
+            else:
+                opened["resumed"] = False
+                return opened
+        building_path = Path(f"{index_path}.building")
+        membership_path = Path(f"{building_path}.membership")
+        connection = self._connect_for_build(building_path)
+        existing = {
+            str(key): str(value)
+            for key, value in connection.execute("SELECT key,value FROM meta")
+        }
+        association_available = bool(selection.molecule_enabled)
+        compatible = bool(existing) and (
+            int(existing.get("schema_version", 0) or 0)
+            == EVENT_EVIDENCE_SCHEMA_VERSION
+            and existing.get("build_state") == "building"
+            and existing.get("source_kind") == "native_hdf5"
+            and existing.get("source_schema_version") == "1"
+            and existing.get("reactionevent_file") == reaction_source[0]
+            and int(existing.get("reactionevent_size", -1) or -1)
+            == reaction_source[1]
+            and int(existing.get("reactionevent_mtime_ns", -1) or -1)
+            == reaction_source[2]
+            and (existing.get("association_available", "0") == "1")
+            == association_available
+            and (
+                not association_available
+                or int(
+                    existing.get("association_algorithm_version", 0) or 0
+                )
+                == EVENT_ASSOCIATION_ALGORITHM_VERSION
+            )
+        )
+        if existing and not compatible:
+            connection.close()
+            building_path.unlink(missing_ok=True)
+            membership_path.unlink(missing_ok=True)
+            connection = self._connect_for_build(building_path)
+            existing = {}
+        resumed = compatible
+        try:
+            with NativeHdf5EvidenceAdapter(selection) as adapter:
+                membership: np.memmap[Any, Any] | None = None
+                range_offset = int(existing.get("range_offset", 0) or 0)
+                membership_complete = (
+                    existing.get("membership_complete", "0") == "1"
+                )
+                expected_membership_size = int(
+                    np.prod(adapter.membership_shape)
+                    * adapter.membership_dtype.itemsize
+                )
+                can_resume_membership = (
+                    compatible
+                    and membership_path.is_file()
+                    and membership_path.stat().st_size
+                    == expected_membership_size
+                )
+                if association_available:
+                    if not can_resume_membership:
+                        membership_path.unlink(missing_ok=True)
+                        range_offset = 0
+                        membership_complete = False
+
+                    def checkpoint_membership(
+                        completed_offset: int, molecule_id: int
+                    ) -> None:
+                        _write_meta(
+                            connection,
+                            {
+                                "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                                "build_state": "building",
+                                "dataset_id": dataset_id_for_source(
+                                    reaction_source[0]
+                                ),
+                                "source_kind": "native_hdf5",
+                                "source_schema_version": "1",
+                                "reactionevent_file": reaction_source[0],
+                                "reactionevent_size": reaction_source[1],
+                                "reactionevent_mtime_ns": reaction_source[2],
+                                "molecules_file": "",
+                                "molecules_size": 0,
+                                "molecules_mtime_ns": 0,
+                                "association_available": 1,
+                                "association_algorithm_version": (
+                                    EVENT_ASSOCIATION_ALGORITHM_VERSION
+                                ),
+                                "time_basis": "physical_timestep",
+                                "range_offset": completed_offset,
+                                "completed_molecule_id": molecule_id,
+                                "membership_complete": 0,
+                                "event_count": 0,
+                                "reaction_type_count": 0,
+                                "available_intervals": int(
+                                    selection.frame_count or 1
+                                )
+                                - 1,
+                                "updated_at_epoch": int(time.time()),
+                            },
+                        )
+                        connection.commit()
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "progress": min(
+                                        completed_offset
+                                        / max(
+                                            int(
+                                                adapter.handle[
+                                                    "molecule_ranges/molecule_id"
+                                                ].shape[0]
+                                            ),
+                                            1,
+                                        )
+                                        * 0.45,
+                                        0.45,
+                                    ),
+                                    "phase": "indexing_molecule_ranges",
+                                    "message": (
+                                        "Checkpointed native molecule "
+                                        f"{molecule_id}"
+                                    ),
+                                }
+                            )
+
+                    if membership_complete:
+                        membership = np.memmap(
+                            membership_path,
+                            dtype=adapter.membership_dtype,
+                            mode="r+",
+                            shape=adapter.membership_shape,
+                        )
+                    else:
+                        membership = adapter.build_membership(
+                            membership_path,
+                            start_offset=range_offset,
+                            resume=can_resume_membership,
+                            checkpoint=checkpoint_membership,
+                        )
+                        membership_complete = True
+                        _write_meta(
+                            connection,
+                            {
+                                "membership_complete": 1,
+                                "updated_at_epoch": int(time.time()),
+                            },
+                        )
+                        connection.commit()
+
+                if not existing:
+                    _write_meta(
+                        connection,
+                        {
+                            "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                            "build_state": "building",
+                            "dataset_id": dataset_id_for_source(
+                                reaction_source[0]
+                            ),
+                            "source_kind": "native_hdf5",
+                            "source_schema_version": "1",
+                            "reactionevent_file": reaction_source[0],
+                            "reactionevent_size": reaction_source[1],
+                            "reactionevent_mtime_ns": reaction_source[2],
+                            "molecules_file": "",
+                            "molecules_size": 0,
+                            "molecules_mtime_ns": 0,
+                            "association_available": int(
+                                association_available
+                            ),
+                            "association_algorithm_version": (
+                                EVENT_ASSOCIATION_ALGORITHM_VERSION
+                                if association_available
+                                else 0
+                            ),
+                            "time_basis": "physical_timestep",
+                            "range_offset": range_offset,
+                            "membership_complete": int(
+                                membership_complete
+                            ),
+                            "completed_transition": -1,
+                            "last_source_row": 0,
+                            "event_count": 0,
+                            "reaction_type_count": 0,
+                            "available_intervals": int(
+                                selection.frame_count or 1
+                            )
+                            - 1,
+                            "updated_at_epoch": int(time.time()),
+                        },
+                    )
+                    connection.commit()
+
+                completed_transition = int(
+                    existing.get("completed_transition", -1) or -1
+                )
+                source_row = int(existing.get("last_source_row", 0) or 0)
+                event_count = int(existing.get("event_count", 0) or 0)
+                reaction_type_count = int(
+                    existing.get("reaction_type_count", 0) or 0
+                )
+                transition_count = int(selection.frame_count or 1) - 1
+                for batch in adapter.iter_transitions(
+                    membership,
+                    start=completed_transition + 1,
+                ):
+                    pools: dict[
+                        tuple[tuple[str, ...], tuple[str, ...]],
+                        deque[MoleculeComponent],
+                    ] = defaultdict(deque)
+                    if association_available:
+                        for component in changed_components(
+                            batch.before_molecules,
+                            batch.after_molecules,
+                        ):
+                            pools[component.net_key].append(component)
+                    occurrences: dict[str, int] = defaultdict(int)
+                    summary_counts: dict[str, list[int]] = defaultdict(
+                        lambda: [0, 0]
+                    )
+                    for aggregate in batch.reactions:
+                        terms = aggregate.reaction_terms
+                        normalized_key = canonical_reaction_key(*terms)
+                        event_net_key = net_reaction_key(*terms)
+                        for _logical_ordinal in range(aggregate.count):
+                            source_row += 1
+                            occurrences[normalized_key] += 1
+                            component = (
+                                pools[event_net_key].popleft()
+                                if pools[event_net_key]
+                                else None
+                            )
+                            rng_atom_ids = (
+                                list(component.atom_ids) if component else []
+                            )
+                            atom_ids = [value + 1 for value in rng_atom_ids]
+                            if component is not None:
+                                status = "matched"
+                            elif association_available:
+                                status = "unresolved_hmm_timeline"
+                            else:
+                                status = "reactionevent_only"
+                            event_id = _event_id(
+                                batch.transition_index,
+                                normalized_key,
+                                atom_ids,
+                                unresolved_ordinal=occurrences[
+                                    normalized_key
+                                ],
+                            )
+                            reactant_bonds = (
+                                [
+                                    _trajectory_bond_id(value)
+                                    for value in component.reactant_bonds
+                                ]
+                                if component
+                                else []
+                            )
+                            product_bonds = (
+                                [
+                                    _trajectory_bond_id(value)
+                                    for value in component.product_bonds
+                                ]
+                                if component
+                                else []
+                            )
+                            if component:
+                                reactant_participants = _participant_payload(
+                                    component.reactant_molecules
+                                )
+                                product_participants = _participant_payload(
+                                    component.product_molecules
+                                )
+                            elif not association_available:
+                                reactant_participants = [
+                                    {"species": value, "atom_ids": []}
+                                    for value in terms[0]
+                                ]
+                                product_participants = [
+                                    {"species": value, "atom_ids": []}
+                                    for value in terms[1]
+                                ]
+                            else:
+                                reactant_participants = []
+                                product_participants = []
+                            connection.execute(
+                                """
+                                INSERT INTO events(
+                                    event_id,reaction_key,source_row,
+                                    timestep_index,before_timestep,
+                                    after_timestep,reactant_text,product_text,
+                                    atom_ids_json,reactant_bonds_json,
+                                    product_bonds_json,
+                                    reactant_participants_json,
+                                    product_participants_json,
+                                    association_status,occurrence
+                                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                """,
+                                (
+                                    event_id,
+                                    normalized_key,
+                                    source_row,
+                                    batch.transition_index,
+                                    batch.before_timestep,
+                                    batch.after_timestep,
+                                    aggregate.reactant,
+                                    aggregate.product,
+                                    json.dumps(atom_ids, separators=(",", ":")),
+                                    json.dumps(
+                                        reactant_bonds, separators=(",", ":")
+                                    ),
+                                    json.dumps(
+                                        product_bonds, separators=(",", ":")
+                                    ),
+                                    json.dumps(
+                                        reactant_participants,
+                                        separators=(",", ":"),
+                                    ),
+                                    json.dumps(
+                                        product_participants,
+                                        separators=(",", ":"),
+                                    ),
+                                    status,
+                                    occurrences[normalized_key],
+                                ),
+                            )
+                            connection.executemany(
+                                """
+                                INSERT INTO event_atoms(event_id,atom_id)
+                                VALUES(?,?)
+                                """,
+                                [(event_id, value) for value in atom_ids],
+                            )
+                            connection.executemany(
+                                """
+                                INSERT INTO event_species(
+                                    event_id,side,species_smiles,
+                                    timestep_index,occurrence
+                                ) VALUES(?,?,?,?,?)
+                                """,
+                                _event_species_rows(
+                                    event_id,
+                                    batch.transition_index,
+                                    terms,
+                                ),
+                            )
+                            summary_counts[normalized_key][0] += 1
+                            summary_counts[normalized_key][1] += int(
+                                status == "matched"
+                            )
+                            event_count += 1
+                    for normalized_key, counts in summary_counts.items():
+                        if connection.execute(
+                            "SELECT 1 FROM reaction_summary WHERE reaction_key=?",
+                            (normalized_key,),
+                        ).fetchone() is None:
+                            reaction_type_count += 1
+                        connection.execute(
+                            """
+                            INSERT INTO reaction_summary(
+                                reaction_key,total_events,matched_events,
+                                distinct_intervals
+                            ) VALUES(?,?,?,1)
+                            ON CONFLICT(reaction_key) DO UPDATE SET
+                                total_events=total_events+excluded.total_events,
+                                matched_events=matched_events+excluded.matched_events,
+                                distinct_intervals=distinct_intervals+1
+                            """,
+                            (normalized_key, counts[0], counts[1]),
+                        )
+                    completed_transition = batch.transition_index
+                    _write_meta(
+                        connection,
+                        {
+                            "completed_transition": completed_transition,
+                            "last_source_row": source_row,
+                            "event_count": event_count,
+                            "reaction_type_count": reaction_type_count,
+                            "reactionevent_offset": int(
+                                reaction_source[1]
+                                * (completed_transition + 1)
+                                / max(transition_count, 1)
+                            ),
+                            "updated_at_epoch": int(time.time()),
+                        },
+                    )
+                    should_checkpoint = (
+                        (completed_transition + 1) % 100 == 0
+                        or completed_transition + 1 == transition_count
+                    )
+                    if should_checkpoint:
+                        connection.commit()
+                    if progress_callback and should_checkpoint:
+                        progress_callback(
+                            {
+                                "progress": 0.45
+                                + 0.5
+                                * (completed_transition + 1)
+                                / max(transition_count, 1),
+                                "phase": "checkpoint_event_index",
+                                "message": (
+                                    "Checkpointed native transition "
+                                    f"{completed_transition}"
+                                ),
+                                "resumed": resumed,
+                            }
+                        )
+                actual_event_count = int(
+                    connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+                )
+                actual_type_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM reaction_summary"
+                    ).fetchone()[0]
+                )
+                if (
+                    actual_event_count != event_count
+                    or actual_type_count != reaction_type_count
+                ):
+                    raise IndexInvalidError(
+                        "Native event evidence checkpoint counts are inconsistent"
+                    )
+                _write_meta(
+                    connection,
+                    {
+                        "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                        "build_state": "ready",
+                        "dataset_id": dataset_id_for_source(reaction_source[0]),
+                        "source_kind": "native_hdf5",
+                        "source_schema_version": "1",
+                        "reactionevent_file": reaction_source[0],
+                        "reactionevent_size": reaction_source[1],
+                        "reactionevent_mtime_ns": reaction_source[2],
+                        "molecules_file": "",
+                        "molecules_size": 0,
+                        "molecules_mtime_ns": 0,
+                        "association_available": int(association_available),
+                        "association_algorithm_version": (
+                            EVENT_ASSOCIATION_ALGORITHM_VERSION
+                            if association_available
+                            else 0
+                        ),
+                        "time_basis": "physical_timestep",
+                        "reactionevent_offset": reaction_source[1],
+                        "molecules_offset": 0,
+                        "completed_transition": completed_transition,
+                        "last_source_row": source_row,
+                        "membership_complete": int(membership_complete),
+                        "event_count": event_count,
+                        "reaction_type_count": reaction_type_count,
+                        "molecule_frame_count": int(
+                            selection.frame_count or 0
+                        ),
+                        "available_intervals": transition_count,
+                        "updated_at_epoch": int(time.time()),
+                    },
+                )
+                connection.commit()
+                if membership is not None:
+                    membership.flush()
+                    del membership
+        finally:
+            connection.close()
+        os.replace(building_path, index_path)
+        membership_path.unlink(missing_ok=True)
+        if progress_callback:
+            progress_callback(
+                {
+                    "progress": 1.0,
+                    "phase": "completed",
+                    "message": "Native event evidence index ready",
+                }
+            )
+        result = self.open_required(reaction_source[0], "")
+        result["resumed"] = resumed
+        return result
+
     def build(
         self,
         reactionevent_file: str,
@@ -1077,11 +1643,24 @@ class EventEvidenceStore:
         *,
         progress_callback: Any = None,
     ) -> dict[str, Any]:
+        is_native = str(reactionevent_file).lower().endswith(".timeline.h5")
+        selection = select_timed_evidence(
+            timeline_file=reactionevent_file if is_native else "",
+            reactionevent_file="" if is_native else reactionevent_file,
+            molecules_file=molecules_file,
+        )
         reaction_source, molecule_source = self._source_pair(
-            reactionevent_file, molecules_file
+            selection.primary_file,
+            selection.molecules_file,
         )
         index_path = event_evidence_index_path(reaction_source[0])
         with _exclusive_build_lock(index_path):
+            if selection.kind == "native_hdf5":
+                return self._build_native_hdf5_unlocked(
+                    selection,
+                    reaction_source,
+                    progress_callback=progress_callback,
+                )
             if index_path.is_file():
                 try:
                     opened = self.open_required(
@@ -1333,8 +1912,11 @@ class EventEvidenceStore:
                             )
                             event_id = _event_id(
                                 timestep_index,
-                                int(event["source_row"]),
+                                normalized_key,
                                 atom_ids,
+                                unresolved_ordinal=occurrences[
+                                    normalized_key
+                                ],
                             )
                             reactant_participants = (
                                 _participant_payload(
@@ -1684,8 +2266,13 @@ class EventEvidenceStore:
             raise IndexInvalidError(
                 f"Event evidence index payload is invalid: {exc}"
             ) from exc
+        source_label = (
+            "timeline"
+            if opened.get("source_kind") == "native_hdf5"
+            else "reactionevent"
+        )
         source_signatures = {
-            "reactionevent": {
+            source_label: {
                 "path": os.path.abspath(reactionevent_file),
                 "size": os.path.getsize(reactionevent_file),
                 "mtime_ns": os.stat(reactionevent_file).st_mtime_ns,
@@ -1935,7 +2522,11 @@ class EventEvidenceStore:
                 "event evidence index path escapes REACNET_SCOPE_CACHE_DIR"
             ) from exc
 
-        targets = (index_path, Path(f"{index_path}.building"))
+        targets = (
+            index_path,
+            Path(f"{index_path}.building"),
+            Path(f"{index_path}.building.membership"),
+        )
         removed: list[str] = []
         released_bytes = 0
         with _exclusive_build_lock(index_path):
@@ -1974,6 +2565,11 @@ class EventIndexEvidenceProvider:
             else ""
         )
         self._store = store
+        self._source_label = (
+            "timeline"
+            if self._reactionevent_file.lower().endswith(".timeline.h5")
+            else "reactionevent"
+        )
         self._opened = dict(
             opened
             if opened is not None
@@ -1984,7 +2580,7 @@ class EventIndexEvidenceProvider:
         )
         self._index_path = os.path.abspath(str(self._opened["index_path"]))
         self._source_identities = {
-            "reactionevent": self._identity(self._reactionevent_file),
+            self._source_label: self._identity(self._reactionevent_file),
             "event_index": self._identity(self._index_path),
         }
         if self._molecules_file:
@@ -1992,7 +2588,7 @@ class EventIndexEvidenceProvider:
                 self._molecules_file
             )
         self._source_signatures = {
-            "reactionevent": self._signature(self._reactionevent_file),
+            self._source_label: self._signature(self._reactionevent_file),
             "event_index": {
                 **self._signature(self._index_path),
                 "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
@@ -2039,7 +2635,7 @@ class EventIndexEvidenceProvider:
     def assert_current(self) -> None:
         """Reject source replacement instead of mixing query snapshots."""
         paths = {
-            "reactionevent": self._reactionevent_file,
+            self._source_label: self._reactionevent_file,
             "event_index": self._index_path,
         }
         if self._molecules_file:
