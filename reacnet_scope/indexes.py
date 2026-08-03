@@ -10,26 +10,34 @@ The public boundary in this module is intentional:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import sys
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+
+_replace_file = os.replace
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - production deployment is Linux
+except ImportError:  # pragma: no cover - Windows
     fcntl = None
 
-from rng_tools.network import smiles_to_formula_fast
-from rng_tools.reaction import canonical_smiles
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
 
-
-ROUTE_INDEX_SCHEMA_VERSION = 3
 TRAJECTORY_INDEX_SCHEMA_VERSION = 3
 _TRAJECTORY_REQUIRED_TABLE_COLUMNS = {
     "meta": {"key", "value"},
@@ -41,12 +49,9 @@ DATASET_SUFFIXES = (
     ".molecules.csv",
     ".reactionabcd",
     ".species",
-    ".route",
     ".table",
 )
-FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
-ROUTE_LINE_RE = re.compile(r"^\s*Atom\s+(\d+)\s+\S+:\s*(.*)$")
-ROUTE_STEP_RE = re.compile(r"(\d+)\s+(\S+)")
+DATASET_ID_RE = re.compile(r"^[0-9a-f]{20}$")
 
 
 class IndexNotReadyError(RuntimeError):
@@ -65,11 +70,172 @@ class IndexBuildInProgressError(RuntimeError):
     """A requested index is locked by a live offline preparation process."""
 
 
+_REMOTE_OR_SHARED_FILESYSTEMS = frozenset(
+    {
+        "9p",
+        "afs",
+        "beegfs",
+        "ceph",
+        "cifs",
+        "davfs",
+        "fuse.rclone",
+        "fuse.s3fs",
+        "fuse.sshfs",
+        "glusterfs",
+        "gpfs",
+        "lustre",
+        "nfs",
+        "nfs4",
+        "osxfuse",
+        "remote",
+        "smb",
+        "smb2",
+        "smb3",
+        "smbfs",
+        "webdav",
+    }
+)
+
+
+def _decode_mount_path(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def _linux_filesystem_type(path: Path) -> str:
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    except OSError:
+        return ""
+    resolved = path.resolve()
+    best_mount: Path | None = None
+    best_type = ""
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            mount = Path(_decode_mount_path(fields[4])).resolve()
+            filesystem_type = fields[separator + 1]
+            resolved.relative_to(mount)
+        except (IndexError, ValueError, OSError):
+            continue
+        if best_mount is None or len(mount.parts) > len(best_mount.parts):
+            best_mount = mount
+            best_type = filesystem_type
+    return best_type
+
+
+def _windows_filesystem_type(path: Path) -> str:
+    if str(path).startswith("\\\\"):
+        return "remote"
+    try:
+        import ctypes
+
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(path.anchor)
+    except (AttributeError, OSError):
+        return ""
+    return "remote" if int(drive_type) == 4 else ""
+
+
+def _macos_filesystem_type(path: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["stat", "-f", "%T", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+@lru_cache(maxsize=256)
+def _platform_filesystem_type(path: Path) -> str:
+    if os.name == "nt":
+        return _windows_filesystem_type(path)
+    if sys.platform == "darwin":
+        return _macos_filesystem_type(path)
+    if sys.platform.startswith("linux"):
+        return _linux_filesystem_type(path)
+    return ""
+
+
+@dataclass(frozen=True)
+class WorkspacePolicy:
+    """Choose whether a dataset location is suitable for a sidecar."""
+
+    filesystem_type: Callable[[Path], str] = _platform_filesystem_type
+
+    def requires_central_workspace(self, path: Path) -> bool:
+        kind = str(self.filesystem_type(path) or "").strip().casefold()
+        return kind in _REMOTE_OR_SHARED_FILESYSTEMS
+
+
+@dataclass(frozen=True)
+class WorkspaceStorageStatus:
+    """Filesystem facts for a Dataset Workspace target."""
+
+    target: Path
+    existing_ancestor: Path
+    writable: bool
+    free_bytes: int | None
+
+
+def inspect_workspace_storage(
+    target: str | os.PathLike[str],
+) -> WorkspaceStorageStatus:
+    """Inspect one workspace target without creating or mutating it."""
+    resolved_target = Path(target).expanduser().resolve()
+    existing = resolved_target
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    writable = bool(
+        existing.is_dir() and os.access(existing, os.W_OK | os.X_OK)
+    )
+    try:
+        free_bytes = int(shutil.disk_usage(existing).free)
+    except OSError:
+        free_bytes = None
+    return WorkspaceStorageStatus(
+        target=resolved_target,
+        existing_ancestor=existing,
+        writable=writable,
+        free_bytes=free_bytes,
+    )
+
+
+def _platform_workspace_root() -> Path:
+    if os.name == "nt":
+        parent = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or Path.home() / "AppData" / "Local"
+        )
+    elif sys.platform == "darwin":
+        parent = Path.home() / "Library" / "Application Support"
+    else:
+        parent = Path(
+            os.environ.get("XDG_DATA_HOME")
+            or Path.home() / ".local" / "share"
+        )
+    return (parent / "reacnet-scope" / "workspaces").expanduser().resolve()
+
+
 def _cache_root(*, create: bool = False) -> Path:
     configured = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-    if not configured:
-        raise RuntimeError("REACNET_SCOPE_CACHE_DIR must be set")
-    root = Path(configured).expanduser().resolve()
+    root = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else _platform_workspace_root()
+    )
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
@@ -100,21 +266,409 @@ def _dataset_base(path: str) -> str:
     return absolute
 
 
-def dataset_id_for_source(path: str) -> str:
+def _path_derived_dataset_id(path: str) -> str:
     absolute = _dataset_base(path)
     return hashlib.sha256(absolute.encode("utf-8")).hexdigest()[:20]
 
 
+def _dataset_base_is_active(path_text: str) -> bool:
+    base = Path(_dataset_base(path_text))
+    return base.is_file() or any(
+        Path(f"{base}{suffix}").is_file()
+        for suffix in DATASET_SUFFIXES
+    )
+
+
+def _dataset_artifact_candidates(base_path: Path) -> tuple[Path, ...]:
+    return (
+        base_path,
+        *(Path(f"{base_path}{suffix}") for suffix in DATASET_SUFFIXES),
+    )
+
+
+def _dataset_anchor_token(base_path: Path) -> str:
+    """Return a move-stable local filesystem anchor for copy detection."""
+    for candidate in _dataset_artifact_candidates(base_path):
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if candidate.is_file():
+            return f"{int(stat.st_dev)}:{int(stat.st_ino)}"
+    return ""
+
+
+def _dataset_source_fingerprint(base_path: Path) -> str:
+    """Hash discovery-safe source metadata without opening large artifacts."""
+    digest = hashlib.sha256()
+    found = False
+    for candidate in _dataset_artifact_candidates(base_path):
+        try:
+            stat = candidate.stat()
+            if not candidate.is_file():
+                continue
+            found = True
+            digest.update(candidate.name.encode("utf-8", errors="surrogateescape"))
+            digest.update(str(int(stat.st_size)).encode("ascii"))
+            digest.update(str(int(stat.st_mtime_ns)).encode("ascii"))
+        except OSError:
+            continue
+    return digest.hexdigest() if found else ""
+
+
+def _anchor_device(token: str) -> str:
+    """Return the device component of a local filesystem anchor."""
+    device, separator, _inode = str(token or "").partition(":")
+    return device if separator and device.isdigit() else ""
+
+
+def _anchor_matches_move(
+    recorded: str,
+    current: str,
+    *,
+    recorded_fingerprint: str = "",
+    current_fingerprint: str = "",
+) -> bool:
+    """Recognize same-filesystem and cross-filesystem directory moves.
+
+    A same-filesystem copy changes only the inode and must receive a new
+    identity.  A device change cannot preserve an inode, so an otherwise
+    unique inactive record is treated as a cross-filesystem move.
+    """
+    if not recorded or not current:
+        return False
+    if recorded == current:
+        return True
+    recorded_device = _anchor_device(recorded)
+    current_device = _anchor_device(current)
+    return bool(
+        recorded_device
+        and current_device
+        and recorded_device != current_device
+        and recorded_fingerprint
+        and recorded_fingerprint == current_fingerprint
+    )
+
+
+def _valid_identity_record(record: Any) -> bool:
+    return bool(
+        isinstance(record, dict)
+        and DATASET_ID_RE.fullmatch(str(record.get("dataset_id") or ""))
+    )
+
+
+def _matching_legacy_manifest(
+    base_path: Path,
+    manifest: Path,
+) -> str:
+    """Validate one path-derived workspace against the active sources."""
+    legacy_id = manifest.parent.name
+    if not DATASET_ID_RE.fullmatch(legacy_id):
+        return ""
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    if str(payload.get("dataset_id") or "") != legacy_id:
+        return ""
+    recorded_base = str(payload.get("base") or "")
+    if not recorded_base:
+        return ""
+    recorded_base_path = Path(_dataset_base(recorded_base)).resolve()
+    if (
+        _path_derived_dataset_id(str(recorded_base_path)) != legacy_id
+        or recorded_base_path.name != base_path.name
+        or (
+            recorded_base_path != base_path
+            and _dataset_base_is_active(str(recorded_base_path))
+        )
+    ):
+        return ""
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return ""
+    suffixes = ("", *DATASET_SUFFIXES)
+    recorded_candidates = {
+        (
+            recorded_base_path
+            if not suffix
+            else Path(f"{recorded_base_path}{suffix}")
+        ).resolve(): suffix
+        for suffix in suffixes
+    }
+    recorded: dict[str, dict[str, Any]] = {}
+    for descriptor in artifacts.values():
+        if not isinstance(descriptor, dict) or not descriptor.get("exists"):
+            continue
+        path_text = str(descriptor.get("path") or "")
+        if not path_text:
+            return ""
+        resolved_path = Path(path_text).expanduser().resolve()
+        suffix = recorded_candidates.get(resolved_path)
+        if suffix is not None:
+            if suffix in recorded:
+                return ""
+            recorded[suffix] = descriptor
+    current = {
+        suffix: candidate
+        for suffix, candidate in zip(
+            suffixes,
+            _dataset_artifact_candidates(base_path),
+        )
+        if candidate.is_file()
+    }
+    if not current or set(recorded) != set(current):
+        return ""
+    for suffix, source_path in current.items():
+        descriptor = recorded[suffix]
+        try:
+            stat = source_path.stat()
+            if (
+                int(descriptor.get("size", -1)) != int(stat.st_size)
+                or int(descriptor.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+            ):
+                return ""
+        except (OSError, TypeError, ValueError):
+            return ""
+    return legacy_id
+
+
+def _matching_legacy_dataset_id(
+    base_path: Path,
+    workspace_root: Path,
+) -> str:
+    """Return one unambiguous path-derived identity from before the registry."""
+    datasets = workspace_root / "datasets"
+    try:
+        workspaces = tuple(datasets.iterdir())
+    except OSError:
+        return ""
+    matches = []
+    for workspace in workspaces:
+        matched = _matching_legacy_manifest(
+            base_path,
+            workspace / "manifest.json",
+        )
+        if matched:
+            matches.append(matched)
+            if len(matches) > 1:
+                return ""
+    return matches[0] if matches else ""
+
+
+@contextmanager
+def _workspace_identity_lock(registry: Path):
+    lock_path = registry.with_suffix(".lock")
+    descriptor: int | None = None
+    for _attempt in range(500):
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+            )
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock_path.stat().st_mtime > 30
+            except FileNotFoundError:
+                continue
+            if stale:
+                lock_path.unlink(missing_ok=True)
+                continue
+            time.sleep(0.01)
+    if descriptor is None:
+        raise IndexBuildInProgressError(
+            f"Dataset Workspace identity is locked: {lock_path}"
+        )
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+
+
+def _persistent_dataset_id(base_path: Path, workspace_root: Path) -> str:
+    """Resolve and persist identity in the Dataset Workspace manifest."""
+    registry = workspace_root / "workspace-manifest.json"
+    try:
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        with _workspace_identity_lock(registry):
+            creating_registry = not registry.exists()
+            try:
+                payload = json.loads(registry.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            records = [
+                record
+                for record in (payload.get("datasets") or [])
+                if _valid_identity_record(record)
+            ]
+            active_path = os.path.normcase(str(base_path.resolve()))
+            base_name = base_path.name
+            source_anchor = _dataset_anchor_token(base_path)
+            source_fingerprint = _dataset_source_fingerprint(base_path)
+            selected: dict[str, Any] | None = None
+            for record in records:
+                if (
+                    str(record.get("base_name") or "") == base_name
+                    and os.path.normcase(str(record.get("active_path") or ""))
+                    == active_path
+                ):
+                    selected = record
+                    break
+            if selected is None:
+                inactive = [
+                    record
+                    for record in records
+                    if str(record.get("base_name") or "") == base_name
+                    and not _dataset_base_is_active(
+                        str(record.get("active_path") or "")
+                    )
+                ]
+                if len(inactive) == 1:
+                    candidate = inactive[0]
+                    recorded_anchor = str(candidate.get("source_anchor") or "")
+                    recorded_fingerprint = str(
+                        candidate.get("source_fingerprint") or ""
+                    )
+                    if _anchor_matches_move(
+                        recorded_anchor,
+                        source_anchor,
+                        recorded_fingerprint=recorded_fingerprint,
+                        current_fingerprint=source_fingerprint,
+                    ) or bool(
+                        not recorded_anchor
+                        and recorded_fingerprint
+                        and recorded_fingerprint == source_fingerprint
+                    ):
+                        selected = candidate
+                        selected["active_path"] = str(base_path.resolve())
+            if selected is None and creating_registry:
+                legacy_id = _matching_legacy_dataset_id(
+                    base_path,
+                    workspace_root,
+                )
+                if legacy_id and not any(
+                    str(record.get("dataset_id") or "") == legacy_id
+                    for record in records
+                ):
+                    selected = {
+                        "dataset_id": legacy_id,
+                        "base_name": base_name,
+                        "active_path": str(base_path.resolve()),
+                        "source_anchor": source_anchor,
+                        "source_fingerprint": source_fingerprint,
+                    }
+                    records.append(selected)
+            if selected is None:
+                selected = {
+                    "dataset_id": uuid.uuid4().hex[:20],
+                    "base_name": base_name,
+                    "active_path": str(base_path.resolve()),
+                    "source_anchor": source_anchor,
+                    "source_fingerprint": source_fingerprint,
+                }
+                records.append(selected)
+            selected["source_anchor"] = source_anchor
+            selected["source_fingerprint"] = source_fingerprint
+            selected["active_path"] = str(base_path.resolve())
+            selected["last_seen_epoch"] = int(time.time())
+            document = {"manifest_version": 1, "datasets": records}
+            temporary = registry.with_name(
+                f".{registry.name}.{os.getpid()}.tmp"
+            )
+            temporary.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _replace_file(temporary, registry)
+            return str(selected["dataset_id"])
+    except (IndexBuildInProgressError, OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Dataset Identity could not be persisted; the active Workspace "
+            f"was not changed: {registry}"
+        ) from exc
+
+
+def _existing_dataset_id(base_path: Path, workspace_root: Path) -> str:
+    """Resolve a known identity without creating or updating any files."""
+    fallback = _path_derived_dataset_id(str(base_path))
+    registry = workspace_root / "workspace-manifest.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    records = [
+        record
+        for record in (payload.get("datasets") or [])
+        if _valid_identity_record(record)
+    ]
+    active_path = os.path.normcase(str(base_path.resolve()))
+    base_name = base_path.name
+    source_fingerprint = _dataset_source_fingerprint(base_path)
+    for record in records:
+        if (
+            str(record.get("base_name") or "") == base_name
+            and os.path.normcase(str(record.get("active_path") or ""))
+            == active_path
+        ):
+            return str(record.get("dataset_id") or fallback)
+    inactive = [
+        record
+        for record in records
+        if str(record.get("base_name") or "") == base_name
+        and not _dataset_base_is_active(
+            str(record.get("active_path") or "")
+        )
+    ]
+    if len(inactive) == 1:
+        recorded_anchor = str(inactive[0].get("source_anchor") or "")
+        current_anchor = _dataset_anchor_token(base_path)
+        if _anchor_matches_move(
+            recorded_anchor,
+            current_anchor,
+            recorded_fingerprint=str(
+                inactive[0].get("source_fingerprint") or ""
+            ),
+            current_fingerprint=source_fingerprint,
+        ):
+            return str(inactive[0].get("dataset_id") or fallback)
+    return fallback
+
+
+def dataset_id_for_source(path: str) -> str:
+    """Return the persistent Dataset Identity for one source artifact."""
+    return resolve_dataset_paths(path, persist_identity=False).dataset_id
+
+
+def _assert_source_unchanged(
+    source_file: str,
+    expected_size: int,
+    expected_mtime_ns: int,
+) -> None:
+    """Refuse to publish an index built from a changing source revision."""
+    _path, size, mtime_ns = _source_signature(source_file)
+    if size != int(expected_size) or mtime_ns != int(expected_mtime_ns):
+        raise IndexStaleError(
+            f"source changed during preparation; index was not published: {_path}"
+        )
+
+
 @dataclass(frozen=True)
 class DatasetPaths:
-    """The sole cache-layout contract shared by CLI, Dash and readers."""
+    """The sole Dataset Workspace layout shared by CLI, Dash and readers."""
 
     source_root: Path
     base: Path
     dataset_id: str
-    cache_dir: Path
+    workspace_dir: Path
     manifest: Path
-    route_index: Path
     trajectory_index: Path
     event_index: Path
 
@@ -124,6 +678,8 @@ def resolve_dataset_paths(
     base: str = "",
     *,
     cache_root: str | os.PathLike[str] | None = None,
+    workspace_policy: WorkspacePolicy | None = None,
+    persist_identity: bool = True,
 ) -> DatasetPaths:
     """Resolve every prepared-data path without independently joining strings.
 
@@ -137,51 +693,50 @@ def resolve_dataset_paths(
         candidate = root / candidate if root.is_dir() else root
     absolute = _dataset_base(str(candidate))
     base_path = Path(absolute)
-    resolved_cache = (
-        Path(cache_root).expanduser().resolve()
-        if cache_root is not None
-        else _cache_root()
+    configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+    if cache_root is not None:
+        resolved_cache = Path(cache_root).expanduser().resolve()
+    elif configured_cache:
+        resolved_cache = _cache_root()
+    elif (workspace_policy or WorkspacePolicy()).requires_central_workspace(
+        base_path.parent
+    ):
+        resolved_cache = _platform_workspace_root()
+    elif base_path.parent.is_dir() and os.access(
+        base_path.parent,
+        os.W_OK | os.X_OK,
+    ):
+        resolved_cache = base_path.parent / ".reacnet-scope"
+    else:
+        resolved_cache = _platform_workspace_root()
+    dataset_id = (
+        _persistent_dataset_id(base_path, resolved_cache)
+        if persist_identity
+        else _existing_dataset_id(base_path, resolved_cache)
     )
-    dataset_id = dataset_id_for_source(str(base_path))
-    cache_dir = resolved_cache / "datasets" / dataset_id
+    workspace_dir = resolved_cache / "datasets" / dataset_id
     return DatasetPaths(
         source_root=base_path.parent,
         base=base_path,
         dataset_id=dataset_id,
-        cache_dir=cache_dir,
-        manifest=cache_dir / "manifest.json",
-        route_index=cache_dir / "route.sqlite3",
-        trajectory_index=cache_dir / "trajectory.sqlite3",
-        event_index=cache_dir / "events.sqlite3",
+        workspace_dir=workspace_dir,
+        manifest=workspace_dir / "manifest.json",
+        trajectory_index=workspace_dir / "trajectory.sqlite3",
+        event_index=workspace_dir / "events.sqlite3",
     )
-
-
-def route_index_path(route_file: str) -> Path:
-    path, _size, _mtime_ns = _source_signature(route_file)
-    return resolve_dataset_paths(path).route_index
 
 
 def trajectory_index_path(trajectory_file: str) -> Path:
     path, _size, _mtime_ns = _source_signature(trajectory_file)
-    return resolve_dataset_paths(path).trajectory_index
+    return resolve_dataset_paths(
+        path,
+        persist_identity=False,
+    ).trajectory_index
 
 
 def event_evidence_index_path(reactionevent_file: str) -> Path:
     path, _size, _mtime_ns = _source_signature(reactionevent_file)
-    return resolve_dataset_paths(path).event_index
-
-
-def _legacy_route_index_path(route_file: str) -> Path:
-    """Locate the v3 index layout published before dataset directories.
-
-    This path is intentionally private: only the offline builder migrates it;
-    Dash may merely validate and read it while prompting the user to run CLI.
-    """
-    path, size, mtime_ns = _source_signature(route_file)
-    digest = hashlib.sha256(
-        f"route|v{ROUTE_INDEX_SCHEMA_VERSION}|{path}|{size}|{mtime_ns}".encode("utf-8")
-    ).hexdigest()[:20]
-    return _cache_root() / "route" / f"{_safe_stem(path, 'route')}.{digest}.sqlite3"
+    return resolve_dataset_paths(path, persist_identity=False).event_index
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
@@ -199,6 +754,7 @@ def _exclusive_build_lock(index_path: Path):
     lock_path = Path(f"{index_path}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+b")
+    locked = False
     try:
         if fcntl is not None:
             try:
@@ -207,10 +763,29 @@ def _exclusive_build_lock(index_path: Path):
                 raise IndexBuildInProgressError(
                     f"an offline preparation process owns: {lock_path}"
                 ) from exc
+            locked = True
+        elif msvcrt is not None:  # pragma: no cover - exercised on Windows
+            try:
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise IndexBuildInProgressError(
+                    f"an offline preparation process owns: {lock_path}"
+                ) from exc
+            locked = True
+        else:  # pragma: no cover - every supported OS has one backend
+            raise RuntimeError("no cross-process file locking backend is available")
         yield
     finally:
-        if fcntl is not None:
+        if locked and fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif locked and msvcrt is not None:  # pragma: no cover - Windows
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         handle.close()
 
 
@@ -260,365 +835,12 @@ def _validate_meta(
         raise IndexInvalidError(f"{kind} index schema is incompatible")
     if meta.get("build_state") != "ready":
         raise IndexInvalidError(f"{kind} index is not complete")
-    if meta.get("source_file") != source_path:
-        raise IndexStaleError(f"{kind} index source path changed")
     if int(meta.get("source_size", -1) or -1) != source_size:
         raise IndexStaleError(f"{kind} index source size changed")
     if int(meta.get("source_mtime_ns", -1) or -1) != source_mtime_ns:
         raise IndexStaleError(f"{kind} index source modification time changed")
     if meta.get("dataset_id") != dataset_id_for_source(source_path):
         raise IndexInvalidError(f"{kind} index dataset id is invalid")
-
-
-@lru_cache(maxsize=400_000)
-def _normalize_route_label(token: str) -> tuple[str, str]:
-    raw = str(token or "").strip()
-    if not raw:
-        return "", ""
-    canonical = canonical_smiles(raw) or ""
-    formula = raw if FORMULA_RE.fullmatch(raw) else ""
-    if not formula:
-        try:
-            formula = str(smiles_to_formula_fast(canonical or raw) or "")
-        except Exception:
-            formula = ""
-    return canonical, formula
-
-
-class RouteIndexStore:
-    """Persistent Route index with explicit offline build and online read APIs."""
-
-    def _open_validated(self, index_path: Path, path: str, size: int, mtime_ns: int) -> dict[str, Any]:
-        connection = _readonly_connection(index_path)
-        try:
-            meta = _read_meta(connection)
-            _validate_meta(
-                meta, source_path=path, source_size=size, source_mtime_ns=mtime_ns,
-                schema_version=ROUTE_INDEX_SCHEMA_VERSION, kind="Route",
-            )
-            tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"transitions", "meta"}.issubset(tables):
-                raise IndexInvalidError("Route index tables are incomplete")
-            expected_rows = int(meta.get("indexed_transitions", -1) or -1)
-            actual_rows = int(connection.execute("SELECT MAX(rowid) FROM transitions").fetchone()[0] or 0)
-            if expected_rows < 0 or actual_rows != expected_rows:
-                raise IndexInvalidError("Route index transition count is inconsistent")
-        except sqlite3.Error as exc:
-            raise IndexInvalidError(f"Route index is corrupt: {exc}") from exc
-        finally:
-            connection.close()
-        return {
-            "index_path": str(index_path), "route_file": path, "route_size": size,
-            "route_mtime": mtime_ns / 1_000_000_000,
-            "scanned_atoms": int(meta.get("scanned_atoms", 0) or 0),
-            "indexed_transitions": int(meta.get("indexed_transitions", 0) or 0),
-            "index_state": "cached_disk",
-        }
-
-    def _published_path(self, path: str) -> Path | None:
-        current = route_index_path(path)
-        if current.is_file():
-            return current
-        legacy = _legacy_route_index_path(path)
-        return legacy if legacy.is_file() else None
-
-    def status(self, route_file: str) -> dict[str, Any]:
-        path, size, _mtime_ns = _source_signature(route_file)
-        index_path = route_index_path(path)
-        published_path = self._published_path(path)
-        building_path = Path(f"{index_path}.building")
-        active = published_path or building_path
-        meta: dict[str, str] = {}
-        if active.exists():
-            try:
-                connection = _readonly_connection(active)
-                try:
-                    meta = _read_meta(connection)
-                finally:
-                    connection.close()
-            except IndexNotReadyError:
-                meta = {}
-        offset = int(meta.get("source_offset", 0) or 0)
-        state = "ready" if published_path else ("building" if building_path.exists() else "missing")
-        if published_path:
-            try:
-                self.open_required(path)
-            except IndexStaleError:
-                state = "stale"
-            except IndexNotReadyError:
-                state = "invalid"
-        elif state == "missing":
-            stale = _find_stale_published_index(index_path.parent, "route", path)
-            if stale is not None:
-                active, meta = stale
-                offset = int(meta.get("source_offset", 0) or 0)
-                state = "stale"
-        return {
-            "state": state,
-            "route_file": path,
-            "route_size": size,
-            "index_path": str(published_path or index_path),
-            "building_path": str(building_path),
-            "index_size": active.stat().st_size if active.exists() else 0,
-            "source_offset": offset,
-            "progress": min(max(offset / max(size, 1), 0.0), 1.0),
-            "scanned_atoms": int(meta.get("scanned_atoms", 0) or 0),
-            "indexed_transitions": int(meta.get("indexed_transitions", 0) or 0),
-            "updated_at_epoch": int(meta.get("updated_at_epoch", meta.get("built_at_epoch", 0)) or 0) or None,
-            "cache_dir": str((published_path or index_path).parent),
-        }
-
-    def open_required(self, route_file: str) -> dict[str, Any]:
-        path, size, mtime_ns = _source_signature(route_file)
-        index_path = self._published_path(path)
-        if index_path is None:
-            expected_path = route_index_path(path)
-            if _has_stale_published_index(expected_path.parent, "route", path):
-                raise IndexStaleError(f"Route index is stale; rerun reacnet-scope-prepare for: {path}")
-            raise IndexNotReadyError(
-                f"Route index is not ready; run reacnet-scope-prepare for: {path}"
-            )
-        return self._open_validated(index_path, path, size, mtime_ns)
-
-    def _connect_for_build(self, target: Path) -> sqlite3.Connection:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(target))
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA temp_store=MEMORY")
-        connection.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS transitions(
-                atom_id INTEGER NOT NULL,
-                start_frame INTEGER NOT NULL,
-                end_frame INTEGER NOT NULL,
-                from_label TEXT NOT NULL,
-                to_label TEXT NOT NULL,
-                from_canonical TEXT NOT NULL,
-                to_canonical TEXT NOT NULL,
-                from_formula TEXT NOT NULL,
-                to_formula TEXT NOT NULL
-            )"""
-        )
-        return connection
-
-    def _checkpoint_route_build(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        route_file: str,
-        mtime: float,
-        size: int,
-        source_offset: int,
-        scanned_atoms: int,
-        indexed_transitions: int,
-    ) -> None:
-        path = os.path.abspath(route_file)
-        current_mtime_ns = int(os.stat(path).st_mtime_ns)
-        rows = {
-            "schema_version": ROUTE_INDEX_SCHEMA_VERSION,
-            "build_state": "building",
-            "source_file": path,
-            "source_size": int(size),
-            "source_mtime_ns": current_mtime_ns,
-            "source_offset": int(source_offset),
-            "dataset_id": dataset_id_for_source(path),
-            "scanned_atoms": int(scanned_atoms),
-            "indexed_transitions": int(indexed_transitions),
-            "updated_at_epoch": int(time.time()),
-        }
-        connection.executemany(
-            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [(key, str(value)) for key, value in rows.items()],
-        )
-        connection.commit()
-
-    def build(self, route_file: str, *, progress_callback: Any = None) -> dict[str, Any]:
-        index_path = route_index_path(route_file)
-        with _exclusive_build_lock(index_path):
-            return self._build_unlocked(route_file, progress_callback=progress_callback)
-
-    def _build_unlocked(self, route_file: str, *, progress_callback: Any = None) -> dict[str, Any]:
-        path, size, mtime_ns = _source_signature(route_file)
-        mtime = mtime_ns / 1_000_000_000
-        index_path = route_index_path(path)
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        if index_path.exists():
-            return self.open_required(path)
-        legacy_path = _legacy_route_index_path(path)
-        if legacy_path.is_file():
-            # Validate before rename.  No source file is opened beyond the
-            # signature check already performed above, and rename is atomic
-            # because both paths are constrained beneath one cache root.
-            self._open_validated(legacy_path, path, size, mtime_ns)
-            os.replace(legacy_path, index_path)
-            return self.open_required(path)
-        building_path = Path(f"{index_path}.building")
-        connection = self._connect_for_build(building_path)
-        existing = {str(k): str(v) for k, v in connection.execute("SELECT key,value FROM meta")}
-        compatible = bool(existing) and (
-            int(existing.get("schema_version", 0) or 0) == ROUTE_INDEX_SCHEMA_VERSION
-            and existing.get("build_state") == "building"
-            and existing.get("source_file") == path
-            and int(existing.get("source_size", -1) or -1) == size
-            and int(existing.get("source_mtime_ns", -1) or -1) == mtime_ns
-        )
-        if existing and not compatible:
-            connection.close()
-            building_path.unlink(missing_ok=True)
-            connection = self._connect_for_build(building_path)
-            existing = {}
-        offset = int(existing.get("source_offset", 0) or 0) if compatible else 0
-        scanned_atoms = int(existing.get("scanned_atoms", 0) or 0) if compatible else 0
-        indexed = int(existing.get("indexed_transitions", 0) or 0) if compatible else 0
-        resumed = offset > 0
-        self._checkpoint_route_build(
-            connection,
-            route_file=path,
-            mtime=mtime,
-            size=size,
-            source_offset=offset,
-            scanned_atoms=scanned_atoms,
-            indexed_transitions=indexed,
-        )
-        batch: list[tuple[Any, ...]] = []
-        last_checkpoint = offset
-        last_emit = 0.0
-        try:
-            with open(path, "rb") as source:
-                source.seek(offset)
-                for raw_line in source:
-                    offset += len(raw_line)
-                    match = ROUTE_LINE_RE.match(raw_line.decode("utf-8", errors="ignore").strip())
-                    if not match:
-                        continue
-                    scanned_atoms += 1
-                    atom_id = int(match.group(1))
-                    steps = [(int(hit.group(1)), hit.group(2)) for hit in ROUTE_STEP_RE.finditer(match.group(2))]
-                    if len(steps) >= 2:
-                        previous_frame, previous_label = steps[0]
-                        previous_canonical, previous_formula = _normalize_route_label(previous_label)
-                        for frame, label in steps[1:]:
-                            current_canonical, current_formula = _normalize_route_label(label)
-                            if label != previous_label:
-                                batch.append((
-                                    atom_id, previous_frame, frame, previous_label, label,
-                                    previous_canonical, current_canonical, previous_formula, current_formula,
-                                ))
-                                indexed += 1
-                            previous_frame, previous_label = frame, label
-                            previous_canonical, previous_formula = current_canonical, current_formula
-                    if len(batch) >= 5000:
-                        connection.executemany("INSERT INTO transitions VALUES(?,?,?,?,?,?,?,?,?)", batch)
-                        batch.clear()
-                    if offset - last_checkpoint >= 256 * 1024 * 1024:
-                        if batch:
-                            connection.executemany("INSERT INTO transitions VALUES(?,?,?,?,?,?,?,?,?)", batch)
-                            batch.clear()
-                        self._checkpoint_route_build(
-                            connection,
-                            route_file=path,
-                            mtime=mtime,
-                            size=size,
-                            source_offset=offset,
-                            scanned_atoms=scanned_atoms,
-                            indexed_transitions=indexed,
-                        )
-                        last_checkpoint = offset
-                    now = time.monotonic()
-                    if progress_callback and now - last_emit >= 1.0:
-                        progress_callback({
-                            "progress": min(offset / max(size, 1), 0.9),
-                            "phase": "indexing_route",
-                            "message": f"Building Route index: {offset / max(size, 1) * 100:.1f}%",
-                            "resumed": resumed,
-                        })
-                        last_emit = now
-            if batch:
-                connection.executemany("INSERT INTO transitions VALUES(?,?,?,?,?,?,?,?,?)", batch)
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_transitions_atom ON transitions(atom_id)")
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_transitions_frames ON transitions(start_frame,end_frame)")
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_transitions_canonical ON transitions(from_canonical,to_canonical)")
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_transitions_formula ON transitions(from_formula,to_formula)")
-            self._checkpoint_route_build(
-                connection,
-                route_file=path,
-                mtime=mtime,
-                size=size,
-                source_offset=size,
-                scanned_atoms=scanned_atoms,
-                indexed_transitions=indexed,
-            )
-            connection.execute("UPDATE meta SET value='ready' WHERE key='build_state'")
-            connection.commit()
-        finally:
-            connection.close()
-        os.replace(building_path, index_path)
-        if progress_callback:
-            progress_callback({"progress": 1.0, "phase": "completed", "message": "Route index ready"})
-        result = self.open_required(path)
-        result["index_state"] = "built"
-        result["resumed"] = resumed
-        return result
-
-    # Compatibility for offline callers. Online code must use open_required/query.
-    def get(self, route_file: str, *, progress_callback: Any = None, **_kwargs: Any) -> dict[str, Any]:
-        return self.build(route_file, progress_callback=progress_callback)
-
-    def clear(self, route_file: str) -> list[str]:
-        return list(clear_index(route_file, kind="route")["removed"])
-
-    def query_reaction_hits(
-        self,
-        route_file: str,
-        reaction_query: dict[str, Any],
-        *,
-        max_hits: int = 2000,
-        progress_callback: Any = None,
-        **_kwargs: Any,
-    ) -> dict[str, Any]:
-        meta = self.open_required(route_file)
-        reactants = sorted(str(value) for value in reaction_query["reactant_token_set"])
-        products = sorted(str(value) for value in reaction_query["product_token_set"])
-        if not reactants or not products:
-            return {"hits": [], "scanned_atoms": 0, "matched_atom_transitions": 0, "route_index": meta}
-        mode = str(reaction_query.get("match_mode") or "canonical_smiles")
-        from_column = "from_canonical" if mode == "canonical_smiles" else "from_formula"
-        to_column = "to_canonical" if mode == "canonical_smiles" else "to_formula"
-        left = ",".join("?" for _ in reactants)
-        right = ",".join("?" for _ in products)
-        sql = (
-            "SELECT atom_id,start_frame,end_frame,from_label,to_label,"
-            f"{from_column},{to_column} FROM transitions WHERE "
-            f"(({from_column} IN ({left}) AND {to_column} IN ({right})) OR "
-            f"({from_column} IN ({right}) AND {to_column} IN ({left}))) "
-            "ORDER BY start_frame,end_frame,atom_id LIMIT ?"
-        )
-        params = [*reactants, *products, *products, *reactants, max(1, min(int(max_hits), 100_000))]
-        connection = _readonly_connection(Path(meta["index_path"]))
-        hits: list[dict[str, Any]] = []
-        try:
-            for atom_id, start, end, from_label, to_label, from_token, to_token in connection.execute(sql, params):
-                direction = (
-                    "reactant_to_product"
-                    if str(from_token) in reaction_query["reactant_token_set"] and str(to_token) in reaction_query["product_token_set"]
-                    else "product_to_reactant"
-                )
-                hits.append({
-                    "atom_id": int(atom_id), "start_frame": int(start), "end_frame": int(end),
-                    "anchor_frame": int(end), "from_label": str(from_label), "to_label": str(to_label),
-                    "from_token": str(from_token), "to_token": str(to_token), "direction": direction,
-                })
-        finally:
-            connection.close()
-        if progress_callback:
-            progress_callback({"progress": 1.0, "phase": "querying_route_index", "message": f"Matched {len(hits)} transitions"})
-        return {
-            "hits": hits,
-            "scanned_atoms": meta["scanned_atoms"],
-            "matched_atom_transitions": len(hits),
-            "route_index": meta,
-        }
 
 
 @dataclass
@@ -785,7 +1007,7 @@ class TrajectoryIndexStore:
             "progress": min(max(offset / max(size, 1), 0.0), 1.0),
             "frames": display_int(meta.get("frame_count", 0)),
             "updated_at_epoch": updated_at_epoch or None,
-            "cache_dir": str(index_path.parent),
+            "workspace_path": str(index_path.parent),
         }
 
     def open_required(self, trajectory_file: str) -> TrajectoryFrameIndex:
@@ -793,9 +1015,13 @@ class TrajectoryIndexStore:
         index_path = trajectory_index_path(path)
         if not index_path.is_file():
             if _has_stale_published_index(index_path.parent, "trajectory", path):
-                raise IndexStaleError(f"Trajectory index is stale; rerun reacnet-scope-prepare for: {path}")
+                raise IndexStaleError(
+                    "Trajectory index is stale; run "
+                    f"reacnet-scope prepare rebuild trajectory {path}"
+                )
             raise IndexNotReadyError(
-                f"Trajectory index is not ready; run reacnet-scope-prepare for: {path}"
+                "Trajectory index is not ready; run "
+                f"reacnet-scope prepare build trajectory {path}"
             )
         connection = _readonly_connection(index_path)
         try:
@@ -899,6 +1125,7 @@ class TrajectoryIndexStore:
             connection.close()
 
     def build(self, trajectory_file: str, *, progress_callback: Any = None) -> TrajectoryFrameIndex:
+        resolve_dataset_paths(trajectory_file, persist_identity=True)
         index_path = trajectory_index_path(trajectory_file)
         with _exclusive_build_lock(index_path):
             return self._build_unlocked(trajectory_file, progress_callback=progress_callback)
@@ -915,7 +1142,7 @@ class TrajectoryIndexStore:
         compatible = bool(meta) and (
             int(meta.get("schema_version", 0) or 0) == TRAJECTORY_INDEX_SCHEMA_VERSION
             and meta.get("build_state") == "building"
-            and meta.get("source_file") == path
+            and meta.get("dataset_id") == dataset_id_for_source(path)
             and int(meta.get("source_size", -1) or -1) == size
             and int(meta.get("source_mtime_ns", -1) or -1) == mtime_ns
         )
@@ -997,6 +1224,7 @@ class TrajectoryIndexStore:
             )
         finally:
             connection.close()
+        _assert_source_unchanged(path, size, mtime_ns)
         os.replace(building_path, index_path)
         if progress_callback:
             progress_callback({"progress": 1.0, "phase": "completed", "message": "Trajectory index ready"})
@@ -1009,7 +1237,6 @@ class TrajectoryIndexStore:
         return list(clear_index(trajectory_file, kind="trajectory")["removed"])
 
 
-ROUTE_INDEX_STORE = RouteIndexStore()
 TRAJECTORY_INDEX_STORE = TrajectoryIndexStore()
 
 
@@ -1017,29 +1244,24 @@ def clear_index(source_file: str, *, kind: str) -> dict[str, Any]:
     """Safely remove one current-source index after acquiring its build lock.
 
     This intentionally accepts only the source file and index kind.  The
-    target path is derived internally, constrained to the configured cache,
-    and cannot point at any ReacNetGenerator output file.
+    target path is derived internally, constrained to the resolved Dataset
+    Workspace, and cannot point at any ReacNetGenerator output file.
     """
     normalized_kind = str(kind or "").strip().lower()
-    if normalized_kind == "route":
-        index_path = route_index_path(source_file)
-        legacy_path = _legacy_route_index_path(source_file)
-    elif normalized_kind == "trajectory":
+    if normalized_kind == "trajectory":
         index_path = trajectory_index_path(source_file)
     else:
-        raise ValueError("kind must be 'route' or 'trajectory'")
+        raise ValueError("kind must be 'trajectory'")
 
-    cache_root = _cache_root().resolve()
+    workspace_root = resolve_dataset_paths(source_file).workspace_dir.resolve()
     try:
-        index_path.resolve().relative_to(cache_root)
+        index_path.resolve().relative_to(workspace_root)
     except ValueError as exc:
-        raise IndexInvalidError("index path escapes REACNET_SCOPE_CACHE_DIR") from exc
+        raise IndexInvalidError("index path escapes Dataset Workspace") from exc
 
     source_path, _source_size, _source_mtime_ns = _source_signature(source_file)
-    prefix = "route." if normalized_kind == "route" else "trajectory."
+    prefix = "trajectory."
     targets: set[Path] = {index_path, Path(f"{index_path}.building")}
-    if normalized_kind == "route":
-        targets.add(legacy_path)
     if index_path.parent.is_dir():
         for candidate in index_path.parent.glob(f"{prefix}*.sqlite3*"):
             if candidate.name.endswith(".lock") or not candidate.is_file():

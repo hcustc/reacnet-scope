@@ -15,8 +15,6 @@ ARTIFACT_SUFFIXES = (
     (".reactionabcd", "reaction"),
     (".lammpstrj", "trajectory"),
     (".species", "species"),
-    (".moname", "moname"),
-    (".route", "route"),
 )
 
 

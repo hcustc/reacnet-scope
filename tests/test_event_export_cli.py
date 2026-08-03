@@ -23,8 +23,16 @@ def _frame(timestep: int) -> str:
     )
 
 
-def _prepared_dataset(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
-    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+def _prepared_dataset(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    configured_workspace: bool = True,
+) -> tuple[Path, str]:
+    if configured_workspace:
+        monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    else:
+        monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
     trajectory = tmp_path / "run.lammpstrj"
     reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
     molecules = tmp_path / "run.lammpstrj.molecules.csv"
@@ -92,6 +100,44 @@ def test_export_event_cli_writes_package_without_persisting_type_override(
         assert document["source_signatures"]["trajectory"]["size"] > 0
         assert archive.read("trajectory.extxyz")
     assert "wrote event package" in capsys.readouterr().out
+
+
+def test_export_event_cli_reads_local_sidecar_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    trajectory, event_id = _prepared_dataset(
+        tmp_path,
+        monkeypatch,
+        configured_workspace=False,
+    )
+    target = tmp_path / "event.zip"
+
+    result = cli.main(
+        [
+            "export-event",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--scope",
+            "participants",
+            "--before-frames",
+            "0",
+            "--after-frames",
+            "0",
+            "--type-map",
+            "1=C,2=O",
+            "--out",
+            str(target),
+        ]
+    )
+
+    assert result == 0
+    assert target.is_file()
+    assert tmp_path / ".reacnet-scope" in dataset_settings_path(
+        str(trajectory)
+    ).parents
 
 
 def test_export_event_cli_rejects_unknown_event_and_existing_output(

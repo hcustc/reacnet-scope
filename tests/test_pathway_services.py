@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import builtins
 import os
-import shlex
 import shutil
 import sqlite3
 from pathlib import Path
@@ -15,11 +14,10 @@ from reacnet_scope.event_index import (
     EVENT_EVIDENCE_STORE,
     EventIndexEvidenceProvider,
 )
-from reacnet_scope.indexes import ROUTE_INDEX_STORE
-from rng_tools.network import Reaction, ReactionNetwork
-from rng_tools.pathways import find_candidate_paths
-from scripts.webapp import server as legacy_server
-from scripts.webapp_dash import services as svc
+from reacnet_scope.network import Reaction, ReactionNetwork
+from reacnet_scope.pathways import find_candidate_paths
+from reacnet_scope import queries as legacy_server
+from reacnet_scope import services as svc
 
 
 REACTION_KEY = "[H]+[O]->[H][O]"
@@ -54,32 +52,6 @@ def _write_reaction_file(tmp_path: Path, text: str | None = None) -> Path:
     return reaction
 
 
-def test_pathway_step_validation_uses_prepared_route_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
-    route = tmp_path / "run.route"
-    route.write_text(
-        "Atom 1 C: 0 [H] -> 10 [H][O]\n",
-        encoding="utf-8",
-    )
-    ROUTE_INDEX_STORE.build(str(route))
-
-    result = svc.validate_pathway_step_occurrences(
-        {"route": str(route)},
-        {
-            "reactants": ["[H]"],
-            "products": ["[H][O]"],
-        },
-    )
-
-    assert result["evidence_level"] == "route"
-    assert result["can_assert_occurrence"] is False
-    assert result["rows"][0]["start_frame"] == 0
-    assert result["rows"][0]["end_frame"] == 10
-
-
 def test_pathway_step_validation_explains_missing_time_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -102,8 +74,7 @@ def test_pathway_step_validation_explains_missing_time_evidence(
     assert result["evidence_level"] == "network_only"
     assert result["rows"] == []
     assert "没有 .timeline.h5 或 .reactionevent.csv" in result["message"]
-    assert "Route 索引尚未就绪" in result["message"]
-    assert "--route-only" in result["message"]
+    assert "Route" not in result["message"]
 
 
 def _atomic_replace_preserving_size_and_mtime(
@@ -204,9 +175,8 @@ def test_pathway_service_degrades_without_event_index(
 
     step = payload["paths"][0]["steps"][0]
     expected = (
-        "reacnet-scope-prepare "
-        f"{shlex.quote(str(Path(reaction_only_artifacts['reaction']).parent))} "
-        "--event-only"
+        "reacnet-scope prepare build event "
+        f"{reaction_only_artifacts['reaction']}"
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
@@ -320,7 +290,9 @@ def test_unavailable_index_empty_result_remains_network_only(
     assert payload["paths"] == []
     assert payload["reason"] == "species_absent"
     assert payload["evidence_status"] == "network_only"
-    assert payload["preparation_command"].endswith("--event-only")
+    assert payload["preparation_command"].startswith(
+        "reacnet-scope prepare build event "
+    )
 
 
 def test_pathway_service_reads_no_event_source_csv(
@@ -369,7 +341,9 @@ def test_pathway_service_never_builds_event_index(
     )
 
     assert payload["evidence_status"] == "network_only"
-    assert payload["preparation_command"].endswith("--event-only")
+    assert payload["preparation_command"].startswith(
+        "reacnet-scope prepare build event "
+    )
 
 
 def test_invalid_event_index_degrades_with_exact_rebuild_command(
@@ -389,9 +363,8 @@ def test_invalid_event_index_degrades_with_exact_rebuild_command(
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
     expected = (
-        "reacnet-scope-prepare "
-        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
-        "--rebuild event"
+        "reacnet-scope prepare rebuild event "
+        f"{indexed_artifacts['reactionevent']}"
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
@@ -429,9 +402,8 @@ def test_corrupt_summary_discovered_during_batch_degrades_to_network_only(
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
     expected = (
-        "reacnet-scope-prepare "
-        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
-        "--rebuild event"
+        "reacnet-scope prepare rebuild event "
+        f"{indexed_artifacts['reactionevent']}"
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
@@ -459,9 +431,8 @@ def test_fractional_available_intervals_degrades_with_exact_rebuild_command(
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
     expected = (
-        "reacnet-scope-prepare "
-        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
-        "--rebuild event"
+        "reacnet-scope prepare rebuild event "
+        f"{indexed_artifacts['reactionevent']}"
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
@@ -493,9 +464,8 @@ def test_noncanonical_available_intervals_text_degrades_with_exact_rebuild_comma
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
     expected = (
-        "reacnet-scope-prepare "
-        f"{shlex.quote(str(Path(indexed_artifacts['reactionevent']).parent))} "
-        "--rebuild event"
+        "reacnet-scope prepare rebuild event "
+        f"{indexed_artifacts['reactionevent']}"
     )
     assert payload["evidence_status"] == "network_only"
     assert payload["preparation_command"] == expected
@@ -539,7 +509,9 @@ def test_atomic_event_index_replacement_during_batch_degrades_to_network_only(
     payload = svc.find_pathways(indexed_artifacts, "[H]", max_depth=1)
 
     assert payload["evidence_status"] == "network_only"
-    assert payload["preparation_command"].endswith("--rebuild event")
+    assert payload["preparation_command"].startswith(
+        "reacnet-scope prepare rebuild event "
+    )
     assert payload["paths"][0]["steps"][0]["event_coverage"] is None
 
 

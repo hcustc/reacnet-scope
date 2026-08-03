@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from rng_tools.network import Reaction, ReactionNetwork
+from reacnet_scope.network import Reaction, ReactionNetwork
 
 
 # ---------------------------------------------------------------------------

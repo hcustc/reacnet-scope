@@ -93,7 +93,7 @@ def test_event_index_uses_dataset_local_cache_path(tmp_path, monkeypatch) -> Non
 
     paths = resolve_dataset_paths(tmp_path, "run.lammpstrj")
 
-    assert paths.event_index == paths.cache_dir / "events.sqlite3"
+    assert paths.event_index == paths.workspace_dir / "events.sqlite3"
     assert event_evidence_index_path(str(reactionevent)) == paths.event_index
 
 
@@ -610,7 +610,6 @@ def test_event_builder_publishes_only_a_ready_database(
 ) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent, molecules = write_rng_fixture(tmp_path)
-    published = event_evidence_index_path(str(reactionevent))
     real_replace = event_index_module.os.replace
     replacements: list[tuple[Path, Path]] = []
 
@@ -633,6 +632,7 @@ def test_event_builder_publishes_only_a_ready_database(
 
     EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
 
+    published = event_evidence_index_path(str(reactionevent))
     assert replacements == [(Path(f"{published}.building"), published)]
 
 

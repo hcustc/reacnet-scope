@@ -15,15 +15,15 @@ from unittest import mock
 
 import pytest
 
-import rng_tools.dir_browser as dir_browser
-from rng_tools.dir_browser import (
+import reacnet_scope.dir_browser as dir_browser
+from reacnet_scope.dir_browser import (
     ALLOWED_ROOTS,
     DirBrowserError,
     get_allowed_roots,
     list_directory,
     validate_browse_path,
 )
-from scripts.webapp_dash import services as svc
+from reacnet_scope import services as svc
 
 
 # ======================================================================
@@ -60,7 +60,7 @@ class ValidateBrowsePathTests(unittest.TestCase):
             root.mkdir()
             target.mkdir()
             link = root / f"escape_{os.getpid()}"
-            import rng_tools.dir_browser as _db
+            import reacnet_scope.dir_browser as _db
 
             old_roots = list(_db.ALLOWED_ROOTS)
             _db.ALLOWED_ROOTS = [root]
@@ -92,7 +92,7 @@ class ListDirectoryTests(unittest.TestCase):
             list_directory(bad)
 
     def test_skips_hidden_directories(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -109,7 +109,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_skips_macos_metadata_dirs(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -129,7 +129,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_skips_windows_system_volume_information(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -146,7 +146,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_handles_permission_denied_on_scandir(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -160,7 +160,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_handles_os_error_on_scandir(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -174,7 +174,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_isolates_single_subdir_permission_error(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -204,7 +204,7 @@ class ListDirectoryTests(unittest.TestCase):
             list_directory(bad)
 
     def test_reports_not_a_directory(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -219,7 +219,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_cannot_go_up_beyond_allowed_root(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -233,7 +233,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_skips_regular_files(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -250,7 +250,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_can_go_up_to_parent_within_roots(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -266,7 +266,7 @@ class ListDirectoryTests(unittest.TestCase):
                 _db.ALLOWED_ROOTS = old_roots
 
     def test_isolates_single_subdir_deleted_during_scan(self):
-        import rng_tools.dir_browser as _db
+        import reacnet_scope.dir_browser as _db
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -353,7 +353,7 @@ def test_browser_snapshot_exposes_breadcrumbs_and_one_dataset(tmp_path, monkeypa
         "path": str(data_dir),
     }
     assert snapshot["datasets"][0]["auto_selected"] is True
-    assert snapshot["datasets"][0]["completeness"] == "2/8"
+    assert snapshot["datasets"][0]["completeness"] == "2/6"
     assert set(snapshot["datasets"][0]["index_states"]) == {
         "event",
         "trajectory",

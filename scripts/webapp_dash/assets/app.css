@@ -1922,63 +1922,40 @@ html, body {
 .rs-composition-detail .dash-table-container { border: 1px solid #e1e6ee; border-radius: 5px; overflow: hidden; }
 .rs-composition-note { grid-column: 1 / -1; padding: 10px 12px; border-left: 3px solid #d69e2e; background: #fffaf0; color: #69532a; font-size: 12px; }
 
-/* Minimal carbon-skeleton analysis: filter → trend → species drilldown. */
-.rs-carbon-minimal { width: 100%; max-width: 1560px; margin: 0 auto; }
-.rs-carbon-minimal .rs-card { padding: 0; overflow: visible; }
-.rs-carbon-controls {
+/* Element Distribution Evolution: filter → trend → species drilldown. */
+.rs-element-distribution-minimal { width: 100%; max-width: 1560px; margin: 0 auto; }
+.rs-element-distribution-minimal .rs-card { padding: 0; overflow: visible; }
+.rs-element-distribution-controls {
     display: grid;
-    grid-template-columns: minmax(220px, 2fr) minmax(105px, .7fr) minmax(105px, .7fr) minmax(180px, 1.25fr) auto;
+    grid-template-columns: minmax(180px, 1.5fr) repeat(3, minmax(90px, .6fr)) minmax(145px, .9fr) minmax(180px, 1.2fr) auto;
     gap: 12px;
     align-items: end;
     min-width: 0;
 }
-.rs-carbon-field { min-width: 0; }
-.rs-carbon-field label {
+.rs-element-distribution-field { min-width: 0; }
+.rs-element-distribution-field label {
     display: block;
     margin: 0 0 5px;
     color: #596579;
     font-size: 12px;
     font-weight: 650;
 }
-.rs-carbon-field > input,
-.rs-carbon-field > .dash-dropdown,
-.rs-carbon-field .Select { width: 100%; min-width: 0; }
-.rs-carbon-field input:disabled,
-.rs-carbon-field .Select.is-disabled .Select-control {
+.rs-element-distribution-field > input,
+.rs-element-distribution-field > .dash-dropdown,
+.rs-element-distribution-field .Select { width: 100%; min-width: 0; }
+.rs-element-distribution-field input:disabled,
+.rs-element-distribution-field .Select.is-disabled .Select-control {
     background: #f7f9fc;
     color: #344054;
     opacity: 1;
 }
-.rs-carbon-draw { min-height: 36px; padding-inline: 20px; font-weight: 650; }
-.rs-carbon-filter-row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
-.rs-carbon-filter { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.rs-carbon-filter-label { color: #344054; font-size: 12px; font-weight: 700; white-space: nowrap; }
-.rs-carbon-radio { display: flex; flex-wrap: wrap; gap: 4px 14px; }
-.rs-carbon-radio .form-check { margin: 0; min-height: auto; }
-.rs-carbon-radio label { color: #475467; font-size: 12px; }
-.rs-carbon-advanced-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(150px, 1fr));
-    gap: 12px;
-}
-.rs-carbon-advanced-grid .rs-carbon-field input,
-.rs-carbon-advanced-grid .rs-carbon-field textarea,
-.rs-carbon-advanced-grid .rs-carbon-field .dash-dropdown { width: 100%; }
-.rs-carbon-advanced-wide { grid-column: span 2; }
-.rs-carbon-advanced-viewer:empty { display: none; }
-.rs-carbon-advanced-viewer {
-    margin-bottom: 14px;
-    padding: 12px;
-    border: 1px solid #e1e6ee;
-    border-radius: 7px;
-    background: #fff;
-}
-.rs-carbon-advanced-frame {
-    width: 100%;
-    min-height: 720px;
-    margin-top: 10px;
-    border: 0;
-}
+.rs-element-distribution-draw { min-height: 36px; padding-inline: 20px; font-weight: 650; }
+.rs-element-distribution-filter-row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.rs-element-distribution-filter { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.rs-element-distribution-filter-label { color: #344054; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.rs-element-distribution-radio { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.rs-element-distribution-radio .form-check { margin: 0; min-height: auto; }
+.rs-element-distribution-radio label { color: #475467; font-size: 12px; }
 .rs-index-block { display: grid; grid-template-columns: minmax(250px, auto) minmax(180px, 1fr); align-items: center; gap: 12px; margin-top: 13px; }
 .rs-index-status { min-height: 18px; color: #667085; font-size: 12px; }
 .rs-index-status.is-ready { color: #147a52; }
@@ -2002,7 +1979,7 @@ html, body {
     border-radius: 50%;
     background: #2563eb;
     box-shadow: 0 0 0 0 rgba(37, 99, 235, .35);
-    animation: rs-carbon-pulse 1.2s infinite;
+    animation: rs-element-distribution-pulse 1.2s infinite;
     content: "";
 }
 .rs-analysis-progress.is-running::after {
@@ -2025,7 +2002,7 @@ html, body {
     animation: rs-analysis-progress-slide 1.15s linear infinite;
     content: "";
 }
-@keyframes rs-carbon-pulse {
+@keyframes rs-element-distribution-pulse {
     70% { box-shadow: 0 0 0 7px rgba(37, 99, 235, 0); }
     100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
 }
@@ -2103,11 +2080,11 @@ body:has([data-dash-is-loading="true"]) .rs-global-operation-progress {
         bottom: 12px;
     }
 }
-.rs-carbon-chart { width: 100%; min-width: 0; min-height: 520px; margin: 2px 0 14px; border: 1px solid #e1e6ee; border-radius: 7px; background: #fff; }
-.rs-carbon-table-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.rs-carbon-table-heading .rs-analysis-progress { margin: 0; }
-.rs-carbon-minimal .rs-composition-detail { padding: 14px; }
-.rs-carbon-minimal .rs-composition-detail .dash-table-container { max-width: 100%; }
+.rs-element-distribution-chart { width: 100%; min-width: 0; min-height: 520px; margin: 2px 0 14px; border: 1px solid #e1e6ee; border-radius: 7px; background: #fff; }
+.rs-element-distribution-table-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.rs-element-distribution-table-heading .rs-analysis-progress { margin: 0; }
+.rs-element-distribution-minimal .rs-composition-detail { padding: 14px; }
+.rs-element-distribution-minimal .rs-composition-detail .dash-table-container { max-width: 100%; }
 .rs-frame-label { color: #526074; font-variant-numeric: tabular-nums; }
 
 .rs-pathway-page { width: 100%; max-width: 1560px; margin: 0 auto; }
@@ -2519,8 +2496,8 @@ body:has([data-dash-is-loading="true"]) .rs-global-operation-progress {
 
 @media (max-width: 1100px) {
     .rs-composition-panel { grid-template-columns: 1fr; }
-    .rs-carbon-controls { grid-template-columns: minmax(210px, 2fr) repeat(2, minmax(100px, .8fr)) minmax(170px, 1.3fr); }
-    .rs-carbon-draw { grid-column: 1 / -1; justify-self: start; }
+    .rs-element-distribution-controls { grid-template-columns: minmax(210px, 2fr) repeat(3, minmax(100px, .8fr)); }
+    .rs-element-distribution-draw { grid-column: 1 / -1; justify-self: start; }
     .rs-channel-lanes { grid-template-columns: 1fr; }
     .rs-pathway-controls { grid-template-columns: minmax(250px, 2fr) repeat(3, minmax(105px, 1fr)); }
     .rs-pathway-search { justify-self: start; }
@@ -2538,11 +2515,11 @@ body:has([data-dash-is-loading="true"]) .rs-global-operation-progress {
     .rs-topbar { height: auto; min-height: 64px; flex-wrap: wrap; padding: 10px 12px; }
     .rs-topbar .rs-meta { order: 3; flex-basis: 100%; border-left: 0; padding-left: 0; }
     .rs-body.rs-tool-shell { padding: 8px; }
-    .rs-carbon-controls { grid-template-columns: 1fr 1fr; }
-    .rs-carbon-dataset, .rs-carbon-controls .rs-carbon-field:nth-child(4) { grid-column: 1 / -1; }
-    .rs-carbon-filter-row, .rs-carbon-filter { align-items: flex-start; flex-direction: column; gap: 8px; }
+    .rs-element-distribution-controls { grid-template-columns: 1fr 1fr; }
+    .rs-element-distribution-dataset, .rs-element-distribution-controls .rs-element-distribution-field:nth-child(6) { grid-column: 1 / -1; }
+    .rs-element-distribution-filter-row, .rs-element-distribution-filter { align-items: flex-start; flex-direction: column; gap: 8px; }
     .rs-index-block { grid-template-columns: 1fr; gap: 7px; }
-    .rs-carbon-chart { min-height: 430px; }
+    .rs-element-distribution-chart { min-height: 430px; }
     .rs-pathway-controls { grid-template-columns: 1fr 1fr; }
     .rs-pathway-concept-flow { grid-template-columns: 1fr; }
     .rs-pathway-concept-arrow { min-height: 24px; transform: rotate(90deg); }
@@ -3240,7 +3217,7 @@ textarea,
 .rs-query-row label,
 .rs-subquery-row label,
 .rs-grid-label,
-.rs-carbon-field label,
+.rs-element-distribution-field label,
 .rs-pathway-field label {
     color: #687386;
     font-size: 10px !important;
@@ -3542,7 +3519,7 @@ textarea,
 }
 
 .rs-plot-frame,
-.rs-carbon-chart,
+.rs-element-distribution-chart,
 .rs-composition-panel .dash-graph {
     overflow: hidden;
     border-color: var(--rs-border);

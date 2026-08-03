@@ -2,7 +2,6 @@
 
 Provides common building blocks used by multiple analysis workflows:
   - SMILES ↔ formula conversion (with caching)
-  - moname file scanning
   - reactionabcd file parsing & canonicalization
   - reaction classification (oxidation / coupling / fragmentation …)
   - net-flux calculation (forward − reverse)
@@ -53,59 +52,7 @@ def canonical_smiles(smi: str) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════
-#  2. moname 文件扫描
-# ═══════════════════════════════════════════════════════════
-
-def collect_smiles_for_formulas(
-    moname_path: str,
-    target_formulas: Set[str],
-    *,
-    verbose: bool = True,
-) -> Dict[str, Dict[str, int]]:
-    """扫描 moname 文件, 收集指定分子式的所有原始 SMILES.
-
-    Returns:
-        {formula: {orig_smiles: count}}
-    """
-    if verbose:
-        print(f"[moname] 扫描 {os.path.basename(moname_path)}, "
-              f"搜索 {', '.join(sorted(target_formulas))} ...")
-
-    result: Dict[str, Dict[str, int]] = {f: defaultdict(int) for f in target_formulas}
-
-    with open(moname_path) as fh:
-        for line in fh:
-            parts = line.strip().split()
-            if not parts:
-                continue
-            smi = parts[0]
-            f = smiles_to_formula(smi)
-            if f in result:
-                result[f][smi] += 1
-
-    if verbose:
-        for f in sorted(target_formulas):
-            total = sum(result[f].values())
-            n_smi = len(result[f])
-            print(f"    {f}: {total} 条, {n_smi} 种 SMILES")
-
-    return result
-
-
-def build_canonical_map(
-    variant_counts: Dict[str, int],
-) -> Dict[str, Set[str]]:
-    """从 {orig_smiles: count} 构建 {canonical: {orig_smiles, …}}."""
-    cmap: Dict[str, Set[str]] = defaultdict(set)
-    for smi in variant_counts:
-        can = canonical_smiles(smi)
-        if can:
-            cmap[can].add(smi)
-    return dict(cmap)
-
-
-# ═══════════════════════════════════════════════════════════
-#  3. reactionabcd 文件解析
+#  2. reactionabcd 文件解析
 # ═══════════════════════════════════════════════════════════
 
 def build_formula_cache(reac_path: str, *, verbose: bool = True) -> Dict[str, str]:
@@ -713,7 +660,7 @@ def compute_rate_constants(
     species_ts: Dict[str, List[Tuple[int, int]]],
     *,
     volume_A3: float,
-    timestep_ps: float = 0.0001,
+    timestep_ps: float | None = None,
     dump_interval: int = 100,
     temperature_K: Optional[float] = None,
     net_flux: bool = False,
@@ -733,7 +680,7 @@ def compute_rate_constants(
         species_ts:    {formula: [(timestep, count), ...]}
                        **需包含所有反应物分子式的时间序列**
         volume_A3:     模拟盒子体积, Å³
-        timestep_ps:   LAMMPS dt, 单位 ps (metal units 典型值 0.0001)
+        timestep_ps:   已由证据或用户确认的 timestep 到 ps 换算
         dump_interval: ReacNetGenerator 每隔多少 LAMMPS 步写一帧, 默认 100
         temperature_K: 模拟温度, K (仅用于记录和显示)
         net_flux:      是否使用 net_count 字段
@@ -744,6 +691,10 @@ def compute_rate_constants(
                       'avg_N_A', 'avg_N_B', 'reactant_A', 'reactant_B' 字段
         sim_info    : 模拟条件汇总 dict
     """
+    if timestep_ps is None or float(timestep_ps) <= 0:
+        raise ValueError("rate constants require a confirmed positive timestep_ps")
+    timestep_ps = float(timestep_ps)
+
     # ── 单位换算 ─────────────────────────────────────────
     V_L = volume_A3 * 1e-27          # Å³ → L  (1 Å³ = 1e-30 m³ = 1e-27 L)
     count_key = 'net_count' if net_flux else 'count'

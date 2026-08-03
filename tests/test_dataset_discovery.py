@@ -57,12 +57,10 @@ def test_discovery_separates_prefixes_and_ignores_unknown_files(tmp_path):
 
     candidates = discover_dataset_candidates(tmp_path)
 
-    assert [item["label"] for item in candidates] == [
-        "second.lammpstrj", "first.lammpstrj"
-    ]
-    assert [item["kinds"] for item in candidates] == [
-        ["reaction", "route"], ["species"]
-    ]
+    by_label = {item["label"]: item for item in candidates}
+    assert set(by_label) == {"second.lammpstrj", "first.lammpstrj"}
+    assert by_label["second.lammpstrj"]["kinds"] == ["reaction"]
+    assert by_label["first.lammpstrj"]["kinds"] == ["species"]
 
 
 def test_discovery_sorts_by_completeness_then_latest_mtime(tmp_path):

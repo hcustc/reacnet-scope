@@ -19,7 +19,6 @@ import os
 import re
 import sys
 import tempfile
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
@@ -32,18 +31,13 @@ PROJECT_ROOT = TOOL_ROOT.parent
 if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
-from rng_tools.network import (  # noqa: E402
+from reacnet_scope.network import (  # noqa: E402
     Reaction,
     ReactionNetwork,
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
-from rng_tools.carbon_plot import (  # noqa: E402
-    parse_carbon_range_specs,
-    plot_carbon_number_evolution,
-    species_file_to_tidy_table,
-)
-from rng_tools.pathway_export import (  # noqa: E402
+from reacnet_scope.pathway_export import (  # noqa: E402
     PATHWAY_CSV_FIELDS,
     pathway_csv_rows as _pathway_csv_rows,
     pathway_document as _pathway_document,
@@ -70,9 +64,6 @@ def detect_default_reaction_file() -> Path:
 
 DEFAULT_REACTION_FILE = detect_default_reaction_file()
 
-SEP_RE = re.compile(r"\s*\+\s*|\s*,\s*|\s*;\s*")
-
-
 @dataclass
 class MatchedReaction:
     role: str
@@ -81,18 +72,6 @@ class MatchedReaction:
     reverse_tp: int
     net_tp: int
     ratio_pct: float
-
-
-def split_terms(expr: str) -> List[str]:
-    terms = [x.strip() for x in SEP_RE.split(expr.strip()) if x.strip()]
-    return terms
-
-
-def multiset_contains(have: Counter, need: Counter) -> bool:
-    for key, val in need.items():
-        if have.get(key, 0) < val:
-            return False
-    return True
 
 
 def reaction_formula_str(rxn: Reaction) -> str:
@@ -137,9 +116,224 @@ def find_pathways_service(
     **limits: object,
 ) -> dict:
     """Load the shared read-only pathway adapter only for this subcommand."""
-    from scripts.webapp_dash.services import find_pathways
+    from reacnet_scope.services import find_pathways
 
     return find_pathways(artifacts, start_smiles, **limits)
+
+
+def cmd_prepare(args: argparse.Namespace) -> int:
+    """Run offline preparation through the supported unified CLI surface."""
+    from reacnet_scope.prepare import run_preparation
+
+    return run_preparation(
+        action=str(args.prepare_action),
+        capability=str(getattr(args, "capability", "all")),
+        case=str(args.case),
+        base=str(args.base or ""),
+    )
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the supported Dash application from the unified CLI."""
+    from scripts.webapp_dash.app import run_server
+
+    return run_server(
+        host=str(args.host),
+        port=int(args.port),
+        debug=bool(args.debug),
+    )
+
+
+def _element_filter(value: str) -> tuple[str, dict[str, int | str]]:
+    """Parse ELEMENT=present|absent|range[:MIN[:MAX]]."""
+    try:
+        element, expression = value.split("=", 1)
+        parts = expression.split(":")
+        mode = parts[0]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "filter must use ELEMENT=present|absent|range[:MIN[:MAX]]"
+        ) from exc
+    if not re.fullmatch(r"[A-Z][a-z]?", element):
+        raise argparse.ArgumentTypeError("filter element must be a chemical symbol")
+    if mode not in {"present", "absent", "range"}:
+        raise argparse.ArgumentTypeError("filter mode must be present, absent, or range")
+    rule: dict[str, int | str] = {"mode": mode}
+    if mode == "range":
+        try:
+            if len(parts) > 1 and parts[1] != "":
+                rule["min"] = int(parts[1])
+            if len(parts) > 2 and parts[2] != "":
+                rule["max"] = int(parts[2])
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "range bounds must be integers"
+            ) from exc
+        if len(parts) > 3:
+            raise argparse.ArgumentTypeError("range accepts at most MIN and MAX")
+    elif len(parts) != 1:
+        raise argparse.ArgumentTypeError(
+            "present and absent filters do not accept bounds"
+        )
+    return element, rule
+
+
+def _element_symbol(value: str) -> str:
+    symbol = str(value).strip()
+    if not re.fullmatch(r"[A-Z][a-z]?", symbol):
+        raise argparse.ArgumentTypeError(
+            "element must be a chemical symbol such as C, N, or Cl"
+        )
+    return symbol
+
+
+def cmd_element_distribution(args: argparse.Namespace) -> int:
+    """Query the prepared generic Element Distribution index."""
+    from reacnet_scope.composition import build_element_distribution_model
+    from reacnet_scope.prepare import discover_dataset
+
+    try:
+        dataset = discover_dataset(str(args.case), str(args.base or ""))
+        species_files = {"current": dataset["species"]}
+        for label, path in args.species_file or []:
+            species_files[str(label)] = str(path)
+        result = build_element_distribution_model(
+            species_files=species_files,
+            tidy_table=str(args.tidy_table or ""),
+            max_points=int(args.max_points),
+            group_element=str(args.group_element),
+            max_group_count=int(args.max_group_count),
+            element_filters={
+                element: rule for element, rule in (args.filter or [])
+            },
+            include_zero=bool(args.include_zero),
+            bin_width=int(args.bin_width),
+            group_ranges=list(args.group_range or []),
+            smooth_window=int(args.smooth_window),
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    document = {
+        "schema_version": 1,
+        "group_element": str(args.group_element),
+        "element_filters": {
+            element: rule for element, rule in (args.filter or [])
+        },
+        "include_zero": bool(args.include_zero),
+        "rows": result.get("rows") or [],
+        "raw_rows": result.get("raw_rows") or [],
+        "sources": result.get("sources") or [],
+        "transform": result.get("transform") or {},
+    }
+    print(json.dumps(document, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _labelled_path(value: str) -> tuple[str, str]:
+    label, separator, path = str(value).partition("=")
+    if not separator or not label.strip() or not path.strip():
+        raise argparse.ArgumentTypeError("value must use LABEL=PATH")
+    return label.strip(), path.strip()
+
+
+def _group_range(value: str) -> dict[str, int | str | None]:
+    label, separator, bounds = str(value).partition(":")
+    if not separator or not label.strip():
+        raise argparse.ArgumentTypeError("range must use LABEL:MIN:MAX")
+    parts = bounds.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("range must use LABEL:MIN:MAX")
+    try:
+        minimum = int(parts[0]) if parts[0] else None
+        maximum = int(parts[1]) if parts[1] else None
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("range bounds must be integers") from exc
+    return {"label": label.strip(), "min": minimum, "max": maximum}
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.timed_evidence import select_timed_evidence
+
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        selection = select_timed_evidence(
+            timeline_file=dataset["timeline"],
+            reactionevent_file=dataset["reactionevent"],
+            molecules_file=dataset["molecules"],
+        )
+        result = EVENT_EVIDENCE_STORE.query_events(
+            selection.primary_file,
+            selection.molecules_file,
+            str(args.reaction_key),
+            limit=int(args.limit),
+            offset=int(args.offset),
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_intermediate_candidates(args: argparse.Namespace) -> int:
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.services import ServiceError, build_intermediate_candidates
+
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        species_path = str(dataset.get("species") or "")
+        reaction_path = str(dataset.get("reaction") or "")
+        if not species_path:
+            raise FileNotFoundError("dataset has no .species source")
+        result = build_intermediate_candidates(
+            {"reaction": reaction_path, "species": species_path},
+            top=int(args.top),
+            fwhm_min_frames=float(args.fwhm_min_frames),
+            timestep_ps=args.timestep_ps,
+            with_flux=not args.no_flux,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError, ServiceError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_batch_compare(args: argparse.Namespace) -> int:
+    from reacnet_scope.services import run_grouped_batch_comparison
+
+    groups: dict[str, list[str]] = {}
+    for label, path in args.group:
+        groups.setdefault(label, []).append(path)
+    requests = [
+        {
+            "group_name": label,
+            "conditions": [
+                {
+                    "name": f"{label}-{index}",
+                    "folder": str(Path(path).expanduser().parent),
+                    "reaction_file": str(Path(path).expanduser()),
+                    "replicate": index,
+                }
+                for index, path in enumerate(paths, 1)
+            ],
+        }
+        for label, paths in groups.items()
+    ]
+    try:
+        result = run_grouped_batch_comparison(
+            requests,
+            min_detection_rate=float(args.min_detection_rate),
+            top_n=int(args.top),
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def _reaction_base(reaction_path: str) -> str:
@@ -239,7 +433,7 @@ def cmd_pathway(args: argparse.Namespace) -> int:
             min_directionality=args.min_directionality,
         )
     except Exception as exc:
-        from scripts.webapp_dash.services import ServiceError
+        from reacnet_scope.services import ServiceError
 
         if not isinstance(exc, ServiceError):
             raise
@@ -404,11 +598,9 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         TrajectoryFrameError,
         load_type_element_map,
     )
-    from scripts.webapp_dash import services as svc
+    from reacnet_scope import services as svc
 
     try:
-        if not os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip():
-            raise RuntimeError("REACNET_SCOPE_CACHE_DIR must be set")
         dataset = discover_dataset(args.case, args.base)
         reactionevent = dataset["reactionevent"]
         molecules = (
@@ -763,12 +955,6 @@ def cmd_topshare(args: argparse.Namespace) -> int:
     return 0
 
 
-_FORMULA_RE = re.compile(r"^([A-Z][a-z]?\d*)+$")
-
-
-def looks_like_formula(text: str) -> bool:
-    return bool(_FORMULA_RE.fullmatch(text.strip()))
-
 
 def split_target_args(raw_items: Sequence[str]) -> List[str]:
     out: List[str] = []
@@ -778,38 +964,6 @@ def split_target_args(raw_items: Sequence[str]) -> List[str]:
     return out
 
 
-def parse_target_item(item: str) -> tuple[str, str, str]:
-    """Return (query_type, query, label). query_type in {'formula','smiles'}."""
-    label = ""
-    query = item.strip()
-    if "::" in query:
-        label, query = query.split("::", 1)
-        label = label.strip()
-        query = query.strip()
-
-    low = query.lower()
-    if low.startswith("formula:"):
-        query = query[len("formula:") :].strip()
-        qtype = "formula"
-    elif low.startswith("f:"):
-        query = query[2:].strip()
-        qtype = "formula"
-    elif low.startswith("smiles:"):
-        query = query[len("smiles:") :].strip()
-        qtype = "smiles"
-    elif low.startswith("smi:"):
-        query = query[len("smi:") :].strip()
-        qtype = "smiles"
-    elif low.startswith("s:"):
-        query = query[2:].strip()
-        qtype = "smiles"
-    else:
-        qtype = "formula" if looks_like_formula(query) else "smiles"
-
-    if not label:
-        label = query
-    return qtype, query, label
-
 
 def derive_species_path(reac_path: str) -> str:
     if reac_path.endswith(".reactionabcd"):
@@ -817,437 +971,120 @@ def derive_species_path(reac_path: str) -> str:
     return reac_path + ".species"
 
 
-def moving_average(vals: List[float], window: int) -> List[float]:
-    if window <= 1 or len(vals) <= 2:
-        return list(vals)
-    out: List[float] = []
-    half = window // 2
-    for i in range(len(vals)):
-        lo = max(0, i - half)
-        hi = min(len(vals), i + half + 1)
-        seg = vals[lo:hi]
-        out.append(sum(seg) / len(seg))
-    return out
 
+def cmd_species_evolution(args: argparse.Namespace) -> int:
+    """Run the formal indexed Species Evolution workflow."""
+    from reacnet_scope import services as svc
 
-def resolve_plot_series(
-    net: ReactionNetwork,
-    targets: Sequence[tuple[str, str, str]],
-    *,
-    formula_mode: str,
-    max_smiles_per_formula: int,
-) -> tuple[List[dict], List[dict]]:
-    """Build plot series definitions and mapping rows."""
-    series_defs: List[dict] = []
-    mapping_rows: List[dict] = []
-
-    for qtype, query, label in targets:
-        if qtype == "smiles":
-            if query not in net.species:
-                print(f"[WARN] SMILES not in reaction network, skipped: {query}")
-                continue
-            sp = net.species[query]
-            series_defs.append(
-                {
-                    "series_name": label,
-                    "query_type": "smiles",
-                    "query": query,
-                    "formula": sp.formula,
-                    "members": [query],
-                }
-            )
-            mapping_rows.append(
-                {
-                    "series_name": label,
-                    "query_type": "smiles",
-                    "query": query,
-                    "formula": sp.formula,
-                    "smiles": query,
-                    "tp_total": sp.total_throughput,
-                }
-            )
-            continue
-
-        # formula
-        smiles_list = list(net.smiles_by_formula(query))
-        if not smiles_list:
-            print(f"[WARN] Formula has no SMILES in network, skipped: {query}")
-            continue
-        smiles_list.sort(
-            key=lambda s: net.species[s].total_throughput if s in net.species else 0,
-            reverse=True,
-        )
-        if max_smiles_per_formula > 0:
-            smiles_list = smiles_list[:max_smiles_per_formula]
-
-        if formula_mode in {"sum", "both"}:
-            series_defs.append(
-                {
-                    "series_name": label,
-                    "query_type": "formula_sum",
-                    "query": query,
-                    "formula": query,
-                    "members": list(smiles_list),
-                }
-            )
-
-        if formula_mode in {"split", "both"}:
-            for i, smi in enumerate(smiles_list, 1):
-                sp = net.species.get(smi)
-                series_defs.append(
-                    {
-                        "series_name": f"{label}[{i}]",
-                        "query_type": "formula_member",
-                        "query": query,
-                        "formula": query,
-                        "members": [smi],
-                    }
-                )
-                mapping_rows.append(
-                    {
-                        "series_name": f"{label}[{i}]",
-                        "query_type": "formula_member",
-                        "query": query,
-                        "formula": query,
-                        "smiles": smi,
-                        "tp_total": sp.total_throughput if sp else 0,
-                    }
-                )
-
-        if formula_mode in {"sum", "both"}:
-            for smi in smiles_list:
-                sp = net.species.get(smi)
-                mapping_rows.append(
-                    {
-                        "series_name": label,
-                        "query_type": "formula_sum",
-                        "query": query,
-                        "formula": query,
-                        "smiles": smi,
-                        "tp_total": sp.total_throughput if sp else 0,
-                    }
-                )
-
-    return series_defs, mapping_rows
-
-
-def parse_species_selected(
-    species_file: str,
-    selected_smiles: Sequence[str],
-) -> tuple[List[int], dict[str, List[int]]]:
-    ts_re = re.compile(r"^Timestep\s+(\d+):(.*)$")
-    selected = list(dict.fromkeys(selected_smiles))
-    selected_set = set(selected)
-    series: dict[str, List[int]] = {s: [] for s in selected}
-    timesteps: List[int] = []
-
-    with open(species_file, encoding="utf-8") as fh:
-        for line in fh:
-            m = ts_re.match(line.strip())
-            if not m:
-                continue
-            ts = int(m.group(1))
-            timesteps.append(ts)
-            for s in selected:
-                series[s].append(0)
-
-            tokens = m.group(2).strip().split()
-            i = 0
-            while i < len(tokens) - 1:
-                smi = tokens[i]
-                try:
-                    cnt = int(tokens[i + 1])
-                except ValueError:
-                    i += 1
-                    continue
-                if smi in selected_set:
-                    series[smi][-1] += cnt
-                i += 2
-
-    return timesteps, series
-
-
-def cmd_plot(args: argparse.Namespace) -> int:
     species_file = args.species_file or derive_species_path(args.reac)
     if not os.path.exists(species_file):
         print(f"[ERROR] species file not found: {species_file}")
         return 2
-
-    if not args.target:
+    raw_targets = split_target_args(args.target)
+    if not raw_targets:
         print("[ERROR] --target is required (support multiple).")
         return 2
+    try:
+        payload = svc.build_species_evolution(
+            {"reaction": args.reac, "species": species_file},
+            raw_targets,
+            species_file=species_file,
+            x_axis=args.x_axis,
+            timestep_ps=args.timestep_ps,
+            normalize=args.normalize,
+            smooth_window=args.smooth_window,
+            downsample=0,
+            max_curves=1_000_000,
+            formula_mode=args.formula_mode,
+            max_smiles_per_formula=args.max_smiles_per_formula,
+        )
+    except svc.ServiceError as exc:
+        print(f"[ERROR] {exc.message}")
+        return 2
 
-    net = build_network(args.reac, args.min_tp)
-
-    raw_items = split_target_args(args.target)
-    targets = [parse_target_item(x) for x in raw_items]
-
-    series_defs, mapping_rows = resolve_plot_series(
-        net,
-        targets,
-        formula_mode=args.formula_mode,
-        max_smiles_per_formula=args.max_smiles_per_formula,
-    )
-    if not series_defs:
-        print("[INFO] no valid targets after resolving formulas/smiles.")
-        return 0
-
-    selected_smiles: List[str] = []
-    for d in series_defs:
-        selected_smiles.extend(d["members"])
-    selected_smiles = list(dict.fromkeys(selected_smiles))
-
-    timesteps, base_series = parse_species_selected(species_file, selected_smiles)
-    if not timesteps:
-        print(f"[INFO] no timestep rows parsed from: {species_file}")
-        return 0
-
+    mapping_rows = list(payload.get("mapping") or [])
     if args.list_only:
         print("# target mapping")
         print("series_name,query_type,query,formula,smiles,tp_total")
         for row in mapping_rows:
             print(
-                f"{row['series_name']},{row['query_type']},{row['query']},"
-                f"{row['formula']},{row['smiles']},{row['tp_total']}"
+                f"{row.get('series_name', '')},{row.get('query_type', '')},"
+                f"{row.get('query', '')},{row.get('formula', '')},"
+                f"{row.get('smiles', '')},{row.get('tp_total', 0)}"
             )
-        if args.out_map:
-            write_csv(
-                args.out_map,
-                ["series_name", "query_type", "query", "formula", "smiles", "tp_total"],
-                mapping_rows,
-            )
-            print(f"[OK] wrote: {args.out_map}")
-        return 0
-
-    # build curve data
-    curves: List[dict] = []
-    for d in series_defs:
-        vals = [0.0] * len(timesteps)
-        for smi in d["members"]:
-            sv = base_series.get(smi, [])
-            if len(sv) != len(vals):
-                continue
-            for i, v in enumerate(sv):
-                vals[i] += float(v)
-
-        if args.normalize == "initial":
-            v0 = vals[0] if vals else 0.0
-            vals = [v / v0 if v0 else 0.0 for v in vals]
-        elif args.normalize == "max":
-            vmax = max(vals) if vals else 0.0
-            vals = [v / vmax if vmax else 0.0 for v in vals]
-
-        vals = moving_average(vals, args.smooth_window)
-        curves.append(
-            {
-                "series_name": d["series_name"],
-                "query_type": d["query_type"],
-                "query": d["query"],
-                "formula": d["formula"],
-                "n_members": len(d["members"]),
-                "members": d["members"],
-                "values": vals,
-            }
-        )
-
-    # x-axis
-    if args.x_axis == "step":
-        x_vals = [float(ts) for ts in timesteps]
-        x_name = "timestep"
-    elif args.x_axis == "ns":
-        x_vals = [ts * args.timestep_ps / 1000.0 for ts in timesteps]
-        x_name = "time_ns"
-    else:
-        x_vals = [ts * args.timestep_ps for ts in timesteps]
-        x_name = "time_ps"
-
-    # stdout summary
-    print(
-        f"# species_file={species_file}\n"
-        f"# timesteps={len(timesteps)}, x_axis={args.x_axis}, curves={len(curves)}\n"
-        f"# normalize={args.normalize}, smooth_window={args.smooth_window}"
-    )
-    for i, c in enumerate(curves, 1):
-        vmax = max(c["values"]) if c["values"] else 0.0
-        print(
-            f"  {i:>2}. {c['series_name']}  ({c['query_type']})  "
-            f"members={c['n_members']}  max={vmax:.6g}"
-        )
-
-    # write mapping
     if args.out_map:
         write_csv(
             args.out_map,
-            ["series_name", "query_type", "query", "formula", "smiles", "tp_total"],
+            [
+                "series_name",
+                "query_type",
+                "query",
+                "formula",
+                "smiles",
+                "tp_total",
+            ],
             mapping_rows,
         )
         print(f"[OK] wrote: {args.out_map}")
+    if args.list_only:
+        return 0
 
-    # write curve csv
+    curves = list(payload.get("curves") or [])
+    x_values = list(payload.get("x_values") or [])
+    x_name = str(payload.get("x_name") or "timestep")
+    print(
+        f"# species_file={species_file}\n"
+        f"# source_mode={payload.get('meta', {}).get('source_mode', '')}, "
+        f"timesteps={payload.get('meta', {}).get('n_timestep_full', 0)}, "
+        f"x_axis={args.x_axis}, curves={len(curves)}\n"
+        f"# normalize={args.normalize}, smooth_window={args.smooth_window}; "
+        "CSV export=raw indexed abundance"
+    )
+    for index, curve in enumerate(curves, 1):
+        values = list(curve.get("values") or [])
+        print(
+            f"  {index:>2}. {curve.get('name', '')}  "
+            f"({curve.get('query_type', '')})  "
+            f"members={curve.get('n_members', 0)}  "
+            f"max={max(values) if values else 0.0:.6g}"
+        )
     if args.out_csv:
-        rows = []
-        for i in range(len(x_vals)):
-            row = {x_name: x_vals[i], "timestep": timesteps[i]}
-            for c in curves:
-                row[c["series_name"]] = c["values"][i]
-            rows.append(row)
-        fieldnames = [x_name, "timestep"] + [c["series_name"] for c in curves]
-        write_csv(args.out_csv, fieldnames, rows)
+        Path(args.out_csv).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out_csv).write_text(
+            svc.evolution_to_csv(payload), encoding="utf-8"
+        )
         print(f"[OK] wrote: {args.out_csv}")
-
-    # draw plot
     if args.out_png:
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(args.fig_width, args.fig_height), dpi=args.dpi)
-        for c in curves:
-            ax.plot(x_vals, c["values"], linewidth=1.8, label=c["series_name"])
-        ax.set_xlabel(x_name)
-        y_label = "count"
-        if args.normalize in {"initial", "max"}:
-            y_label = "normalized_count"
-        ax.set_ylabel(y_label)
-        title = args.title or "Species Time Series"
-        ax.set_title(title)
+        figure, axis = plt.subplots(
+            figsize=(args.fig_width, args.fig_height), dpi=args.dpi
+        )
+        for curve in curves:
+            axis.plot(
+                x_values,
+                curve.get("values") or [],
+                linewidth=1.8,
+                label=curve.get("name") or curve.get("query") or "curve",
+            )
+        axis.set_xlabel(x_name)
+        axis.set_ylabel(
+            "normalized_count"
+            if args.normalize in {"initial", "max"}
+            else "count"
+        )
+        axis.set_title(args.title or "Species Time Series")
         if not args.no_grid:
-            ax.grid(True, alpha=0.25)
-        ax.legend(loc="best", fontsize=9)
-        fig.tight_layout()
-        os.makedirs(os.path.dirname(args.out_png) or ".", exist_ok=True)
-        fig.savefig(args.out_png)
-        plt.close(fig)
+            axis.grid(True, alpha=0.25)
+        axis.legend(loc="best", fontsize=9)
+        figure.tight_layout()
+        Path(args.out_png).parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(args.out_png)
+        plt.close(figure)
         print(f"[OK] wrote: {args.out_png}")
-
-    return 0
-
-
-def cmd_carbon_plot(args: argparse.Namespace) -> int:
-    data_path = (args.data or "").strip()
-    species_file = (args.species_file or "").strip()
-    if not data_path:
-        species_file = species_file or derive_species_path(args.reac)
-        if not os.path.exists(species_file):
-            print(f"[ERROR] species file not found: {species_file}")
-            return 2
-
-    carbon_bins = parse_carbon_range_specs(args.carbon_bins) or None
-    display_ranges = parse_carbon_range_specs(args.display_ranges) or None
-    merge_ranges = parse_carbon_range_specs(args.merge_ranges) or None
-    layout_regions = parse_carbon_range_specs(args.layout_regions) or None
-
-    smoothing = None
-    if args.smoothing == "rolling":
-        smoothing = {"method": "rolling", "window": args.smooth_window}
-    elif args.smoothing == "savgol":
-        smoothing = {
-            "method": "savgol",
-            "window_length": args.smooth_window,
-            "polyorder": args.smooth_polyorder,
-        }
-
-    system_col = args.system_col.strip() or None
-    replicate_col = args.replicate_col.strip() or None
-    parent_carbon_number = args.parent_carbon_number if args.parent_carbon_number > 0 else None
-    system_mode = args.system_mode.strip() or None
-    highlight_small = tuple(args.highlight_small)
-
-    if data_path:
-        source = data_path
-        source_desc = data_path
-    else:
-        source = species_file_to_tidy_table(
-            species_file=species_file,
-            time_axis=args.x_axis,
-            timestep_ps=args.timestep_ps,
-            species_resolver=smiles_to_formula_fast,
-            system=args.system_name.strip() or None,
-            replicate=args.replicate_id.strip() or None,
-        )
-        if args.system_name.strip() and system_col is None:
-            system_col = "system"
-        if args.replicate_id.strip() and replicate_col is None:
-            replicate_col = "replicate"
-        source_desc = species_file
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, _, summary, plot_data = plot_carbon_number_evolution(
-        data=source,
-        time_col=args.time_col,
-        species_col=args.species_col,
-        count_col=args.count_col,
-        system_col=system_col,
-        replicate_col=replicate_col,
-        carbon_bins=carbon_bins,
-        display_ranges=display_ranges,
-        merge_ranges=merge_ranges,
-        mode=args.mode,
-        top_k=args.top_k,
-        max_exact_lines=args.max_exact_lines,
-        parent_carbon_number=parent_carbon_number,
-        highlight_small=highlight_small,
-        highlight_large=args.highlight_large,
-        smoothing=smoothing,
-        layout=args.layout,
-        layout_regions=layout_regions,
-        system_mode=system_mode,
-        legend_mode=args.legend_mode,
-        palette=args.palette,
-        theme=args.theme,
-        figsize=(args.fig_width, args.fig_height),
-        return_summary=True,
-        show_uncertainty=not args.no_uncertainty,
-        output_path=None,
-    )
-
-    if args.out_csv:
-        os.makedirs(os.path.dirname(args.out_csv) or ".", exist_ok=True)
-        plot_data.to_csv(args.out_csv, index=False)
-        print(f"[OK] wrote: {args.out_csv}")
-
-    if args.out_summary:
-        os.makedirs(os.path.dirname(args.out_summary) or ".", exist_ok=True)
-        with open(args.out_summary, "w", encoding="utf-8") as fh:
-            json.dump(summary, fh, ensure_ascii=False, indent=2)
-        print(f"[OK] wrote: {args.out_summary}")
-
-    if args.out_fig:
-        os.makedirs(os.path.dirname(args.out_fig) or ".", exist_ok=True)
-        fig.savefig(args.out_fig, bbox_inches="tight", dpi=args.dpi)
-        print(f"[OK] wrote: {args.out_fig}")
-
-    print(f"# source={source_desc}")
-    print(f"# plot_rows={len(plot_data)}, plot_mode={summary.get('plot_mode', args.mode)}")
-    if "group_by" in summary:
-        systems = ", ".join(sorted(summary.get("by_system", {}).keys()))
-        print(f"# group_by={summary['group_by']}, systems={systems}")
-        overall = summary.get("overall", {})
-        print(
-            f"# overall parent=C{overall.get('parent_carbon_number')} "
-            f"peak={overall.get('parent_peak_count', 0):.6g} "
-            f"final={overall.get('parent_final_count', 0):.6g} "
-            f"decay_onset={overall.get('parent_decay_onset_time')}"
-        )
-    else:
-        print(
-            f"# parent=C{summary.get('parent_carbon_number')} "
-            f"peak={summary.get('parent_peak_count', 0):.6g} "
-            f"final={summary.get('parent_final_count', 0):.6g} "
-            f"decay_onset={summary.get('parent_decay_onset_time')}"
-        )
-        print(
-            f"# small_peak={summary.get('small_fragment_peak_time')} "
-            f"large_peak={summary.get('large_hydrocarbon_peak_time')} "
-            f"max_carbon={summary.get('max_carbon_number_observed')}"
-        )
-
-    plt.close(fig)
     return 0
 
 
@@ -1303,6 +1140,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sp_serve = sub.add_parser("serve", help="启动 Dash Web 应用")
+    sp_serve.add_argument("--host", default="127.0.0.1", help="监听地址")
+    sp_serve.add_argument("--port", type=int, default=8060, help="监听端口")
+    sp_serve.add_argument("--debug", action="store_true", help="启用 Dash 调试模式")
+    sp_serve.set_defaults(func=cmd_serve)
+
     def add_reac_flags(sp: argparse.ArgumentParser) -> None:
         sp.add_argument(
             "--reac",
@@ -1311,6 +1154,85 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument("--min-tp", type=int, default=1, help="最低 tp 过滤阈值")
 
+    sp_prepare = sub.add_parser(
+        "prepare",
+        help="检查、建立、重建或清理 Dataset Workspace 索引",
+    )
+    from reacnet_scope.prepare import configure_parser as configure_prepare
+
+    configure_prepare(sp_prepare, handler=cmd_prepare)
+
+    sp_distribution = sub.add_parser(
+        "element-distribution",
+        help="查询预建的通用元素分布索引",
+    )
+    sp_distribution.add_argument("case", help="数据集目录或公共前缀")
+    sp_distribution.add_argument(
+        "--base",
+        default="",
+        help="多候选目录中的数据集名称",
+    )
+    sp_distribution.add_argument(
+        "--group-element",
+        required=True,
+        type=_element_symbol,
+        help="用于分组的元素符号，例如 C、N 或 Cl",
+    )
+    sp_distribution.add_argument(
+        "--max-group-count",
+        type=_bounded_int("max-group-count", 0, 10000),
+        default=100,
+    )
+    sp_distribution.add_argument(
+        "--filter",
+        action="append",
+        type=_element_filter,
+        default=[],
+        metavar="ELEMENT=MODE[:MIN[:MAX]]",
+        help="可重复：S=present、Cl=absent 或 O=range:1:3",
+    )
+    sp_distribution.add_argument(
+        "--max-points",
+        type=_bounded_int("max-points", 2, 4000),
+        default=1200,
+    )
+    sp_distribution.add_argument(
+        "--include-zero",
+        action="store_true",
+        help="包含分组元素原子数为 0 的 E0 组",
+    )
+    sp_distribution.add_argument(
+        "--species-file",
+        action="append",
+        type=_labelled_path,
+        default=[],
+        metavar="LABEL=PATH",
+        help="加入另一个已准备的 .species 数据集，可重复",
+    )
+    sp_distribution.add_argument(
+        "--tidy-table",
+        default="",
+        help="可选 tidy CSV/Excel（time,species,count[,dataset]）",
+    )
+    sp_distribution.add_argument(
+        "--bin-width",
+        type=_bounded_int("bin-width", 1),
+        default=1,
+    )
+    sp_distribution.add_argument(
+        "--group-range",
+        action="append",
+        type=_group_range,
+        default=[],
+        metavar="LABEL:MIN:MAX",
+    )
+    sp_distribution.add_argument(
+        "--smooth-window",
+        type=_bounded_int("smooth-window", 1),
+        default=1,
+    )
+    sp_distribution.set_defaults(func=cmd_element_distribution)
+
     sp_species = sub.add_parser("species", help="按分子式列出所有 SMILES")
     add_reac_flags(sp_species)
     sp_species.add_argument("--formula", required=True, help="目标分子式, 例如 C6H4")
@@ -1318,7 +1240,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_species.add_argument("--out", default="", help="可选输出 CSV 路径")
     sp_species.set_defaults(func=cmd_species)
 
-    sp_next = sub.add_parser("next", help="查询某个 SMILES 的下一步(消耗/生成)反应")
+    sp_next = sub.add_parser("reactions", help="查询某个 SMILES 的下一步(消耗/生成)反应")
     add_reac_flags(sp_next)
     sp_next.add_argument("--smiles", required=True, help="目标 SMILES")
     sp_next.add_argument(
@@ -1336,41 +1258,54 @@ def build_parser() -> argparse.ArgumentParser:
     sp_next.add_argument("--out", default="", help="可选输出 CSV 路径")
     sp_next.set_defaults(func=cmd_next)
 
-    sp_rf = sub.add_parser("rxn-formula", help="按公式级反应检索路径")
-    add_reac_flags(sp_rf)
-    sp_rf.add_argument(
-        "--reactants",
-        required=False,
-        default="",
-        help="可选: 反应物分子式列表, 用 + 或 , 分隔, 如 C6H4O2+C6H4",
-    )
-    sp_rf.add_argument(
-        "--products",
-        required=False,
-        default="",
-        help="可选: 产物分子式列表, 用 + 或 , 分隔, 如 C12H8O2",
-    )
-    sp_rf.add_argument(
-        "--mode",
-        choices=["exact", "contains"],
-        default="exact",
-        help="exact: 已提供的一侧需完全一致(缺省侧不限制); contains: 已提供的一侧只要求包含",
-    )
-    sp_rf.add_argument("--top", type=int, default=50, help="输出前 N 条, <=0 表示全部")
-    sp_rf.add_argument("--out", default="", help="可选输出 CSV 路径")
-    sp_rf.set_defaults(func=cmd_rxn_formula)
+    sp_events = sub.add_parser("events", help="查询预建的 Reaction Occurrence 索引")
+    sp_events.add_argument("case", help="数据集目录或公共前缀")
+    sp_events.add_argument("--base", default="")
+    sp_events.add_argument("--reaction-key", required=True)
+    sp_events.add_argument("--limit", type=_bounded_int("limit", 1, 10000), default=100)
+    sp_events.add_argument("--offset", type=_bounded_int("offset", 0), default=0)
+    sp_events.set_defaults(func=cmd_events)
 
-    sp_ts = sub.add_parser("topshare", help="计算 CSV 指标列的 TOP-N 占比")
-    sp_ts.add_argument("--csv", required=True, help="输入 CSV 路径")
-    sp_ts.add_argument("--metric", required=True, help="指标列名 (数值列)")
-    sp_ts.add_argument("--top", type=int, default=10, help="TOP N")
-    sp_ts.add_argument("--positive-only", action="store_true", help="仅统计 metric > 0")
-    sp_ts.add_argument("--abs-metric", action="store_true", help="对 metric 取绝对值后统计")
-    sp_ts.add_argument("--out", default="", help="可选输出 CSV 路径")
-    sp_ts.set_defaults(func=cmd_topshare)
+    sp_intermediate = sub.add_parser(
+        "intermediate-candidates",
+        help="查询中间体候选",
+    )
+    sp_intermediate.add_argument("case", help="数据集目录或公共前缀")
+    sp_intermediate.add_argument("--base", default="")
+    sp_intermediate.add_argument("--top", type=_bounded_int("top", 1, 500), default=120)
+    sp_intermediate.add_argument(
+        "--fwhm-min-frames",
+        type=_bounded_float("fwhm-min-frames", 0.0, 1_000_000.0),
+        default=1.0,
+        help="最小 FWHM（Analyzed Frame 数量）",
+    )
+    sp_intermediate.add_argument(
+        "--timestep-ps",
+        type=_bounded_float("timestep-ps", 0.000000001, 1_000_000.0),
+        default=None,
+        help="显式确认并保存 timestep 到 ps 的换算；未提供时保留 frame 语义",
+    )
+    sp_intermediate.add_argument("--no-flux", action="store_true")
+    sp_intermediate.set_defaults(func=cmd_intermediate_candidates)
+
+    sp_batch = sub.add_parser("batch-compare", help="按 Simulation Condition 对比 Replicate")
+    sp_batch.add_argument(
+        "--group",
+        action="append",
+        type=_labelled_path,
+        required=True,
+        metavar="CONDITION=REACTIONABCD",
+    )
+    sp_batch.add_argument(
+        "--min-detection-rate",
+        type=_unit_float("min-detection-rate"),
+        default=0.0,
+    )
+    sp_batch.add_argument("--top", type=_bounded_int("top", 1, 500), default=50)
+    sp_batch.set_defaults(func=cmd_batch_compare)
 
     sp_pathway = sub.add_parser(
-        "pathway",
+        "candidate-paths",
         help="检索并排序有界候选反应路径（候选路线，不代表机理证明）",
     )
     sp_pathway.add_argument(
@@ -1564,7 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_export_event.set_defaults(func=cmd_export_event)
 
     sp_plot = sub.add_parser(
-        "plot",
+        "species-evolution",
         help="绘制物种随时间变化曲线 (支持 formula/SMILES 混合输入与多曲线)",
     )
     add_reac_flags(sp_plot)
@@ -1597,14 +1532,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp_plot.add_argument(
         "--x-axis",
         choices=["step", "ps", "ns"],
-        default="ps",
+        default="step",
         help="x 轴单位",
     )
     sp_plot.add_argument(
         "--timestep-ps",
         type=float,
-        default=0.0001,
-        help="LAMMPS 单步时间(ps), 用于 step->ps/ns 转换",
+        default=None,
+        help="显式确认并保存 timestep 到 ps 的换算，用于 step->ps/ns 转换",
     )
     sp_plot.add_argument(
         "--normalize",
@@ -1631,97 +1566,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅输出目标展开映射(公式->SMILES), 不绘图",
     )
-    sp_plot.set_defaults(func=cmd_plot)
-
-    sp_carbon = sub.add_parser(
-        "carbon-plot",
-        help="按碳数聚合绘制分子数量时间演化图",
-    )
-    add_reac_flags(sp_carbon)
-    sp_carbon.add_argument("--data", default="", help="tidy CSV/Excel 路径, 提供后优先于 --species-file")
-    sp_carbon.add_argument(
-        "--species-file",
-        default="",
-        help="RNG .species 文件路径, 默认由 --reac 自动推导",
-    )
-    sp_carbon.add_argument("--time-col", default="time", help="tidy 表时间列名")
-    sp_carbon.add_argument("--species-col", default="species", help="tidy 表物种列名")
-    sp_carbon.add_argument("--count-col", default="count", help="tidy 表计数列名")
-    sp_carbon.add_argument("--system-col", default="", help="tidy 表体系列名")
-    sp_carbon.add_argument("--replicate-col", default="", help="tidy 表重复列名")
-    sp_carbon.add_argument("--system-name", default="", help="从 .species 读取时附加的 system 常量值")
-    sp_carbon.add_argument("--replicate-id", default="", help="从 .species 读取时附加的 replicate 常量值")
-    sp_carbon.add_argument(
-        "--x-axis",
-        choices=["step", "ps", "ns"],
-        default="ps",
-        help=".species 输入时的时间轴单位",
-    )
-    sp_carbon.add_argument(
-        "--timestep-ps",
-        type=float,
-        default=0.0001,
-        help="LAMMPS 单步时间(ps), 用于 .species 的 step->ps/ns 转换",
-    )
-    sp_carbon.add_argument("--mode", choices=["exact", "binned", "topk"], default="exact", help="绘图模式")
-    sp_carbon.add_argument("--top-k", type=int, default=12, help="topk 模式保留的碳数数量")
-    sp_carbon.add_argument("--max-exact-lines", type=int, default=24, help="exact 模式自动切换阈值")
-    sp_carbon.add_argument(
-        "--carbon-bins",
-        default="",
-        help="分箱定义, 如 '1-4;5-15;16-30;31+' 或 'Small:1-4;Growth:31+'",
-    )
-    sp_carbon.add_argument(
-        "--display-ranges",
-        default="",
-        help="仅显示的碳数/区间, 如 'C1;C2;C24;C30+'",
-    )
-    sp_carbon.add_argument(
-        "--merge-ranges",
-        default="",
-        help="合并成单曲线的碳数区间, 如 'Small:1-4;Parent:24;Growth:30+'",
-    )
-    sp_carbon.add_argument("--layout", choices=["single", "subplots"], default="single", help="布局")
-    sp_carbon.add_argument(
-        "--layout-regions",
-        default="",
-        help="子图区间定义, 格式同 --carbon-bins",
-    )
-    sp_carbon.add_argument(
-        "--system-mode",
-        choices=["facet", "overlay"],
-        default="",
-        help="多体系时使用 facet 或 overlay",
-    )
-    sp_carbon.add_argument("--parent-carbon-number", type=int, default=0, help="母体碳数, 0 表示自动推断")
-    sp_carbon.add_argument(
-        "--highlight-small",
-        nargs=2,
-        type=int,
-        metavar=("START", "END"),
-        default=[1, 4],
-        help="小碎片高亮区间, 例如 1 4",
-    )
-    sp_carbon.add_argument("--highlight-large", type=int, default=30, help="大分子增长阈值")
-    sp_carbon.add_argument(
-        "--smoothing",
-        choices=["none", "rolling", "savgol"],
-        default="none",
-        help="平滑方式",
-    )
-    sp_carbon.add_argument("--smooth-window", type=int, default=5, help="rolling/savgol 窗口")
-    sp_carbon.add_argument("--smooth-polyorder", type=int, default=2, help="savgol 多项式阶数")
-    sp_carbon.add_argument("--legend-mode", choices=["detailed", "compact"], default="compact", help="图例模式")
-    sp_carbon.add_argument("--theme", choices=["light", "dark"], default="light", help="主题")
-    sp_carbon.add_argument("--palette", default="viridis", help="中间碳数区调色板")
-    sp_carbon.add_argument("--fig-width", type=float, default=10.5, help="图宽(英寸)")
-    sp_carbon.add_argument("--fig-height", type=float, default=6.2, help="图高(英寸)")
-    sp_carbon.add_argument("--dpi", type=int, default=180, help="保留兼容性的 dpi 参数")
-    sp_carbon.add_argument("--no-uncertainty", action="store_true", help="有 replicate 时关闭标准差阴影")
-    sp_carbon.add_argument("--out-fig", default="", help="输出图像路径, 支持 PNG/SVG/PDF")
-    sp_carbon.add_argument("--out-csv", default="", help="输出 plot_data CSV")
-    sp_carbon.add_argument("--out-summary", default="", help="输出 summary JSON")
-    sp_carbon.set_defaults(func=cmd_carbon_plot)
+    sp_plot.set_defaults(func=cmd_species_evolution)
 
     return p
 
