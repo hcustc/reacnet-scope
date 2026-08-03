@@ -14,7 +14,7 @@ from reacnet_scope.timed_evidence import (
     TimedEvidenceDataError,
     select_timed_evidence,
 )
-from scripts.webapp_dash import services as dash_services
+from reacnet_scope import services as dash_services
 
 
 def write_legacy_evidence(base: Path, *, molecules: bool = True) -> tuple[Path, Path]:
@@ -274,7 +274,7 @@ def test_prepare_cli_builds_native_manifest_and_dash_query_uses_it(
     base = tmp_path / "native.lammpstrj"
     timeline = write_timeline(Path(f"{base}.timeline.h5"))
 
-    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    assert prepare.main(["build", "event", str(tmp_path)]) == 0
 
     paths = resolve_dataset_paths(tmp_path, base.name)
     manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))

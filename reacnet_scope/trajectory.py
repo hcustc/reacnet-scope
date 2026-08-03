@@ -73,9 +73,19 @@ def normalize_type_element_map(
     return dict(sorted(normalized.items(), key=lambda item: int(item[0])))
 
 
-def dataset_settings_path(trajectory_file: str) -> Path:
-    """Return the cache-local settings path for one trajectory dataset."""
-    return resolve_dataset_paths(trajectory_file).cache_dir / "dataset-settings.json"
+def dataset_settings_path(
+    trajectory_file: str,
+    *,
+    persist_identity: bool = False,
+) -> Path:
+    """Return the Dataset Workspace settings path for one trajectory."""
+    return (
+        resolve_dataset_paths(
+            trajectory_file,
+            persist_identity=persist_identity,
+        ).workspace_dir
+        / "dataset-settings.json"
+    )
 
 
 def load_type_element_map(trajectory_file: str) -> dict[str, str]:
@@ -93,13 +103,59 @@ def load_type_element_map(trajectory_file: str) -> dict[str, str]:
     return normalize_type_element_map(raw)
 
 
+def load_timestep_ps(source_file: str) -> float | None:
+    """Load a user-confirmed timestep-to-ps conversion without writing."""
+    path = dataset_settings_path(source_file)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        value = (payload.get("time_axis") or {}).get("timestep_ps")
+        parsed = float(value)
+    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def save_timestep_ps(source_file: str, value: float) -> Path:
+    """Persist an explicitly confirmed timestep-to-ps conversion."""
+    try:
+        timestep_ps = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TrajectoryFrameError("timestep 到 ps 的换算必须是正数") from exc
+    if timestep_ps <= 0:
+        raise TrajectoryFrameError("timestep 到 ps 的换算必须是正数")
+    path = dataset_settings_path(source_file, persist_identity=True)
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrajectoryFrameError(f"数据集设置文件无效: {path}") from exc
+        if not isinstance(existing, dict):
+            raise TrajectoryFrameError(f"数据集设置格式无效: {path}")
+        payload.update(existing)
+    payload["time_axis"] = {
+        "timestep_ps": timestep_ps,
+        "confirmed": True,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
 def save_type_element_map(
     trajectory_file: str,
     values: Mapping[Any, Any],
 ) -> Path:
     """Atomically persist a user-confirmed dataset-specific mapping."""
     mapping = normalize_type_element_map(values)
-    path = dataset_settings_path(trajectory_file)
+    path = dataset_settings_path(trajectory_file, persist_identity=True)
     payload: dict[str, Any] = {}
     if path.is_file():
         try:

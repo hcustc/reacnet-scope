@@ -1,10 +1,10 @@
 """Dash WebUI V1 entry point for ReacNet Scope.
 
-Runs in parallel with the legacy WebUI at ``scripts.webapp.server``.
+This is the single supported Web application.
 
 Usage::
 
-    uv run reacnet-scope-web-dash --host 127.0.0.1 --port 8060
+    uv run reacnet-scope serve --host 127.0.0.1 --port 8060
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from scripts.webapp_dash import callbacks as cb  # noqa: E402
-from scripts.webapp_dash import services as svc  # noqa: E402
+from reacnet_scope import services as svc  # noqa: E402
 from scripts.webapp_dash.navigation import (  # noqa: E402
     DEFAULT_PAGE,
     NAV_GROUPS,
@@ -837,10 +837,10 @@ def _intermediate_page() -> html.Div:
                         dcc.Dropdown(
                             id="inter-kind",
                             options=[
-                                {"label": "intermediate", "value": "intermediate"},
-                                {"label": "product", "value": "product"},
-                                {"label": "reactant", "value": "reactant"},
-                                {"label": "all", "value": "all"},
+                                {"label": "中间体候选", "value": "intermediate"},
+                                {"label": "产物型候选", "value": "product"},
+                                {"label": "反应物型候选", "value": "reactant"},
+                                {"label": "全部候选", "value": "all"},
                             ],
                             value="intermediate",
                             clearable=False,
@@ -854,6 +854,10 @@ def _intermediate_page() -> html.Div:
                         dcc.Input(id="inter-start-ratio", value="0.1", type="number", style={"width": 86}),
                         dbc.Label("DecayAlpha", className="mb-0", style={"fontSize": 12}),
                         dcc.Input(id="inter-decay-alpha", value="0.8", type="number", style={"width": 86}),
+                        dbc.Label("ProductRatioMin", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="inter-product-ratio", value="0.95", type="number", min=0, max=1, step=0.01, style={"width": 86}),
+                        dbc.Label("ReactantStartRatioMin", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="inter-reactant-ratio", value="0.9", type="number", min=0, max=1, step=0.01, style={"width": 86}),
                         dbc.Button("筛选", id="inter-search-btn", color="primary", size="sm"),
                         dbc.Button("导出 CSV", id="inter-csv-btn", color="secondary", size="sm", outline=True),
                         dcc.Download(id="inter-csv-download"),
@@ -862,10 +866,10 @@ def _intermediate_page() -> html.Div:
                 ),
                 html.Div(
                     [
-                        dbc.Label("FWHMMin(ps)", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="inter-fwhm", value="0.5", type="number", style={"width": 92}),
-                        dbc.Label("Timestep(ps)", className="mb-0", style={"fontSize": 12}),
-                        dcc.Input(id="inter-timestep", value="0.0001", type="number", style={"width": 100}),
+                        dbc.Label("FWHMMin(Analyzed Frame)", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="inter-fwhm", value="1", type="number", style={"width": 92}),
+                        dbc.Label("timestep → ps（可选确认）", className="mb-0", style={"fontSize": 12}),
+                        dcc.Input(id="inter-timestep", value=None, type="number", style={"width": 110}),
                         dbc.Checkbox(id="inter-require-fwhm", value=True, className="me-1"),
                         dbc.Label("RequireFWHM", html_for="inter-require-fwhm", className="mb-0"),
                         dbc.Checkbox(id="inter-with-flux", value=True, className="me-1"),
@@ -963,7 +967,7 @@ def _evolution_page() -> html.Div:
                                             {"label": "ps", "value": "ps"},
                                             {"label": "ns", "value": "ns"},
                                         ],
-                                        value="ps",
+                                        value="step",
                                         clearable=False,
                                     ),
                                 ],
@@ -1043,8 +1047,8 @@ def _evolution_page() -> html.Div:
                                             clearable=False,
                                             style={"width": 130},
                                         ),
-                                        dbc.Label("Timestep(ps)", className="mb-0"),
-                                        dcc.Input(id="evolution-timestep", value="0.0001", type="number", min=0, style={"width": 110}),
+                                        dbc.Label("timestep → ps（确认后保存）", className="mb-0"),
+                                        dcc.Input(id="evolution-timestep", value=None, type="number", min=0, style={"width": 120}),
                                         dbc.Label("下采样", className="mb-0"),
                                         dcc.Input(id="evolution-downsample", value="1800", type="number", min=0, style={"width": 88}),
                                         dbc.Label("最大曲线", className="mb-0"),
@@ -1109,7 +1113,7 @@ def _evolution_page() -> html.Div:
     return html.Div([query_card, chart_card], className="rs-page", id="page-evolution")
 
 
-def _carbon_page() -> html.Div:
+def _element_distribution_page() -> html.Div:
     settings_card = dbc.Card(
         dbc.CardBody(
             [
@@ -1117,149 +1121,147 @@ def _carbon_page() -> html.Div:
                     [
                         html.Div(
                             [
-                                dbc.Label("数据集", html_for="carbon-dataset-name"),
+                                dbc.Label("数据集", html_for="element-distribution-dataset-name"),
                                 dcc.Input(
-                                    id="carbon-dataset-name",
+                                    id="element-distribution-dataset-name",
                                     value="未选择",
                                     disabled=True,
-                                    className="rs-carbon-input",
+                                    className="rs-element-distribution-input",
                                 ),
                             ],
-                            className="rs-carbon-field rs-carbon-dataset",
+                            className="rs-element-distribution-field rs-element-distribution-dataset",
                         ),
                         html.Div(
                             [
-                                dbc.Label("Timestep (ps)", html_for="carbon-timestep"),
+                                dbc.Label(
+                                    "timestep → ps（确认后保存）",
+                                    html_for="element-distribution-timestep",
+                                ),
                                 dcc.Input(
-                                    id="carbon-timestep",
-                                    value=0.0001,
+                                    id="element-distribution-timestep",
+                                    value=None,
                                     type="number",
                                     min=1e-12,
                                     step="any",
+                                    placeholder="留空显示 timestep",
                                 ),
                             ],
-                            className="rs-carbon-field",
+                            className="rs-element-distribution-field",
                         ),
                         html.Div(
                             [
-                                dbc.Label("最大碳数", html_for="carbon-max-c"),
-                                dcc.Input(id="carbon-max-c", value=6, type="number", min=1, max=30),
+                                dbc.Label(
+                                    "分组元素",
+                                    html_for="element-distribution-group-element",
+                                ),
+                                dcc.Dropdown(
+                                    id="element-distribution-group-element",
+                                    options=[{"label": "C", "value": "C"}],
+                                    value="C",
+                                    clearable=False,
+                                ),
                             ],
-                            className="rs-carbon-field",
+                            className="rs-element-distribution-field",
                         ),
                         html.Div(
                             [
-                                dbc.Label("参考物种 SMILES（可选）", html_for="carbon-reference-smiles"),
+                                dbc.Label(
+                                    "最大原子数",
+                                    html_for="element-distribution-max-count",
+                                ),
                                 dcc.Input(
-                                    id="carbon-reference-smiles",
-                                    value="",
-                                    placeholder="例如 [C][C]；留空则只显示 C1…Cn",
-                                    className="rs-carbon-input",
+                                    id="element-distribution-max-count",
+                                    value=6,
+                                    type="number",
+                                    min=0,
+                                    max=200,
                                 ),
                             ],
-                            className="rs-carbon-field",
+                            className="rs-element-distribution-field",
                         ),
-                        dbc.Button("绘制", id="carbon-search-btn", color="primary", className="rs-carbon-draw"),
+                        html.Div(
+                            dbc.Checkbox(
+                                id="element-distribution-include-zero",
+                                value=False,
+                                label="包含 0 原子分组（E0）",
+                            ),
+                            className="rs-element-distribution-field",
+                        ),
+                        html.Div(
+                            [
+                                dbc.Label("参考物种 SMILES（可选）", html_for="element-distribution-reference-smiles"),
+                                dcc.Input(
+                                    id="element-distribution-reference-smiles",
+                                    value="",
+                                    placeholder="例如 [N][S]；留空则只显示元素分组",
+                                    className="rs-element-distribution-input",
+                                ),
+                            ],
+                            className="rs-element-distribution-field",
+                        ),
+                        dbc.Button("绘制", id="element-distribution-search-btn", color="primary", className="rs-element-distribution-draw"),
                     ],
-                    className="rs-carbon-controls",
+                    className="rs-element-distribution-controls",
                 ),
                 html.Hr(),
                 html.Div(
                     [
                         html.Div(
                             [
-                                html.Span("氯状态", className="rs-carbon-filter-label"),
-                                dbc.RadioItems(
-                                    id="carbon-chlorine-state",
-                                    options=[
-                                        {"label": "全部", "value": "all"},
-                                        {"label": "含氯", "value": "chlorinated"},
-                                        {"label": "不含氯", "value": "unchlorinated"},
-                                    ],
-                                    value="all",
-                                    inline=True,
-                                    className="rs-carbon-radio",
+                                html.Span("筛选元素", className="rs-element-distribution-filter-label"),
+                                dcc.Dropdown(
+                                    id="element-distribution-filter-element",
+                                    options=[],
+                                    value=None,
+                                    clearable=True,
                                 ),
                             ],
-                            className="rs-carbon-filter",
+                            className="rs-element-distribution-filter",
                         ),
                         html.Div(
                             [
-                                html.Span("氧状态", className="rs-carbon-filter-label"),
+                                html.Span("筛选条件", className="rs-element-distribution-filter-label"),
                                 dbc.RadioItems(
-                                    id="carbon-oxygen-state",
+                                    id="element-distribution-filter-mode",
                                     options=[
                                         {"label": "全部", "value": "all"},
-                                        {"label": "含氧", "value": "oxygenated"},
-                                        {"label": "不含氧", "value": "unoxygenated"},
+                                        {"label": "存在", "value": "present"},
+                                        {"label": "不存在", "value": "absent"},
+                                        {"label": "原子数范围", "value": "range"},
                                     ],
                                     value="all",
                                     inline=True,
-                                    className="rs-carbon-radio",
+                                    className="rs-element-distribution-radio",
                                 ),
                             ],
-                            className="rs-carbon-filter",
+                            className="rs-element-distribution-filter",
+                        ),
+                        html.Div(
+                            [
+                                html.Span("最小 / 最大", className="rs-element-distribution-filter-label"),
+                                dcc.Input(
+                                    id="element-distribution-filter-min",
+                                    type="number",
+                                    min=0,
+                                    placeholder="最小",
+                                ),
+                                dcc.Input(
+                                    id="element-distribution-filter-max",
+                                    type="number",
+                                    min=0,
+                                    placeholder="最大",
+                                ),
+                            ],
+                            className="rs-element-distribution-filter",
                         ),
                     ],
-                    className="rs-carbon-filter-row",
-                ),
-                dbc.Accordion(
-                    [
-                        dbc.AccordionItem(
-                            [
-                                html.Div(
-                                    [
-                                        html.Div([dbc.Label("Tidy CSV / Excel"), dcc.Input(id="carbon-advanced-data", placeholder="可选 tidy 数据文件")], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("单个 Species"), dcc.Input(id="carbon-advanced-species-file", placeholder="留空使用当前数据集")], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("多文件列表"), dcc.Textarea(id="carbon-advanced-species-files", placeholder="system::/path/run.species", style={"minHeight": 60})], className="rs-carbon-field rs-carbon-advanced-wide"),
-                                        html.Div([dbc.Label("X 轴"), dcc.Dropdown(id="carbon-advanced-xaxis", options=[{"label": "step", "value": "step"}, {"label": "ps", "value": "ps"}, {"label": "ns", "value": "ns"}], value="ps", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("模式"), dcc.Dropdown(id="carbon-advanced-mode", options=[{"label": "精确碳数", "value": "exact"}, {"label": "分箱", "value": "binned"}, {"label": "Top K", "value": "topk"}], value="exact", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("时间对齐"), dcc.Dropdown(id="carbon-advanced-time-align", options=[{"label": "原始", "value": "raw"}, {"label": "截断交集", "value": "truncate"}, {"label": "相对起点", "value": "relative"}], value="raw", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("Top K"), dcc.Input(id="carbon-advanced-top-k", value=12, type="number", min=1)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("精确曲线上限"), dcc.Input(id="carbon-advanced-max-exact", value=24, type="number", min=1)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("分箱"), dcc.Input(id="carbon-advanced-bins", placeholder="1-4;5-15;16-30;31+")], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("显示区间"), dcc.Input(id="carbon-advanced-display-ranges", placeholder="C1;C2;C24;C30+")], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("合并区间"), dcc.Input(id="carbon-advanced-merge-ranges", placeholder="Small:1-4;Growth:30+")], className="rs-carbon-field rs-carbon-advanced-wide"),
-                                        html.Div([dbc.Label("母体碳数"), dcc.Input(id="carbon-advanced-parent", type="number", min=0)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("小分子高亮"), dcc.Input(id="carbon-advanced-small", value="1-4")], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("大分子阈值"), dcc.Input(id="carbon-advanced-large", value=30, type="number", min=1)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("平滑"), dcc.Dropdown(id="carbon-advanced-smoothing", options=[{"label": "无", "value": "none"}, {"label": "Rolling", "value": "rolling"}, {"label": "Savitzky–Golay", "value": "savgol"}], value="none", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("平滑窗口"), dcc.Input(id="carbon-advanced-window", value=5, type="number", min=1)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("多项式阶数"), dcc.Input(id="carbon-advanced-polyorder", value=2, type="number", min=1)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("布局"), dcc.Dropdown(id="carbon-advanced-layout", options=[{"label": "单图", "value": "single"}, {"label": "子图", "value": "subplots"}], value="single", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("子图区间"), dcc.Textarea(id="carbon-advanced-regions", placeholder="panel1:1-4; panel2:5-15", style={"minHeight": 60})], className="rs-carbon-field rs-carbon-advanced-wide"),
-                                        html.Div([dbc.Label("体系模式"), dcc.Dropdown(id="carbon-advanced-system-mode", options=[{"label": "自动", "value": ""}, {"label": "Overlay", "value": "overlay"}, {"label": "Facet", "value": "facet"}], value="", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("主题"), dcc.Dropdown(id="carbon-advanced-theme", options=[{"label": "浅色", "value": "light"}, {"label": "深色", "value": "dark"}], value="light", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("图例"), dcc.Dropdown(id="carbon-advanced-legend", options=[{"label": "紧凑", "value": "compact"}, {"label": "详细", "value": "detailed"}], value="compact", clearable=False)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("图宽"), dcc.Input(id="carbon-advanced-width", value=11.5, type="number", min=4)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("图高"), dcc.Input(id="carbon-advanced-height", value=8.0, type="number", min=4)], className="rs-carbon-field"),
-                                        html.Div([dbc.Label("公式列表上限"), dcc.Input(id="carbon-advanced-max-formulas", value=30, type="number", min=5)], className="rs-carbon-field"),
-                                    ],
-                                    className="rs-carbon-advanced-grid",
-                                ),
-                                html.Div(
-                                    [
-                                        dbc.Button("绘制高级 Carbon Plot", id="carbon-advanced-search-btn", color="primary"),
-                                        dbc.Button("导出 CSV", id="carbon-advanced-csv-btn", color="secondary", outline=True),
-                                        dbc.Button("导出 SVG", id="carbon-advanced-svg-btn", color="secondary", outline=True),
-                                        dcc.Download(id="carbon-advanced-csv-download"),
-                                        dcc.Download(id="carbon-advanced-svg-download"),
-                                    ],
-                                    className="d-flex gap-2 flex-wrap mt-3",
-                                ),
-                                html.Div(id="carbon-advanced-progress", className="rs-analysis-progress"),
-                            ],
-                            title="高级 Carbon Plot（多体系 / 分箱 / 平滑 / 子图）",
-                        )
-                    ],
-                    start_collapsed=True,
-                    className="rs-advanced mt-3",
+                    className="rs-element-distribution-filter-row",
                 ),
                 html.Div(
                     [
-                        html.Div(id="carbon-index-status", className="rs-index-status"),
+                        html.Div(id="element-distribution-index-status", className="rs-index-status"),
                         dbc.Progress(
-                            id="carbon-index-progress",
+                            id="element-distribution-index-progress",
                             value=0,
                             max=100,
                             striped=True,
@@ -1269,9 +1271,9 @@ def _carbon_page() -> html.Div:
                     ],
                     className="rs-index-block",
                 ),
-                html.Div(id="carbon-progress", className="rs-analysis-progress"),
+                html.Div(id="element-distribution-progress", className="rs-analysis-progress"),
                 dcc.Interval(
-                    id="carbon-index-refresh",
+                    id="element-distribution-index-refresh",
                     interval=2000,
                     n_intervals=0,
                     disabled=True,
@@ -1284,19 +1286,17 @@ def _carbon_page() -> html.Div:
     result_card = dbc.Card(
         dbc.CardBody(
             [
-                html.Div(id="carbon-alert"),
-                html.Div(id="carbon-highlights", className="rs-stat-row"),
-                html.Div(id="carbon-advanced-alert"),
-                html.Div(id="carbon-advanced-viewer", className="rs-carbon-advanced-viewer"),
+                html.Div(id="element-distribution-alert"),
+                html.Div(id="element-distribution-highlights", className="rs-stat-row"),
                 dcc.Loading(
                     dcc.Graph(
-                        id="carbon-composition-trend",
+                        id="element-distribution-composition-trend",
                         figure=_empty_chart_figure(
                             "尚无组成趋势",
                             "选择数据来源与元素范围，然后开始绘制。",
                         ),
                         config={"displaylogo": False, "responsive": True},
-                        className="rs-carbon-chart",
+                        className="rs-element-distribution-chart",
                     ),
                     type="circle",
                 ),
@@ -1305,23 +1305,23 @@ def _carbon_page() -> html.Div:
                         html.Div(
                             [
                                 html.Div(
-                                    "点击主图中的参考物种或碳数曲线，查看该时间点的代表物种。",
-                                    id="carbon-composition-table-title",
+                                    "点击主图中的参考物种或元素计数曲线，查看该时间点的代表物种。",
+                                    id="element-distribution-composition-table-title",
                                     className="rs-composition-detail-title",
                                 ),
-                                html.Div(id="carbon-drilldown-progress", className="rs-analysis-progress"),
+                                html.Div(id="element-distribution-drilldown-progress", className="rs-analysis-progress"),
                             ],
-                            className="rs-carbon-table-heading",
+                            className="rs-element-distribution-table-heading",
                         ),
-                        _grid("carbon-composition-table", row_selectable="single"),
+                        _grid("element-distribution-composition-table", row_selectable="single"),
                         dbc.Checkbox(
-                            id="carbon-structure-show-h",
+                            id="element-distribution-structure-show-h",
                             value=True,
                             label="显示 H",
                             className="rs-structure-h-toggle",
                         ),
                         html.Div(
-                            id="carbon-structure-detail",
+                            id="element-distribution-structure-detail",
                             className="rs-channel-detail rs-channel-detail-empty",
                         ),
                     ],
@@ -1334,8 +1334,8 @@ def _carbon_page() -> html.Div:
     )
     return html.Div(
         [settings_card, result_card],
-        className="rs-page rs-carbon-minimal",
-        id="page-carbon",
+        className="rs-page rs-element-distribution-minimal",
+        id="page-element-distribution",
     )
 
 
@@ -1462,6 +1462,7 @@ def _events_page() -> html.Div:
 
 
 def _trajectory_page() -> html.Div:
+    ovito_capability = svc.ovito_launch_capability()
     source_card = dbc.Card(
         dbc.CardBody(
             [
@@ -1675,6 +1676,21 @@ def _trajectory_page() -> html.Div:
                                                 ),
                                                 dbc.Button("下载帧 CSV", id="event-frames-csv-btn", color="secondary", size="sm", outline=True),
                                                 dbc.Button("下载子轨迹", id="event-trajectory-btn", color="secondary", size="sm", outline=True),
+                                                dbc.Button(
+                                                    "在 OVITO 中打开",
+                                                    id="event-ovito-open-btn",
+                                                    color="secondary",
+                                                    size="sm",
+                                                    outline=True,
+                                                    disabled=not bool(
+                                                        ovito_capability.get("available")
+                                                    ),
+                                                    title=(
+                                                        "远程模式仅支持下载"
+                                                        if ovito_capability.get("mode") == "remote"
+                                                        else "设置 REACNET_SCOPE_OVITO_EXECUTABLE 可指定 OVITO"
+                                                    ),
+                                                ),
                                                 dbc.Button("下载 OVITO 脚本", id="event-ovito-btn", color="secondary", size="sm", outline=True),
                                                 dbc.Button("下载 VMD 脚本", id="event-vmd-btn", color="secondary", size="sm", outline=True),
                                                 dcc.Download(id="event-package-download"),
@@ -1682,6 +1698,10 @@ def _trajectory_page() -> html.Div:
                                                 dcc.Download(id="event-trajectory-download"),
                                                 dcc.Download(id="event-ovito-download"),
                                                 dcc.Download(id="event-vmd-download"),
+                                                html.Div(
+                                                    id="event-ovito-launch-status",
+                                                    className="rs-inline-status",
+                                                ),
                                             ],
                                             className="d-flex gap-2 flex-wrap",
                                         ),
@@ -2459,9 +2479,10 @@ def _pathway_page() -> html.Div:
                             ],
                             className="rs-pathway-field",
                         ),
-                        html.Div([dbc.Label("最大深度"), dcc.Input(id="pathway-max-depth", value=4, type="number", min=1)], className="rs-pathway-field"),
-                        html.Div([dbc.Label("每步分支"), dcc.Input(id="pathway-max-branches", value=4, type="number", min=1)], className="rs-pathway-field"),
-                        html.Div([dbc.Label("路径上限"), dcc.Input(id="pathway-max-paths", value=10, type="number", min=1)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("最大深度"), dcc.Input(id="pathway-max-depth", value=3, type="number", min=1, max=12)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("每步分支"), dcc.Input(id="pathway-max-branches", value=5, type="number", min=1, max=100)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("路径上限"), dcc.Input(id="pathway-max-paths", value=20, type="number", min=1, max=500)], className="rs-pathway-field"),
+                        html.Div([dbc.Label("状态展开上限（高级）"), dcc.Input(id="pathway-max-expansions", value=5000, type="number", min=1, max=1000000)], className="rs-pathway-field"),
                         html.Div([dbc.Label("最小净 TP"), dcc.Input(id="pathway-min-net-tp", value=1, type="number", min=1)], className="rs-pathway-field"),
                         html.Div([dbc.Label("最小方向性"), dcc.Input(id="pathway-min-directionality", value=0.05, type="number", min=0, max=1, step=0.01)], className="rs-pathway-field"),
                         html.Div(
@@ -2473,7 +2494,7 @@ def _pathway_page() -> html.Div:
                                         {"label": "按通量排名路径", "value": "ranked"},
                                         {"label": "追踪至小分子碎片（快速）", "value": "small_fragments"},
                                     ],
-                                    value="small_fragments",
+                                    value="ranked",
                                     clearable=False,
                                 ),
                             ],
@@ -2497,7 +2518,7 @@ def _pathway_page() -> html.Div:
                     className="rs-pathway-controls",
                 ),
                 html.P(
-                    "小分子快速模式只做 reactionabcd 核心粗筛，不读取事件、Route "
+                    "小分子快速模式只做 reactionabcd 核心粗筛，不读取事件"
                     "或时间连续性。表中的每一行都是“网络可以这样拼”，不代表同一批原子"
                     "真的连续走完；整链证据请到“② 验证实际发生”查看。",
                     className="rs-step-note mt-2 mb-0",
@@ -2540,9 +2561,8 @@ def _pathway_page() -> html.Div:
                         ),
                         html.P(
                             "这里一次只检查所选路线中的一个反应步骤。单步存在并不能证明"
-                            "前后步骤由同一原子谱系连续完成。系统会先查询 RNG 事件索引；"
-                            "缺少 RNG 事件时再查询已准备的 Route 索引。"
-                            "Route 命中只是近似发生帧，不等于完整反应事件。",
+                            "前后步骤由同一原子谱系连续完成。系统只查询原生 RNG 事件索引；"
+                            "缺少 Molecular Evidence 时不会用 Route 近似替代。",
                             className="rs-step-note mb-2",
                         ),
                         html.Div(
@@ -2850,14 +2870,15 @@ def _data_cache_management_card() -> html.Div:
             "复制轨迹索引 CLI 命令",
         ),
         (
-            "C/O/Cl 组成索引",
+                "元素分布索引",
             "data-prep-composition-command",
             "data-prep-composition-copy",
-            "复制 C/O/Cl 组成索引 CLI 命令",
+            "复制元素分布索引 CLI 命令",
         ),
     )
     return html.Div(
         [
+            dcc.Store(id="data-prep-cancel-result", storage_type="memory"),
             html.Section(
                 [
                     html.Div(
@@ -2869,7 +2890,7 @@ def _data_cache_management_card() -> html.Div:
                                         className="rs-data-section-title",
                                     ),
                                     html.Div(
-                                        "每种索引保留一个直接操作；索引只写入缓存目录。",
+                                        "每种派生索引保留一个直接操作；索引只写入 Dataset Workspace。",
                                         className="rs-card-subtitle",
                                     ),
                                 ]
@@ -2909,9 +2930,9 @@ def _data_cache_management_card() -> html.Div:
                             ),
                             _data_index_readiness_row(
                                 "composition",
-                                "C/O/Cl 组成索引",
-                                "composition.sqlite3",
-                                "组成演化、时间采样与代表物种下钻",
+                                "元素分布索引",
+                                "element-distribution.sqlite3",
+                                "元素分布演化、时间采样与代表物种下钻",
                             ),
                         ],
                         id="data-prep-status",
@@ -2984,7 +3005,7 @@ def _data_cache_management_card() -> html.Div:
                 [
                     html.Summary(
                         [
-                            html.Span("危险操作：清理索引缓存"),
+                            html.Span("危险操作：清理派生索引"),
                             html.Small("不会删除 RNG 原始输出"),
                         ]
                     ),
@@ -3253,7 +3274,7 @@ def build_layout() -> html.Div:
                             _pathway_page(),
                             _intermediate_page(),
                             _evolution_page(),
-                            _carbon_page(),
+                            _element_distribution_page(),
                             _events_page(),
                             _trajectory_page(),
                             _data_management_page(),
@@ -3275,8 +3296,7 @@ def build_layout() -> html.Div:
             dcc.Store(id="rxn-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="inter-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="evolution-payload-store", storage_type="memory", data=None),
-            dcc.Store(id="carbon-payload-store", storage_type="memory", data=None),
-            dcc.Store(id="carbon-advanced-store", storage_type="memory", data=None),
+            dcc.Store(id="element-distribution-payload-store", storage_type="memory", data=None),
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="data-clear-kind-store", storage_type="memory", data={}),
             dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
@@ -3305,7 +3325,9 @@ def create_app() -> dash.Dash:
     """Create and configure the Dash application instance."""
     app = dash.Dash(
         __name__,
-        external_stylesheets=[dbc.themes.BOOTSTRAP],
+        # All production assets are vendored under ``assets/`` so the
+        # workbench remains usable on offline analysis hosts.
+        external_stylesheets=[],
         suppress_callback_exceptions=True,
         title="ReacNet Scope (Dash)",
         assets_folder=str(Path(__file__).parent / "assets"),
@@ -3346,31 +3368,36 @@ def create_app() -> dash.Dash:
 
     @app.server.get("/api/health")
     def _health():
-        cache_text = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-        cache_path = Path(cache_text).expanduser() if cache_text else None
-        cache_ready = bool(
-            cache_path
-            and cache_path.exists()
-            and cache_path.is_dir()
-            and os.access(cache_path, os.W_OK)
+        workspace_text = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
+        workspace_path = (
+            Path(workspace_text).expanduser() if workspace_text else None
+        )
+        workspace_ready = bool(
+            not workspace_path
+            or (
+                workspace_path.exists()
+                and workspace_path.is_dir()
+                and os.access(workspace_path, os.W_OK)
+            )
         )
         try:
             app_version = version("reacnet-scope")
         except PackageNotFoundError:
             app_version = "development"
         warnings: list[str] = []
-        if not cache_text:
-            warnings.append("REACNET_SCOPE_CACHE_DIR is not configured")
-        elif not cache_ready:
-            warnings.append("configured cache directory is not writable")
+        if not workspace_ready:
+            warnings.append("configured Dataset Workspace root is not writable")
         return jsonify(
             {
                 "ok": True,
-                "service": "reacnet-scope-web-dash",
+                "service": "reacnet-scope",
                 "version": app_version,
                 "uptime_seconds": round(time.time() - _PROCESS_STARTED_AT, 3),
-                "cache_dir": str(cache_path) if cache_path else "",
-                "cache_ready": cache_ready,
+                "workspace_mode": (
+                    "configured-root" if workspace_path else "dataset-sidecar"
+                ),
+                "workspace_root": str(workspace_path) if workspace_path else "",
+                "workspace_ready": workspace_ready,
                 "allowed_roots": [str(path) for path in svc.ALLOWED_ROOTS],
                 "warnings": warnings,
             }
@@ -3383,21 +3410,25 @@ def create_app() -> dash.Dash:
 # ---------------------------------------------------------------------------
 
 
+def run_server(*, host: str, port: int, debug: bool = False) -> int:
+    """Run the supported Dash product surface."""
+    app = create_app()
+    print(f"[ReacNet-Scope-Dash] http://{host}:{port}")
+    print("[ReacNet-Scope-Dash] Press Ctrl+C to stop")
+    try:
+        app.run(host=host, port=port, debug=debug)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ReacNet Scope Dash WebUI V1")
     ap.add_argument("--host", default="127.0.0.1", help="bind host")
     ap.add_argument("--port", type=int, default=8060, help="bind port")
     ap.add_argument("--debug", action="store_true", help="enable Dash debug mode")
     args = ap.parse_args()
-
-    app = create_app()
-    print(f"[ReacNet-Scope-Dash] http://{args.host}:{args.port}")
-    print("[ReacNet-Scope-Dash] Press Ctrl+C to stop")
-    try:
-        app.run(host=args.host, port=args.port, debug=args.debug)
-    except KeyboardInterrupt:
-        pass
-    return 0
+    return run_server(host=args.host, port=args.port, debug=args.debug)
 
 
 if __name__ == "__main__":

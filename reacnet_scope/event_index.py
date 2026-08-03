@@ -20,6 +20,7 @@ from .indexes import (
     IndexNotReadyError,
     IndexStaleError,
     _exclusive_build_lock,
+    _assert_source_unchanged,
     _read_meta,
     _readonly_connection,
     _source_signature,
@@ -504,7 +505,10 @@ class EventEvidenceStore:
 
     @staticmethod
     def _expected_path(reactionevent_file: str) -> Path:
-        return resolve_dataset_paths(os.path.abspath(reactionevent_file)).event_index
+        return resolve_dataset_paths(
+            os.path.abspath(reactionevent_file),
+            persist_identity=False,
+        ).event_index
 
     @staticmethod
     def _source_pair(
@@ -628,15 +632,15 @@ class EventEvidenceStore:
             )
         if meta.get("build_state") != "ready":
             raise IndexInvalidError("Event evidence index is not complete")
+        if meta.get("dataset_id") != dataset_id_for_source(reaction_path):
+            raise IndexInvalidError("Event evidence index dataset id is invalid")
         checks = (
-            ("reactionevent_file", reaction_path, "reaction-event path"),
             ("reactionevent_size", reaction_size, "reaction-event size"),
             (
                 "reactionevent_mtime_ns",
                 reaction_mtime_ns,
                 "reaction-event modification time",
             ),
-            ("molecules_file", molecule_path, "molecules path"),
             ("molecules_size", molecule_size, "molecules size"),
             (
                 "molecules_mtime_ns",
@@ -650,8 +654,6 @@ class EventEvidenceStore:
                 actual = _strict_int(actual, key, minimum=0)
             if actual != expected:
                 raise IndexStaleError(f"Event evidence index {label} changed")
-        if meta.get("dataset_id") != dataset_id_for_source(reaction_path):
-            raise IndexInvalidError("Event evidence index dataset id is invalid")
 
     def _open_validated(
         self,
@@ -906,7 +908,7 @@ class EventEvidenceStore:
             "updated_at_epoch": (
                 _safe_meta_int(meta, "updated_at_epoch") or None
             ),
-            "cache_dir": str(index_path.parent),
+            "workspace_path": str(index_path.parent),
         }
 
     def open_required(
@@ -921,8 +923,7 @@ class EventEvidenceStore:
         if not index_path.is_file():
             raise IndexNotReadyError(
                 "Event evidence index is not ready; run "
-                f"reacnet-scope-prepare {Path(reaction_source[0]).parent} "
-                "--event-only"
+                f"reacnet-scope prepare build event {reaction_source[0]}"
             )
         return self._open_validated(
             index_path, reaction_source, molecule_source
@@ -1133,6 +1134,9 @@ class EventEvidenceStore:
             connection.commit()
         finally:
             connection.close()
+        _assert_source_unchanged(
+            reaction_source[0], reaction_source[1], reaction_source[2]
+        )
         os.replace(building_path, index_path)
         if progress_callback:
             progress_callback(
@@ -1621,6 +1625,9 @@ class EventEvidenceStore:
                     del membership
         finally:
             connection.close()
+        _assert_source_unchanged(
+            reaction_source[0], reaction_source[1], reaction_source[2]
+        )
         os.replace(building_path, index_path)
         membership_path.unlink(missing_ok=True)
         if progress_callback:
@@ -1652,6 +1659,7 @@ class EventEvidenceStore:
             selection.primary_file,
             selection.molecules_file,
         )
+        resolve_dataset_paths(reaction_source[0], persist_identity=True)
         index_path = event_evidence_index_path(reaction_source[0])
         with _exclusive_build_lock(index_path):
             if selection.kind == "native_hdf5":
@@ -2168,6 +2176,12 @@ class EventEvidenceStore:
                     connection.commit()
                 finally:
                     connection.close()
+            _assert_source_unchanged(
+                reaction_source[0], reaction_source[1], reaction_source[2]
+            )
+            _assert_source_unchanged(
+                molecule_source[0], molecule_source[1], molecule_source[2]
+            )
             os.replace(building_path, index_path)
             if progress_callback:
                 progress_callback(
@@ -2515,7 +2529,7 @@ class EventEvidenceStore:
         )
         index_path = workspace.event_index
         try:
-            index_path.resolve().relative_to(workspace.cache_dir.resolve())
+            index_path.resolve().relative_to(workspace.workspace_dir.resolve())
         except ValueError as exc:
             raise IndexInvalidError(
                 "event evidence index path escapes Dataset Workspace"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rng_tools.network import Reaction, ReactionNetwork
+from reacnet_scope.network import Reaction, ReactionNetwork
 
 
 def test_reverse_lookup_uses_prebuilt_reaction_index() -> None:

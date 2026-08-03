@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
 from scripts import rng_query_cli as cli
 
 
@@ -88,7 +89,7 @@ def test_pathway_parser_supports_documented_options(tmp_path: Path) -> None:
 
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -147,7 +148,7 @@ def test_pathway_parser_rejects_invalid_bounds(
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(
             [
-                "pathway",
+                "candidate-paths",
                 "--reac",
                 str(reaction),
                 "--start-smiles",
@@ -179,7 +180,7 @@ def test_pathway_command_exports_schema_and_one_csv_row_per_step(
     monkeypatch.setattr(cli, "find_pathways_service", lambda *_args, **_kwargs: payload)
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -225,7 +226,7 @@ def test_pathway_command_infers_event_sources_and_preserves_prepare_command(
     reaction = _write_reaction_file(folder, name="sample trajectory.reactionabcd")
     captured: dict[str, Any] = {}
     reported_command = (
-        "reacnet-scope-prepare 'service quoted directory' --event-only"
+        "reacnet-scope prepare build event 'service quoted source'"
     )
 
     def fake_find(artifacts: dict[str, str], start_smiles: str, **limits: Any) -> dict[str, Any]:
@@ -236,7 +237,7 @@ def test_pathway_command_infers_event_sources_and_preserves_prepare_command(
 
     monkeypatch.setattr(cli, "find_pathways_service", fake_find)
     args = cli.build_parser().parse_args(
-        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+        ["candidate-paths", "--reac", str(reaction), "--start-smiles", "[H]"]
     )
 
     assert cli.cmd_pathway(args) == 0
@@ -260,7 +261,7 @@ def test_pathway_command_preserves_service_rebuild_command(
     folder = tmp_path / "data set"
     folder.mkdir()
     reaction = _write_reaction_file(folder)
-    expected = f"reacnet-scope-prepare '{folder}' --rebuild event"
+    expected = f"reacnet-scope prepare rebuild event '{folder / 'run.reactionevent.csv'}'"
     payload = _network_only_payload()
     payload["event_index_state"] = index_state
     payload["preparation_command"] = expected
@@ -270,7 +271,7 @@ def test_pathway_command_preserves_service_rebuild_command(
         lambda *_args, **_kwargs: payload,
     )
     args = cli.build_parser().parse_args(
-        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+        ["candidate-paths", "--reac", str(reaction), "--start-smiles", "[H]"]
     )
 
     assert cli.cmd_pathway(args) == 0
@@ -286,7 +287,7 @@ def test_pathway_main_maps_missing_reaction_to_stable_usage_error(
 
     exit_code = cli.main(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(missing),
             "--start-smiles",
@@ -312,7 +313,7 @@ def test_pathway_command_does_not_swallow_unexpected_errors(
 
     monkeypatch.setattr(cli, "find_pathways_service", fail_unexpectedly)
     args = cli.build_parser().parse_args(
-        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+        ["candidate-paths", "--reac", str(reaction), "--start-smiles", "[H]"]
     )
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
@@ -331,7 +332,7 @@ def test_pathway_command_without_exports_prints_unrounded_ranked_table(
         lambda *_args, **_kwargs: _one_path_payload(),
     )
     args = cli.build_parser().parse_args(
-        ["pathway", "--reac", str(reaction), "--start-smiles", "[H]"]
+        ["candidate-paths", "--reac", str(reaction), "--start-smiles", "[H]"]
     )
 
     assert cli.cmd_pathway(args) == 0
@@ -366,7 +367,7 @@ def test_pathway_command_never_builds_or_reads_event_source_csv(
     monkeypatch.setattr(EVENT_EVIDENCE_STORE, "build", forbidden_build)
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -401,7 +402,7 @@ def test_pathway_json_export_uses_sibling_temp_and_atomic_replace(
     monkeypatch.setattr(cli.os, "replace", recording_replace)
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -435,7 +436,7 @@ def test_pathway_json_replace_failure_preserves_target_and_cleans_temp(
     monkeypatch.setattr(cli.os, "replace", failed_replace)
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -463,7 +464,7 @@ def test_pathway_empty_result_writes_valid_empty_exports(
     monkeypatch.setattr(cli, "find_pathways_service", lambda *_args, **_kwargs: _network_only_payload())
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",
@@ -480,6 +481,82 @@ def test_pathway_empty_result_writes_valid_empty_exports(
     with out_csv.open(newline="", encoding="utf-8") as handle:
         assert list(csv.DictReader(handle)) == []
     assert "species_absent" in capsys.readouterr().out
+
+
+def test_species_evolution_cli_uses_index_and_exports_raw_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    reaction = _write_reaction_file(tmp_path)
+    species = tmp_path / "run.species"
+    species.write_text(
+        "Timestep 0: [H] 0\nTimestep 10: [H] 10\nTimestep 20: [H] 0\n",
+        encoding="utf-8",
+    )
+    SPECIES_COMPOSITION_STORE.build(str(species))
+    output = tmp_path / "evolution.csv"
+    real_open = builtins.open
+
+    def guarded_open(file, *args, **kwargs):
+        if os.path.abspath(os.fspath(file)) == os.path.abspath(species):
+            raise AssertionError("formal CLI opened raw Species source")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    args = cli.build_parser().parse_args(
+        [
+            "species-evolution",
+            "--reac",
+            str(reaction),
+            "--species-file",
+            str(species),
+            "--target",
+            "smiles:[H]",
+            "--normalize",
+            "max",
+            "--smooth-window",
+            "3",
+            "--out-csv",
+            str(output),
+        ]
+    )
+
+    assert args.func is cli.cmd_species_evolution
+    assert args.func(args) == 0
+    assert "source_mode=prepared_index" in capsys.readouterr().out
+    with output.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["source_timestep"] for row in rows] == ["0", "10", "20"]
+    assert [row["[H]"] for row in rows] == ["0.0", "10.0", "0.0"]
+
+
+def test_intermediate_cli_degrades_when_reaction_network_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    species = tmp_path / "run.species"
+    species.write_text(
+        "Timestep 0: C 0\nTimestep 10: C 10\nTimestep 20: C 0\n",
+        encoding="utf-8",
+    )
+    SPECIES_COMPOSITION_STORE.build(str(species))
+    args = cli.build_parser().parse_args(
+        ["intermediate-candidates", str(tmp_path), "--base", "run"]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"]
+    assert payload["meta"]["flux_enrichment"] == {
+        "requested": True,
+        "available": False,
+        "applied": False,
+        "reason": "reaction_network_missing",
+    }
 
 
 def test_pathway_cli_ready_index_empty_result_keeps_linked_context(
@@ -507,7 +584,7 @@ def test_pathway_cli_ready_index_empty_result_keeps_linked_context(
     out_json = tmp_path / "empty-linked.json"
     args = cli.build_parser().parse_args(
         [
-            "pathway",
+            "candidate-paths",
             "--reac",
             str(reaction),
             "--start-smiles",

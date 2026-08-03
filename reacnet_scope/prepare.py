@@ -5,15 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
+import signal
+import subprocess
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .indexes import (
+    IndexBuildInProgressError,
     clear_index,
+    inspect_workspace_storage,
     resolve_dataset_paths,
-    ROUTE_INDEX_STORE,
     TRAJECTORY_INDEX_STORE,
 )
 from .composition import SPECIES_COMPOSITION_STORE
@@ -37,12 +41,15 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         elif len(candidates) == 1:
             stem = str(candidates[0])[: -len(".reactionabcd")]
         else:
-            routes = sorted(root.glob("*.route"))
             reaction_stems = {
                 str(path)[: -len(".reactionabcd")] for path in candidates
             }
-            route_stems = {
-                str(path)[: -len(".route")] for path in routes
+            species_stems = {
+                str(path)[: -len(".species")]
+                for path in root.glob("*.species")
+            }
+            trajectory_stems = {
+                str(path) for path in root.glob("*.lammpstrj")
             }
             event_stems = {
                 str(path)[: -len(".reactionevent.csv")]
@@ -58,7 +65,8 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             }
             stems = (
                 reaction_stems
-                | route_stems
+                | species_stems
+                | trajectory_stems
                 | event_stems
                 | molecule_stems
                 | timeline_stems
@@ -70,8 +78,6 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         raise FileNotFoundError(f"dataset path not found: {root}")
     if stem.endswith(".reactionabcd"):
         stem = stem[: -len(".reactionabcd")]
-    if stem.endswith(".route"):
-        stem = stem[: -len(".route")]
     if stem.endswith(".reactionevent.csv"):
         stem = stem[: -len(".reactionevent.csv")]
     if stem.endswith(".molecules.csv"):
@@ -83,7 +89,6 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         "reaction": f"{stem}.reactionabcd",
         "species": f"{stem}.species",
         "table": f"{stem}.table",
-        "route": f"{stem}.route",
         "trajectory": stem,
         "reactionevent": f"{stem}.reactionevent.csv",
         "molecules": f"{stem}.molecules.csv",
@@ -93,8 +98,393 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
 
 def _manifest_path(dataset: dict[str, str]) -> Path:
     paths = resolve_dataset_paths(Path(dataset["base"]).parent, Path(dataset["base"]).name)
-    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    paths.workspace_dir.mkdir(parents=True, exist_ok=True)
     return paths.manifest
+
+
+def _preparation_task_path(
+    dataset: dict[str, str],
+    capability: str,
+    *,
+    persist_identity: bool = True,
+) -> Path:
+    paths = resolve_dataset_paths(
+        Path(dataset["base"]).parent,
+        Path(dataset["base"]).name,
+        persist_identity=persist_identity,
+    )
+    return paths.workspace_dir / "tasks" / f"{capability}.json"
+
+
+def _write_task_record(path: Path, task: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(task, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+@contextmanager
+def _task_record_lock(path: Path):
+    """Serialize task registration and cancellation record mutations."""
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor: int | None = None
+    for _attempt in range(500):
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+            )
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock_path.stat().st_mtime > 30
+            except FileNotFoundError:
+                continue
+            if stale:
+                lock_path.unlink(missing_ok=True)
+                continue
+            time.sleep(0.01)
+    if descriptor is None:
+        raise IndexBuildInProgressError(
+            f"Preparation Task registry is locked: {lock_path}"
+        )
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+
+
+def _source_revision(path_text: str) -> dict[str, Any]:
+    path = Path(path_text)
+    if not path.is_file():
+        return {"path": str(path), "exists": False}
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "exists": True,
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _process_is_running(process_id: int) -> bool:
+    if process_id <= 0:
+        return False
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(
+                0x1000,
+                False,
+                process_id,
+            )
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        except (AttributeError, OSError):
+            return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _process_start_token(process_id: int) -> str:
+    """Return an OS process-instance token so a reused PID is never signaled."""
+    if process_id <= 0:
+        return ""
+    if sys.platform.startswith("linux"):
+        try:
+            stat_text = Path(f"/proc/{process_id}/stat").read_text(
+                encoding="utf-8"
+            )
+            command_end = stat_text.rfind(")")
+            if command_end < 0:
+                return ""
+            # Fields after ``comm`` start at proc field 3; starttime is 22.
+            fields_after_command = stat_text[command_end + 1 :].split()
+            return fields_after_command[19]
+        except (OSError, IndexError):
+            return ""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+            if not handle:
+                return ""
+            creation = ctypes.c_ulonglong()
+            exit_time = ctypes.c_ulonglong()
+            kernel = ctypes.c_ulonglong()
+            user = ctypes.c_ulonglong()
+            ok = ctypes.windll.kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            )
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return str(creation.value) if ok else ""
+        except (AttributeError, OSError):
+            return ""
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(process_id)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+    return ""
+
+
+def _task_process_is_owner(task: dict[str, Any]) -> bool:
+    try:
+        process_id = int(task.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    recorded = str(task.get("process_start_token") or "")
+    return bool(
+        process_id > 0
+        and recorded
+        and _process_is_running(process_id)
+        and _process_start_token(process_id) == recorded
+    )
+
+
+_ACTIVE_TASK_STATES = {"running", "cancel_requested"}
+
+
+def _read_preparation_task(
+    dataset: dict[str, str], capability: str
+) -> dict[str, Any]:
+    """Read and recover one task record while holding its process lock."""
+    task_path = _preparation_task_path(
+        dataset,
+        capability,
+        persist_identity=False,
+    )
+    if not task_path.is_file():
+        return {}
+    with _task_record_lock(task_path):
+        try:
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(task, dict):
+            return {}
+        if (
+            str(task.get("state") or "") in _ACTIVE_TASK_STATES
+            and not _task_process_is_owner(task)
+        ):
+            task.update(
+                {
+                    "state": "interrupted",
+                    "message": (
+                        "Preparation worker is no longer running; "
+                        "committed checkpoints may be resumed."
+                    ),
+                    "updated_at_epoch": int(time.time()),
+                }
+            )
+            _write_task_record(task_path, task)
+        return dict(task)
+
+
+def _run_preparation_task(
+    dataset: dict[str, str],
+    *,
+    capability: str,
+    source_file: str,
+    action: str,
+    operation,
+    report,
+) -> Any:
+    task_path = _preparation_task_path(dataset, capability)
+    paths = resolve_dataset_paths(
+        Path(dataset["base"]).parent,
+        Path(dataset["base"]).name,
+    )
+    task: dict[str, Any] = {
+        "task_version": 1,
+        "dataset_id": paths.dataset_id,
+        "capability": capability,
+        "action": action,
+        "state": "running",
+        "pid": os.getpid(),
+        "process_start_token": _process_start_token(os.getpid()),
+        "source_revision": _source_revision(source_file),
+        "started_at_epoch": int(time.time()),
+        "updated_at_epoch": int(time.time()),
+        "progress": 0.0,
+    }
+    with _task_record_lock(task_path):
+        try:
+            existing_task = json.loads(task_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing_task = {}
+        if (
+            str(existing_task.get("state") or "") in _ACTIVE_TASK_STATES
+            and _task_process_is_owner(existing_task)
+        ):
+            print(
+                json.dumps(
+                    {"existing_preparation_task": existing_task},
+                    ensure_ascii=False,
+                )
+            )
+            return dict(existing_task)
+        _write_task_record(task_path, task)
+
+    def task_report(update: dict[str, Any]) -> None:
+        with _task_record_lock(task_path):
+            try:
+                current = json.loads(task_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                current = task
+            if str(current.get("state") or "") == "cancel_requested":
+                raise KeyboardInterrupt
+            task.update(
+                {
+                    "progress": float(update.get("progress", 0.0) or 0.0),
+                    "phase": str(update.get("phase") or ""),
+                    "message": str(update.get("message") or ""),
+                    "updated_at_epoch": int(time.time()),
+                }
+            )
+            _write_task_record(task_path, task)
+        report(update)
+
+    try:
+        result = operation(task_report)
+    except KeyboardInterrupt:
+        task.update(
+            {
+                "state": "canceled",
+                "updated_at_epoch": int(time.time()),
+            }
+        )
+        with _task_record_lock(task_path):
+            _write_task_record(task_path, task)
+        raise
+    except Exception as exc:
+        task.update(
+            {
+                "state": "failed",
+                "message": str(exc),
+                "updated_at_epoch": int(time.time()),
+            }
+        )
+        with _task_record_lock(task_path):
+            _write_task_record(task_path, task)
+        raise
+    with _task_record_lock(task_path):
+        try:
+            current = json.loads(task_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            current = task
+        task.update(
+            {
+                "state": (
+                    "canceled"
+                    if str(current.get("state") or "") == "cancel_requested"
+                    else "completed"
+                ),
+                "progress": 1.0,
+                "updated_at_epoch": int(time.time()),
+            }
+        )
+        _write_task_record(task_path, task)
+    return result
+
+
+def request_cancellation(
+    case: str,
+    *,
+    base: str = "",
+    capability: str,
+) -> bool:
+    """Request cancellation of one persisted Preparation Task."""
+    dataset = discover_dataset(case, base)
+    if capability == "all":
+        results = [
+            request_cancellation(
+                case,
+                base=base,
+                capability=item,
+            )
+            for item in ("event", "trajectory", "composition")
+        ]
+        return any(results)
+    task_path = _preparation_task_path(dataset, capability)
+    with _task_record_lock(task_path):
+        try:
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return False
+        if str(task.get("state") or "") not in _ACTIVE_TASK_STATES:
+            return False
+        if not _task_process_is_owner(task):
+            task.update(
+                {
+                    "state": "interrupted",
+                    "message": (
+                        "Preparation worker is no longer running; "
+                        "committed checkpoints may be resumed."
+                    ),
+                    "updated_at_epoch": int(time.time()),
+                }
+            )
+            _write_task_record(task_path, task)
+            return False
+        task["state"] = "cancel_requested"
+        task["cancel_requested_epoch"] = int(time.time())
+        _write_task_record(task_path, task)
+    try:
+        process_id = int(task.get("pid") or 0)
+        recorded_token = str(task.get("process_start_token") or "")
+        if (
+            process_id > 0
+            and recorded_token
+            and _process_start_token(process_id) == recorded_token
+        ):
+            os.kill(
+                process_id,
+                signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT,
+            )
+    except (OSError, TypeError, ValueError):
+        pass
+    return True
+
+
+def preparation_task_status(
+    case: str,
+    *,
+    base: str = "",
+    capability: str,
+) -> dict[str, Any]:
+    """Return one task, reclassifying a dead persisted worker."""
+    dataset = discover_dataset(case, base)
+    return _read_preparation_task(dataset, capability)
 
 
 def _select_event_source(
@@ -124,7 +514,6 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         "reaction",
         "species",
         "table",
-        "route",
         "trajectory",
         "timeline",
         "reactionevent",
@@ -136,7 +525,6 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
             stat = path.stat()
             item.update({"size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
         artifacts[kind] = item
-    route_status = ROUTE_INDEX_STORE.status(dataset["route"]) if artifacts["route"]["exists"] else {"state": "missing"}
     trajectory_status = (
         TRAJECTORY_INDEX_STORE.status(dataset["trajectory"])
         if artifacts["trajectory"]["exists"]
@@ -150,7 +538,7 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
     event_primary, event_molecules = _event_source_paths(dataset)
     if Path(event_primary).is_file():
         event_status = EVENT_EVIDENCE_STORE.status(
-            event_primary, event_molecules
+            event_primary, event_molecules, metadata_only=True
         )
         try:
             timed_evidence = {
@@ -171,7 +559,7 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
     paths = resolve_dataset_paths(
         Path(dataset["base"]).parent, Path(dataset["base"]).name
     )
-    settings_path = paths.cache_dir / "dataset-settings.json"
+    settings_path = paths.workspace_dir / "dataset-settings.json"
     return {
         "manifest_version": 3,
         "dataset_id": paths.dataset_id,
@@ -179,7 +567,6 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         "updated_at_epoch": int(time.time()),
         "artifacts": artifacts,
         "indexes": {
-            "route": route_status,
             "trajectory": trajectory_status,
             "composition": composition_status,
             "event": event_status,
@@ -203,7 +590,6 @@ def write_manifest(dataset: dict[str, str]) -> Path:
 def _capacity_check(
     dataset: dict[str, str],
     *,
-    include_route: bool,
     include_trajectory: bool,
     include_composition: bool,
     include_event: bool,
@@ -211,16 +597,14 @@ def _capacity_check(
     workspace = resolve_dataset_paths(
         Path(dataset["base"]).parent,
         Path(dataset["base"]).name,
-    ).cache_dir
-    probe = workspace
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-    free = shutil.disk_usage(probe).free
+    ).workspace_dir
+    storage = inspect_workspace_storage(workspace)
+    free = storage.free_bytes
+    if free is None:
+        raise RuntimeError(
+            f"cannot inspect Dataset Workspace capacity at {workspace}"
+        )
     required = 1024**3
-    if include_route and Path(dataset["route"]).is_file():
-        # Building and rebuilding may temporarily coexist with the published
-        # database. SQLite secondary indexes can be larger than raw rows.
-        required += int(Path(dataset["route"]).stat().st_size * 2.5)
     if include_trajectory and Path(dataset["trajectory"]).is_file():
         required += max(256 * 1024**2, Path(dataset["trajectory"]).stat().st_size // 100)
     if include_composition and Path(dataset["species"]).is_file():
@@ -241,64 +625,72 @@ def _capacity_check(
             required += native_membership_bytes(selection)
     if free < required:
         raise RuntimeError(
-            f"insufficient cache capacity: need about {required / 1024**3:.1f} GiB, "
+            f"insufficient Dataset Workspace capacity: need about {required / 1024**3:.1f} GiB, "
             f"have {free / 1024**3:.1f} GiB at {workspace}"
         )
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare persistent ReacNet Scope indexes offline")
-    parser.add_argument("case", help="Dataset directory or dataset base path")
-    parser.add_argument("--base", default="", help="Dataset base name when a directory contains multiple runs")
-    parser.add_argument("--status", action="store_true", help="Inspect state without building")
-    only = parser.add_mutually_exclusive_group()
-    only.add_argument("--route-only", action="store_true")
-    only.add_argument("--trajectory-only", action="store_true")
-    only.add_argument("--composition-only", action="store_true")
-    only.add_argument("--event-only", action="store_true")
-    parser.add_argument(
-        "--rebuild",
-        choices=("route", "trajectory", "composition", "event", "all"),
+def run_preparation(
+    *,
+    action: str,
+    case: str,
+    capability: str = "all",
+    base: str = "",
+) -> int:
+    capability = str(capability or "all")
+    internal_capability = (
+        "composition"
+        if capability == "element-distribution"
+        else capability
     )
-    parser.add_argument(
-        "--clear",
-        choices=("route", "trajectory", "composition", "event", "all"),
-    )
-    args = parser.parse_args(argv)
     try:
-        dataset = discover_dataset(args.case, args.base)
+        dataset = discover_dataset(case, base)
     except (FileNotFoundError, RuntimeError) as exc:
-        parser.error(str(exc))
-    # RNG-authored event files replace Route reconstruction in the normal
-    # workflow.  Route preparation remains explicit for compatibility only.
-    explicit_only = bool(
-        args.route_only
-        or args.trajectory_only
-        or args.composition_only
-        or args.event_only
-    )
-    if explicit_only:
-        selected_route = bool(args.route_only)
-        selected_trajectory = bool(args.trajectory_only)
-        selected_composition = bool(args.composition_only)
-        selected_event = bool(args.event_only)
-    elif args.rebuild:
-        selected_route = args.rebuild in {"route", "all"}
-        selected_trajectory = args.rebuild in {"trajectory", "all"}
-        selected_composition = args.rebuild in {"composition", "all"}
-        selected_event = args.rebuild in {"event", "all"}
-    else:
-        selected_route = False
-        selected_trajectory = Path(dataset["trajectory"]).is_file()
-        selected_composition = Path(dataset["species"]).is_file()
-        selected_event = bool(
-            Path(dataset["timeline"]).is_file()
-            or Path(dataset["reactionevent"]).is_file()
+        raise RuntimeError(str(exc)) from exc
+    if action == "cancel":
+        canceled = request_cancellation(
+            case,
+            base=base,
+            capability=internal_capability,
         )
-    route_needs_build = (
-        selected_route
-        and Path(dataset["route"]).is_file()
-        and ROUTE_INDEX_STORE.status(dataset["route"])["state"] != "ready"
+        print(
+            f"Cancellation requested for {capability} Preparation Task."
+            if canceled
+            else f"No active {capability} Preparation Task."
+        )
+        return 0
+    selected_trajectory = bool(
+        action in {"build", "rebuild"}
+        and (
+            internal_capability == "trajectory"
+            or (
+                internal_capability == "all"
+                and Path(dataset["trajectory"]).is_file()
+            )
+        )
+    )
+    selected_composition = bool(
+        action in {"build", "rebuild"}
+        and (
+            internal_capability == "composition"
+            or (
+                internal_capability == "all"
+                and Path(dataset["species"]).is_file()
+            )
+        )
+    )
+    selected_event = bool(
+        action in {"build", "rebuild"}
+        and (
+            internal_capability == "event"
+            or (
+                internal_capability == "all"
+                and bool(
+                    Path(dataset["timeline"]).is_file()
+                    or Path(dataset["reactionevent"]).is_file()
+                )
+            )
+        )
     )
     trajectory_needs_build = (
         selected_trajectory
@@ -315,14 +707,33 @@ def main(argv: list[str] | None = None) -> int:
         selected_event
         and Path(event_primary).is_file()
         and EVENT_EVIDENCE_STORE.status(
-            event_primary, event_molecules
+            event_primary, event_molecules, metadata_only=True
         )["state"]
         != "ready"
     )
-    if not args.status and not args.clear:
+    if action in {"build", "rebuild"}:
+        selected_tasks = (
+            ("trajectory", selected_trajectory),
+            ("composition", selected_composition),
+            ("event", selected_event),
+        )
+        for task_capability, selected in selected_tasks:
+            if not selected:
+                continue
+            existing_task = _read_preparation_task(
+                dataset, task_capability
+            )
+            if str(existing_task.get("state") or "") in _ACTIVE_TASK_STATES:
+                print(
+                    json.dumps(
+                        {"existing_preparation_task": existing_task},
+                        ensure_ascii=False,
+                    )
+                )
+                return 0
+    if action in {"build", "rebuild"}:
         _capacity_check(
             dataset,
-            include_route=route_needs_build,
             include_trajectory=trajectory_needs_build,
             include_composition=composition_needs_build,
             include_event=event_needs_build,
@@ -331,35 +742,64 @@ def main(argv: list[str] | None = None) -> int:
     def report(update: dict[str, Any]) -> None:
         print(f"[{float(update.get('progress', 0.0)) * 100:6.2f}%] {update.get('message', '')}", flush=True)
 
-    if args.clear or args.rebuild:
-        target = args.clear or args.rebuild
-        if target in {"route", "all"} and Path(dataset["route"]).is_file():
-            clear_index(dataset["route"], kind="route")
-        if target in {"trajectory", "all"} and Path(dataset["trajectory"]).is_file():
-            clear_index(dataset["trajectory"], kind="trajectory")
-        if target in {"composition", "all"} and Path(dataset["species"]).is_file():
-            SPECIES_COMPOSITION_STORE.clear(dataset["species"])
-        if target in {"event", "all"}:
-            EVENT_EVIDENCE_STORE.clear(
-                event_primary, event_molecules
-            )
-        if args.clear:
+    if action in {"clear", "rebuild"}:
+        target = internal_capability
+        try:
+            if target in {"trajectory", "all"} and Path(dataset["trajectory"]).is_file():
+                clear_index(dataset["trajectory"], kind="trajectory")
+            if target in {"composition", "all"} and Path(dataset["species"]).is_file():
+                SPECIES_COMPOSITION_STORE.clear(dataset["species"])
+            if target in {"event", "all"}:
+                EVENT_EVIDENCE_STORE.clear(
+                    event_primary, event_molecules
+                )
+        except IndexBuildInProgressError:
+            for task_capability in ("trajectory", "composition", "event"):
+                existing_task = _read_preparation_task(
+                    dataset, task_capability
+                )
+                if str(existing_task.get("state") or "") in _ACTIVE_TASK_STATES:
+                    print(
+                        json.dumps(
+                            {"existing_preparation_task": existing_task},
+                            ensure_ascii=False,
+                        )
+                    )
+                    return 0
+            raise
+        if action == "clear":
             print(f"Manifest: {write_manifest(dataset)}")
             return 0
-    if not args.status:
+    if action in {"build", "rebuild"}:
         try:
-            if selected_route:
-                if not Path(dataset["route"]).is_file():
-                    raise FileNotFoundError(f"Route file not found: {dataset['route']}")
-                ROUTE_INDEX_STORE.build(dataset["route"], progress_callback=report)
             if selected_trajectory:
                 if not Path(dataset["trajectory"]).is_file():
                     raise FileNotFoundError(f"trajectory file not found: {dataset['trajectory']}")
-                TRAJECTORY_INDEX_STORE.build(dataset["trajectory"], progress_callback=report)
+                _run_preparation_task(
+                    dataset,
+                    capability="trajectory",
+                    source_file=dataset["trajectory"],
+                    action=action,
+                    operation=lambda task_report: TRAJECTORY_INDEX_STORE.build(
+                        dataset["trajectory"],
+                        progress_callback=task_report,
+                    ),
+                    report=report,
+                )
             if selected_composition:
                 if not Path(dataset["species"]).is_file():
                     raise FileNotFoundError(f"species file not found: {dataset['species']}")
-                SPECIES_COMPOSITION_STORE.build(dataset["species"], progress_callback=report)
+                _run_preparation_task(
+                    dataset,
+                    capability="composition",
+                    source_file=dataset["species"],
+                    action=action,
+                    operation=lambda task_report: SPECIES_COMPOSITION_STORE.build(
+                        dataset["species"],
+                        progress_callback=task_report,
+                    ),
+                    report=report,
+                )
             if selected_event:
                 try:
                     selection = _select_event_source(dataset)
@@ -376,10 +816,17 @@ def main(argv: list[str] | None = None) -> int:
                         "timed reaction evidence not found: "
                         f"{selection.primary_file}"
                     )
-                EVENT_EVIDENCE_STORE.build(
-                    selection.primary_file,
-                    selection.molecules_file,
-                    progress_callback=report,
+                _run_preparation_task(
+                    dataset,
+                    capability="event",
+                    source_file=selection.primary_file,
+                    action=action,
+                    operation=lambda task_report: EVENT_EVIDENCE_STORE.build(
+                        selection.primary_file,
+                        selection.molecules_file,
+                        progress_callback=task_report,
+                    ),
+                    report=report,
                 )
         except KeyboardInterrupt:
             print("Preparation canceled; committed checkpoints were preserved.")
@@ -389,6 +836,60 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(build_manifest(dataset)["indexes"], ensure_ascii=False, indent=2))
     print(f"Manifest: {manifest}")
     return 0
+
+
+def configure_parser(
+    parser: argparse.ArgumentParser,
+    *,
+    handler: Any = None,
+) -> argparse.ArgumentParser:
+    """Attach the single formal preparation command grammar to a parser."""
+    operations = parser.add_subparsers(dest="prepare_action", required=True)
+
+    def add_dataset_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "case", help="Dataset directory or dataset base path"
+        )
+        command.add_argument(
+            "--base",
+            default="",
+            help="Dataset base name when a directory contains multiple runs",
+        )
+        if handler is not None:
+            command.set_defaults(func=handler)
+
+    status = operations.add_parser("status")
+    add_dataset_arguments(status)
+    for action in ("build", "rebuild", "cancel", "clear"):
+        command = operations.add_parser(action)
+        command.add_argument(
+            "capability",
+            choices=("trajectory", "element-distribution", "event", "all"),
+        )
+        add_dataset_arguments(command)
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Prepare persistent ReacNet Scope indexes offline"
+    )
+    return configure_parser(parser)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return run_preparation(
+            action=str(args.prepare_action),
+            capability=str(getattr(args, "capability", "all")),
+            case=str(args.case),
+            base=str(args.base or ""),
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        parser.error(str(exc))
+    return 2
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from numbers import Real
 from os import PathLike
 from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 
-from rng_tools.network import Reaction, ReactionNetwork, count_atoms_fast
+from reacnet_scope.network import Reaction, ReactionNetwork, count_atoms_fast
 
 
 SCORE_VERSION = "candidate-path/v1"

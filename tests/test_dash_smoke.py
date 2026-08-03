@@ -9,12 +9,12 @@ from typing import Any
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import dataset_id_for_source
-from rng_tools import dir_browser
+from reacnet_scope import dir_browser
 from scripts import rng_query_cli as cli
 from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash.navigation import NAV_GROUPS, TOP_NAV_PAGE_IDS
-from scripts.webapp_dash import services as svc
+from reacnet_scope import services as svc
 
 
 def _layout_string_ids(node: Any) -> set[str]:
@@ -69,10 +69,15 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     app = create_app()
     client = app.server.test_client()
 
-    assert client.get("/").status_code == 200
+    root = client.get("/")
+    assert root.status_code == 200
+    root_body = root.get_data(as_text=True)
+    assert "bootstrap-local.css" in root_body
+    assert "jsdelivr" not in root_body
+    assert "cdnjs" not in root_body
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.get_json()["service"] == "reacnet-scope-web-dash"
+    assert health.get_json()["service"] == "reacnet-scope"
     layout_response = client.get("/_dash-layout")
     dependency_response = client.get("/_dash-dependencies")
     assert layout_response.status_code == 200
@@ -186,26 +191,35 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "global-operation-progress" in layout_ids
     assert "data-override-reaction" not in layout_ids
     assert "data-override-reactionevent" not in layout_ids
-    assert "carbon-reference-smiles" in layout_ids
-    assert "carbon-timestep" in layout_ids
-    assert "carbon-parent-name" not in layout_ids
-    for advanced_carbon_id in {
-        "carbon-advanced-search-btn",
-        "carbon-advanced-species-files",
-        "carbon-advanced-mode",
-        "carbon-advanced-layout",
-        "carbon-advanced-smoothing",
-        "carbon-advanced-viewer",
-        "carbon-advanced-csv-download",
-        "carbon-advanced-svg-download",
+    assert "element-distribution-reference-smiles" in layout_ids
+    assert "element-distribution-timestep" in layout_ids
+    assert "element-distribution-parent-name" not in layout_ids
+    assert "element-distribution-group-element" in layout_ids
+    assert "element-distribution-max-count" in layout_ids
+    assert "element-distribution-include-zero" in layout_ids
+    assert "element-distribution-filter-element" in layout_ids
+    assert "element-distribution-filter-mode" in layout_ids
+    assert "inter-product-ratio" in layout_ids
+    assert "inter-reactant-ratio" in layout_ids
+    for removed_advanced_id in {
+        "element-distribution-advanced-search-btn",
+        "element-distribution-advanced-species-files",
+        "element-distribution-advanced-mode",
+        "element-distribution-advanced-layout",
+        "element-distribution-advanced-smoothing",
+        "element-distribution-advanced-viewer",
+        "element-distribution-advanced-csv-download",
+        "element-distribution-advanced-svg-download",
     }:
-        assert advanced_carbon_id in layout_ids
+        assert removed_advanced_id not in layout_ids
     for event_tool_id in {
         "event-frames-csv-download",
         "event-package-btn",
         "event-package-download",
         "event-trajectory-download",
         "event-ovito-download",
+        "event-ovito-open-btn",
+        "event-ovito-launch-status",
         "event-vmd-download",
         "event-atom-ids-copy",
         "event-ovito-expression-copy",
@@ -246,6 +260,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-max-depth",
         "pathway-max-branches",
         "pathway-max-paths",
+        "pathway-max-expansions",
         "pathway-min-net-tp",
         "pathway-min-directionality",
         "pathway-search-btn",
@@ -260,12 +275,13 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-context-store",
     }:
         assert pathway_id in layout_ids
-    assert (_layout_node_by_id(layout, "pathway-max-depth") or {})["props"]["value"] == 4
-    assert (_layout_node_by_id(layout, "pathway-max-branches") or {})["props"]["value"] == 4
-    assert (_layout_node_by_id(layout, "pathway-max-paths") or {})["props"]["value"] == 10
+    assert (_layout_node_by_id(layout, "pathway-max-depth") or {})["props"]["value"] == 3
+    assert (_layout_node_by_id(layout, "pathway-max-branches") or {})["props"]["value"] == 5
+    assert (_layout_node_by_id(layout, "pathway-max-paths") or {})["props"]["value"] == 20
+    assert (_layout_node_by_id(layout, "pathway-max-expansions") or {})["props"]["value"] == 5000
     assert (
         (_layout_node_by_id(layout, "pathway-goal") or {})["props"]["value"]
-        == "small_fragments"
+        == "ranked"
     )
     assert "page-transitions" not in layout_ids
     assert "nav-transitions" not in layout_ids
@@ -301,11 +317,11 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "d-none" not in str((overview.get("props") or {}).get("className") or "")
     assert "d-none" in str((browser.get("props") or {}).get("className") or "")
     assert "data-recent-datasets" in _layout_string_ids(overview)
-    carbon_refresh = _layout_node_by_id(layout, "carbon-index-refresh")
+    element_distribution_refresh = _layout_node_by_id(layout, "element-distribution-index-refresh")
     operation_progress = _layout_node_by_id(layout, "global-operation-progress")
-    assert carbon_refresh is not None
+    assert element_distribution_refresh is not None
     assert operation_progress is not None
-    assert (carbon_refresh.get("props") or {}).get("disabled") is True
+    assert (element_distribution_refresh.get("props") or {}).get("disabled") is True
     assert (operation_progress.get("props") or {}).get("role") == "status"
     assert "progressbar" in json.dumps(operation_progress)
     layout_text = json.dumps(layout, ensure_ascii=False)
@@ -1634,6 +1650,7 @@ def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
         "max_depth": 4,
         "max_branches": 6,
         "max_paths": 7,
+        "max_expansions": 5000,
         "min_net_tp": 2,
         "min_directionality": 0,
     }
@@ -1676,6 +1693,7 @@ def test_pathway_search_passes_small_fragment_carbon_goal(monkeypatch) -> None:
                 "pathway-max-depth": 6,
                 "pathway-max-branches": 10,
                 "pathway-max-paths": 20,
+                "pathway-max-expansions": 300,
                 "pathway-min-net-tp": 1,
                 "pathway-min-directionality": 0,
                 "pathway-goal": "small_fragments",
@@ -1980,22 +1998,21 @@ def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
 
 def test_selected_single_step_path_queries_time_evidence(monkeypatch) -> None:
     def fake_validate(artifacts, step, *, max_occurrences):
-        assert artifacts == {"route": "/tmp/run.route"}
+        assert artifacts == {"reactionevent": "/tmp/run.reactionevent.csv"}
         assert step["reaction_text"] == "[H] + [O] -> [H][O]"
         assert max_occurrences == 20
         return {
             "rows": [
                 {
                     "occurrence_rank": 1,
-                    "evidence_source": "Route 候选",
-                    "start_frame": 10,
-                    "end_frame": 20,
-                    "frame_span": 10,
+                    "evidence_source": "RNG 事件",
+                    "event_id": "evt-1",
+                    "timestep_index": 10,
                     "reaction_smiles": step["reaction_text"],
                 }
             ],
-            "evidence_level": "route",
-            "message": "找到 1 个 Route 原子转移时间候选。",
+            "evidence_level": "rng_event",
+            "message": "找到 1 条精确匹配的 RNG 反应事件。",
         }
 
     monkeypatch.setattr(
@@ -2026,7 +2043,9 @@ def test_selected_single_step_path_queries_time_evidence(monkeypatch) -> None:
                     "reaction_text": "[H] + [O] -> [H][O]",
                 },
                 "app-store": {
-                    "artifacts": {"route": "/tmp/run.route"},
+                    "artifacts": {
+                        "reactionevent": "/tmp/run.reactionevent.csv"
+                    },
                 },
             },
             state_values={},
@@ -2035,11 +2054,11 @@ def test_selected_single_step_path_queries_time_evidence(monkeypatch) -> None:
 
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["pathway-evidence-grid"]["data"][0]["start_frame"] == 10
+    assert result["pathway-evidence-grid"]["data"][0]["event_id"] == "evt-1"
     assert "只有 1 步，不存在两步连续性" in result[
         "pathway-evidence-alert"
     ]["children"]
-    assert "Route 原子转移时间候选" in result[
+    assert "精确匹配的 RNG 反应事件" in result[
         "pathway-evidence-alert"
     ]["children"]
 
@@ -2245,13 +2264,13 @@ def test_dataset_change_clears_pathway_selection() -> None:
     assert changed["pathway-open-events-btn"]["disabled"] is True
 
 
-def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> None:
+def test_element_distribution_callback_passes_generic_filters(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake_build(_artifacts, **kwargs):
         captured.update(kwargs)
         return {
-            "carbon_skeleton_rows": [],
+            "distribution_rows": [],
             "summary": {},
             "meta": {},
             "filters": {},
@@ -2264,26 +2283,30 @@ def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> 
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]] == ["carbon-search-btn"]
+        if [value["id"] for value in item["inputs"]] == ["element-distribution-search-btn"]
     )
     state_values = {
-        "carbon-max-c": 8,
-        "carbon-chlorine-state": "all",
-        "carbon-oxygen-state": "all",
-        "carbon-reference-smiles": "[C][C]",
-        "carbon-timestep": 0.002,
+        "element-distribution-group-element": "N",
+        "element-distribution-max-count": 8,
+        "element-distribution-include-zero": True,
+        "element-distribution-filter-element": "S",
+        "element-distribution-filter-mode": "range",
+        "element-distribution-filter-min": 1,
+        "element-distribution-filter-max": 3,
+        "element-distribution-reference-smiles": "[C][C]",
+        "element-distribution-timestep": 0.002,
         "app-store": {"artifacts": {"species": "/tmp/example.species"}},
     }
     payload = {
         "output": dependency["output"],
         "outputs": [
-            {"id": "carbon-alert", "property": "children"},
-            {"id": "carbon-highlights", "property": "children"},
-            {"id": "carbon-payload-store", "property": "data"},
-            {"id": "carbon-composition-trend", "property": "figure"},
+            {"id": "element-distribution-alert", "property": "children"},
+            {"id": "element-distribution-highlights", "property": "children"},
+            {"id": "element-distribution-payload-store", "property": "data"},
+            {"id": "element-distribution-composition-trend", "property": "figure"},
         ],
-        "changedPropIds": ["carbon-search-btn.n_clicks"],
-        "inputs": [{"id": "carbon-search-btn", "property": "n_clicks", "value": 1}],
+        "changedPropIds": ["element-distribution-search-btn.n_clicks"],
+        "inputs": [{"id": "element-distribution-search-btn", "property": "n_clicks", "value": 1}],
         "state": [
             {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
             for item in dependency["state"]
@@ -2294,9 +2317,13 @@ def test_carbon_callback_passes_explicit_reference_and_timestep(monkeypatch) -> 
     assert response.status_code == 200
     assert captured["reference_smiles"] == "[C][C]"
     assert captured["timestep_ps"] == 0.002
+    assert captured["group_element"] == "N"
+    assert captured["max_group_count"] == 8
+    assert captured["include_zero"] is True
+    assert captured["element_filters"] == {"S": {"mode": "range", "min": 1, "max": 3}}
 
 
-def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch) -> None:
+def test_element_distribution_index_refresh_only_polls_while_visible_and_building(monkeypatch) -> None:
     calls: list[dict[str, str]] = []
     current_state = {"value": "building"}
 
@@ -2307,12 +2334,13 @@ def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch)
             "progress": 0.5,
             "timepoints": 3,
             "unique_species": 4,
+            "available_elements": ["N", "S"],
         }
 
     monkeypatch.setattr(svc, "composition_index_status", fake_status)
     app = create_app()
     client = app.server.test_client()
-    input_ids = ["app-store", "page-store", "carbon-index-refresh"]
+    input_ids = ["app-store", "page-store", "element-distribution-index-refresh"]
     store = {
         "label": "example",
         "artifacts": {"species": "/tmp/example.species"},
@@ -2327,14 +2355,17 @@ def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch)
             input_values={
                 "app-store": store,
                 "page-store": {"page": "species"},
-                "carbon-index-refresh": 0,
+                "element-distribution-index-refresh": 0,
             },
-            state_values={},
-            output_id="carbon-index-refresh",
+            state_values={
+                "element-distribution-group-element": "C",
+                "element-distribution-filter-element": None,
+            },
+            output_id="element-distribution-index-refresh",
         ),
     )
     assert hidden_response.status_code == 200
-    assert hidden_response.get_json()["response"]["carbon-index-refresh"]["disabled"] is True
+    assert hidden_response.get_json()["response"]["element-distribution-index-refresh"]["disabled"] is True
     assert calls == []
 
     building_response = client.post(
@@ -2345,15 +2376,18 @@ def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch)
             changed="page-store.data",
             input_values={
                 "app-store": store,
-                "page-store": {"page": "carbon"},
-                "carbon-index-refresh": 0,
+                "page-store": {"page": "element-distribution"},
+                "element-distribution-index-refresh": 0,
             },
-            state_values={},
-            output_id="carbon-index-refresh",
+            state_values={
+                "element-distribution-group-element": "C",
+                "element-distribution-filter-element": None,
+            },
+            output_id="element-distribution-index-refresh",
         ),
     )
     assert building_response.status_code == 200
-    assert building_response.get_json()["response"]["carbon-index-refresh"]["disabled"] is False
+    assert building_response.get_json()["response"]["element-distribution-index-refresh"]["disabled"] is False
 
     current_state["value"] = "ready"
     ready_response = client.post(
@@ -2361,20 +2395,25 @@ def test_carbon_index_refresh_only_polls_while_visible_and_building(monkeypatch)
         json=_callback_payload(
             client,
             input_ids=input_ids,
-            changed="carbon-index-refresh.n_intervals",
+            changed="element-distribution-index-refresh.n_intervals",
             input_values={
                 "app-store": store,
-                "page-store": {"page": "carbon"},
-                "carbon-index-refresh": 1,
+                "page-store": {"page": "element-distribution"},
+                "element-distribution-index-refresh": 1,
             },
-            state_values={},
-            output_id="carbon-index-refresh",
+            state_values={
+                "element-distribution-group-element": "N",
+                "element-distribution-filter-element": "S",
+            },
+            output_id="element-distribution-index-refresh",
         ),
     )
     assert ready_response.status_code == 200
     ready_payload = ready_response.get_json()["response"]
-    assert ready_payload["carbon-index-refresh"]["disabled"] is True
-    assert ready_payload["carbon-index-status"]["children"].startswith("组成索引已就绪")
+    assert ready_payload["element-distribution-index-refresh"]["disabled"] is True
+    assert ready_payload["element-distribution-index-status"]["children"].startswith("元素分布索引已就绪")
+    assert ready_payload["element-distribution-group-element"]["value"] == "N"
+    assert ready_payload["element-distribution-filter-element"]["value"] == "S"
     assert len(calls) == 2
 
 
@@ -2623,6 +2662,7 @@ def _preparation_status_callback_payload(
         "data-prep-refresh-btn": 1,
         "data-prep-refresh": 0,
         "dataset-browser-candidate": candidate,
+        "data-prep-cancel-result": None,
     }
     return {
         "output": dependency["output"],
@@ -2862,7 +2902,9 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
         return {
             "trajectory": {"state": "ready"},
             "dataset_id": "dataset-public-id",
-            "cache_dir": "/workspace/dataset-public-id",
+            "workspace_path": "/workspace/dataset-public-id",
+            "workspace_resolved": True,
+            "workspace_writable": True,
             "index_bytes": 2048,
             "event_command": "reacnet-scope prepare event",
             "trajectory_command": "reacnet-scope prepare trajectory",

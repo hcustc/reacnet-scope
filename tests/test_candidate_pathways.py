@@ -9,7 +9,7 @@ from types import MappingProxyType
 
 import pytest
 
-from rng_tools.pathways import (
+from reacnet_scope.pathways import (
     CandidatePath,
     CandidatePathResult,
     PathwayStep,
@@ -17,7 +17,7 @@ from rng_tools.pathways import (
     score_path,
     score_step,
 )
-from rng_tools.network import Reaction, ReactionNetwork
+from reacnet_scope.network import Reaction, ReactionNetwork
 
 
 def test_evidence_linked_step_score_uses_v1_weights() -> None:

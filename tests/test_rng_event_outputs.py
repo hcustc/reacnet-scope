@@ -6,7 +6,7 @@ import pytest
 
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
-from rng_tools import dir_browser
+from reacnet_scope import dir_browser
 from reacnet_scope.rng_events import (
     canonical_reaction_key,
     event_output_status,
@@ -14,7 +14,7 @@ from reacnet_scope.rng_events import (
     query_rng_events,
     reaction_key,
 )
-from scripts.webapp_dash import services as svc
+from reacnet_scope import services as svc
 
 
 def _frame(timestep: int) -> str:
@@ -161,8 +161,7 @@ def test_rng_event_service_requires_prepared_index(tmp_path, monkeypatch) -> Non
         svc.locate_rng_events(artifacts, "[C] + [O] -> [C][O]")
 
     assert error.value.reason == "event_index_not_ready"
-    assert "reacnet-scope-prepare" in error.value.message
-    assert "--event-only" in error.value.message
+    assert "reacnet-scope prepare build event" in error.value.message
 
 
 def test_stale_event_index_recommends_explicit_rebuild(
@@ -181,9 +180,13 @@ def test_stale_event_index_recommends_explicit_rebuild(
     status = svc.scan_dataset(str(tmp_path))
     event_status = status["dataset"]["readiness"]["event_search"]
     assert event_status["state"] == "stale"
-    assert event_status["preparation_command"].endswith("--rebuild event")
+    assert event_status["preparation_command"].startswith(
+        "reacnet-scope prepare rebuild event "
+    )
     preparation = svc.dataset_preparation_status(str(tmp_path))
-    assert preparation["event_command"].endswith("--rebuild event")
+    assert preparation["event_command"].startswith(
+        "reacnet-scope prepare rebuild event "
+    )
 
     with pytest.raises(svc.ServiceError) as error:
         svc.locate_rng_events(
@@ -194,7 +197,7 @@ def test_stale_event_index_recommends_explicit_rebuild(
             "[C] + [O] -> [C][O]",
         )
     assert error.value.reason == "event_index_stale"
-    assert "--rebuild event" in error.value.message
+    assert "reacnet-scope prepare rebuild event" in error.value.message
 
 
 def test_rng_event_visualization_reads_only_selected_atoms(tmp_path, monkeypatch) -> None:

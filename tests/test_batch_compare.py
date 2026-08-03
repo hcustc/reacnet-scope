@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from rng_tools import dir_browser
-from rng_tools.batch_compare import BatchComparator, ConditionGroup, SimulationCondition
-from rng_tools.network import Reaction, ReactionNetwork
-from scripts.webapp_dash import services as svc
+from reacnet_scope import dir_browser
+from reacnet_scope.batch_compare import BatchComparator, ConditionGroup, SimulationCondition
+from reacnet_scope.network import Reaction, ReactionNetwork
+from reacnet_scope import services as svc
 from scripts.webapp_dash.app import create_app
 
 

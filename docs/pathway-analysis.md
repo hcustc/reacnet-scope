@@ -122,7 +122,7 @@ path_score =
 | `min_net_tp` | 1 | 整数，至少 1 | 每步最小正净 TP |
 | `min_directionality` | 0.05 | 0–1 | 每步最小方向性 |
 | `target_max_carbon` | `null` | 1–100 或 `null` | 可选的目标导向模式；只返回焦点物种已到达 C1–Cn 的路径 |
-| `evidence_mode` | `auto` | `auto` / `network_only` | `network_only` 仅做 reactionabcd 粗筛，推迟事件与 Route 验证 |
+| `evidence_mode` | `auto` | `auto` / `network_only` | `network_only` 仅做 reactionabcd 粗筛，推迟 RNG 事件验证 |
 
 搜索是确定性的有界 best-first 枚举。分支先按评分和稳定的语义键排序，再应用
 `max_branches`。在不触及展开上限时，搜索只会在剩余队列的理论最高完成分数
@@ -162,24 +162,24 @@ ReacNetGenerator 运行时至少需要生成 Reaction Evidence；Molecular Evide
 
 候选路径请求本身始终是只读的：它不会构建索引，也不会顺序扫描
 `.timeline.h5`、`.reactionevent.csv` 或 `.molecules.csv`。请先给准备命令和运行 CLI/Dash
-的进程设置同一个持久、可写缓存目录：
+的进程设置同一个持久、可写 Dataset Workspace：
 
 ```bash
 export REACNET_SCOPE_CACHE_DIR="/data/reacnet-cache"
-uv run reacnet-scope-prepare "/data/case with spaces" --event-only
-uv run reacnet-scope-prepare "/data/case with spaces" --status
+uv run reacnet-scope prepare build event "/data/case with spaces"
+uv run reacnet-scope prepare status "/data/case with spaces"
 ```
 
 缺失或尚未准备的索引会使查询降级为 `network_only`，同时输出可复制的
-`--event-only` 命令。若索引陈旧、损坏或与源文件不一致，请人工重建：
+`prepare build event` 命令。若索引陈旧、损坏或与源文件不一致，请人工重建：
 
 ```bash
 export REACNET_SCOPE_CACHE_DIR="/data/reacnet-cache"
-uv run reacnet-scope-prepare "/data/case with spaces" --rebuild event
+uv run reacnet-scope prepare rebuild event "/data/case with spaces"
 ```
 
 准备工作应在独立终端或作业中运行。不要把示例目录原样使用；替换为服务器上
-真实的数据目录和缓存目录。CLI 会优先自动发现同前缀 `.timeline.h5`，不存在时
+真实的数据目录和 Dataset Workspace。CLI 会优先自动发现同前缀 `.timeline.h5`，不存在时
 推导 `.reactionevent.csv` 与 `.molecules.csv`，例如：
 
 ```text
@@ -194,13 +194,13 @@ run.lammpstrj.molecules.csv
 先查看当前安装版本的精确参数：
 
 ```bash
-uv run reacnet-scope pathway --help
+uv run reacnet-scope candidate-paths --help
 ```
 
 一个同时导出 JSON 和逐步 CSV 的完整示例：
 
 ```bash
-uv run reacnet-scope pathway \
+uv run reacnet-scope candidate-paths \
   --reac "/data/case with spaces/run.lammpstrj.reactionabcd" \
   --start-smiles '[CH3]' \
   --direction downstream \
@@ -341,8 +341,8 @@ evidence_status,score_version,source_references
    “达到深度上限”只表示搜索边界，不表示已经找到真实终产物。下方二部超图
    保留每一步的完整反应物/产物。
    选择只有一步的路径时，界面会自动选中该唯一反应并立即查询时间证据：
-   优先显示精确 RNG 事件，缺少事件时回退到已准备的 Route 近似帧候选。
-   单步路径本身不存在“两步连续性”，Route 命中也不能单独证明完整反应事件。
+   只接受精确 RNG 事件；事件索引缺失或过期时显式降级为 `network_only`，
+   并给出相应的准备命令。单步路径本身不存在“两步连续性”。
 5. 在表格选择一条路径，可点击“在网络中高亮路径”。要检查某一步，继续点击
    图中的黄色菱形反应节点，再点击“查看该步事件”；界面会进入事件页并填入
    该步的完整 `reactants → products` 文本。
@@ -350,9 +350,10 @@ evidence_status,score_version,source_references
    发起搜索。
 
 该页面是独立的网络级检索工具，不属于“高频生成/消耗通道”的一步事件工作流。
-默认使用大数据快速预算：深度 4、每步分支 4、路径上限 10、状态展开上限
-300，并设置 `evidence_mode=network_only`。粗筛阶段不会打开事件、Route 或
-species 时间索引；选定具体反应后再进入连续反应与局部轨迹验证。
+正式默认为深度 3、每步分支 5、路径上限 20、状态展开上限
+5000。用户明确选择“追踪至小分子碎片（快速）”后，界面才切换为
+`4 / 4 / 10 / 300` 并设置 `evidence_mode=network_only`；切换后仍可逐项修改。粗筛阶段不会打开事件或 species
+时间索引；选定具体反应后再进入连续反应与局部轨迹验证。
 
 灰色虚线反应节点表示 `network_only`。如果事件页没有可用索引，先按界面或
 CLI 输出的准备命令离线建立索引，再重新执行路径搜索。

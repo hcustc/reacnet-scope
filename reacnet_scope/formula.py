@@ -34,10 +34,6 @@ NOMINAL_MASS = {
     "Si": 28,
 }
 
-CHLORINE_37_EXACT_MASS = 36.965902602
-CHLORINE_37_NOMINAL_MASS = 37
-
-
 def parse_formula(formula: str) -> Dict[str, int]:
     """Parse a molecular formula into an element count dict.
 
@@ -139,27 +135,15 @@ def formula_nominal_mass(formula: str) -> int | None:
 
 
 def formula_isotopic_masses(formula: str) -> tuple[tuple[float, int], ...] | None:
-    """Return exact/nominal masses for every chlorine isotope combination.
+    """Return the neutral monoisotopic formula mass.
 
-    Each returned item is ``(exact_mass, nominal_mass)``.  Elements other than
-    chlorine retain their existing monoisotopic masses.  For a formula with
-    ``n`` chlorine atoms, the result contains ``n + 1`` masses corresponding
-    to zero through ``n`` substitutions of 35Cl by 37Cl.
-
-    Returns None if any element in formula has no mass entry.
+    General isotope-envelope interpretation is deliberately outside this
+    product boundary.  This helper retains its public name for compatibility
+    but never performs element-specific isotope expansion.
     """
     exact = formula_exact_mass(formula)
     nominal = formula_nominal_mass(formula)
     if exact is None or nominal is None:
         return None
 
-    chlorine_count = parse_formula(formula).get("Cl", 0)
-    exact_shift = CHLORINE_37_EXACT_MASS - MONOISOTOPIC_MASS["Cl"]
-    nominal_shift = CHLORINE_37_NOMINAL_MASS - NOMINAL_MASS["Cl"]
-    return tuple(
-        (
-            exact + chlorine_37_count * exact_shift,
-            nominal + chlorine_37_count * nominal_shift,
-        )
-        for chlorine_37_count in range(chlorine_count + 1)
-    )
+    return ((exact, nominal),)

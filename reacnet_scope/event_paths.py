@@ -19,7 +19,7 @@ from pathlib import Path
 from statistics import fmean, median
 from typing import Any, Callable, Iterable, Sequence
 
-from rng_tools.network import Reaction, ReactionNetwork, parse_reactionabcd
+from reacnet_scope.network import Reaction, ReactionNetwork, parse_reactionabcd
 
 from .event_index import (
     EVENT_EVIDENCE_STORE,

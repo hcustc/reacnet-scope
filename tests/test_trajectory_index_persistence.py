@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.webapp.server import TrajectoryIndexStore
+from reacnet_scope.queries import TrajectoryIndexStore
 
 
 def _frame(frame: int) -> bytes:

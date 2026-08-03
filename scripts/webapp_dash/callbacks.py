@@ -1,7 +1,7 @@
 """Dash callback registration for ReacNet Scope WebUI V1.
 
 All callbacks are registered in ``register_callbacks(app)``.  Each callback
-delegates to ``scripts.webapp_dash.services`` for data operations and never
+delegates to ``reacnet_scope.services`` for data operations and never
 re-implements analysis logic.
 """
 
@@ -28,9 +28,9 @@ from dash import (
 )
 from dash.exceptions import PreventUpdate
 
-from rng_tools.pathway_export import pathway_csv_text, pathway_document
+from reacnet_scope.pathway_export import pathway_csv_text, pathway_document
 from reacnet_scope.indexes import dataset_id_for_source
-from scripts.webapp_dash import services as svc
+from reacnet_scope import services as svc
 from scripts.webapp_dash.navigation import (
     DEFAULT_PAGE,
     PAGE_CLASS_NAMES,
@@ -46,7 +46,7 @@ PAGE_DATA_REQUIREMENTS = {
     "pathway": ("reaction", "reactionabcd"),
     "intermediate": ("species", ".species"),
     "evolution": ("species", ".species"),
-    "carbon": ("species", ".species"),
+    "element-distribution": ("species", ".species"),
     "events": ("reactionevent", ".reactionevent.csv + .molecules.csv"),
     "trajectory": ("trajectory", "轨迹文件与帧索引"),
 }
@@ -272,7 +272,7 @@ def _current_dataset_id(store: dict[str, Any] | None) -> str:
 
 
 def _dataset_id_from_selection(folder: str, base: str) -> str:
-    """Return the cache-compatible ID for one fully qualified dataset base."""
+    """Return the workspace-compatible ID for one fully qualified dataset base."""
     source = Path(str(base or "")).expanduser()
     if not source.is_absolute():
         source = Path(str(folder or "")).expanduser() / source
@@ -403,7 +403,7 @@ def _preparation_item_detail(label: str, item: dict[str, Any]) -> str:
             f"{_format_bytes(item.get('source_offset'))} / "
             f"{_format_bytes(item.get('trajectory_size'))}"
         )
-    elif label == "C/O/Cl 组成索引" and item.get("species_size"):
+    elif label == "元素分布索引" and item.get("species_size"):
         detail = (
             f"{_format_bytes(item.get('source_offset'))} / "
             f"{_format_bytes(item.get('species_size'))}"
@@ -413,7 +413,7 @@ def _preparation_item_detail(label: str, item: dict[str, Any]) -> str:
             item.get("frames")
             if label == "轨迹帧索引"
             else item.get("timepoints")
-            if label == "C/O/Cl 组成索引"
+            if label == "元素分布索引"
             else None
         )
         if records is not None:
@@ -506,8 +506,8 @@ def _render_next_preparation_action(
             "启用按时间步定位帧和局部反应轨迹提取。",
         ),
         "composition": (
-            "建立 C/O/Cl 组成索引",
-            "启用“组成演化”分析和代表物种下钻。",
+            "建立元素分布索引",
+            "启用元素分布演化分析和代表物种下钻。",
         ),
     }[recommended_kind]
     return html.Div(
@@ -522,13 +522,13 @@ def _render_next_preparation_action(
 
 def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
     alert: Any = ""
-    if payload.get("cache_configured") is False:
+    if payload.get("workspace_resolved") is False:
         alert = dbc.Alert(
             "无法为当前数据集确定 Dataset Workspace；请检查数据集路径和访问权限。",
             color="warning",
             className="py-2 mb-0",
         )
-    elif payload.get("cache_writable") is False:
+    elif payload.get("workspace_writable") is False:
         alert = dbc.Alert(
             "Dataset Workspace 不可写；请检查数据集目录，或由管理员配置集中位置。",
             color="danger",
@@ -540,7 +540,7 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         if updated
         else "-"
     )
-    workspace_path = str(payload.get("cache_dir") or "未配置")
+    workspace_path = str(payload.get("workspace_path") or "未配置")
     workspace_meta = html.Div(
         [
             html.Div(
@@ -583,7 +583,7 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         "basic": ("基础分析文件", payload.get("basic") or {}),
         "event": ("事件索引", payload.get("events") or {}),
         "trajectory": ("轨迹帧索引", payload.get("trajectory") or {}),
-        "composition": ("C/O/Cl 组成索引", payload.get("composition") or {}),
+        "composition": ("元素分布索引", payload.get("composition") or {}),
     }
     ready_count = sum(
         1 for _label, item in items.values() if item.get("state") == "ready"
@@ -873,7 +873,7 @@ def register_callbacks(app: Any) -> None:
         Output("page-trajectory", "className"),
         Output("page-intermediate", "className"),
         Output("page-pathway", "className"),
-        Output("page-carbon", "className"),
+        Output("page-element-distribution", "className"),
         Output("page-data-management", "className"),
         Output("page-batch-compare", "className"),
         Output("nav-species", "className"),
@@ -883,7 +883,7 @@ def register_callbacks(app: Any) -> None:
         Output("nav-trajectory", "className"),
         Output("nav-intermediate", "className"),
         Output("nav-pathway", "className"),
-        Output("nav-carbon", "className"),
+        Output("nav-element-distribution", "className"),
         Output("nav-data-management", "className"),
         Output("data-open-batch-compare-btn", "className"),
         Output("page-store", "data"),
@@ -899,7 +899,7 @@ def register_callbacks(app: Any) -> None:
         Input("nav-trajectory", "n_clicks"),
         Input("nav-intermediate", "n_clicks"),
         Input("nav-pathway", "n_clicks"),
-        Input("nav-carbon", "n_clicks"),
+        Input("nav-element-distribution", "n_clicks"),
         Input("nav-data-management", "n_clicks"),
         Input("data-open-batch-compare-btn", "n_clicks"),
         Input("open-data-modal", "n_clicks"),
@@ -1098,7 +1098,7 @@ def register_callbacks(app: Any) -> None:
         Output("pathway-search-btn", "disabled"),
         Output("inter-search-btn", "disabled"),
         Output("evolution-search-btn", "disabled"),
-        Output("carbon-search-btn", "disabled"),
+        Output("element-distribution-search-btn", "disabled"),
         Output("event-rxn-btn", "disabled"),
         Output("trajectory-refresh-btn", "disabled"),
         Input("app-store", "data"),
@@ -1258,9 +1258,17 @@ def register_callbacks(app: Any) -> None:
         Input("data-prep-refresh-btn", "n_clicks"),
         Input("data-prep-refresh", "n_intervals"),
         Input("dataset-browser-candidate", "data"),
+        Input("data-prep-cancel-result", "data"),
         State("app-store", "data"),
     )
-    def _refresh_preparation_status(page_store, _refresh_clicks, _tick, candidate, app_store):
+    def _refresh_preparation_status(
+        page_store,
+        _refresh_clicks,
+        _tick,
+        candidate,
+        cancel_result,
+        app_store,
+    ):
         if (page_store or {}).get("page") != "data-management":
             return (
                 "", "", "", "", "", "", "", "",
@@ -1306,6 +1314,13 @@ def register_callbacks(app: Any) -> None:
             }
 
         rendered = _render_preparation_status(payload)
+        status_alert = rendered["alert"]
+        if isinstance(cancel_result, dict) and cancel_result:
+            status_alert = dbc.Alert(
+                str(cancel_result.get("message") or "取消请求已提交。"),
+                color="info" if cancel_result.get("ok") else "danger",
+                className="py-2 mb-0",
+            )
         recommended_kind = rendered["recommended_kind"]
 
         def action_class(kind: str) -> str:
@@ -1321,7 +1336,7 @@ def register_callbacks(app: Any) -> None:
             rendered["trajectory"],
             rendered["composition"],
             rendered["meta"],
-            rendered["alert"],
+            status_alert,
             rendered["next_action"],
             rendered["global_status"],
             rendered["global_class"],
@@ -1357,10 +1372,9 @@ def register_callbacks(app: Any) -> None:
             (Output("data-prep-composition-btn", "disabled"), True, False),
             (Output("data-prep-cancel-btn", "disabled"), False, True),
         ],
-        cancel=Input("data-prep-cancel-btn", "n_clicks"),
         prevent_initial_call=True,
     )
-    def _prepare_dataset_cache(
+    def _prepare_dataset_workspace(
         set_progress,
         _event_clicks,
         _trajectory_clicks,
@@ -1379,7 +1393,7 @@ def register_callbacks(app: Any) -> None:
         labels = {
             "event": "事件索引",
             "trajectory": "轨迹帧索引",
-            "composition": "组成索引",
+            "composition": "元素分布索引",
         }
         try:
             target = _validated_dataset_target(
@@ -1393,7 +1407,7 @@ def register_callbacks(app: Any) -> None:
                     className="py-2 mb-0",
                 )
             )
-            result = svc.prepare_dataset_cache(
+            result = svc.prepare_dataset_workspace(
                 target["folder"],
                 base=target["base"],
                 kind=kind,
@@ -1406,12 +1420,24 @@ def register_callbacks(app: Any) -> None:
             )
         except Exception as exc:
             return dbc.Alert(
-                f"缓存任务失败: {exc}",
+                f"Preparation Task 失败: {exc}",
                 color="danger",
                 className="py-2 mb-0",
             )
 
         status = result.get("status") or {}
+        if result.get("existing_task"):
+            return dbc.Alert(
+                "同类 Preparation Task 已在运行；继续显示现有任务进度。",
+                color="info",
+                className="py-2 mb-0",
+            )
+        if result.get("canceled"):
+            return dbc.Alert(
+                "Preparation Task 已取消；最近检查点已保留。",
+                color="warning",
+                className="py-2 mb-0",
+            )
         count = (
             status.get("event_count")
             if kind == "event"
@@ -1426,6 +1452,26 @@ def register_callbacks(app: Any) -> None:
             color="success",
             className="py-2 mb-0",
         )
+
+    @app.callback(
+        Output("data-prep-cancel-result", "data"),
+        Input("data-prep-cancel-btn", "n_clicks"),
+        State("dataset-browser-candidate", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _cancel_preparation_task(n_clicks, candidate, app_store):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            target = _validated_dataset_target(candidate, app_store=app_store)
+            return svc.cancel_dataset_preparation(
+                target["folder"],
+                base=target["base"],
+                kind="all",
+            )
+        except svc.ServiceError as exc:
+            return {"ok": False, "message": str(exc.message)}
 
     @app.callback(
         Output("data-clear-confirm-modal", "is_open"),
@@ -1485,7 +1531,7 @@ def register_callbacks(app: Any) -> None:
             [
                 html.P(f"将清理当前数据集的 {label} 索引，预计释放 {size}。"),
                 html.P(
-                    "只删除缓存目录中的派生文件，不会删除轨迹、.species、事件 CSV 或任何 ReacNetGenerator 输出文件。",
+                    "只删除 Dataset Workspace 中的派生文件，不会删除轨迹、.species、事件 CSV 或任何 ReacNetGenerator 输出文件。",
                     className="text-muted mb-0",
                 ),
             ]
@@ -2557,12 +2603,15 @@ def register_callbacks(app: Any) -> None:
         Output("inter-grid", "columns"),
         Output("inter-alert", "children"),
         Output("inter-grid-store", "data"),
+        Output("inter-with-flux", "value"),
         Input("inter-search-btn", "n_clicks"),
         State("inter-kind", "value"),
         State("inter-top", "value"),
         State("inter-abundance", "value"),
         State("inter-start-ratio", "value"),
         State("inter-decay-alpha", "value"),
+        State("inter-product-ratio", "value"),
+        State("inter-reactant-ratio", "value"),
         State("inter-fwhm", "value"),
         State("inter-timestep", "value"),
         State("inter-require-fwhm", "value"),
@@ -2590,6 +2639,8 @@ def register_callbacks(app: Any) -> None:
         abundance,
         start_ratio,
         decay_alpha,
+        product_ratio_min,
+        reactant_start_ratio_min,
         fwhm,
         timestep,
         require_fwhm,
@@ -2608,16 +2659,44 @@ def register_callbacks(app: Any) -> None:
                 abundance_threshold=float(abundance or 5.0),
                 start_ratio_max=float(start_ratio or 0.1),
                 decay_alpha=float(decay_alpha or 0.8),
-                fwhm_min_ps=float(fwhm or 0.5),
-                timestep_ps=float(timestep or 0.0001),
+                product_ratio_min=float(
+                    0.95 if product_ratio_min is None else product_ratio_min
+                ),
+                reactant_start_ratio_min=float(
+                    0.9
+                    if reactant_start_ratio_min is None
+                    else reactant_start_ratio_min
+                ),
+                fwhm_min_frames=float(fwhm if fwhm is not None else 1.0),
+                timestep_ps=float(timestep) if timestep is not None else None,
                 require_fwhm=bool(require_fwhm),
                 with_flux=bool(with_flux),
                 flux_top=int(flux_top or 10),
             )
         except svc.ServiceError as exc:
-            return [], _intermediate_columns(), str(exc.message), {"rows": []}
+            return (
+                [],
+                _intermediate_columns(),
+                str(exc.message),
+                {"rows": []},
+                bool(with_flux),
+            )
         rows = result.get("rows") or []
-        return rows, _intermediate_columns(rows), None, {"rows": rows, "meta": result.get("meta", {})}
+        flux_meta = (result.get("meta") or {}).get("flux_enrichment") or {}
+        flux_applied = bool(flux_meta.get("applied"))
+        downgrade = (
+            "未找到 Reaction Network；已继续执行丰度筛选并关闭通量富集。"
+            if flux_meta.get("requested") and not flux_meta.get("available")
+            else None
+        )
+        return rows, _intermediate_columns(rows), downgrade, {
+            "rows": rows,
+            "meta": result.get("meta", {}),
+            "query": result.get("query", {}),
+            "schema_version": result.get("schema_version"),
+            "rule_version": result.get("rule_version"),
+            "scoring_version": result.get("scoring_version"),
+        }, flux_applied
 
     @app.callback(
         Output("inter-structure-detail", "children"),
@@ -2634,7 +2713,7 @@ def register_callbacks(app: Any) -> None:
         smiles = str((row or {}).get("smiles") or "").strip()
         if not smiles:
             return (
-                "选择一个中间体后显示其结构、分子式与 SMILES。",
+                "选择一个中间体候选后显示其结构、分子式与 SMILES。",
                 "",
                 {"display": "none"},
                 True,
@@ -2649,7 +2728,7 @@ def register_callbacks(app: Any) -> None:
         return (
             _species_structure_detail_children(
                 items,
-                title="中间体结构",
+                title="中间体候选结构",
             ),
             f"已选：{formula or '未知分子式'} · {smiles}",
             {"display": "flex"},
@@ -2777,7 +2856,11 @@ def register_callbacks(app: Any) -> None:
         rows = (grid_store or {}).get("rows") or []
         if not rows:
             raise PreventUpdate
-        return {"content": svc.rows_to_csv(rows), "filename": "intermediate_candidates.csv", "type": "text/csv"}
+        return {
+            "content": svc.intermediate_candidates_to_csv(grid_store),
+            "filename": "intermediate_candidates.csv",
+            "type": "text/csv",
+        }
 
     # ── Evolution ───────────────────────────────────────────────────
 
@@ -2849,8 +2932,8 @@ def register_callbacks(app: Any) -> None:
                 targets,
                 species_file=species_file or "",
                 species_files=species_files or "",
-                x_axis=x_axis or "ps",
-                timestep_ps=float(timestep or 0.0001),
+                x_axis=x_axis or "step",
+                timestep_ps=float(timestep) if timestep is not None else None,
                 normalize=normalize or "none",
                 smooth_window=int(smooth or 1),
                 downsample=int(downsample or 0),
@@ -2899,7 +2982,16 @@ def register_callbacks(app: Any) -> None:
             str(curve.get("name") or curve.get("query") or "")
             for curve in curves
         ]
-        return fig, None, {**payload, "visible_curve_names": visible_names}
+        warnings = [
+            str(item)
+            for item in ((payload.get("meta") or {}).get("warnings") or [])
+            if str(item).strip()
+        ]
+        return (
+            fig,
+            "；".join(warnings) if warnings else None,
+            {**payload, "visible_curve_names": visible_names},
+        )
 
     # ── CSV export: evolution ───────────────────────────────────────
 
@@ -2957,211 +3049,47 @@ def register_callbacks(app: Any) -> None:
             note=note,
         )
 
-    # ── Carbon-number evolution ────────────────────────────────────
+    # ── Element Distribution Evolution ─────────────────────────────
 
     @app.callback(
-        Output("carbon-advanced-alert", "children"),
-        Output("carbon-advanced-viewer", "children"),
-        Output("carbon-advanced-store", "data"),
-        Input("carbon-advanced-search-btn", "n_clicks"),
-        State("carbon-advanced-data", "value"),
-        State("carbon-advanced-species-file", "value"),
-        State("carbon-advanced-species-files", "value"),
-        State("carbon-advanced-xaxis", "value"),
-        State("carbon-advanced-mode", "value"),
-        State("carbon-advanced-time-align", "value"),
-        State("carbon-advanced-top-k", "value"),
-        State("carbon-advanced-max-exact", "value"),
-        State("carbon-advanced-bins", "value"),
-        State("carbon-advanced-display-ranges", "value"),
-        State("carbon-advanced-merge-ranges", "value"),
-        State("carbon-advanced-parent", "value"),
-        State("carbon-advanced-small", "value"),
-        State("carbon-advanced-large", "value"),
-        State("carbon-advanced-smoothing", "value"),
-        State("carbon-advanced-window", "value"),
-        State("carbon-advanced-polyorder", "value"),
-        State("carbon-advanced-layout", "value"),
-        State("carbon-advanced-regions", "value"),
-        State("carbon-advanced-system-mode", "value"),
-        State("carbon-advanced-theme", "value"),
-        State("carbon-advanced-legend", "value"),
-        State("carbon-advanced-width", "value"),
-        State("carbon-advanced-height", "value"),
-        State("carbon-advanced-max-formulas", "value"),
-        State("carbon-timestep", "value"),
+        Output("element-distribution-alert", "children"),
+        Output("element-distribution-highlights", "children"),
+        Output("element-distribution-payload-store", "data"),
+        Output("element-distribution-composition-trend", "figure"),
+        Input("element-distribution-search-btn", "n_clicks"),
+        State("element-distribution-group-element", "value"),
+        State("element-distribution-max-count", "value"),
+        State("element-distribution-include-zero", "value"),
+        State("element-distribution-filter-element", "value"),
+        State("element-distribution-filter-mode", "value"),
+        State("element-distribution-filter-min", "value"),
+        State("element-distribution-filter-max", "value"),
+        State("element-distribution-reference-smiles", "value"),
+        State("element-distribution-timestep", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
         running=[
             (
-                Output("carbon-advanced-progress", "children"),
-                "正在构建高级 Carbon Plot…",
+                Output("element-distribution-progress", "children"),
+                "正在读取元素分布索引并应用筛选…",
                 "",
             ),
             (
-                Output("carbon-advanced-progress", "className"),
+                Output("element-distribution-progress", "className"),
                 "rs-analysis-progress is-running",
                 "rs-analysis-progress",
             ),
         ],
     )
-    def _build_advanced_carbon(
+    def _build_element_distribution(
         n_clicks,
-        data_path,
-        species_file,
-        species_files,
-        x_axis,
-        mode,
-        time_align,
-        top_k,
-        max_exact,
-        carbon_bins,
-        display_ranges,
-        merge_ranges,
-        parent,
-        highlight_small,
-        highlight_large,
-        smoothing,
-        smooth_window,
-        smooth_polyorder,
-        layout,
-        layout_regions,
-        system_mode,
-        theme,
-        legend_mode,
-        fig_width,
-        fig_height,
-        max_formula_list,
-        timestep,
-        store,
-    ):
-        if n_clicks is None:
-            raise PreventUpdate
-        try:
-            payload = svc.build_carbon_evolution(
-                (store or {}).get("artifacts") or {},
-                data_path=str(data_path or "").strip(),
-                species_file=str(species_file or "").strip(),
-                species_files=str(species_files or "").strip(),
-                x_axis=x_axis or "ps",
-                timestep_ps=float(0.0001 if timestep is None else timestep),
-                mode=mode or "exact",
-                top_k=int(top_k or 12),
-                max_exact_lines=int(max_exact or 24),
-                display_ranges=str(display_ranges or "").strip(),
-                merge_ranges=str(merge_ranges or "").strip(),
-                carbon_bins=str(carbon_bins or "").strip(),
-                parent_carbon_number=int(parent) if parent not in (None, "") else None,
-                highlight_small=str(highlight_small or "1-4"),
-                highlight_large=int(highlight_large or 30),
-                smoothing=smoothing or "none",
-                smooth_window=int(smooth_window or 5),
-                smooth_polyorder=int(smooth_polyorder or 2),
-                layout=layout or "single",
-                layout_regions=str(layout_regions or "").strip(),
-                theme=theme or "light",
-                time_align=time_align or "raw",
-                system_mode=system_mode or "",
-                legend_mode=legend_mode or "compact",
-                fig_width=float(fig_width or 11.5),
-                fig_height=float(fig_height or 8.0),
-                max_formula_list=int(max_formula_list or 30),
-            )
-        except (svc.ServiceError, TypeError, ValueError) as exc:
-            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return dbc.Alert(message, color="warning"), [], None
-        svg = str(payload.get("svg") or "")
-        if not svg:
-            return dbc.Alert("高级 Carbon Plot 没有生成可显示的 SVG。", color="warning"), [], payload
-        meta = payload.get("meta") or {}
-        summary = payload.get("summary") or {}
-        viewer = [
-            html.Div(
-                [
-                    html.Span(
-                        f"{int(meta.get('rows') or len(payload.get('plot_data') or []))} 数据行",
-                        className="rs-stat-chip",
-                    ),
-                    html.Span(
-                        f"{int(meta.get('n_systems') or 1)} 体系",
-                        className="rs-stat-chip",
-                    ),
-                    html.Span(
-                        str(summary.get("message") or payload.get("mode") or "carbon"),
-                        className="rs-stat-chip",
-                    ),
-                ],
-                className="rs-stat-row",
-            ),
-            html.Iframe(
-                srcDoc=_wrap_svg_doc(svg),
-                className="rs-carbon-advanced-frame",
-                title="高级 Carbon Plot",
-            ),
-        ]
-        return None, viewer, payload
-
-    @app.callback(
-        Output("carbon-advanced-csv-download", "data"),
-        Input("carbon-advanced-csv-btn", "n_clicks"),
-        State("carbon-advanced-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _export_advanced_carbon_csv(n_clicks, payload):
-        if n_clicks is None or not payload:
-            raise PreventUpdate
-        return {
-            "content": svc.carbon_plot_to_csv(payload),
-            "filename": "carbon_plot.csv",
-            "type": "text/csv",
-        }
-
-    @app.callback(
-        Output("carbon-advanced-svg-download", "data"),
-        Input("carbon-advanced-svg-btn", "n_clicks"),
-        State("carbon-advanced-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _export_advanced_carbon_svg(n_clicks, payload):
-        if n_clicks is None or not payload or not payload.get("svg"):
-            raise PreventUpdate
-        return {
-            "content": str(payload["svg"]),
-            "filename": "carbon_plot.svg",
-            "type": "image/svg+xml",
-        }
-
-    @app.callback(
-        Output("carbon-alert", "children"),
-        Output("carbon-highlights", "children"),
-        Output("carbon-payload-store", "data"),
-        Output("carbon-composition-trend", "figure"),
-        Input("carbon-search-btn", "n_clicks"),
-        State("carbon-max-c", "value"),
-        State("carbon-chlorine-state", "value"),
-        State("carbon-oxygen-state", "value"),
-        State("carbon-reference-smiles", "value"),
-        State("carbon-timestep", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-        running=[
-            (
-                Output("carbon-progress", "children"),
-                "正在读取组成索引并应用 O/Cl 筛选…",
-                "",
-            ),
-            (
-                Output("carbon-progress", "className"),
-                "rs-analysis-progress is-running",
-                "rs-analysis-progress",
-            ),
-        ],
-    )
-    def _build_carbon(
-        n_clicks,
-        max_c,
-        chlorine_state,
-        oxygen_state,
+        group_element,
+        max_group_count,
+        include_zero,
+        filter_element,
+        filter_mode,
+        filter_min,
+        filter_max,
         reference_smiles,
         timestep,
         store,
@@ -3169,35 +3097,56 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None:
             raise PreventUpdate
         artifacts = (store or {}).get("artifacts", {}) or {}
+        filters: dict[str, dict[str, Any]] = {}
+        selected_filter = str(filter_element or "").strip()
+        selected_mode = str(filter_mode or "all")
+        if selected_filter and selected_mode != "all":
+            rule: dict[str, Any] = {"mode": selected_mode}
+            if selected_mode == "range":
+                if filter_min is not None:
+                    rule["min"] = int(filter_min)
+                if filter_max is not None:
+                    rule["max"] = int(filter_max)
+            filters[selected_filter] = rule
         try:
+            species_path = str(artifacts.get("species") or "").strip()
+            confirmed_timestep = (
+                float(timestep)
+                if timestep is not None
+                else svc.load_timestep_ps(species_path)
+            )
+            if timestep is not None and species_path:
+                svc.save_timestep_ps(species_path, float(timestep))
             payload = svc.build_elemental_composition_evolution(
                 artifacts,
-                x_axis="ps",
-                timestep_ps=float(0.0001 if timestep is None else timestep),
-                max_carbon=int(max_c if max_c is not None else 6),
-                chlorine_state=chlorine_state or "all",
-                oxygen_state=oxygen_state or "all",
+                x_axis="ps" if confirmed_timestep is not None else "step",
+                timestep_ps=confirmed_timestep,
+                group_element=str(group_element or "C"),
+                max_group_count=int(max_group_count if max_group_count is not None else 6),
+                element_filters=filters,
+                include_zero=bool(include_zero),
                 reference_smiles=str(reference_smiles or "").strip(),
             )
-        except svc.ServiceError as exc:
-            empty = _empty_plotly_figure(str(exc.message))
-            return dbc.Alert(str(exc.message), color="warning"), [], None, empty
+        except (svc.ServiceError, TypeError, ValueError) as exc:
+            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            empty = _empty_plotly_figure(message)
+            return dbc.Alert(message, color="warning"), [], None, empty
         return None, _composition_highlights(payload), payload, _composition_trend_figure(payload)
 
     @app.callback(
-        Output("carbon-composition-table", "columns"),
-        Output("carbon-composition-table", "data"),
-        Output("carbon-composition-table-title", "children"),
-        Input("carbon-composition-trend", "clickData"),
-        Input("carbon-payload-store", "data"),
+        Output("element-distribution-composition-table", "columns"),
+        Output("element-distribution-composition-table", "data"),
+        Output("element-distribution-composition-table-title", "children"),
+        Input("element-distribution-composition-trend", "clickData"),
+        Input("element-distribution-payload-store", "data"),
         running=[
             (
-                Output("carbon-drilldown-progress", "children"),
-                "正在读取所选碳数组的当前值与全程峰值…",
+                Output("element-distribution-drilldown-progress", "children"),
+                "正在读取所选元素计数组的当前值与全程峰值…",
                 "",
             ),
             (
-                Output("carbon-drilldown-progress", "className"),
+                Output("element-distribution-drilldown-progress", "className"),
                 "rs-analysis-progress is-running",
                 "rs-analysis-progress",
             ),
@@ -3205,44 +3154,45 @@ def register_callbacks(app: Any) -> None:
     )
     def _render_composition_detail(click_data, payload):
         if not payload:
-            return [], [], "绘制后，点击主图中的参考物种或碳数曲线查看代表物种。"
+            return [], [], "绘制后，点击主图中的参考物种或元素计数曲线查看代表物种。"
         points = (click_data or {}).get("points") or []
         if not points:
-            return [], [], "点击主图中的参考物种或碳数曲线，查看该时间点的代表物种。"
+            return [], [], "点击主图中的参考物种或元素计数曲线，查看该时间点的代表物种。"
         point = points[0]
         custom = point.get("customdata") or []
         try:
             timestep = int(custom[0])
             series = str(custom[1])
-            detail = svc.build_carbon_species_drilldown(
+            detail = svc.build_element_distribution_species_drilldown(
                 payload,
                 series=series,
                 timestep=timestep,
             )
         except (IndexError, TypeError, ValueError, svc.ServiceError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return [], [], f"无法读取所选碳数组：{message}"
+            return [], [], f"无法读取所选元素计数组：{message}"
+        unit = str(detail.get("x_unit") or "timestep")
         columns = [
             {"name": "分子式", "id": "formula"},
             {"name": "SMILES", "id": "smiles"},
             {"name": "当前数量", "id": "current_count", "type": "numeric"},
             {"name": "峰值数量", "id": "peak_count", "type": "numeric"},
-            {"name": "峰值时间 (ps)", "id": "peak_time", "type": "numeric"},
+            {"name": f"峰值位置 ({unit})", "id": "peak_time", "type": "numeric"},
         ]
         title = (
-            f"{detail['series']} · 当前 {detail['current_time']:.6g} ps"
+            f"{detail['series']} · 当前 {detail['current_time']:.6g} {unit}"
             f" · {len(detail['rows'])} 个代表物种"
             f" · 查询 {float(detail.get('query_seconds') or 0):.4f} s"
         )
         return columns, detail["rows"], title
 
     @app.callback(
-        Output("carbon-structure-detail", "children"),
-        Input("carbon-composition-table", "selected_rows"),
-        Input("carbon-structure-show-h", "value"),
-        State("carbon-composition-table", "data"),
+        Output("element-distribution-structure-detail", "children"),
+        Input("element-distribution-composition-table", "selected_rows"),
+        Input("element-distribution-structure-show-h", "value"),
+        State("element-distribution-composition-table", "data"),
     )
-    def _show_carbon_species_structure(selected_rows, show_h, rows):
+    def _show_element_distribution_species_structure(selected_rows, show_h, rows):
         row = _selected_table_row(selected_rows, rows)
         smiles = str((row or {}).get("smiles") or "").strip()
         if not smiles:
@@ -3258,18 +3208,40 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
-        Output("carbon-dataset-name", "value"),
-        Output("carbon-index-status", "children"),
-        Output("carbon-index-status", "className"),
-        Output("carbon-index-progress", "value"),
-        Output("carbon-index-refresh", "disabled"),
+        Output("element-distribution-dataset-name", "value"),
+        Output("element-distribution-index-status", "children"),
+        Output("element-distribution-index-status", "className"),
+        Output("element-distribution-index-progress", "value"),
+        Output("element-distribution-index-refresh", "disabled"),
+        Output("element-distribution-group-element", "options"),
+        Output("element-distribution-group-element", "value"),
+        Output("element-distribution-filter-element", "options"),
+        Output("element-distribution-filter-element", "value"),
         Input("app-store", "data"),
         Input("page-store", "data"),
-        Input("carbon-index-refresh", "n_intervals"),
+        Input("element-distribution-index-refresh", "n_intervals"),
+        State("element-distribution-group-element", "value"),
+        State("element-distribution-filter-element", "value"),
     )
-    def _refresh_carbon_index_status(store, page_store, _n_intervals):
-        if str((page_store or {}).get("page") or "") != "carbon":
-            return no_update, no_update, no_update, no_update, True
+    def _refresh_element_distribution_index_status(
+        store,
+        page_store,
+        _n_intervals,
+        current_group_element,
+        current_filter_element,
+    ):
+        if str((page_store or {}).get("page") or "") != "element-distribution":
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                True,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
         store = store or {}
         label = str(store.get("label") or store.get("folder") or "未选择")
         status = svc.composition_index_status(store.get("artifacts") or {})
@@ -3277,27 +3249,44 @@ def register_callbacks(app: Any) -> None:
         percent = int(round(float(status.get("progress") or 0.0) * 100))
         if state == "ready":
             text = (
-                f"组成索引已就绪 · {int(status.get('timepoints') or 0)} 个时间点"
+                f"元素分布索引已就绪 · {int(status.get('timepoints') or 0)} 个时间点"
                 f" · {int(status.get('unique_species') or 0)} 个物种"
             )
             percent = 100
             class_name = "rs-index-status is-ready"
         elif state == "building":
-            text = f"正在建立组成索引 · {percent}%"
+            text = f"正在建立元素分布索引 · {percent}%"
             class_name = "rs-index-status is-building"
         elif state == "missing_source":
             text = "请先在“管理数据”中选择包含 .species 的数据集"
             class_name = "rs-index-status is-warning"
         elif state in {"stale", "invalid"}:
-            if "REACNET_SCOPE_CACHE_DIR" in str(status.get("message") or ""):
-                text = "请先设置 REACNET_SCOPE_CACHE_DIR，再建立 composition 索引"
-            else:
-                text = "组成索引需要重建：运行 reacnet-scope-prepare <目录> --composition-only"
+            text = "元素分布索引需要重建：运行 reacnet-scope prepare rebuild element-distribution <目录>"
             class_name = "rs-index-status is-warning"
         else:
-            text = "组成索引尚未建立：运行 reacnet-scope-prepare <目录> --composition-only"
+            text = "元素分布索引尚未建立：运行 reacnet-scope prepare build element-distribution <目录>"
             class_name = "rs-index-status is-warning"
-        return label, text, class_name, percent, state != "building"
+        elements = [str(value) for value in status.get("available_elements") or []]
+        if not elements:
+            elements = ["C"]
+        options = [{"label": value, "value": value} for value in elements]
+        group_value = (
+            current_group_element
+            if current_group_element in elements
+            else ("C" if "C" in elements else elements[0])
+        )
+        filter_value = current_filter_element if current_filter_element in elements else None
+        return (
+            label,
+            text,
+            class_name,
+            percent,
+            state != "building",
+            options,
+            group_value,
+            options,
+            filter_value,
+        )
 
     # ── Event evidence ──────────────────────────────────────────────
 
@@ -3798,6 +3787,21 @@ def register_callbacks(app: Any) -> None:
             "filename": f"{event_id}_subset.lammpstrj",
             "type": "text/plain",
         }
+
+    @app.callback(
+        Output("event-ovito-launch-status", "children"),
+        Input("event-ovito-open-btn", "n_clicks"),
+        State("event-viewer-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _launch_event_ovito(n_clicks, viewer):
+        if n_clicks is None or not viewer:
+            raise PreventUpdate
+        try:
+            launched = svc.launch_event_in_ovito(viewer)
+        except svc.ServiceError as exc:
+            return str(exc.message)
+        return f"OVITO 已启动（PID {launched['pid']}）。"
 
     @app.callback(
         Output("event-ovito-download", "data"),
@@ -4392,6 +4396,19 @@ def register_callbacks(app: Any) -> None:
         return None, None
 
     @app.callback(
+        Output("pathway-max-depth", "value"),
+        Output("pathway-max-branches", "value"),
+        Output("pathway-max-paths", "value"),
+        Output("pathway-max-expansions", "value"),
+        Input("pathway-goal", "value"),
+        prevent_initial_call=True,
+    )
+    def _apply_pathway_search_preset(goal):
+        if goal == "small_fragments":
+            return 4, 4, 10, 300
+        return 3, 5, 20, 5000
+
+    @app.callback(
         Output("pathway-grid", "data"),
         Output("pathway-grid", "columns"),
         Output("pathway-cytoscape", "elements"),
@@ -4406,6 +4423,7 @@ def register_callbacks(app: Any) -> None:
         State("pathway-max-depth", "value"),
         State("pathway-max-branches", "value"),
         State("pathway-max-paths", "value"),
+        State("pathway-max-expansions", "value"),
         State("pathway-min-net-tp", "value"),
         State("pathway-min-directionality", "value"),
         State("pathway-goal", "value"),
@@ -4420,6 +4438,7 @@ def register_callbacks(app: Any) -> None:
         max_depth,
         max_branches,
         max_paths,
+        max_expansions,
         min_net_tp,
         min_directionality,
         goal,
@@ -4440,6 +4459,9 @@ def register_callbacks(app: Any) -> None:
                     5 if max_branches is None else max_branches
                 ),
                 "max_paths": int(20 if max_paths is None else max_paths),
+                "max_expansions": int(
+                    5000 if max_expansions is None else max_expansions
+                ),
                 "min_net_tp": int(1 if min_net_tp is None else min_net_tp),
                 "min_directionality": float(
                     0.05
@@ -4453,7 +4475,6 @@ def register_callbacks(app: Any) -> None:
                     if target_max_carbon is None
                     else target_max_carbon
                 )
-                limits["max_expansions"] = 300
                 limits["evidence_mode"] = "network_only"
             payload = svc.find_pathways(artifacts, start, **limits)
         except (TypeError, ValueError) as exc:
@@ -4502,7 +4523,7 @@ def register_callbacks(app: Any) -> None:
             )
         if payload.get("search_stage") == "network_shortlist":
             message += (
-                " 当前为快速网络粗筛：未读取事件、Route 或 species 时间索引；"
+                " 当前为快速网络粗筛：未读取事件或 species 时间索引；"
                 "请在选定具体反应后再做时间验证。"
             )
         pathway_context = {
@@ -4680,18 +4701,6 @@ def register_callbacks(app: Any) -> None:
         evidence_level = str(result.get("evidence_level") or "network_only")
         if evidence_level == "rng_event":
             columns = _event_columns(rows)
-        elif evidence_level == "route":
-            columns = _columns_from_rows(
-                rows,
-                [
-                    "occurrence_rank",
-                    "evidence_source",
-                    "start_frame",
-                    "end_frame",
-                    "frame_span",
-                    "reaction_smiles",
-                ],
-            )
         else:
             columns = []
         prefix = (
@@ -5538,6 +5547,8 @@ def _intermediate_columns(rows=None):
         "start_ratio",
         "end_ratio",
         "peak_timestep",
+        "peak_analyzed_frame",
+        "fwhm_frames",
         "peak_time_ps",
         "fwhm_ps",
         "tp_consume",
@@ -6115,6 +6126,8 @@ def _columns_from_rows(rows: list[dict[str, Any]], preferred: list[str]):
             "start_ratio",
             "end_ratio",
             "peak_timestep",
+            "peak_analyzed_frame",
+            "fwhm_frames",
             "peak_time_ps",
             "fwhm_ps",
             "net_production",
@@ -6124,7 +6137,7 @@ def _columns_from_rows(rows: list[dict[str, Any]], preferred: list[str]):
                 "field": field,
                 "headerName": field,
                 "minWidth": 120 if field not in {"smiles", "reaction_smiles", "top_sources", "top_sinks"} else 220,
-                "flex": 2 if field in {"smiles", "reaction_smiles", "top_sources", "top_sinks", "route_context_atom_ids"} else 1,
+                "flex": 2 if field in {"smiles", "reaction_smiles", "top_sources", "top_sinks"} else 1,
                 **({"type": "numericColumn"} if is_num else {}),
             }
         )
@@ -6158,7 +6171,6 @@ def _render_artifacts(artifacts: dict[str, str]) -> Any:
         "reaction": "Reaction",
         "species": "Species",
         "trajectory": "Trajectory",
-        "route": "Route",
     }
     rows: list[Any] = []
     ready = 0
@@ -6210,16 +6222,11 @@ def _composition_trend_figure(payload: dict[str, Any]) -> Any:
     import plotly.graph_objects as go
 
     x_name = str(payload.get("x_name") or "Time")
-    rows = payload.get("carbon_skeleton_rows") or []
+    rows = payload.get("distribution_rows") or []
     if not rows:
-        return _empty_plotly_figure("没有可显示的碳骨架数据")
+        return _empty_plotly_figure("没有可显示的元素分布数据")
     styles = {
         "参考物种": {"color": "#111827", "dash": "solid", "width": 3.2},
-        "C1": {"color": "#2563eb", "dash": "solid", "width": 2.2},
-        "C2": {"color": "#0f766e", "dash": "solid", "width": 2.2},
-        "C3": {"color": "#7c3aed", "dash": "solid", "width": 2.2},
-        "C4": {"color": "#ca8a04", "dash": "solid", "width": 2.2},
-        "C5": {"color": "#dc2626", "dash": "solid", "width": 2.2},
     }
     names = list(dict.fromkeys(str(row["series"]) for row in rows))
     figure = go.Figure()
@@ -6229,7 +6236,11 @@ def _composition_trend_figure(payload: dict[str, Any]) -> Any:
         if style is None and name.endswith(" 其他物种"):
             style = {"color": "#64748b", "dash": "dash", "width": 2.5}
         if style is None:
-            style = {"color": "#667085", "dash": "dot", "width": 1.8}
+            style = {
+                "color": f"hsl({(index * 47) % 360}, 58%, 43%)",
+                "dash": "solid",
+                "width": 2.0,
+            }
         figure.add_trace(
             go.Scatter(
                 x=[row["x"] for row in series],
@@ -6248,7 +6259,7 @@ def _composition_trend_figure(payload: dict[str, Any]) -> Any:
     figure.update_xaxes(title_text=x_name, gridcolor="#eef2f6", zeroline=False)
     figure.update_layout(
         title={
-            "text": "碳数分布随时间变化<br><sup>点击任一曲线，查看该时间点的代表物种</sup>",
+            "text": "元素分布随时间变化<br><sup>点击任一曲线，查看该时间点的代表物种</sup>",
             "x": 0.01,
         },
         template="plotly_white",
@@ -6258,7 +6269,7 @@ def _composition_trend_figure(payload: dict[str, Any]) -> Any:
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         hovermode="closest",
         clickmode="event+select",
-        uirevision="carbon-minimal",
+        uirevision="element-distribution",
     )
     return figure
 
@@ -6269,23 +6280,18 @@ def _composition_highlights(payload: dict[str, Any]) -> Any:
     meta = payload.get("meta") or {}
     summary = payload.get("summary") or {}
     filters = payload.get("filters") or {}
-    chlorine_labels = {
-        "all": "全部",
-        "chlorinated": "含氯",
-        "unchlorinated": "不含氯",
-    }
-    oxygen_labels = {
-        "all": "全部",
-        "oxygenated": "含氧",
-        "unoxygenated": "不含氧",
-    }
+    filter_summary = ", ".join(
+        f"{element}: {str((rule or {}).get('mode') or 'all')}"
+        for element, rule in sorted(filters.items())
+    )
     items = [
         ("索引时间点", meta.get("source_timepoints")),
         ("绘图采样点", meta.get("sampled_timepoints")),
         ("索引查询", f"{meta.get('query_seconds')} s" if meta.get("query_seconds") is not None else None),
         ("总耗时", f"{meta.get('analysis_seconds')} s" if meta.get("analysis_seconds") is not None else None),
-        ("氯状态", chlorine_labels.get(str(filters.get("chlorine_state") or "all"))),
-        ("氧状态", oxygen_labels.get(str(filters.get("oxygen_state") or "all"))),
+        ("分组元素", summary.get("group_element")),
+        ("最大原子数", summary.get("max_group_count")),
+        ("筛选", filter_summary or "无"),
         ("Timestep", f"{summary.get('timestep_ps')} ps" if summary.get("timestep_ps") is not None else None),
         ("参考物种", summary.get("reference_formula") or summary.get("reference_smiles")),
     ]

@@ -4,28 +4,30 @@ from pathlib import Path
 
 import pytest
 
-from rng_tools.formula import formula_isotopic_masses
-from scripts.webapp_dash import services as svc
+from reacnet_scope.formula import formula_isotopic_masses
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
+from reacnet_scope import services as svc
 
 
-def test_formula_isotopic_masses_include_all_chlorine_combinations() -> None:
+def test_formula_mass_does_not_silently_expand_chlorine_isotopes() -> None:
     chlorine = formula_isotopic_masses("Cl")
     assert chlorine is not None
-    assert [nominal for _, nominal in chlorine] == [35, 37]
+    assert [nominal for _, nominal in chlorine] == [35]
     assert [exact for exact, _ in chlorine] == pytest.approx(
-        [34.968852682, 36.965902602]
+        [34.968852682]
     )
 
     dichloromethane = formula_isotopic_masses("CH2Cl2")
     assert dichloromethane is not None
-    assert [nominal for _, nominal in dichloromethane] == [84, 86, 88]
+    assert [nominal for _, nominal in dichloromethane] == [84]
 
 
-def test_exact_mass_search_matches_both_natural_chlorine_isotopes(
+def test_exact_mass_search_only_matches_neutral_monoisotopic_mass(
     tmp_path: Path,
 ) -> None:
     species = tmp_path / "chlorine.species"
     species.write_text("Timestep 0: [Cl] 3 [C] 1\n", encoding="utf-8")
+    SPECIES_COMPOSITION_STORE.build(str(species))
     artifacts = {"species": str(species)}
 
     chlorine_35 = svc.search_species_catalog(
@@ -42,16 +44,15 @@ def test_exact_mass_search_matches_both_natural_chlorine_isotopes(
     )
 
     assert [row["smiles"] for row in chlorine_35["rows"]] == ["[Cl]"]
-    assert [row["smiles"] for row in chlorine_37["rows"]] == ["[Cl]"]
+    assert chlorine_37["rows"] == []
     assert chlorine_35["rows"][0]["nominal_mass"] == 35
     assert chlorine_35["rows"][0]["exact_mass"] == pytest.approx(34.968853)
-    assert chlorine_37["rows"][0]["nominal_mass"] == 37
-    assert chlorine_37["rows"][0]["exact_mass"] == pytest.approx(36.965903)
 
 
-def test_exact_mass_search_matches_chlorine_37(tmp_path: Path) -> None:
+def test_exact_mass_search_does_not_expand_chlorine_37(tmp_path: Path) -> None:
     species = tmp_path / "chlorine.species"
     species.write_text("Timestep 0: [Cl] 3\n", encoding="utf-8")
+    SPECIES_COMPOSITION_STORE.build(str(species))
 
     result = svc.search_species_catalog(
         {"species": str(species)},
@@ -60,9 +61,7 @@ def test_exact_mass_search_matches_chlorine_37(tmp_path: Path) -> None:
         mass_tolerance=0,
     )
 
-    assert [row["smiles"] for row in result["rows"]] == ["[Cl]"]
-    assert result["rows"][0]["nominal_mass"] == 37
-    assert result["rows"][0]["mass_error"] == 0
+    assert result["rows"] == []
 
 
 def test_species_catalog_mass_search_groups_structures_by_formula(
@@ -70,6 +69,7 @@ def test_species_catalog_mass_search_groups_structures_by_formula(
 ) -> None:
     species = tmp_path / "isomers.species"
     species.write_text("Timestep 0: CCO 3 COC 2\n", encoding="utf-8")
+    SPECIES_COMPOSITION_STORE.build(str(species))
 
     result = svc.search_species_catalog(
         {"species": str(species)},
@@ -85,7 +85,7 @@ def test_species_catalog_mass_search_groups_structures_by_formula(
     assert result["rows"][0]["smiles"] == "CCO"
 
 
-def test_reaction_network_mass_search_matches_chlorine_37(tmp_path: Path) -> None:
+def test_reaction_network_mass_search_does_not_expand_chlorine_37(tmp_path: Path) -> None:
     reaction = tmp_path / "chlorine.reactionabcd"
     reaction.write_text("1 [Cl]+[C]->[C][Cl]\n", encoding="utf-8")
 
@@ -97,9 +97,7 @@ def test_reaction_network_mass_search_matches_chlorine_37(tmp_path: Path) -> Non
     )
 
     chlorine_rows = [row for row in result["rows"] if row["smiles"] == "[Cl]"]
-    assert len(chlorine_rows) == 1
-    assert chlorine_rows[0]["nominal_mass"] == 37
-    assert chlorine_rows[0]["exact_mass"] == pytest.approx(36.965903)
+    assert chlorine_rows == []
 
 
 def test_reaction_network_mass_search_groups_structures_by_formula(

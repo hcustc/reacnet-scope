@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
-from rng_tools import dir_browser
+import pytest
+
+from reacnet_scope import dir_browser, indexes
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
-from reacnet_scope.indexes import ROUTE_INDEX_STORE, resolve_dataset_paths
+from reacnet_scope.indexes import (
+    IndexBuildInProgressError,
+    IndexInvalidError,
+    TRAJECTORY_INDEX_STORE,
+    WorkspacePolicy,
+    inspect_workspace_storage,
+    resolve_dataset_paths,
+)
 from reacnet_scope import prepare
 from scripts.webapp_dash.app import create_app
-from scripts.webapp_dash import services as svc
+from reacnet_scope import services as svc
 
 
 def _layout_node_by_id(node, component_id: str):
@@ -31,6 +43,201 @@ def _layout_node_by_id(node, component_id: str):
     return None
 
 
+def test_workspace_storage_inspection_uses_nearest_existing_ancestor(
+    tmp_path,
+) -> None:
+    target = tmp_path / "not-created" / "datasets" / "example"
+
+    status = inspect_workspace_storage(target)
+
+    assert status.target == target
+    assert status.existing_ancestor == tmp_path
+    assert status.writable is True
+    assert status.free_bytes is not None
+
+
+def test_dataset_identity_distinguishes_copy_made_after_unresolved_move(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    source = original / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    original_id = resolve_dataset_paths(source).dataset_id
+
+    moved = tmp_path / "moved"
+    shutil.move(str(original), moved)
+    copied = tmp_path / "copied"
+    shutil.copytree(moved, copied)
+
+    moved_id = resolve_dataset_paths(moved / "run.species").dataset_id
+    copied_id = resolve_dataset_paths(copied / "run.species").dataset_id
+
+    assert moved_id == original_id
+    assert copied_id != original_id
+
+
+def test_dataset_identity_accepts_cross_filesystem_move_anchor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original-device"
+    original.mkdir()
+    source = original / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    original_id = resolve_dataset_paths(source).dataset_id
+    moved = tmp_path / "moved-device"
+    original.rename(moved)
+    real_anchor = indexes._dataset_anchor_token
+
+    monkeypatch.setattr(
+        indexes,
+        "_dataset_anchor_token",
+        lambda base: (
+            f"999999:{real_anchor(base).partition(':')[2]}"
+            if real_anchor(base)
+            else ""
+        ),
+    )
+
+    assert resolve_dataset_paths(moved / "run.species").dataset_id == original_id
+
+
+def test_cross_device_same_name_with_different_content_gets_new_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original-device"
+    original.mkdir()
+    source = original / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    original_id = resolve_dataset_paths(source).dataset_id
+    source.unlink()
+    replacement = tmp_path / "replacement-device" / "run.species"
+    replacement.parent.mkdir()
+    replacement.write_text("Timestep 0: [O] 9\n", encoding="utf-8")
+    real_anchor = indexes._dataset_anchor_token
+    monkeypatch.setattr(
+        indexes,
+        "_dataset_anchor_token",
+        lambda base: (
+            f"999999:{real_anchor(base).partition(':')[2]}"
+            if real_anchor(base)
+            else ""
+        ),
+    )
+
+    assert resolve_dataset_paths(replacement).dataset_id != original_id
+
+
+def test_dataset_identity_lock_failure_never_falls_back_to_path_hash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 1\n", encoding="utf-8")
+
+    class BrokenLock:
+        def __enter__(self):
+            raise indexes.IndexBuildInProgressError("busy")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        indexes, "_workspace_identity_lock", lambda _registry: BrokenLock()
+    )
+
+    with pytest.raises(RuntimeError, match="could not be persisted"):
+        resolve_dataset_paths(source)
+
+
+def test_preparation_discovers_species_only_dataset(tmp_path) -> None:
+    species = tmp_path / "species-only.lammpstrj.species"
+    species.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+
+    dataset = prepare.discover_dataset(str(tmp_path))
+
+    assert dataset["species"] == str(species)
+
+
+def test_preparation_discovers_trajectory_only_dataset(tmp_path) -> None:
+    trajectory = tmp_path / "trajectory-only.lammpstrj"
+    trajectory.write_text("ITEM: TIMESTEP\n0\n", encoding="utf-8")
+
+    dataset = prepare.discover_dataset(str(tmp_path))
+
+    assert dataset["trajectory"] == str(trajectory)
+
+
+def test_corrupt_dataset_identity_cannot_escape_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(workspace))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
+    workspace.mkdir()
+    (workspace / "workspace-manifest.json").write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "dataset_id": "../../outside",
+                        "base_name": "run",
+                        "active_path": str(tmp_path / "run"),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = resolve_dataset_paths(source, persist_identity=False)
+
+    assert paths.workspace_dir.parent == workspace / "datasets"
+    assert paths.dataset_id != "../../outside"
+    assert paths.workspace_dir.resolve().is_relative_to(workspace.resolve())
+
+
+def test_cancellation_does_not_signal_pid_with_different_start_token(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    task_path = prepare._preparation_task_path(
+        prepare.discover_dataset(str(tmp_path), base.name),
+        "event",
+    )
+    task_path.parent.mkdir(parents=True)
+    task_path.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "pid": 4242,
+                "process_start_token": "old-process",
+            }
+        ),
+        encoding="utf-8",
+    )
+    signaled: list[tuple[int, int]] = []
+    monkeypatch.setattr(prepare, "_process_start_token", lambda _pid: "new-process")
+    monkeypatch.setattr(prepare.os, "kill", lambda pid, sig: signaled.append((pid, sig)))
+
+    assert prepare.request_cancellation(
+        str(tmp_path), base=base.name, capability="event"
+    ) is False
+    assert all(signal_value == 0 for _pid, signal_value in signaled)
+    assert json.loads(task_path.read_text(encoding="utf-8"))["state"] == "interrupted"
+
+
 def test_cache_management_is_visible_without_global_path_overrides() -> None:
     app = create_app()
     layout = app.server.test_client().get("/_dash-layout").get_json()
@@ -44,7 +251,7 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert workspace_meta is not None
     cache_text = json.dumps(cache_card, ensure_ascii=False)
     assert "索引就绪状态" in cache_text
-    assert "危险操作：清理索引缓存" in cache_text
+    assert "危险操作：清理派生索引" in cache_text
     for component_id in (
         "data-prep-status",
         "data-prep-event-command",
@@ -67,8 +274,8 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "data-overrides-apply-btn" not in cache_text
     assert "等效 CLI 命令" in cache_text
     assert "data-rng-event-command" not in cache_text
-    assert "C/O/Cl 组成索引" in cache_text
-    assert "元素分布索引" not in cache_text
+    assert "元素分布索引" in cache_text
+    assert "C/O/Cl 组成索引" not in cache_text
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
@@ -161,7 +368,7 @@ def test_cache_build_background_callback_dispatches_and_returns(
         ensure_ascii=False,
     )
     paths = resolve_dataset_paths(tmp_path, base.name)
-    assert tmp_path / ".reacnet-scope" in paths.cache_dir.parents
+    assert tmp_path / ".reacnet-scope" in paths.workspace_dir.parents
     assert paths.event_index.is_file()
 
 
@@ -183,13 +390,11 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     trajectory = tmp_path / "run.lammpstrj"
-    route = Path(f"{trajectory}.route")
     reaction = Path(f"{trajectory}.reactionabcd")
     species = Path(f"{trajectory}.species")
     reactionevent = Path(f"{trajectory}.reactionevent.csv")
     molecules = Path(f"{trajectory}.molecules.csv")
     trajectory.write_text("ITEM: TIMESTEP\n0\n", encoding="utf-8")
-    route.write_text("Atom 1 C: 0 C -> 10 O\n", encoding="utf-8")
     reaction.write_text("1 C->O\n", encoding="utf-8")
     species.write_text("Timestep 0: C 1\n", encoding="utf-8")
     reactionevent.write_text("Timestep_Index,Reactant,Product\n0,C,O\n", encoding="utf-8")
@@ -197,26 +402,52 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
         "Timestep,Species,AtomIDs,BondIDs\n0,C,0,\n10,O,0,\n",
         encoding="utf-8",
     )
-    ROUTE_INDEX_STORE.build(str(route))
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
 
     payload = svc.dataset_preparation_status(str(tmp_path))
     assert payload["dataset_id"]
-    assert "/datasets/" in payload["cache_dir"]
-    assert payload["cache_configured"] is True
-    assert payload["cache_writable"] is True
+    assert "/datasets/" in payload["workspace_path"]
+    assert payload["workspace_resolved"] is True
+    assert payload["workspace_writable"] is True
     assert payload["events"]["state"] == "needs_preparation"
     assert payload["events"]["source_available"] is True
-    assert payload["trajectory"]["state"] == "missing"
+    assert payload["trajectory"]["state"] == "ready"
     assert payload["trajectory"]["source_available"] is True
     assert payload["rng_event_command"] == "--reaction-event --show-molecule-time"
     assert payload["event_command"].startswith("reacnet-scope prepare ")
     assert "reacnet-scope-prepare" not in payload["event_command"]
     assert "uv run" not in payload["event_command"]
 
-    cleared = svc.clear_dataset_index(str(tmp_path), kind="route")
+    cleared = svc.clear_dataset_index(str(tmp_path), kind="trajectory")
     assert cleared["released_bytes"] > 0
-    assert route.exists()
-    assert ROUTE_INDEX_STORE.status(str(route))["state"] == "missing"
+    assert trajectory.exists()
+    assert TRAJECTORY_INDEX_STORE.status(str(trajectory))["state"] == "missing"
+
+
+def test_dash_equivalent_prepare_command_runs_through_the_installed_cli(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    payload = svc.dataset_preparation_status(str(tmp_path), base=str(base))
+    environment = os.environ.copy()
+    environment.pop("REACNET_SCOPE_CACHE_DIR", None)
+
+    completed = subprocess.run(
+        shlex.split(payload["event_command"]),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
+        "state"
+    ] == "ready"
 
 
 def _event_only_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -248,7 +479,7 @@ def test_prepare_reports_ambiguous_dataset_as_cli_error(
     Path(f"{tmp_path / 'run-b.lammpstrj'}.reactionabcd").touch()
 
     try:
-        prepare.main([str(tmp_path), "--event-only"])
+        prepare.main(["build", "event", str(tmp_path)])
     except SystemExit as exc:
         assert exc.code == 2
     else:  # pragma: no cover - argparse errors must terminate the command
@@ -273,10 +504,10 @@ def test_installed_cli_exposes_prepare_command(tmp_path) -> None:
         [
             str(executable),
             "prepare",
+            "status",
             str(tmp_path),
             "--base",
             base.name,
-            "--status",
         ],
         check=False,
         capture_output=True,
@@ -286,6 +517,308 @@ def test_installed_cli_exposes_prepare_command(tmp_path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "Manifest:" in completed.stdout
+
+
+def test_installed_prepare_exposes_formal_operations_without_route_modes() -> None:
+    executable = Path(sys.executable).with_name("reacnet-scope")
+
+    completed = subprocess.run(
+        [str(executable), "prepare", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    for operation in ("status", "build", "rebuild", "cancel", "clear"):
+        assert operation in completed.stdout
+    assert "route" not in completed.stdout.casefold()
+
+
+def test_core_preparation_parser_has_no_route_mode(capsys) -> None:
+    try:
+        prepare.main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:  # pragma: no cover - argparse help always exits
+        raise AssertionError("prepare --help did not exit")
+
+    assert "route" not in capsys.readouterr().out.casefold()
+
+
+def test_installed_prepare_cancel_is_idempotent_without_an_active_task(
+    tmp_path,
+) -> None:
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("REACNET_SCOPE_CACHE_DIR", None)
+    executable = Path(sys.executable).with_name("reacnet-scope")
+
+    completed = subprocess.run(
+        [
+            str(executable),
+            "prepare",
+            "cancel",
+            "event",
+            str(tmp_path),
+            "--base",
+            base.name,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "No active event Preparation Task" in completed.stdout
+
+
+def test_cancel_all_marks_every_active_preparation_task(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    tasks = resolve_dataset_paths(tmp_path, base.name).workspace_dir / "tasks"
+    tasks.mkdir(parents=True)
+    for capability in ("event", "trajectory"):
+        (tasks / f"{capability}.json").write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "pid": 0,
+                    "capability": capability,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert prepare.request_cancellation(
+        str(tmp_path),
+        base=base.name,
+        capability="all",
+    ) is False
+
+    assert {
+        json.loads((tasks / f"{capability}.json").read_text())["state"]
+        for capability in ("event", "trajectory")
+    } == {"interrupted"}
+
+
+def test_duplicate_active_preparation_task_is_not_overwritten(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base, reactionevent, _molecules = _event_only_dataset(tmp_path)
+    dataset = prepare.discover_dataset(str(tmp_path), base.name)
+    task_path = (
+        resolve_dataset_paths(tmp_path, base.name).workspace_dir
+        / "tasks"
+        / "event.json"
+    )
+    task_path.parent.mkdir(parents=True)
+    original = {
+        "state": "running",
+        "pid": os.getpid(),
+        "process_start_token": prepare._process_start_token(os.getpid()),
+        "capability": "event",
+    }
+    task_path.write_text(json.dumps(original), encoding="utf-8")
+    operation_called = False
+
+    def operation(_report):
+        nonlocal operation_called
+        operation_called = True
+
+    returned = prepare._run_preparation_task(
+        dataset,
+        capability="event",
+        source_file=str(reactionevent),
+        action="build",
+        operation=operation,
+        report=lambda _update: None,
+    )
+
+    assert operation_called is False
+    assert returned == original
+    assert json.loads(task_path.read_text(encoding="utf-8")) == original
+
+
+def test_task_status_reclassifies_dead_worker_and_preserves_checkpoint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    dataset = prepare.discover_dataset(str(tmp_path), base.name)
+    task_path = prepare._preparation_task_path(dataset, "event")
+    task_path.parent.mkdir(parents=True)
+    task_path.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "pid": 99999999,
+                "process_start_token": "gone",
+                "checkpoint": {"source_offset": 42},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = prepare.preparation_task_status(
+        str(tmp_path), base=base.name, capability="event"
+    )
+
+    assert status["state"] == "interrupted"
+    assert status["checkpoint"] == {"source_offset": 42}
+    assert json.loads(task_path.read_text(encoding="utf-8"))["state"] == "interrupted"
+
+
+def test_rebuild_returns_active_task_before_clearing_index(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    dataset = prepare.discover_dataset(str(tmp_path), base.name)
+    task_path = prepare._preparation_task_path(dataset, "event")
+    task_path.parent.mkdir(parents=True)
+    task_path.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "pid": os.getpid(),
+                "process_start_token": prepare._process_start_token(os.getpid()),
+                "capability": "event",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        prepare.EVENT_EVIDENCE_STORE,
+        "clear",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("active rebuild must not clear")
+        ),
+    )
+
+    assert prepare.run_preparation(
+        action="rebuild",
+        case=str(tmp_path),
+        base=base.name,
+        capability="event",
+    ) == 0
+    assert "existing_preparation_task" in capsys.readouterr().out
+
+
+def test_macos_process_start_token_uses_process_creation_text(
+    monkeypatch,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        ["ps"], 0, stdout="Mon Aug  3 12:34:56 2026\n", stderr=""
+    )
+    monkeypatch.setattr(prepare.sys, "platform", "darwin")
+    monkeypatch.setattr(prepare.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    assert prepare._process_start_token(321) == "Mon Aug  3 12:34:56 2026"
+
+
+def test_installed_prepare_cancels_an_active_task_and_records_the_result(
+    tmp_path,
+) -> None:
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionabcd").write_text("1 [C]->[C]\n", encoding="utf-8")
+    Path(f"{base}.species").write_text(
+        "".join(
+            f"Timestep {timestep}: [C] 1 [O] 1\n"
+            for timestep in range(300_000)
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("REACNET_SCOPE_CACHE_DIR", None)
+    executable = Path(sys.executable).with_name("reacnet-scope")
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    task_path = paths.workspace_dir / "tasks" / "composition.json"
+    builder = subprocess.Popen(
+        [
+            str(executable),
+            "prepare",
+            "build",
+            "element-distribution",
+            str(tmp_path),
+            "--base",
+            base.name,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not task_path.is_file():
+            if builder.poll() is not None:
+                break
+            time.sleep(0.01)
+        assert task_path.is_file(), builder.communicate(timeout=5)
+
+        canceled = subprocess.run(
+            [
+                str(executable),
+                "prepare",
+                "cancel",
+                "element-distribution",
+                str(tmp_path),
+                "--base",
+                base.name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        stdout, stderr = builder.communicate(timeout=10)
+    finally:
+        if builder.poll() is None:
+            builder.terminate()
+            builder.wait(timeout=5)
+
+    assert canceled.returncode == 0, canceled.stderr
+    assert "Cancellation requested" in canceled.stdout
+    assert builder.returncode == 130, (stdout, stderr)
+    assert json.loads(task_path.read_text(encoding="utf-8"))["state"] == "canceled"
+
+
+def test_project_exports_only_the_unified_reacnet_scope_command() -> None:
+    project = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert project["project"]["scripts"] == {
+        "reacnet-scope": "scripts.rng_query_cli:main"
+    }
+
+
+def test_unified_cli_exposes_dash_serve_options() -> None:
+    executable = Path(sys.executable).with_name("reacnet-scope")
+
+    completed = subprocess.run(
+        [str(executable), "serve", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--host" in completed.stdout
+    assert "--port" in completed.stdout
+    assert "Dash" in completed.stdout
 
 
 def test_installed_prepare_uses_local_sidecar_without_cache_override(
@@ -302,10 +835,11 @@ def test_installed_prepare_uses_local_sidecar_without_cache_override(
         [
             str(executable),
             "prepare",
+            "build",
+            "event",
             str(tmp_path),
             "--base",
             base.name,
-            "--event-only",
         ],
         check=False,
         capture_output=True,
@@ -315,7 +849,7 @@ def test_installed_prepare_uses_local_sidecar_without_cache_override(
 
     assert completed.returncode == 0, completed.stderr
     paths = resolve_dataset_paths(tmp_path, base.name)
-    assert tmp_path / ".reacnet-scope" in paths.cache_dir.parents
+    assert tmp_path / ".reacnet-scope" in paths.workspace_dir.parents
     assert paths.event_index.is_file()
 
     source_bytes = Path(f"{base}.reactionevent.csv").read_bytes()
@@ -323,11 +857,11 @@ def test_installed_prepare_uses_local_sidecar_without_cache_override(
         [
             str(executable),
             "prepare",
+            "clear",
+            "event",
             str(tmp_path),
             "--base",
             base.name,
-            "--clear",
-            "event",
         ],
         check=False,
         capture_output=True,
@@ -338,6 +872,127 @@ def test_installed_prepare_uses_local_sidecar_without_cache_override(
     assert cleared.returncode == 0, cleared.stderr
     assert Path(f"{base}.reactionevent.csv").read_bytes() == source_bytes
     assert not paths.event_index.exists()
+
+
+def test_local_workspace_identity_survives_a_dataset_directory_move(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    base, _reactionevent, _molecules = _event_only_dataset(original)
+    before = resolve_dataset_paths(original, base.name)
+
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    after = resolve_dataset_paths(moved, base.name)
+
+    assert after.dataset_id == before.dataset_id
+    assert after.workspace_dir == moved / ".reacnet-scope" / "datasets" / before.dataset_id
+
+
+def test_active_dataset_copy_gets_an_independent_move_stable_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    base, _reactionevent, _molecules = _event_only_dataset(original)
+    original_paths = resolve_dataset_paths(original, base.name)
+
+    copied = tmp_path / "copied"
+    shutil.copytree(original, copied)
+    copied_paths = resolve_dataset_paths(copied, base.name)
+    assert copied_paths.dataset_id != original_paths.dataset_id
+
+    moved_copy = tmp_path / "moved-copy"
+    copied.rename(moved_copy)
+    moved_paths = resolve_dataset_paths(moved_copy, base.name)
+
+    assert moved_paths.dataset_id == copied_paths.dataset_id
+    assert resolve_dataset_paths(original, base.name).dataset_id == original_paths.dataset_id
+
+
+def test_moved_dataset_reuses_compatible_sidecar_indexes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original"
+    original.mkdir()
+    base, reactionevent, molecules = _event_only_dataset(original)
+    assert prepare.main(["build", "event", str(original)]) == 0
+    before = resolve_dataset_paths(original, base.name)
+
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    moved_reactionevent = moved / reactionevent.name
+    moved_molecules = moved / molecules.name
+
+    status = EVENT_EVIDENCE_STORE.status(
+        str(moved_reactionevent),
+        str(moved_molecules),
+    )
+
+    assert resolve_dataset_paths(moved, base.name).dataset_id == before.dataset_id
+    assert status["state"] == "ready"
+
+
+def test_moved_dataset_reuses_compatible_trajectory_index(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    original = tmp_path / "original-trajectory"
+    original.mkdir()
+    trajectory = original / "run.lammpstrj"
+    trajectory.write_text(
+        "ITEM: TIMESTEP\n0\n"
+        "ITEM: NUMBER OF ATOMS\n1\n"
+        "ITEM: BOX BOUNDS pp pp pp\n0 10\n0 10\n0 10\n"
+        "ITEM: ATOMS id type x y z\n1 1 1 1 1\n",
+        encoding="utf-8",
+    )
+    Path(f"{trajectory}.reactionabcd").write_text(
+        "1 [H]->[H]\n",
+        encoding="utf-8",
+    )
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    before = resolve_dataset_paths(original, trajectory.name)
+
+    moved = tmp_path / "moved-trajectory"
+    original.rename(moved)
+    moved_trajectory = moved / trajectory.name
+
+    opened = TRAJECTORY_INDEX_STORE.open_required(str(moved_trajectory))
+
+    assert opened.frames == [0]
+    assert resolve_dataset_paths(moved, trajectory.name).dataset_id == before.dataset_id
+
+
+def test_remote_dataset_uses_the_platform_workspace_without_configuration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "user-data"))
+    dataset = tmp_path / "remote-dataset"
+    dataset.mkdir()
+    base, _reactionevent, _molecules = _event_only_dataset(dataset)
+    policy = WorkspacePolicy(filesystem_type=lambda _path: "nfs")
+
+    paths = resolve_dataset_paths(
+        dataset,
+        base.name,
+        workspace_policy=policy,
+    )
+
+    assert dataset / ".reacnet-scope" not in paths.workspace_dir.parents
+    assert tmp_path / "user-data" / "reacnet-scope" / "workspaces" in (
+        paths.workspace_dir.parents
+    )
 
 
 def test_installed_prepare_safely_clears_local_sidecar_index(
@@ -361,13 +1016,17 @@ def test_installed_prepare_safely_clears_local_sidecar_index(
     command = [
         str(executable),
         "prepare",
-        str(tmp_path),
-        "--base",
-        base.name,
     ]
 
     built = subprocess.run(
-        [*command, "--trajectory-only"],
+        [
+            *command,
+            "build",
+            "trajectory",
+            str(tmp_path),
+            "--base",
+            base.name,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -378,7 +1037,14 @@ def test_installed_prepare_safely_clears_local_sidecar_index(
     assert paths.trajectory_index.is_file()
 
     cleared = subprocess.run(
-        [*command, "--clear", "trajectory"],
+        [
+            *command,
+            "clear",
+            "trajectory",
+            str(tmp_path),
+            "--base",
+            base.name,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -396,7 +1062,7 @@ def test_prepare_event_only_builds_manifest_v3_and_safe_clear(
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     base, reactionevent, molecules = _event_only_dataset(tmp_path)
 
-    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    assert prepare.main(["build", "event", str(tmp_path)]) == 0
 
     paths = resolve_dataset_paths(tmp_path, base.name)
     manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
@@ -404,12 +1070,12 @@ def test_prepare_event_only_builds_manifest_v3_and_safe_clear(
     assert manifest["indexes"]["rng_events"]["kind"] == "legacy_csv"
     assert manifest["indexes"]["event"]["state"] == "ready"
     assert manifest["settings"] == {
-        "path": str(paths.cache_dir / "dataset-settings.json"),
+        "path": str(paths.workspace_dir / "dataset-settings.json"),
         "exists": False,
     }
 
     source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
-    assert prepare.main([str(tmp_path), "--clear", "event"]) == 0
+    assert prepare.main(["clear", "event", str(tmp_path)]) == 0
     assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
@@ -426,12 +1092,12 @@ def test_ui_preparation_service_builds_and_rebuilds_rng_event_cache(
     base, reactionevent, molecules = _event_only_dataset(tmp_path)
     source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
 
-    built = svc.prepare_dataset_cache(
+    built = svc.prepare_dataset_workspace(
         str(tmp_path),
         base=str(base),
         kind="event",
     )
-    rebuilt = svc.prepare_dataset_cache(
+    rebuilt = svc.prepare_dataset_workspace(
         str(tmp_path),
         base=str(base),
         kind="event",
@@ -459,16 +1125,16 @@ def test_ui_preparation_service_rejects_an_unwritable_cache_target(
     base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
 
     status = svc.dataset_preparation_status(str(tmp_path), base=str(base))
-    assert status["cache_writable"] is False
+    assert status["workspace_writable"] is False
 
     try:
-        svc.prepare_dataset_cache(
+        svc.prepare_dataset_workspace(
             str(tmp_path),
             base=str(base),
             kind="event",
         )
     except svc.ServiceError as exc:
-        assert exc.reason == "cache_not_writable"
+        assert exc.reason == "workspace_not_writable"
     else:  # pragma: no cover - the service must reject this target
         raise AssertionError("unwritable cache target was accepted")
 
@@ -489,12 +1155,12 @@ def test_ui_preparation_service_builds_trajectory_and_composition_caches(
     species.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
     source_bytes = base.read_bytes(), species.read_bytes()
 
-    trajectory = svc.prepare_dataset_cache(
+    trajectory = svc.prepare_dataset_workspace(
         str(tmp_path),
         base=str(base),
         kind="trajectory",
     )
-    composition = svc.prepare_dataset_cache(
+    composition = svc.prepare_dataset_workspace(
         str(tmp_path),
         base=str(base),
         kind="composition",
@@ -505,6 +1171,30 @@ def test_ui_preparation_service_builds_trajectory_and_composition_caches(
     assert composition["status"]["state"] == "ready"
     assert composition["status"]["timepoints"] == 1
     assert (base.read_bytes(), species.read_bytes()) == source_bytes
+
+
+def test_dash_cancel_service_uses_persisted_preparation_task(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_cancel(case, *, base="", capability):
+        calls.append((case, base, capability))
+        return True
+
+    monkeypatch.setattr(prepare, "request_cancellation", fake_cancel)
+
+    result = svc.cancel_dataset_preparation(
+        str(tmp_path), base=str(base), kind="all"
+    )
+
+    assert result["cancellation_requested"] is True
+    assert calls == [(str(tmp_path.resolve()), base.name, "all")]
 
 
 def test_ui_clear_service_manages_all_visible_index_types(
@@ -527,7 +1217,7 @@ def test_ui_clear_service_manages_all_visible_index_types(
     }
 
     for kind in ("event", "trajectory", "composition"):
-        built = svc.prepare_dataset_cache(
+        built = svc.prepare_dataset_workspace(
             str(tmp_path),
             base=str(base),
             kind=kind,
@@ -557,7 +1247,7 @@ def test_default_preparation_builds_available_event_index(
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     _base, reactionevent, molecules = _event_only_dataset(tmp_path)
 
-    assert prepare.main([str(tmp_path)]) == 0
+    assert prepare.main(["build", "all", str(tmp_path)]) == 0
 
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
@@ -571,7 +1261,7 @@ def test_event_only_discovers_paired_rng_outputs_without_reaction_file(
     base, reactionevent, molecules = _event_only_dataset(tmp_path)
     Path(f"{base}.reactionabcd").unlink()
 
-    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    assert prepare.main(["build", "event", str(tmp_path)]) == 0
 
     assert EVENT_EVIDENCE_STORE.status(str(reactionevent), str(molecules))[
         "state"
@@ -586,7 +1276,7 @@ def test_event_only_prepares_unpaired_reactionevent(
     Path(f"{base}.reactionabcd").unlink()
     molecules.unlink()
 
-    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    assert prepare.main(["build", "event", str(tmp_path)]) == 0
 
     status = EVENT_EVIDENCE_STORE.status(str(reactionevent), "")
     assert status["state"] == "ready"
@@ -599,7 +1289,7 @@ def test_prepare_can_clear_event_cache_after_sources_are_removed(
 ) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     base, reactionevent, molecules = _event_only_dataset(tmp_path)
-    assert prepare.main([str(tmp_path), "--event-only"]) == 0
+    assert prepare.main(["build", "event", str(tmp_path)]) == 0
     index_path = resolve_dataset_paths(tmp_path, base.name).event_index
     reactionevent.unlink()
     molecules.unlink()
@@ -607,11 +1297,11 @@ def test_prepare_can_clear_event_cache_after_sources_are_removed(
     assert (
         prepare.main(
             [
+                "clear",
+                "event",
                 str(tmp_path),
                 "--base",
                 base.name,
-                "--clear",
-                "event",
             ]
         )
         == 0
@@ -626,7 +1316,7 @@ def test_scan_dataset_reads_version_one_manifest(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
     paths = resolve_dataset_paths(tmp_path, base.name)
-    paths.cache_dir.mkdir(parents=True)
+    paths.workspace_dir.mkdir(parents=True)
     paths.manifest.write_text(
         json.dumps(
             {

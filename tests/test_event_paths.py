@@ -13,7 +13,7 @@ from reacnet_scope.event_paths import (
     analyze_event_paths,
     enumerate_aggregate_reaction_paths,
 )
-from rng_tools.network import Reaction
+from reacnet_scope.network import Reaction
 from scripts import rng_query_cli as cli
 
 

@@ -13,7 +13,7 @@
 
 此外还需要：
 
-- 已由 `reacnet-scope-prepare ... --event-only` 建好的事件索引；
+- 已由 `reacnet-scope prepare build event ...` 建好的事件索引；
 - `.reactionabcd`（可选但推荐）：用于比较聚合网络可达路径与实际路径。
 
 只有 Reaction Evidence 的索引可以检索事件和判断事件先后，但没有分子实例与
@@ -152,13 +152,13 @@ Dash 的“反应路径”页面把两个证据层级串成一个工作流：
 
 ## CLI
 
-先为每个重复实验准备索引，并确保准备和查询使用同一个持久缓存目录：
+先为每个重复实验准备索引，并确保准备和查询使用同一个持久 Dataset Workspace：
 
 ```bash
 export REACNET_SCOPE_CACHE_DIR=/data/reacnet-cache
 
-uv run reacnet-scope-prepare /data/case/rep1 --event-only
-uv run reacnet-scope-prepare /data/case/rep2 --event-only
+uv run reacnet-scope prepare build event /data/case/rep1
+uv run reacnet-scope prepare build event /data/case/rep2
 ```
 
 下例中的 `/data/case/...` 是需要替换的路径占位符。`--source` 的右侧是 RNG
@@ -177,7 +177,7 @@ uv run reacnet-scope event-paths \
 ```bash
 export REACNET_SCOPE_CACHE_DIR="$PWD/.cache/reacnet-scope"
 
-uv run reacnet-scope-prepare ref_data/rng-test-rp3-0523 --event-only
+uv run reacnet-scope prepare build event ref_data/rng-test-rp3-0523
 uv run reacnet-scope event-paths \
   --source rp3="$PWD/ref_data/rng-test-rp3-0523/rp3.lammpstrj" \
   --top 2 \
