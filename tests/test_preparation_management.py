@@ -42,10 +42,6 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "危险操作：清理索引缓存" in cache_text
     for component_id in (
         "data-prep-status",
-        "data-rng-event-command",
-        "data-prep-event-command",
-        "data-prep-trajectory-command",
-        "data-prep-composition-command",
         "data-prep-event-btn",
         "data-prep-trajectory-btn",
         "data-prep-composition-btn",
@@ -58,6 +54,10 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "路径覆盖与高级设置" not in cache_text
     assert "data-global-min-tp" not in cache_text
     assert "data-overrides-apply-btn" not in cache_text
+    assert "维护" not in cache_text
+    assert "离线准备命令" not in cache_text
+    assert "data-rng-event-command" not in cache_text
+    assert "data-prep-composition-command" not in cache_text
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:

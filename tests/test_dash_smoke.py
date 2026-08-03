@@ -176,7 +176,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-scan-btn" not in layout_ids
     assert "data-prep-status" in layout_ids
     assert "data-prep-refresh-btn" in layout_ids
-    assert "data-rng-event-command" in layout_ids
+    assert "data-rng-event-command" not in layout_ids
     assert "data-clear-event-btn" in layout_ids
     assert "data-clear-trajectory-btn" in layout_ids
     assert "data-clear-composition-btn" in layout_ids
@@ -2631,20 +2631,11 @@ def _preparation_status_callback_payload(
             {"id": "data-prep-event-status", "property": "children"},
             {"id": "data-prep-trajectory-status", "property": "children"},
             {"id": "data-prep-composition-status", "property": "children"},
-            {"id": "data-prep-cache-meta", "property": "children"},
             {"id": "data-prep-status-alert", "property": "children"},
             {"id": "data-next-action", "property": "children"},
             {"id": "topbar-index-status", "property": "children"},
             {"id": "topbar-index-status", "property": "className"},
             {"id": "data-prep-refresh-label", "property": "children"},
-            {"id": "data-rng-event-command", "property": "children"},
-            {"id": "data-prep-event-command", "property": "children"},
-            {"id": "data-prep-trajectory-command", "property": "children"},
-            {"id": "data-prep-composition-command", "property": "children"},
-            {"id": "data-rng-event-copy", "property": "content"},
-            {"id": "data-prep-event-copy", "property": "content"},
-            {"id": "data-prep-trajectory-copy", "property": "content"},
-            {"id": "data-prep-composition-copy", "property": "content"},
             {"id": "data-clear-event-btn", "property": "disabled"},
             {"id": "data-clear-trajectory-btn", "property": "disabled"},
             {"id": "data-clear-composition-btn", "property": "disabled"},

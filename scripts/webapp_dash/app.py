@@ -2836,32 +2836,6 @@ def _data_index_readiness_row(
 
 
 def _data_cache_management_card() -> html.Div:
-    command_rows = [
-        (
-            "ReacNetGenerator 事件输出参数",
-            "data-rng-event-command",
-            "data-rng-event-copy",
-            "复制 RNG 事件输出参数",
-        ),
-        (
-            "事件索引准备命令",
-            "data-prep-event-command",
-            "data-prep-event-copy",
-            "复制事件索引准备命令",
-        ),
-        (
-            "轨迹索引准备命令",
-            "data-prep-trajectory-command",
-            "data-prep-trajectory-copy",
-            "复制轨迹索引准备命令",
-        ),
-        (
-            "C/O/Cl 组成索引准备命令",
-            "data-prep-composition-command",
-            "data-prep-composition-copy",
-            "复制组成索引准备命令",
-        ),
-    ]
     return html.Div(
         [
             html.Section(
@@ -2942,48 +2916,6 @@ def _data_cache_management_card() -> html.Div:
                     html.Div(id="data-prep-action-alert", className="rs-index-action-alert"),
                 ],
                 className="rs-data-section rs-index-readiness-section",
-            ),
-            html.Details(
-                [
-                    html.Summary(
-                        [
-                            html.Span("维护"),
-                            html.Small("缓存信息 · 离线准备命令"),
-                        ]
-                    ),
-                    html.Div(
-                        [
-                            html.Div(
-                                id="data-prep-cache-meta",
-                                className="rs-cache-meta",
-                            ),
-                            *[
-                                html.Div(
-                                    [
-                                        html.Div(label, className="rs-command-label"),
-                                        html.Div(
-                                            [
-                                                html.Code(
-                                                    id=command_id,
-                                                    className="small flex-grow-1",
-                                                ),
-                                                dcc.Clipboard(
-                                                    id=copy_id,
-                                                    title=copy_title,
-                                                ),
-                                            ],
-                                            className="rs-command-line",
-                                        ),
-                                    ],
-                                    className="rs-maintenance-command",
-                                )
-                                for label, command_id, copy_id, copy_title in command_rows
-                            ],
-                        ],
-                        className="rs-maintenance-body",
-                    ),
-                ],
-                className="rs-data-collapsible rs-maintenance-section",
             ),
             html.Div(id="data-prep-clear-alert", className="rs-index-clear-alert"),
             html.Details(

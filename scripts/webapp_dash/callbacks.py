@@ -548,38 +548,6 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         if updated
         else "-"
     )
-    cache_dir = str(payload.get("cache_dir") or "未配置")
-    meta = html.Details(
-        [
-            html.Summary(
-                f"缓存详情 · 索引占用 {_format_bytes(payload.get('index_bytes'))} · 最后更新 {updated_text}"
-            ),
-            html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Span("数据集 ID"),
-                            html.Code(payload.get("dataset_id") or "-"),
-                        ],
-                        className="rs-cache-meta-row",
-                    ),
-                    html.Div(
-                        [
-                            html.Span("缓存目录"),
-                            html.Code(cache_dir, className="rs-cache-path"),
-                            dcc.Clipboard(
-                                content=cache_dir,
-                                title="复制缓存目录",
-                            ),
-                        ],
-                        className="rs-cache-meta-row",
-                    ),
-                ],
-                className="rs-cache-meta-details",
-            )
-        ],
-        className="rs-cache-meta-details-shell",
-    )
     recommended_kind = _recommended_preparation_kind(payload)
     items = {
         "basic": ("基础分析文件", payload.get("basic") or {}),
@@ -608,7 +576,6 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         "event": _render_preparation_item(*items["event"]),
         "trajectory": _render_preparation_item(*items["trajectory"]),
         "composition": _render_preparation_item(*items["composition"]),
-        "meta": meta,
         "alert": alert,
         "next_action": _render_next_preparation_action(recommended_kind),
         "global_status": global_status,
@@ -1237,20 +1204,11 @@ def register_callbacks(app: Any) -> None:
         Output("data-prep-event-status", "children"),
         Output("data-prep-trajectory-status", "children"),
         Output("data-prep-composition-status", "children"),
-        Output("data-prep-cache-meta", "children"),
         Output("data-prep-status-alert", "children"),
         Output("data-next-action", "children"),
         Output("topbar-index-status", "children"),
         Output("topbar-index-status", "className"),
         Output("data-prep-refresh-label", "children"),
-        Output("data-rng-event-command", "children"),
-        Output("data-prep-event-command", "children"),
-        Output("data-prep-trajectory-command", "children"),
-        Output("data-prep-composition-command", "children"),
-        Output("data-rng-event-copy", "content"),
-        Output("data-prep-event-copy", "content"),
-        Output("data-prep-trajectory-copy", "content"),
-        Output("data-prep-composition-copy", "content"),
         Output("data-clear-event-btn", "disabled"),
         Output("data-clear-trajectory-btn", "disabled"),
         Output("data-clear-composition-btn", "disabled"),
@@ -1267,9 +1225,9 @@ def register_callbacks(app: Any) -> None:
     def _refresh_preparation_status(page_store, _refresh_clicks, _tick, candidate, app_store):
         if (page_store or {}).get("page") != "data-management":
             return (
-                "", "", "", "", "", "", "", "",
-                "rs-index-global-state", "状态自动刷新", "", "", "", "",
-                "", "", "", "", True, True, True, True,
+                "", "", "", "", "", "", "",
+                "rs-index-global-state", "状态自动刷新",
+                True, True, True, True,
                 "rs-index-action", "rs-index-action", "rs-index-action",
             )
         try:
@@ -1281,17 +1239,17 @@ def register_callbacks(app: Any) -> None:
         except svc.ServiceError as exc:
             error = str(exc.message)
             return (
-                "", "", "", "", "", error, "", "状态不可用",
-                "rs-index-global-state is-partial", "状态读取失败", "", "", "", "",
-                "", "", "", "", True, True, True, False,
+                "", "", "", "", error, "", "状态不可用",
+                "rs-index-global-state is-partial", "状态读取失败",
+                True, True, True, False,
                 "rs-index-action", "rs-index-action", "rs-index-action",
             )
         except Exception as exc:
             error = f"读取准备状态失败: {exc}"
             return (
-                "", "", "", "", "", error, "", "状态不可用",
-                "rs-index-global-state is-partial", "状态读取失败", "", "", "", "",
-                "", "", "", "", True, True, True, False,
+                "", "", "", "", error, "", "状态不可用",
+                "rs-index-global-state is-partial", "状态读取失败",
+                True, True, True, False,
                 "rs-index-action", "rs-index-action", "rs-index-action",
             )
 
@@ -1321,20 +1279,11 @@ def register_callbacks(app: Any) -> None:
             rendered["event"],
             rendered["trajectory"],
             rendered["composition"],
-            rendered["meta"],
             rendered["alert"],
             rendered["next_action"],
             rendered["global_status"],
             rendered["global_class"],
             rendered["refresh_label"],
-            payload.get("rng_event_command") or "",
-            payload.get("event_command") or "",
-            payload.get("trajectory_command") or "",
-            payload.get("composition_command") or "",
-            payload.get("rng_event_command") or "",
-            payload.get("event_command") or "",
-            payload.get("trajectory_command") or "",
-            payload.get("composition_command") or "",
             clear_disabled(events),
             clear_disabled(trajectory),
             clear_disabled(composition),
