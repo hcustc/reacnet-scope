@@ -2631,11 +2631,18 @@ def _preparation_status_callback_payload(
             {"id": "data-prep-event-status", "property": "children"},
             {"id": "data-prep-trajectory-status", "property": "children"},
             {"id": "data-prep-composition-status", "property": "children"},
+            {"id": "data-prep-cache-meta", "property": "children"},
             {"id": "data-prep-status-alert", "property": "children"},
             {"id": "data-next-action", "property": "children"},
             {"id": "topbar-index-status", "property": "children"},
             {"id": "topbar-index-status", "property": "className"},
             {"id": "data-prep-refresh-label", "property": "children"},
+            {"id": "data-prep-event-command", "property": "children"},
+            {"id": "data-prep-trajectory-command", "property": "children"},
+            {"id": "data-prep-composition-command", "property": "children"},
+            {"id": "data-prep-event-copy", "property": "content"},
+            {"id": "data-prep-trajectory-copy", "property": "content"},
+            {"id": "data-prep-composition-copy", "property": "content"},
             {"id": "data-clear-event-btn", "property": "disabled"},
             {"id": "data-clear-trajectory-btn", "property": "disabled"},
             {"id": "data-clear-composition-btn", "property": "disabled"},
@@ -2854,9 +2861,12 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
         preparation_calls.append((folder, base))
         return {
             "trajectory": {"state": "ready"},
-            "rng_event_command": "rng",
-            "trajectory_command": "trajectory",
-            "composition_command": "composition",
+            "dataset_id": "dataset-public-id",
+            "cache_dir": "/workspace/dataset-public-id",
+            "index_bytes": 2048,
+            "event_command": "reacnet-scope prepare event",
+            "trajectory_command": "reacnet-scope prepare trajectory",
+            "composition_command": "reacnet-scope prepare element-distribution",
         }
 
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
@@ -2876,7 +2886,31 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
 
     assert response.status_code == 200
     assert preparation_calls == [(candidate["folder"], candidate["base"])]
-    assert response.get_json()["response"]["data-clear-trajectory-btn"]["disabled"] is False
+    result = response.get_json()["response"]
+    assert result["data-clear-trajectory-btn"]["disabled"] is False
+    workspace_meta = json.dumps(
+        result["data-prep-cache-meta"]["children"],
+        ensure_ascii=False,
+    )
+    assert "dataset-public-id" in workspace_meta
+    assert "/workspace/dataset-public-id" in workspace_meta
+    assert "2.0 KiB" in workspace_meta
+    for component_id, command in (
+        ("data-prep-event-command", "reacnet-scope prepare event"),
+        ("data-prep-trajectory-command", "reacnet-scope prepare trajectory"),
+        (
+            "data-prep-composition-command",
+            "reacnet-scope prepare element-distribution",
+        ),
+        ("data-prep-event-copy", "reacnet-scope prepare event"),
+        ("data-prep-trajectory-copy", "reacnet-scope prepare trajectory"),
+        (
+            "data-prep-composition-copy",
+            "reacnet-scope prepare element-distribution",
+        ),
+    ):
+        property_name = "content" if component_id.endswith("-copy") else "children"
+        assert result[component_id][property_name] == command
 
 
 def test_clear_confirmation_rejects_untrusted_candidate_before_status_service(

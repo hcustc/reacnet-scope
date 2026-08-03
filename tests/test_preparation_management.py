@@ -33,15 +33,23 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     layout = app.server.test_client().get("/_dash-layout").get_json()
     cache_card = _layout_node_by_id(layout, "data-cache-management")
     details = _layout_node_by_id(layout, "data-advanced-tools")
+    workspace_meta = _layout_node_by_id(layout, "data-prep-cache-meta")
 
     assert cache_card is not None
     assert cache_card["type"] == "Div"
     assert details is None
+    assert workspace_meta is not None
     cache_text = json.dumps(cache_card, ensure_ascii=False)
     assert "索引就绪状态" in cache_text
     assert "危险操作：清理索引缓存" in cache_text
     for component_id in (
         "data-prep-status",
+        "data-prep-event-command",
+        "data-prep-event-copy",
+        "data-prep-trajectory-command",
+        "data-prep-trajectory-copy",
+        "data-prep-composition-command",
+        "data-prep-composition-copy",
         "data-prep-event-btn",
         "data-prep-trajectory-btn",
         "data-prep-composition-btn",
@@ -54,10 +62,8 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "路径覆盖与高级设置" not in cache_text
     assert "data-global-min-tp" not in cache_text
     assert "data-overrides-apply-btn" not in cache_text
-    assert "维护" not in cache_text
-    assert "离线准备命令" not in cache_text
+    assert "等效 CLI 命令" in cache_text
     assert "data-rng-event-command" not in cache_text
-    assert "data-prep-composition-command" not in cache_text
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
