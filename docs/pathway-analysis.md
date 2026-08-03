@@ -153,14 +153,15 @@ path_score =
 
 ## 人工准备事件索引
 
-ReacNetGenerator 运行时至少需要生成事件；分子时间线是可选的增强证据：
+ReacNetGenerator 运行时至少需要生成 Reaction Evidence；Molecular Evidence 是
+可选增强。最新版本的 `.timeline.h5` 会自动选择，旧版 CSV 可使用：
 
 ```text
 --reaction-event [--show-molecule-time]
 ```
 
 候选路径请求本身始终是只读的：它不会构建索引，也不会顺序扫描
-`.reactionevent.csv` 或 `.molecules.csv`。请先给准备命令和运行 CLI/Dash
+`.timeline.h5`、`.reactionevent.csv` 或 `.molecules.csv`。请先给准备命令和运行 CLI/Dash
 的进程设置同一个持久、可写缓存目录：
 
 ```bash
@@ -178,11 +179,12 @@ uv run reacnet-scope-prepare "/data/case with spaces" --rebuild event
 ```
 
 准备工作应在独立终端或作业中运行。不要把示例目录原样使用；替换为服务器上
-真实的数据目录和缓存目录。CLI 会由 `--reac` 自动推导同前缀的
-`.reactionevent.csv` 与 `.molecules.csv`，例如：
+真实的数据目录和缓存目录。CLI 会优先自动发现同前缀 `.timeline.h5`，不存在时
+推导 `.reactionevent.csv` 与 `.molecules.csv`，例如：
 
 ```text
 run.lammpstrj.reactionabcd
+run.lammpstrj.timeline.h5
 run.lammpstrj.reactionevent.csv
 run.lammpstrj.molecules.csv
 ```

@@ -60,8 +60,13 @@ class EventPathSource:
             raise ValueError("replicate is required")
         if not reactionevent_file:
             raise ValueError("reactionevent_file is required")
-        if not molecules_file:
-            raise ValueError("molecules_file is required")
+        if (
+            not molecules_file
+            and not reactionevent_file.lower().endswith(".timeline.h5")
+        ):
+            raise ValueError(
+                "molecules_file is required for legacy CSV evidence"
+            )
         object.__setattr__(self, "replicate", replicate)
         object.__setattr__(self, "reactionevent_file", reactionevent_file)
         object.__setattr__(self, "molecules_file", molecules_file)
@@ -187,7 +192,7 @@ def _load_event_nodes(source: EventPathSource) -> tuple[list[_EventNode], dict[s
     if not opened["association_available"]:
         raise EventPathAnalysisError(
             f"repeat {source.replicate!r} has no molecule/atom association; "
-            "rebuild the event index with .molecules.csv"
+            "rebuild the event index with molecular evidence"
         )
     connection = _readonly_connection(Path(opened["index_path"]))
     nodes: list[_EventNode] = []
@@ -948,7 +953,11 @@ def analyze_event_paths(
                 "reactionevent_file": os.path.abspath(
                     source.reactionevent_file
                 ),
-                "molecules_file": os.path.abspath(source.molecules_file),
+                "molecules_file": (
+                    os.path.abspath(source.molecules_file)
+                    if source.molecules_file
+                    else ""
+                ),
                 "reaction_file": (
                     os.path.abspath(source.reaction_file)
                     if source.reaction_file

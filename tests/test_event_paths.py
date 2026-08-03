@@ -401,6 +401,17 @@ def test_event_paths_cli_accepts_repeat_prefixes_and_exports_report(
     assert "realization_rate=0.25" in terminal
 
 
+def test_event_paths_cli_source_prefers_native_timeline(tmp_path: Path) -> None:
+    base = tmp_path / "run.lammpstrj"
+    timeline = Path(f"{base}.timeline.h5")
+    timeline.touch()
+
+    source = cli._event_path_source_from_spec(f"native={base}")
+
+    assert source.reactionevent_file == str(timeline)
+    assert source.molecules_file == ""
+
+
 def test_event_paths_cli_rejects_malformed_source_without_traceback(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

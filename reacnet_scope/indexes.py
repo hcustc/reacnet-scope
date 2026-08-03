@@ -36,6 +36,7 @@ _TRAJECTORY_REQUIRED_TABLE_COLUMNS = {
     "frames": {"timestep", "byte_start", "byte_end"},
 }
 DATASET_SUFFIXES = (
+    ".timeline.h5",
     ".reactionevent.csv",
     ".molecules.csv",
     ".reactionabcd",

@@ -149,15 +149,25 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
         )
         dataset = payload.get("dataset", {}) or {}
         artifacts = dataset.get("artifacts", {}) or {}
+        timeline = str(
+            (artifacts.get("timeline") or {}).get("path") or ""
+        )
         reactionevent = str(
             (artifacts.get("reactionevent") or {}).get("path") or ""
         )
         molecules = str((artifacts.get("molecules") or {}).get("path") or "")
-        if reactionevent:
+        event_primary = timeline if timeline and Path(timeline).is_file() else reactionevent
+        if event_primary:
             try:
                 event_status = EVENT_EVIDENCE_STORE.status(
-                    reactionevent,
-                    molecules if molecules and Path(molecules).is_file() else "",
+                    event_primary,
+                    (
+                        molecules
+                        if event_primary == reactionevent
+                        and molecules
+                        and Path(molecules).is_file()
+                        else ""
+                    ),
                 )
             except RuntimeError as exc:
                 event_status = {"state": "invalid", "message": str(exc)}
@@ -184,7 +194,7 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
                 )
                 event_status["preparation_command"] = (
                     "reacnet-scope-prepare "
-                    f"{shlex.quote(str(Path(reactionevent).parent))} "
+                    f"{shlex.quote(str(Path(event_primary).parent))} "
                     f"{prepare_option}"
                 )
             readiness = dataset.setdefault("readiness", {})
@@ -265,7 +275,8 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
         except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
             return {"state": "invalid", "message": str(exc)}
 
-    event_path = str(artifact_paths.get("reactionevent") or "")
+    timeline_path = str(artifact_paths.get("timeline") or "")
+    event_path = timeline_path or str(artifact_paths.get("reactionevent") or "")
     molecule_path = str(artifact_paths.get("molecules") or "")
     if event_path and Path(event_path).is_file():
         try:
@@ -273,9 +284,12 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
                 event_path,
                 (
                     molecule_path
-                    if molecule_path and Path(molecule_path).is_file()
+                    if not timeline_path
+                    and molecule_path
+                    and Path(molecule_path).is_file()
                     else ""
                 ),
+                metadata_only=True,
             )
         except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
             event_status = {"state": "invalid", "message": str(exc)}
@@ -385,12 +399,37 @@ def artifacts_from_status(status: dict[str, Any]) -> dict[str, str]:
     dataset = status.get("dataset", {}) if status else {}
     artifacts = dataset.get("artifacts", {}) or {}
     out: dict[str, str] = {}
-    for key in ("reaction", "species", "moname", "trajectory", "route", "reactionevent", "molecules"):
+    for key in (
+        "reaction",
+        "species",
+        "moname",
+        "trajectory",
+        "route",
+        "timeline",
+        "reactionevent",
+        "molecules",
+    ):
         item = artifacts.get(key, {}) or {}
         path_text = item.get("path") or ""
         if path_text:
             out[key] = path_text
     return out
+
+
+def _event_artifact_paths(
+    artifacts: Mapping[str, str],
+) -> tuple[str, str]:
+    """Apply native-timeline precedence to one compact artifact mapping."""
+
+    timeline = str(artifacts.get("timeline") or "").strip()
+    if timeline and Path(timeline).is_file():
+        return timeline, ""
+    reactionevent = str(artifacts.get("reactionevent") or "").strip()
+    molecules = str(artifacts.get("molecules") or "").strip()
+    return (
+        reactionevent,
+        molecules if molecules and Path(molecules).is_file() else "",
+    )
 
 
 def dataset_label(status: dict[str, Any]) -> str:
@@ -443,7 +482,8 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     manifest = dataset.get("manifest", {}) or {}
     events = dict(readiness.get("event_search") or {"state": "missing"})
     trajectory = dict(readiness.get("trajectory_evidence") or {"state": "missing"})
-    events["source_available"] = bool(artifacts.get("reactionevent"))
+    event_primary, _event_molecules = _event_artifact_paths(artifacts)
+    events["source_available"] = bool(event_primary)
     trajectory["source_available"] = bool(artifacts.get("trajectory"))
     species_source = artifacts.get("species", "")
     if species_source and Path(species_source).is_file():
@@ -504,7 +544,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
                 if events.get("state") in {"stale", "invalid"}
                 else f"{command_prefix} --event-only"
             )
-            if artifacts.get("reactionevent")
+            if event_primary
             else ""
         ),
         "trajectory_command": f"{command_prefix} --trajectory-only" if trajectory_source else "",
@@ -560,7 +600,7 @@ def prepare_dataset_cache(
     item = before.get(item_key) or {}
     if not item.get("source_available"):
         labels = {
-            "event": ".reactionevent.csv",
+            "event": ".timeline.h5 或 .reactionevent.csv",
             "trajectory": "轨迹",
             "composition": ".species",
         }
@@ -642,7 +682,11 @@ def clear_dataset_index(folder: str, *, base: str = "", kind: str) -> dict[str, 
         "event": "reactionevent",
         "composition": "species",
     }[normalized_kind]
-    source = artifacts.get(source_key, "")
+    if normalized_kind == "event":
+        source, event_molecules = _event_artifact_paths(artifacts)
+    else:
+        source = artifacts.get(source_key, "")
+        event_molecules = ""
     if not source or not Path(source).is_file():
         raise ServiceError("当前数据集缺少对应源文件", reason="missing_source")
     try:
@@ -651,7 +695,7 @@ def clear_dataset_index(folder: str, *, base: str = "", kind: str) -> dict[str, 
         if normalized_kind == "event":
             return EVENT_EVIDENCE_STORE.clear(
                 source,
-                artifacts.get("molecules", ""),
+                event_molecules,
             )
 
         before = SPECIES_COMPOSITION_STORE.status(
@@ -883,8 +927,7 @@ def find_pathways(
             reason="bad_reac",
         ) from exc
 
-    reactionevent_path = (artifacts.get("reactionevent") or "").strip()
-    molecules_path = (artifacts.get("molecules") or "").strip()
+    reactionevent_path, molecules_path = _event_artifact_paths(artifacts)
     evidence_provider: EventIndexEvidenceProvider | None = None
     rebuild_event_index = False
     if (
@@ -1219,15 +1262,19 @@ def _event_path_source_from_prefix(
         )
     parent = validate_browse_path(str(raw_prefix.parent))
     prefix = str((parent / raw_prefix.name).resolve())
+    timeline = f"{prefix}.timeline.h5"
     reactionevent = f"{prefix}.reactionevent.csv"
     molecules = f"{prefix}.molecules.csv"
     reaction = f"{prefix}.reactionabcd"
-    if not Path(reactionevent).is_file():
+    if Path(timeline).is_file():
+        reactionevent = timeline
+        molecules = ""
+    elif not Path(reactionevent).is_file():
         raise ServiceError(
-            f"{label}: 找不到 {reactionevent}",
+            f"{label}: 找不到 {timeline} 或 {reactionevent}",
             reason="missing_event_path_source",
         )
-    if not Path(molecules).is_file():
+    if not reactionevent.endswith(".timeline.h5") and not Path(molecules).is_file():
         raise ServiceError(
             f"{label}: 找不到 {molecules}",
             reason="missing_event_path_source",
@@ -1263,15 +1310,17 @@ def _event_path_sources_for_dash(
     additional_sources: str = "",
 ) -> list[EventPathSource]:
     label = str(current_replicate or "current").strip() or "current"
-    reactionevent = str(artifacts.get("reactionevent") or "").strip()
-    molecules = str(artifacts.get("molecules") or "").strip()
+    reactionevent, molecules = _event_artifact_paths(artifacts)
     reaction = str(artifacts.get("reaction") or "").strip()
     if not reactionevent or not Path(reactionevent).is_file():
         raise ServiceError(
-            "当前数据集缺少 .reactionevent.csv",
+            "当前数据集缺少 .timeline.h5 或 .reactionevent.csv",
             reason="missing_event_path_source",
         )
-    if not molecules or not Path(molecules).is_file():
+    if (
+        not reactionevent.endswith(".timeline.h5")
+        and (not molecules or not Path(molecules).is_file())
+    ):
         raise ServiceError(
             "当前数据集缺少 .molecules.csv，无法证明原子连续性",
             reason="missing_event_path_source",
@@ -2718,15 +2767,10 @@ def find_continuous_reactions(
         )
     preparation_hints: list[str] = []
     reaction_file = str(artifacts.get("reaction") or "").strip()
-    reactionevent_file = (artifacts.get("reactionevent") or "").strip()
-    molecules_file = (artifacts.get("molecules") or "").strip()
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
     event_id = str(anchor.get("event_id") or "")
     if reactionevent_file and Path(reactionevent_file).is_file():
-        event_molecules = (
-            molecules_file
-            if molecules_file and Path(molecules_file).is_file()
-            else ""
-        )
+        event_molecules = molecules_file
         if event_id:
             try:
                 payload = EVENT_EVIDENCE_STORE.query_adjacent_events(
@@ -3736,18 +3780,12 @@ def locate_rng_events(
     max_events: int = 100,
 ) -> dict[str, Any]:
     """Query RNG-authored event records without reading Route or trajectory."""
-    reactionevent_file = (artifacts.get("reactionevent") or "").strip()
-    molecules_file = (artifacts.get("molecules") or "").strip()
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
     if not reactionevent_file or not Path(reactionevent_file).is_file():
         raise ServiceError(
-            "缺少 .reactionevent.csv；请在 ReacNetGenerator 中启用 --reaction-event",
+            "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
             reason="missing_reactionevent",
         )
-    molecules_file = (
-        molecules_file
-        if molecules_file and Path(molecules_file).is_file()
-        else ""
-    )
     if "->" not in str(reaction_text or ""):
         raise ServiceError(
             "请输入完整反应式，例如 A + B -> C + D",
@@ -3799,6 +3837,11 @@ def locate_rng_events(
         "matched_atoms": matched,
         "unresolved_atoms": len(rows) - matched,
         "reactionevent_file": os.path.abspath(reactionevent_file),
+        "source_kind": (
+            "native_hdf5"
+            if reactionevent_file.endswith(".timeline.h5")
+            else "legacy_csv"
+        ),
         "molecules_file": (
             os.path.abspath(molecules_file) if molecules_file else ""
         ),
@@ -3848,7 +3891,7 @@ def validate_pathway_step_occurrences(
     limit = max(1, min(int(max_occurrences), 50))
     preparation_hints: list[str] = []
     checked_sources: list[str] = []
-    event_file = str(artifacts.get("reactionevent") or "").strip()
+    event_file, _event_molecules = _event_artifact_paths(artifacts)
     event_absent = not event_file or not Path(event_file).is_file()
 
     if not event_absent:
@@ -3955,7 +3998,7 @@ def validate_pathway_step_occurrences(
 
     reasons: list[str] = []
     if event_absent:
-        reasons.append("数据集没有 .reactionevent.csv")
+        reasons.append("数据集没有 .timeline.h5 或 .reactionevent.csv")
     else:
         reasons.append("RNG 事件索引中没有精确匹配事件")
     if route_absent:
@@ -4221,7 +4264,7 @@ def build_rng_event_visualization(
 
     add_signature("trajectory", trajectory_file)
     add_signature("trajectory_index", str(index.index_path))
-    for kind in ("reactionevent", "molecules"):
+    for kind in ("timeline", "reactionevent", "molecules"):
         add_signature(kind, str(artifacts.get(kind) or ""))
     event_index = resolve_dataset_paths(trajectory_file).event_index
     add_signature("event_index", str(event_index))

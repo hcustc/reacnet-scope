@@ -6,14 +6,17 @@
 
 ## 证据要求
 
-每个重复实验都必须同时具有：
+每个重复实验必须具有以下两种 Timed Evidence Source 之一：
 
-- `.reactionevent.csv`：RNG 记录的具体事件和事件区间；
-- `.molecules.csv`：每一帧的分子实例、原子 ID 和键；
+- 原生 schema-1 `.timeline.h5`，且同时启用 Reaction Evidence 与 Molecular Evidence；
+- 或兼容 CSV 对：`.reactionevent.csv` 与 `.molecules.csv`；
+
+此外还需要：
+
 - 已由 `reacnet-scope-prepare ... --event-only` 建好的事件索引；
 - `.reactionabcd`（可选但推荐）：用于比较聚合网络可达路径与实际路径。
 
-只有 `.reactionevent.csv` 的索引可以检索事件和判断事件先后，但没有分子实例与
+只有 Reaction Evidence 的索引可以检索事件和判断事件先后，但没有分子实例与
 原子映射，因而不能断言原子连续路径。分析会明确报错，不会把“同名物种先后
 出现”伪装成原子连续证据。
 
@@ -28,7 +31,7 @@
 - 反应前和反应后的具体分子实例；
 - 参与原子 ID。
 
-无法与 `.molecules.csv` 匹配的事件仍计入节点总数，但不参与实际路径连接。
+无法与 Molecular Evidence 匹配的事件仍计入节点总数，但不参与实际路径连接。
 为避免跨过未知事件制造假连续性，未解析事件涉及的反应物/产物物种会成为保守的
 谱系屏障：此前处于活动状态的同物种分子实例不再允许直接连接到屏障后的事件。
 
@@ -182,6 +185,7 @@ uv run reacnet-scope event-paths \
 ```
 
 终端只缩略显示过长的反应序列；JSON 中始终保留完整反应键、事件节点和分子实例。
+同前缀同时存在完整 `.timeline.h5` 与旧 CSV 时，CLI 自动选择原生文件。
 
 常用限制：
 
@@ -215,6 +219,10 @@ report = analyze_event_paths(
     path_length=3,
 )
 ```
+
+原生文件的 Python 调用把 timeline 路径传给兼容保留的
+`reactionevent_file` 字段，并将 `molecules_file` 留空；索引中的 capability 会证明
+Molecular Evidence 是否可用。
 
 报告使用 `schema_version="event-path/v1"`。`occurrences` 保存可复核的具体事件
 ID、节点、分子实例边和连续原子；`paths` 保存跨事件序列与跨重复统计；

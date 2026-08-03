@@ -378,7 +378,7 @@ def test_event_index_with_missing_required_column_is_invalid(
         EVENT_EVIDENCE_STORE.open_required(str(reactionevent), str(molecules))
 
 
-def test_event_index_versions_association_data_without_changing_schema(
+def test_event_index_versions_semantic_identity_and_association_data(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
@@ -387,8 +387,8 @@ def test_event_index_versions_association_data_without_changing_schema(
     connection = sqlite3.connect(built["index_path"])
     try:
         metadata = dict(connection.execute("SELECT key,value FROM meta"))
-        assert metadata["schema_version"] == "3"
-        assert metadata["association_algorithm_version"] == "2"
+        assert metadata["schema_version"] == "4"
+        assert metadata["association_algorithm_version"] == "3"
         connection.execute(
             "UPDATE meta SET value='1' "
             "WHERE key='association_algorithm_version'"

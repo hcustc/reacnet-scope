@@ -262,6 +262,7 @@ def cmd_pathway(args: argparse.Namespace) -> int:
 
 
 _EVENT_PATH_SOURCE_SUFFIXES = (
+    ".timeline.h5",
     ".reactionevent.csv",
     ".molecules.csv",
     ".reactionabcd",
@@ -286,10 +287,16 @@ def _event_path_source_from_spec(spec: str):
             base = base[: -len(suffix)]
             break
     reaction_path = f"{base}.reactionabcd"
+    timeline_path = f"{base}.timeline.h5"
+    native_available = Path(timeline_path).is_file()
     return EventPathSource(
         replicate=label,
-        reactionevent_file=f"{base}.reactionevent.csv",
-        molecules_file=f"{base}.molecules.csv",
+        reactionevent_file=(
+            timeline_path
+            if native_available
+            else f"{base}.reactionevent.csv"
+        ),
+        molecules_file=("" if native_available else f"{base}.molecules.csv"),
         reaction_file=reaction_path if Path(reaction_path).is_file() else "",
     )
 

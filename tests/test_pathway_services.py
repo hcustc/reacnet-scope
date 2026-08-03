@@ -101,7 +101,7 @@ def test_pathway_step_validation_explains_missing_time_evidence(
 
     assert result["evidence_level"] == "network_only"
     assert result["rows"] == []
-    assert "没有 .reactionevent.csv" in result["message"]
+    assert "没有 .timeline.h5 或 .reactionevent.csv" in result["message"]
     assert "Route 索引尚未就绪" in result["message"]
     assert "--route-only" in result["message"]
 

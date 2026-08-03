@@ -18,7 +18,12 @@ from .indexes import (
 )
 from .composition import SPECIES_COMPOSITION_STORE
 from .event_index import EVENT_EVIDENCE_STORE
-from .rng_events import event_output_status
+from .timed_evidence import (
+    TimedEvidenceDataError,
+    TimedEvidenceSelection,
+    native_membership_bytes,
+    select_timed_evidence,
+)
 
 
 def discover_dataset(case: str, base: str = "") -> dict[str, str]:
@@ -47,11 +52,16 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
                 str(path)[: -len(".molecules.csv")]
                 for path in root.glob("*.molecules.csv")
             }
+            timeline_stems = {
+                str(path)[: -len(".timeline.h5")]
+                for path in root.glob("*.timeline.h5")
+            }
             stems = (
                 reaction_stems
                 | route_stems
                 | event_stems
                 | molecule_stems
+                | timeline_stems
             )
             if len(stems) != 1:
                 raise RuntimeError("dataset directory is ambiguous; pass --base")
@@ -66,6 +76,8 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         stem = stem[: -len(".reactionevent.csv")]
     if stem.endswith(".molecules.csv"):
         stem = stem[: -len(".molecules.csv")]
+    if stem.endswith(".timeline.h5"):
+        stem = stem[: -len(".timeline.h5")]
     return {
         "base": stem,
         "reaction": f"{stem}.reactionabcd",
@@ -75,6 +87,7 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         "trajectory": stem,
         "reactionevent": f"{stem}.reactionevent.csv",
         "molecules": f"{stem}.molecules.csv",
+        "timeline": f"{stem}.timeline.h5",
     }
 
 
@@ -84,9 +97,39 @@ def _manifest_path(dataset: dict[str, str]) -> Path:
     return paths.manifest
 
 
+def _select_event_source(
+    dataset: dict[str, str],
+) -> TimedEvidenceSelection:
+    return select_timed_evidence(
+        timeline_file=dataset["timeline"],
+        reactionevent_file=dataset["reactionevent"],
+        molecules_file=dataset["molecules"],
+    )
+
+
+def _event_source_paths(dataset: dict[str, str]) -> tuple[str, str]:
+    """Resolve native precedence, retaining a path for safe cache clearing."""
+
+    if Path(dataset["timeline"]).is_file():
+        return dataset["timeline"], ""
+    return (
+        dataset["reactionevent"],
+        dataset["molecules"] if Path(dataset["molecules"]).is_file() else "",
+    )
+
+
 def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
     artifacts: dict[str, Any] = {}
-    for kind in ("reaction", "species", "table", "route", "trajectory", "reactionevent", "molecules"):
+    for kind in (
+        "reaction",
+        "species",
+        "table",
+        "route",
+        "trajectory",
+        "timeline",
+        "reactionevent",
+        "molecules",
+    ):
         path = Path(dataset[kind])
         item: dict[str, Any] = {"path": str(path), "exists": path.is_file()}
         if path.is_file():
@@ -104,15 +147,33 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
         if artifacts["species"]["exists"]
         else {"state": "missing"}
     )
-    event_status = EVENT_EVIDENCE_STORE.status(
-        dataset["reactionevent"], dataset["molecules"]
-    )
+    event_primary, event_molecules = _event_source_paths(dataset)
+    if Path(event_primary).is_file():
+        event_status = EVENT_EVIDENCE_STORE.status(
+            event_primary, event_molecules
+        )
+        try:
+            timed_evidence = {
+                "state": "ready",
+                **_select_event_source(dataset).as_dict(),
+            }
+        except TimedEvidenceDataError as exc:
+            timed_evidence = {
+                "state": exc.state,
+                "message": str(exc),
+            }
+    else:
+        event_status = {"state": "missing_source"}
+        timed_evidence = {
+            "state": "missing",
+            "message": "timed reaction evidence is missing",
+        }
     paths = resolve_dataset_paths(
         Path(dataset["base"]).parent, Path(dataset["base"]).name
     )
     settings_path = paths.cache_dir / "dataset-settings.json"
     return {
-        "manifest_version": 2,
+        "manifest_version": 3,
         "dataset_id": paths.dataset_id,
         "base": dataset["base"],
         "updated_at_epoch": int(time.time()),
@@ -122,7 +183,7 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
             "trajectory": trajectory_status,
             "composition": composition_status,
             "event": event_status,
-            "rng_events": event_output_status(dataset["reactionevent"], dataset["molecules"]),
+            "rng_events": timed_evidence,
         },
         "settings": {
             "path": str(settings_path),
@@ -160,12 +221,19 @@ def _capacity_check(
     if include_composition and Path(dataset["species"]).is_file():
         required += max(128 * 1024**2, Path(dataset["species"]).stat().st_size // 2)
     if include_event:
+        event_primary, event_molecules = _event_source_paths(dataset)
         event_bytes = sum(
-            Path(dataset[key]).stat().st_size
-            for key in ("reactionevent", "molecules")
-            if Path(dataset[key]).is_file()
+            Path(path).stat().st_size
+            for path in (event_primary, event_molecules)
+            if path and Path(path).is_file()
         )
         required += max(128 * 1024**2, event_bytes * 2)
+        try:
+            selection = _select_event_source(dataset)
+        except TimedEvidenceDataError:
+            selection = None
+        if selection is not None:
+            required += native_membership_bytes(selection)
     if free < required:
         raise RuntimeError(
             f"insufficient cache capacity: need about {required / 1024**3:.1f} GiB, "
@@ -220,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
         selected_route = False
         selected_trajectory = Path(dataset["trajectory"]).is_file()
         selected_composition = Path(dataset["species"]).is_file()
-        selected_event = Path(dataset["reactionevent"]).is_file()
+        selected_event = bool(
+            Path(dataset["timeline"]).is_file()
+            or Path(dataset["reactionevent"]).is_file()
+        )
     route_needs_build = (
         selected_route
         and Path(dataset["route"]).is_file()
@@ -236,17 +307,14 @@ def main(argv: list[str] | None = None) -> int:
         and Path(dataset["species"]).is_file()
         and SPECIES_COMPOSITION_STORE.status(dataset["species"])["state"] != "ready"
     )
-    event_needs_build = (
+    event_primary, event_molecules = _event_source_paths(dataset)
+    event_needs_build = bool(
         selected_event
-        and Path(dataset["reactionevent"]).is_file()
+        and Path(event_primary).is_file()
         and EVENT_EVIDENCE_STORE.status(
-            dataset["reactionevent"],
-            (
-                dataset["molecules"]
-                if Path(dataset["molecules"]).is_file()
-                else ""
-            ),
-        )["state"] != "ready"
+            event_primary, event_molecules
+        )["state"]
+        != "ready"
     )
     if not args.status and not args.clear:
         _capacity_check(
@@ -270,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             SPECIES_COMPOSITION_STORE.clear(dataset["species"])
         if target in {"event", "all"}:
             EVENT_EVIDENCE_STORE.clear(
-                dataset["reactionevent"], dataset["molecules"]
+                event_primary, event_molecules
             )
         if args.clear:
             print(f"Manifest: {write_manifest(dataset)}")
@@ -290,18 +358,24 @@ def main(argv: list[str] | None = None) -> int:
                     raise FileNotFoundError(f"species file not found: {dataset['species']}")
                 SPECIES_COMPOSITION_STORE.build(dataset["species"], progress_callback=report)
             if selected_event:
-                if not Path(dataset["reactionevent"]).is_file():
+                try:
+                    selection = _select_event_source(dataset)
+                except TimedEvidenceDataError as exc:
+                    if exc.state == "missing":
+                        raise FileNotFoundError(
+                            "timed reaction evidence not found: expected "
+                            f"{dataset['timeline']} or "
+                            f"{dataset['reactionevent']}"
+                        ) from exc
+                    raise
+                if not Path(selection.primary_file).is_file():
                     raise FileNotFoundError(
-                        "reactionevent file not found: "
-                        f"{dataset['reactionevent']}"
+                        "timed reaction evidence not found: "
+                        f"{selection.primary_file}"
                     )
                 EVENT_EVIDENCE_STORE.build(
-                    dataset["reactionevent"],
-                    (
-                        dataset["molecules"]
-                        if Path(dataset["molecules"]).is_file()
-                        else ""
-                    ),
+                    selection.primary_file,
+                    selection.molecules_file,
                     progress_callback=report,
                 )
         except KeyboardInterrupt:

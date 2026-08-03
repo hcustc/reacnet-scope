@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 
 ARTIFACT_SUFFIXES = (
+    (".timeline.h5", "timeline"),
     (".reactionevent.csv", "reactionevent"),
     (".molecules.csv", "molecules"),
     (".reactionabcd", "reaction"),

@@ -377,8 +377,12 @@ def query_rng_events(
             association_counts[status] += 1
             rng_atom_ids = list(component.atom_ids) if component else []
             atom_ids = [atom_id + 1 for atom_id in rng_atom_ids]
+            unresolved_ordinal = occurrence if not atom_ids else 0
             digest = hashlib.sha1(
-                f"{interval}|{row['source_row']}|{','.join(map(str, atom_ids))}".encode("utf-8")
+                (
+                    f"{interval}|{row['reaction_key_text']}|"
+                    f"{','.join(map(str, atom_ids))}|{unresolved_ordinal}"
+                ).encode("utf-8")
             ).hexdigest()[:12]
             output.append(
                 {
