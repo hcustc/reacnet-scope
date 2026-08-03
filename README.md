@@ -11,6 +11,9 @@
 
 它的核心定位是反应 MD 后处理与 ReacNetGenerator 输出解析；质谱实验解释是下游对接场景，而不是把本项目做成峰检测、色谱处理或通用质谱软件。
 
+当前产品范围、领域语义、功能契约和发布验收以
+[`docs/software-design-baseline.md`](docs/software-design-baseline.md) 为准；较早的日期化设计稿和实施计划仅作为历史资料保留。
+
 ## Description
 
 `reacnet-scope` is a data-driven analysis toolkit for aligning reactive MD results with experimental interpretation.  
