@@ -3225,6 +3225,7 @@ def _data_management_page() -> html.Div:
                                         outline=True,
                                     ),
                                 ],
+                                id="dir-browser-filter-row",
                                 className="rs-browser-filter-row",
                             ),
                             html.Div(
@@ -3263,6 +3264,7 @@ def _data_management_page() -> html.Div:
                                         className="rs-browser-path-help",
                                     ),
                                 ],
+                                id="dir-browser-expert-path",
                                 className="rs-browser-expert-path",
                             ),
                             html.Div(
@@ -3272,6 +3274,12 @@ def _data_management_page() -> html.Div:
                                         id="dir-browser-cancel-btn",
                                         color="secondary",
                                         size="sm",
+                                        outline=True,
+                                    ),
+                                    dbc.Button(
+                                        "刷新状态",
+                                        id="data-current-refresh-btn",
+                                        color="secondary",
                                         outline=True,
                                     ),
                                     dbc.Button(
@@ -3326,9 +3334,56 @@ def _index_clear_confirm_modal() -> dbc.Modal:
     )
 
 
+_QUERY_CONTROL_PREFIXES = (
+    "species-",
+    "rxn-",
+    "inter-",
+    "evolution-",
+    "element-distribution-",
+    "event-",
+    "pathway-",
+)
+_PERSISTABLE_QUERY_CONTROLS = (
+    dcc.Input,
+    dcc.Textarea,
+    dcc.Dropdown,
+    dcc.RadioItems,
+    dcc.Checklist,
+    dcc.Slider,
+    dbc.Checkbox,
+)
+_DATASET_BOUND_CONTROL_IDS = {
+    "event-extract-id",
+    "event-frame-slider",
+    "event-path-additional-sources",
+    "event-path-current-replicate",
+    "event-path-occurrence-selector",
+    "evolution-species-file",
+    "evolution-species-files",
+}
+
+
+def _enable_query_session_persistence(component: Any) -> None:
+    """Keep query inputs/preferences tab-local across a browser reload."""
+
+    component_id = getattr(component, "id", None)
+    if (
+        isinstance(component_id, str)
+        and component_id.startswith(_QUERY_CONTROL_PREFIXES)
+        and component_id not in _DATASET_BOUND_CONTROL_IDS
+        and isinstance(component, _PERSISTABLE_QUERY_CONTROLS)
+    ):
+        component.persistence = True
+        component.persistence_type = "session"
+    children = getattr(component, "children", None)
+    for child in children if isinstance(children, (list, tuple)) else [children]:
+        if child is not None:
+            _enable_query_session_persistence(child)
+
+
 def build_layout() -> html.Div:
     """Build the full application layout."""
-    return html.Div(
+    layout = html.Div(
         [
             _topbar(),
             _global_operation_progress(),
@@ -3356,11 +3411,68 @@ def build_layout() -> html.Div:
                 id="app-body",
             ),
             _index_clear_confirm_modal(),
+            html.Div(
+                id="global-dataset-notice",
+                className="rs-global-dataset-notice",
+                role="status",
+                **{"aria-live": "polite", "aria-atomic": "true"},
+            ),
+            dcc.Interval(
+                id="global-dataset-notice-timeout",
+                interval=8000,
+                n_intervals=0,
+                disabled=True,
+            ),
+            html.Div(id="dataset-focus-sink", hidden=True),
             dcc.Store(id="dir-browser-path", storage_type="memory", data=""),
             dcc.Store(id="dataset-browser-candidate", storage_type="memory", data=None),
             dcc.Store(id="recent-datasets", storage_type="local", data=[]),
-            dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
+            dcc.Store(
+                id="app-store",
+                storage_type="memory",
+                data={**cb.initial_store(), "context_state": "restoring"},
+            ),
+            dcc.Store(
+                id="dataset-session-store",
+                storage_type="session",
+                data=cb.initial_store(),
+            ),
             dcc.Store(id="page-store", storage_type="session", data={"page": DEFAULT_PAGE}),
+            dcc.Store(id="dataset-switch-transaction", storage_type="memory", data={}),
+            dcc.Store(id="dataset-switch-validation", storage_type="memory", data={}),
+            dcc.Store(id="dataset-switch-navigation", storage_type="memory", data={}),
+            dcc.Store(id="dataset-context-commit", storage_type="memory", data={}),
+            dcc.Store(id="dataset-focus-request", storage_type="memory", data={}),
+            dcc.Store(id="dataset-restore-result", storage_type="memory", data={}),
+            html.Div(
+                [
+                    dcc.Store(
+                        id={"type": "dataset-bound-operation", "name": name},
+                        storage_type="memory",
+                        data=False,
+                    )
+                    for name in (
+                        "species",
+                        "species-structures",
+                        "species-detail",
+                        "reactions",
+                        "intermediate",
+                        "evolution",
+                        "element-distribution",
+                        "events",
+                        "trajectory",
+                        "event-paths",
+                        "pathways",
+                    )
+                ],
+                hidden=True,
+            ),
+            dcc.Interval(
+                id="dataset-session-restore",
+                interval=100,
+                n_intervals=0,
+                max_intervals=1,
+            ),
             dcc.Store(id="species-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="rxn-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="inter-grid-store", storage_type="memory", data={"rows": []}),
@@ -3388,6 +3500,8 @@ def build_layout() -> html.Div:
         ],
         className="rs-root",
     )
+    _enable_query_session_persistence(layout)
+    return layout
 
 
 def create_app() -> dash.Dash:

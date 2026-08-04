@@ -248,14 +248,16 @@ def initial_store() -> dict[str, Any]:
         "folder": "",
         "base": "",
         "dataset_id": "",
+        "source_revision": {},
+        "context_state": "none",
         "label": "未选择",
-        "ready_count": 0,
         "capabilities": {},
         "readiness": {},
         "artifacts": {},
         "selected_smiles": "",
         "selected_formula": "",
         "selected_species_source": "",
+        "inputs_pending": False,
     }
 
 
@@ -902,6 +904,7 @@ def register_callbacks(app: Any) -> None:
         Input("nav-element-distribution", "n_clicks"),
         Input("nav-data-management", "n_clicks"),
         Input("data-open-batch-compare-btn", "n_clicks"),
+        Input("data-pick-btn", "n_clicks"),
         Input("open-data-modal", "n_clicks"),
         Input("species-open-data-modal", "n_clicks"),
         Input("species-to-channels-btn", "n_clicks"),
@@ -918,13 +921,23 @@ def register_callbacks(app: Any) -> None:
         Input("pathway-open-events-btn", "n_clicks"),
         Input("event-extract-btn", "n_clicks"),
         Input("trajectory-back-events-btn", "n_clicks"),
+        Input("dir-browser-cancel-btn", "n_clicks"),
+        Input("dataset-switch-navigation", "data"),
         State("page-store", "data"),
     )
     def _navigate(*_args):
         triggered_id = ctx.triggered_id
         stored_state = (_args[-1] or {}) if _args else {}
         stored_page = stored_state.get("page")
-        if triggered_id in {
+        switch_navigation = _args[-2] if len(_args) >= 2 else {}
+        if triggered_id == "dataset-switch-navigation":
+            page_id = str((switch_navigation or {}).get("page") or stored_page)
+        elif triggered_id == "dir-browser-cancel-btn":
+            page_id = str(
+                ((stored_state.get("dataset_return") or {}).get("page"))
+                or "data-management"
+            )
+        elif triggered_id in {
             "rxn-to-event-btn",
             "rxn-channel-to-event-btn",
             "pathway-open-events-btn",
@@ -953,6 +966,7 @@ def register_callbacks(app: Any) -> None:
             page_id = "batch-compare"
         elif triggered_id in {
             "nav-data-management",
+            "data-pick-btn",
             "open-data-modal",
             "species-open-data-modal",
         }:
@@ -979,6 +993,25 @@ def register_callbacks(app: Any) -> None:
             for pid in TOP_NAV_PAGE_IDS
         }
         page_state = {"page": page_id}
+        if (
+            triggered_id in {
+                "data-pick-btn",
+                "open-data-modal",
+                "species-open-data-modal",
+            }
+            and stored_page in PAGE_IDS
+            and stored_page != "data-management"
+        ):
+            page_state["dataset_return"] = {
+                "page": stored_page,
+                "trigger": str(triggered_id),
+            }
+        elif (
+            page_id == "data-management"
+            and triggered_id == "data-pick-btn"
+            and stored_state.get("dataset_return")
+        ):
+            page_state["dataset_return"] = dict(stored_state["dataset_return"])
         return_context = {
             "rxn-to-event-btn": ("reactions", "返回反应式检索"),
             "rxn-channel-to-event-btn": ("reactions", "返回反应通道"),
@@ -1039,10 +1072,29 @@ def register_callbacks(app: Any) -> None:
     )
     def _update_page_data_status(page_store, app_store, pathway_tab):
         page_id = (page_store or {}).get("page") or "species"
+        inputs_pending = bool((app_store or {}).get("inputs_pending"))
+        invalidated = set((app_store or {}).get("invalidated_artifacts") or [])
+
+        def ready_status(message: str) -> tuple[str, str]:
+            if inputs_pending:
+                message = f"{message} · 保留的查询输入尚未在当前数据集运行"
+            return message, "rs-page-status is-ready"
+
+        def stale_status(label: str) -> tuple[str, str]:
+            return (
+                f"{label} 的源修订已变化；采用新修订后可继续",
+                "rs-page-status is-blocked",
+            )
+
         if page_id == "data-management":
             label = str((app_store or {}).get("label") or "").strip()
+            if (app_store or {}).get("context_state") == "revision-changed":
+                return (
+                    f"当前数据集：{label} · 源修订已变化",
+                    "rs-page-status is-blocked",
+                )
             if label:
-                return f"当前数据集：{label}", "rs-page-status is-ready"
+                return ready_status(f"当前数据集：{label}")
             return "尚未加载数据集", "rs-page-status is-independent"
         if page_id == "batch-compare":
             reaction_ready = bool(((app_store or {}).get("artifacts") or {}).get("reaction"))
@@ -1050,22 +1102,26 @@ def register_callbacks(app: Any) -> None:
                 return "当前数据集可加入对比", "rs-page-status is-ready"
             return "可扫描目录或从数据管理加载", "rs-page-status is-independent"
         if page_id == "events":
+            if invalidated & {"timeline", "reactionevent", "molecules"}:
+                return stale_status("事件证据")
             artifacts = (app_store or {}).get("artifacts") or {}
             event_ready = bool(
                 artifacts.get("reactionevent") and artifacts.get("molecules")
             )
             return (
-                ("RNG 事件输出已就绪", "rs-page-status is-ready")
+                ready_status("RNG 事件输出已就绪")
                 if event_ready
                 else ("需要 reactionevent.csv + molecules.csv", "rs-page-status is-blocked")
             )
         if page_id == "pathway" and pathway_tab == "concrete-event-paths":
+            if invalidated & {"timeline", "reactionevent", "molecules"}:
+                return stale_status("事件路径证据")
             artifacts = (app_store or {}).get("artifacts") or {}
             event_ready = bool(
                 artifacts.get("reactionevent") and artifacts.get("molecules")
             )
             return (
-                ("事件轨迹证据已就绪", "rs-page-status is-ready")
+                ready_status("事件轨迹证据已就绪")
                 if event_ready
                 else (
                     "需要 reactionevent.csv + molecules.csv",
@@ -1073,12 +1129,14 @@ def register_callbacks(app: Any) -> None:
                 )
             )
         if page_id == "trajectory":
+            if "trajectory" in invalidated:
+                return stale_status("轨迹证据")
             readiness = (app_store or {}).get("readiness") or {}
             trajectory_ready = bool(
                 (readiness.get("trajectory_evidence") or {}).get("ready")
             )
             return (
-                ("轨迹帧索引已就绪", "rs-page-status is-ready")
+                ready_status("轨迹帧索引已就绪")
                 if trajectory_ready
                 else ("需要轨迹文件与帧索引", "rs-page-status is-blocked")
             )
@@ -1087,10 +1145,12 @@ def register_callbacks(app: Any) -> None:
             ("", ""),
         )
         artifacts = (app_store or {}).get("artifacts") or {}
+        if artifact_key and artifact_key in invalidated:
+            return stale_status(artifact_label or "当前能力")
         if artifact_key and artifacts.get(artifact_key):
             if page_id == "pathway":
-                return "聚合反应网络已就绪", "rs-page-status is-ready"
-            return f"{artifact_label} 已就绪", "rs-page-status is-ready"
+                return ready_status("聚合反应网络已就绪")
+            return ready_status(f"{artifact_label} 已就绪")
         return f"需要 {artifact_label or '数据文件'}", "rs-page-status is-blocked"
 
     @app.callback(
@@ -1119,6 +1179,106 @@ def register_callbacks(app: Any) -> None:
             no_species,
             no_reaction_events,
             no_trajectory,
+        )
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("dataset-session-store", "data", allow_duplicate=True),
+        Input("species-search-btn", "n_clicks"),
+        Input("rxn-search-btn", "n_clicks"),
+        Input("inter-search-btn", "n_clicks"),
+        Input("evolution-search-btn", "n_clicks"),
+        Input("element-distribution-search-btn", "n_clicks"),
+        Input("event-rxn-btn", "n_clicks"),
+        Input("event-path-run-btn", "n_clicks"),
+        Input("pathway-search-btn", "n_clicks"),
+        Input("trajectory-refresh-btn", "n_clicks"),
+        State("app-store", "data"),
+        State("dataset-session-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _mark_preserved_inputs_executed(*args):
+        current = args[-2] if len(args) >= 2 else {}
+        session = args[-1] if args else {}
+        if not isinstance(current, dict) or not current.get("inputs_pending"):
+            raise PreventUpdate
+        executed = {**current, "inputs_pending": False}
+        persisted = (
+            {**session, "inputs_pending": False}
+            if isinstance(session, dict) and session.get("dataset_id") == current.get("dataset_id")
+            else executed
+        )
+        return executed, persisted
+
+    @app.callback(
+        Output("dataset-focus-request", "data", allow_duplicate=True),
+        Input("dataset-switch-transaction", "data"),
+        prevent_initial_call=True,
+    )
+    def _focus_dataset_validation_failure(transaction):
+        if (transaction or {}).get("state") != "failed":
+            raise PreventUpdate
+        return {
+            "token": f"validation-failed-{time.time_ns()}",
+            "target": "data-load-feedback",
+        }
+
+    @app.callback(
+        Output("global-dataset-notice-timeout", "disabled"),
+        Input("global-dataset-notice", "children"),
+        prevent_initial_call=True,
+    )
+    def _arm_global_dataset_notice_timeout(children):
+        if not children:
+            raise PreventUpdate
+        return False
+
+    @app.callback(
+        Output("global-dataset-notice", "children", allow_duplicate=True),
+        Output(
+            "global-dataset-notice-timeout",
+            "disabled",
+            allow_duplicate=True,
+        ),
+        Input("global-dataset-notice-timeout", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def _expire_global_dataset_notice(n_intervals):
+        if not n_intervals:
+            raise PreventUpdate
+        return "", True
+
+    @app.callback(
+        Output("topbar-folder", "children", allow_duplicate=True),
+        Output("topbar-rungroup", "children", allow_duplicate=True),
+        Output("topbar-status", "children", allow_duplicate=True),
+        Output("topbar-status", "className", allow_duplicate=True),
+        Input("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _render_current_dataset_topbar(app_store):
+        current = app_store if isinstance(app_store, dict) else {}
+        label = str(current.get("label") or "未选择")
+        if not current.get("dataset_id"):
+            return "未选择", "未选择", "未选择数据", "rs-badge rs-bad"
+        if current.get("context_state") == "revision-changed":
+            affected = "、".join(current.get("invalidated_artifacts") or [])
+            status = (
+                f"源修订已变化 · {affected} 待采用 · 其余能力仍可用"
+                if affected
+                else "源修订已变化 · 请采用新修订"
+            )
+            return label, label, status, "rs-badge rs-bad"
+        readiness = current.get("readiness") or {}
+        return (
+            label,
+            label,
+            "基础 {} · 事件 {} · 轨迹 {}".format(
+                "就绪" if (readiness.get("basic_analysis") or {}).get("ready") else "未就绪",
+                "就绪" if (readiness.get("event_search") or {}).get("ready") else "未就绪",
+                "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
+            ),
+            "rs-badge",
         )
 
     @app.callback(
@@ -1196,7 +1356,6 @@ def register_callbacks(app: Any) -> None:
         Output("data-candidate-summary", "children"),
         Output("data-scan-status", "children"),
         Output("data-artifacts", "children"),
-        Output("data-apply-btn", "disabled"),
         Input("dataset-browser-candidate", "data"),
         Input("app-store", "data"),
     )
@@ -1207,7 +1366,6 @@ def register_callbacks(app: Any) -> None:
         if not folder or not base:
             loaded = app_store or {}
             current_label = str(loaded.get("label") or "").strip()
-            ready = int(loaded.get("ready_count") or 0)
             if current_label:
                 summary = html.Div(
                     [
@@ -1224,7 +1382,6 @@ def register_callbacks(app: Any) -> None:
                 summary,
                 status_text,
                 _render_artifacts(loaded.get("artifacts") or {}),
-                True,
             )
         try:
             target = _validated_dataset_target(selected)
@@ -1240,7 +1397,6 @@ def register_callbacks(app: Any) -> None:
                 ),
                 "Dataset Candidate 验证失败；Current Dataset 未改变。",
                 _render_artifacts({}),
-                True,
             )
         except Exception:
             return (
@@ -1251,7 +1407,6 @@ def register_callbacks(app: Any) -> None:
                 ),
                 "Dataset Candidate 验证失败；Current Dataset 未改变。",
                 _render_artifacts({}),
-                True,
             )
         dataset = status.get("dataset") or {}
         selected_base = str(dataset.get("selected_base") or "")
@@ -1260,10 +1415,8 @@ def register_callbacks(app: Any) -> None:
                 dbc.Alert("所选数据集已不存在，请重新选择。", color="danger", className="py-2"),
                 "所选数据集已不存在。",
                 _render_artifacts({}),
-                True,
             )
         artifact_html = _render_artifacts(svc.artifacts_from_status(status))
-        ready = svc.dataset_ready_count(status)
         display_label = target["label"] or svc.dataset_label(status)
         return (
             html.Div(
@@ -1273,9 +1426,106 @@ def register_callbacks(app: Any) -> None:
                 ],
                 className="rs-current-dataset-name",
             ),
-            "Dataset Candidate 已验证；使用此数据集前不会改变 Current Dataset。",
+            "Dataset Candidate 的有限元数据已检查；使用此数据集前不会改变 Current Dataset。",
             artifact_html,
-            False,
+        )
+
+    @app.callback(
+        Output("data-current-refresh-btn", "children"),
+        Output("data-current-refresh-btn", "color"),
+        Output("data-current-refresh-btn", "outline"),
+        Output("data-current-refresh-btn", "disabled"),
+        Output("data-apply-btn", "children", allow_duplicate=True),
+        Output("data-apply-btn", "disabled", allow_duplicate=True),
+        Input("app-store", "data"),
+        Input("dataset-browser-candidate", "data"),
+        Input("dataset-switch-transaction", "data"),
+        Input({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _render_dataset_context_actions(
+        app_store,
+        candidate,
+        transaction,
+        bound_operations,
+    ):
+        current = app_store if isinstance(app_store, dict) else {}
+        selected = candidate if isinstance(candidate, dict) else {}
+        switch_state = str((transaction or {}).get("state") or "idle")
+        validating = switch_state == "validating"
+        has_candidate = bool(selected.get("folder") and selected.get("base"))
+        inspected: dict[str, Any] = {}
+        if has_candidate:
+            try:
+                inspected = svc.inspect_dataset_candidate(
+                    str(selected.get("folder") or ""),
+                    str(selected.get("base") or ""),
+                )
+            except svc.ServiceError:
+                inspected = {}
+        same_revision = svc.is_same_dataset_revision(current, inspected)
+        is_different_candidate = has_candidate and not (
+            str(inspected.get("dataset_id") or "")
+            and str(inspected.get("dataset_id") or "")
+            == str(current.get("dataset_id") or "")
+        )
+        context_state = str(current.get("context_state") or "none")
+
+        if any(bool(value) for value in bound_operations or []):
+            return (
+                (
+                    "更新当前数据集状态"
+                    if context_state == "revision-changed"
+                    else "刷新状态"
+                ),
+                "secondary",
+                True,
+                True,
+                "等待当前分析完成",
+                True,
+            )
+
+        if validating:
+            apply_label = "正在验证…"
+            apply_disabled = True
+        elif switch_state == "failed" and has_candidate:
+            apply_label = "重试验证"
+            apply_disabled = False
+        elif same_revision or (
+            switch_state == "succeeded" and not is_different_candidate
+        ):
+            apply_label = "当前正在使用"
+            apply_disabled = True
+        else:
+            apply_label = "使用此数据集"
+            apply_disabled = not has_candidate
+
+        if context_state == "revision-changed":
+            refresh_label = "更新当前数据集状态"
+            if is_different_candidate:
+                return (
+                    refresh_label,
+                    "secondary",
+                    True,
+                    validating,
+                    apply_label,
+                    apply_disabled,
+                )
+            return (
+                refresh_label,
+                "primary",
+                False,
+                validating,
+                apply_label,
+                True,
+            )
+        return (
+            "刷新状态",
+            "secondary",
+            True,
+            not bool(current.get("dataset_id")) or validating,
+            apply_label,
+            apply_disabled,
         )
 
     @app.callback(
@@ -1905,101 +2155,320 @@ def register_callbacks(app: Any) -> None:
         raise PreventUpdate
 
     @app.callback(
-        Output("app-store", "data"),
+        Output("dataset-switch-transaction", "data"),
+        Input("data-apply-btn", "n_clicks"),
+        Input("dir-browser-cancel-btn", "n_clicks"),
+        Input("dataset-browser-candidate", "data"),
+        Input("page-store", "data"),
+        Input("dataset-switch-validation", "data"),
+        State("dataset-switch-transaction", "data"),
+        State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _reduce_dataset_switch(
+        _apply_clicks,
+        _cancel_clicks,
+        candidate,
+        page_store,
+        validation_result,
+        transaction,
+        bound_operations,
+    ):
+        """Keep one request authoritative for this browser tab."""
+        triggered = ctx.triggered_id
+        current = transaction if isinstance(transaction, dict) else {}
+        selected = candidate if isinstance(candidate, dict) else {}
+
+        if triggered == "data-apply-btn":
+            if current.get("state") == "validating":
+                raise PreventUpdate
+            if any(bool(value) for value in bound_operations or []):
+                return {
+                    "state": "failed",
+                    "candidate": selected,
+                    "reason": "analysis_in_progress",
+                    "message": (
+                        "当前分析仍在完成，暂不能切换 Current Dataset。"
+                        "等待该分析结束后重试；现有 Current Dataset 和候选均已保留。"
+                    ),
+                }
+            if not selected.get("folder") or not selected.get("base"):
+                return {
+                    "state": "failed",
+                    "candidate": selected,
+                    "reason": "missing_candidate",
+                    "message": "请选择 Dataset Candidate 后再使用。Current Dataset 未改变。",
+                }
+            return svc.begin_dataset_switch(
+                selected,
+                origin=dict((page_store or {}).get("dataset_return") or {}),
+            )
+
+        if triggered == "dataset-switch-validation":
+            if any(bool(value) for value in bound_operations or []):
+                return {
+                    **current,
+                    "state": "failed",
+                    "reason": "analysis_in_progress",
+                    "message": (
+                        "验证完成时仍有旧 Current Dataset 的分析在运行，因此结果未提交。"
+                        "旧 Current Dataset 和候选均已保留；等待分析结束后重试。"
+                    ),
+                }
+            resolved = svc.resolve_dataset_switch(current, validation_result)
+            if resolved == current:
+                raise PreventUpdate
+            return resolved
+
+        if triggered == "dir-browser-cancel-btn":
+            superseded = svc.supersede_dataset_switch(
+                current,
+                reason="cancelled",
+            )
+            return superseded or {"state": "superseded", "reason": "cancelled"}
+
+        if triggered == "page-store":
+            if (page_store or {}).get("page") == "data-management":
+                raise PreventUpdate
+            superseded = svc.supersede_dataset_switch(current, reason="left_workspace")
+            if superseded == current:
+                raise PreventUpdate
+            return superseded
+
+        if triggered == "dataset-browser-candidate":
+            if current.get("state") == "validating":
+                return svc.supersede_dataset_switch(current, reason="candidate_changed")
+            if selected:
+                return {"state": "candidate-selected", "candidate": selected}
+            return {"state": "idle"}
+        raise PreventUpdate
+
+    @app.callback(
+        Output("dataset-switch-validation", "data"),
+        Input("dataset-switch-transaction", "data"),
+        background=True,
+        prevent_initial_call=True,
+    )
+    def _validate_dataset_switch(transaction):
+        request = transaction if isinstance(transaction, dict) else {}
+        if request.get("state") != "validating":
+            raise PreventUpdate
+        request_id = str(request.get("request_id") or "")
+        candidate = request.get("candidate") or {}
+        try:
+            validation = svc.validate_dataset_candidate(
+                str(candidate.get("folder") or ""),
+                str(candidate.get("base") or ""),
+            )
+        except svc.ServiceError as exc:
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "reason": str(exc.reason or "validation_failed"),
+                "message": (
+                    f"{exc.message} Current Dataset 和 Dataset Candidate 均已保留；"
+                    "请修正来源后重试验证。"
+                ),
+                "completed_ns": time.time_ns(),
+            }
+        except Exception:
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "reason": "validation_failed",
+                "message": (
+                    "Dataset Candidate 暂时无法验证。Current Dataset 和 Dataset Candidate "
+                    "均已保留；请重试。"
+                ),
+                "completed_ns": time.time_ns(),
+            }
+        return {
+            "request_id": request_id,
+            "ok": True,
+            "validation": validation,
+            "completed_ns": time.time_ns(),
+        }
+
+    @app.callback(
+        Output("data-load-feedback", "children", allow_duplicate=True),
+        Output("data-apply-btn", "disabled", allow_duplicate=True),
+        Output("data-apply-btn", "children", allow_duplicate=True),
+        Input("dataset-switch-transaction", "data"),
+        prevent_initial_call=True,
+    )
+    def _render_dataset_switch(transaction):
+        state = str((transaction or {}).get("state") or "idle")
+        if state == "validating":
+            return (
+                dbc.Alert(
+                    "正在验证 Dataset Identity 与最新源修订。旧 Current Dataset 仍然有效。",
+                    color="info",
+                    className="py-2",
+                ),
+                True,
+                "正在验证…",
+            )
+        if state == "failed":
+            return (
+                dbc.Alert(
+                    str((transaction or {}).get("message") or "验证失败，请重试。"),
+                    color="danger",
+                    className="py-2",
+                    role="alert",
+                    tabIndex=-1,
+                ),
+                False,
+                "重试验证",
+            )
+        if state == "succeeded":
+            return no_update, True, "当前正在使用"
+        if state == "candidate-selected":
+            return "", False, "使用此数据集"
+        return "", True, "使用此数据集"
+
+    @app.callback(
+        Output("dir-browser-current", "style"),
+        Output("dir-browser-body", "style"),
+        Output("dir-browser-recent-datasets", "style"),
+        Output("dir-browser-filter-row", "style"),
+        Output("dir-browser-expert-path", "style"),
+        Output("dir-browser-path-input", "disabled"),
+        Output("dir-browser-go-btn", "disabled"),
+        Output("dir-browser-filter-input", "disabled"),
+        Output("dir-browser-filter-clear-btn", "disabled"),
+        Output("dir-browser-back-btn", "disabled", allow_duplicate=True),
+        Input("dataset-switch-transaction", "data"),
+        State("dir-browser-path", "data"),
+        prevent_initial_call=True,
+    )
+    def _lock_dataset_selection_controls(transaction, current_path):
+        validating = (transaction or {}).get("state") == "validating"
+        lock_style = {"pointerEvents": "none", "opacity": 0.62} if validating else {}
+        can_go_up = False
+        if current_path:
+            try:
+                can_go_up = bool(
+                    svc.browse_dataset_location(str(current_path)).get("can_go_up")
+                )
+            except svc.ServiceError:
+                can_go_up = False
+        return (
+            lock_style,
+            lock_style,
+            lock_style,
+            lock_style,
+            lock_style,
+            validating,
+            validating,
+            validating,
+            validating,
+            validating or not can_go_up,
+        )
+
+    @app.callback(
+        Output({"type": "dir-browser-dataset", "name": ALL}, "disabled"),
+        Output({"type": "dir-browser-recent-entry", "index": ALL}, "disabled"),
+        Input("dataset-switch-transaction", "data"),
+        State({"type": "dir-browser-dataset", "name": ALL}, "id"),
+        State({"type": "dir-browser-recent-entry", "index": ALL}, "id"),
+        prevent_initial_call=True,
+    )
+    def _lock_dynamic_dataset_choices(transaction, candidate_ids, recent_ids):
+        validating = (transaction or {}).get("state") == "validating"
+        return (
+            [validating for _item in candidate_ids or []],
+            [validating for _item in recent_ids or []],
+        )
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("dataset-session-store", "data", allow_duplicate=True),
+        Output("recent-datasets", "data", allow_duplicate=True),
+        Output("dataset-browser-candidate", "data", allow_duplicate=True),
+        Output("data-load-feedback", "children", allow_duplicate=True),
+        Output("dataset-switch-navigation", "data"),
+        Output("dataset-context-commit", "data"),
+        Output("global-dataset-notice", "children"),
+        Output("data-overview-view", "className", allow_duplicate=True),
+        Output("data-browser-view", "className", allow_duplicate=True),
         Output("topbar-folder", "children"),
         Output("topbar-rungroup", "children"),
         Output("topbar-status", "children"),
         Output("topbar-status", "className"),
-        Output("recent-datasets", "data"),
-        Output("dataset-browser-candidate", "data", allow_duplicate=True),
-        Output("data-load-feedback", "children"),
-        Output("data-overview-view", "className", allow_duplicate=True),
-        Output("data-browser-view", "className", allow_duplicate=True),
-        Input("data-apply-btn", "n_clicks"),
-        State("dataset-browser-candidate", "data"),
+        Output("dataset-focus-request", "data"),
+        Input("dataset-switch-transaction", "data"),
         State("app-store", "data"),
         State("recent-datasets", "data"),
         prevent_initial_call=True,
     )
-    def _apply_data_folder(n_clicks, candidate, store, recent_records):
-        if n_clicks is None:
+    def _commit_dataset_switch(transaction, current_store, recent_records):
+        request = transaction if isinstance(transaction, dict) else {}
+        if request.get("state") != "succeeded":
             raise PreventUpdate
-        store = store or {}
-        selected = candidate if isinstance(candidate, dict) else {}
-        folder = str(selected.get("folder") or "").strip()
-        base = str(selected.get("base") or "").strip()
-        if not folder or not base:
-            return (
-                store,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                recent_records,
-                None,
-                dbc.Alert("请选择 Dataset Candidate 后再使用。", color="warning", className="py-2"),
-                no_update,
-                no_update,
-            )
-        try:
-            target = _validated_dataset_target(selected)
-            folder = target["folder"]
-            base = target["base"]
-            status = svc.scan_dataset(folder, base=base)
-            dataset = status.get("dataset", {}) or {}
-            selected_base_new = str(dataset.get("selected_base") or "")
-            if selected_base_new != base:
-                raise svc.ServiceError("所选数据集已不存在，请重新选择。")
-        except Exception:
-            return (
-                store,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                recent_records,
-                None,
-                dbc.Alert(
-                    "Dataset Candidate 验证失败，Current Dataset、浏览位置和最近记录均未改变；请重新选择或重试。",
-                    color="danger",
-                    className="py-2",
-                ),
-                no_update,
-                no_update,
-            )
-        artifacts = svc.artifacts_from_status(status)
-        capabilities = svc.dataset_capabilities(status)
-        readiness = svc.dataset_readiness(status)
-        ready = svc.dataset_ready_count(status)
-        label = svc.dataset_label(status)
-        new_store = {
-            **initial_store(),
-            "folder": folder,
-            "base": selected_base_new,
-            "dataset_id": _dataset_id_from_selection(
-                folder,
-                selected_base_new,
-            ),
-            "label": label,
-            "ready_count": ready,
-            "capabilities": capabilities,
-            "readiness": readiness,
-            "artifacts": artifacts,
+        validation = request.get("validation") or {}
+        origin = request.get("origin") or {}
+        target_page = str(origin.get("page") or "data-management")
+        navigation = {
+            "request_id": str(request.get("request_id") or ""),
+            "page": target_page,
         }
-        status_class = "rs-badge" if ready >= 3 else ("rs-badge rs-bad" if ready <= 1 else "rs-badge")
+        label = str(validation.get("label") or "未命名数据集")
+        if svc.is_same_dataset_revision(current_store, validation):
+            message = f"{label} 已是相同源修订的 Current Dataset。"
+            return (
+                no_update,
+                no_update,
+                recent_records,
+                request.get("candidate"),
+                dbc.Alert(message, color="info", className="py-2"),
+                navigation,
+                {},
+                dbc.Alert(message, color="info", className="mb-0"),
+                "rs-data-view",
+                "rs-data-view d-none",
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                {
+                    "token": str(request.get("request_id") or ""),
+                    "target": "page-title" if target_page != "data-management" else "data-browser-title",
+                },
+            )
+
+        new_store = svc.current_dataset_from_validation(validation)
+        readiness = new_store.get("readiness") or {}
         recent = svc.normalise_recent_datasets(
             [
                 {
-                    "folder": folder,
-                    "base": selected_base_new,
+                    "folder": new_store["folder"],
+                    "base": new_store["base"],
                     "label": label,
                     "loaded_at": int(time.time()),
                 },
                 *(recent_records if isinstance(recent_records, list) else []),
             ]
         )
+        message = (
+            f"当前数据集已切换为：{label}。旧结果与选择已清除；"
+            "查询条件已保留，但尚未在新 Current Dataset 运行。"
+        )
+        marker = {
+            "request_id": str(request.get("request_id") or ""),
+            "dataset_id": str(new_store.get("dataset_id") or ""),
+            "source_revision": dict(new_store.get("source_revision") or {}),
+        }
         return (
             new_store,
+            new_store,
+            recent,
+            None,
+            dbc.Alert(message, color="success", className="py-2"),
+            navigation,
+            marker,
+            dbc.Alert(message, color="success", className="mb-0"),
+            "rs-data-view",
+            "rs-data-view d-none",
             label,
             label,
             "基础 {} · 事件 {} · 轨迹 {}".format(
@@ -2007,16 +2476,282 @@ def register_callbacks(app: Any) -> None:
                 "就绪" if (readiness.get("event_search") or {}).get("ready") else "未就绪",
                 "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
             ),
-            status_class,
-            recent,
+            "rs-badge",
+            {
+                "token": str(request.get("request_id") or ""),
+                "target": "page-title" if target_page != "data-management" else "data-candidate-summary",
+            },
+        )
+
+    @app.callback(
+        Output("dataset-focus-request", "data", allow_duplicate=True),
+        Input("data-pick-btn", "n_clicks"),
+        Input("dir-browser-cancel-btn", "n_clicks"),
+        State("page-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _request_dataset_focus(_pick_clicks, _cancel_clicks, page_store):
+        if ctx.triggered_id == "data-pick-btn":
+            return {"token": f"picker-{time.time_ns()}", "target": "data-browser-title"}
+        if ctx.triggered_id == "dir-browser-cancel-btn":
+            return {
+                "token": f"cancel-{time.time_ns()}",
+                "target": str(
+                    (((page_store or {}).get("dataset_return") or {}).get("trigger"))
+                    or "data-candidate-summary"
+                ),
+            }
+        raise PreventUpdate
+
+    app.clientside_callback(
+        """
+        function(request) {
+            if (!request || !request.target || !request.token) {
+                return window.dash_clientside.no_update;
+            }
+            let attempts = 0;
+            function focusWhenVisible() {
+                const target = document.getElementById(request.target);
+                if (target && target.getClientRects().length > 0) {
+                    if (!target.hasAttribute("tabindex")) {
+                        target.setAttribute("tabindex", "-1");
+                    }
+                    target.focus();
+                    return;
+                }
+                attempts += 1;
+                if (attempts < 30) {
+                    window.requestAnimationFrame(focusWhenVisible);
+                }
+            }
+            window.requestAnimationFrame(focusWhenVisible);
+            return request.token;
+        }
+        """,
+        Output("dataset-focus-sink", "children"),
+        Input("dataset-focus-request", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("species-grid-store", "data", allow_duplicate=True),
+        Output("rxn-grid-store", "data", allow_duplicate=True),
+        Output("inter-grid-store", "data", allow_duplicate=True),
+        Output("evolution-payload-store", "data", allow_duplicate=True),
+        Output("element-distribution-payload-store", "data", allow_duplicate=True),
+        Output("event-grid-store", "data", allow_duplicate=True),
+        Output("event-selected-store", "data", allow_duplicate=True),
+        Output("event-viewer-store", "data", allow_duplicate=True),
+        Output("pathway-store", "data", allow_duplicate=True),
+        Output("pathway-context-store", "data", allow_duplicate=True),
+        Output("pathway-selected-step", "data", allow_duplicate=True),
+        Output("pathway-selected-path", "data", allow_duplicate=True),
+        Output("event-path-store", "data", allow_duplicate=True),
+        Output("event-path-context-store", "data", allow_duplicate=True),
+        Output("event-path-wizard-step", "data", allow_duplicate=True),
+        Output("species-grid", "data", allow_duplicate=True),
+        Output("species-grid", "selected_rows", allow_duplicate=True),
+        Output("species-structure-grid", "data", allow_duplicate=True),
+        Output("species-structure-grid", "selected_rows", allow_duplicate=True),
+        Output("rxn-grid", "data", allow_duplicate=True),
+        Output("inter-grid", "data", allow_duplicate=True),
+        Output("event-grid", "data", allow_duplicate=True),
+        Output("event-grid", "selected_rows", allow_duplicate=True),
+        Output("pathway-grid", "data", allow_duplicate=True),
+        Output("pathway-grid", "selected_rows", allow_duplicate=True),
+        Output("pathway-evidence-grid", "data", allow_duplicate=True),
+        Output("event-path-comparison-grid", "data", allow_duplicate=True),
+        Output("event-path-signature-grid", "data", allow_duplicate=True),
+        Output("event-path-time-grid", "data", allow_duplicate=True),
+        Output("event-path-event-grid", "data", allow_duplicate=True),
+        Output("event-path-edge-grid", "data", allow_duplicate=True),
+        Output("event-path-cytoscape", "elements", allow_duplicate=True),
+        Output("evolution-graph", "figure", allow_duplicate=True),
+        Output("element-distribution-composition-trend", "figure", allow_duplicate=True),
+        Output("element-distribution-composition-table", "data", allow_duplicate=True),
+        Input("dataset-context-commit", "data"),
+        prevent_initial_call=True,
+    )
+    def _reset_dataset_bound_results(commit_marker):
+        if not (commit_marker or {}).get("request_id"):
+            raise PreventUpdate
+        return (
+            {"rows": []},
+            {"rows": []},
+            {"rows": []},
             None,
+            None,
+            {"rows": []},
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            go.Figure(),
+            go.Figure(),
+            [],
+        )
+
+    @app.callback(
+        Output("event-extract-id", "value", allow_duplicate=True),
+        Output("event-frame-slider", "min", allow_duplicate=True),
+        Output("event-frame-slider", "max", allow_duplicate=True),
+        Output("event-frame-slider", "value", allow_duplicate=True),
+        Output("event-frame-slider", "marks", allow_duplicate=True),
+        Output("event-path-additional-sources", "value", allow_duplicate=True),
+        Output("event-path-current-replicate", "value", allow_duplicate=True),
+        Output("event-path-occurrence-selector", "value", allow_duplicate=True),
+        Output("evolution-species-file", "value", allow_duplicate=True),
+        Output("evolution-species-files", "value", allow_duplicate=True),
+        Input("dataset-context-commit", "data"),
+        prevent_initial_call=True,
+    )
+    def _reset_dataset_bound_controls(commit_marker):
+        if not (commit_marker or {}).get("request_id"):
+            raise PreventUpdate
+        return "", 0, 0, 0, {}, "", "", None, "", ""
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("dataset-session-store", "data", allow_duplicate=True),
+        Output("dataset-restore-result", "data"),
+        Output("dataset-context-commit", "data", allow_duplicate=True),
+        Output("global-dataset-notice", "children", allow_duplicate=True),
+        Input("dataset-session-restore", "n_intervals"),
+        State("dataset-session-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _restore_current_dataset(_tick, session_store):
+        current = session_store if isinstance(session_store, dict) else {}
+        if not current.get("dataset_id"):
+            empty = initial_store()
+            return empty, empty, {"state": "none"}, {}, no_update
+        result = svc.revalidate_current_dataset(current)
+        state = str(result.get("state") or "unavailable")
+        if state == "active":
+            return result.get("context"), result.get("context"), result, {}, no_update
+        if state == "revision-changed":
+            marker = {
+                "request_id": f"restore-{time.time_ns()}",
+                "reason": "restore-revision-changed",
+            }
+            return (
+                result.get("context"),
+                result.get("context"),
+                result,
+                marker,
+                dbc.Alert(
+                    "Current Dataset 的源修订已变化。旧证据已停止作为当前结果；"
+                    "查询条件已保留，请更新当前数据集状态。",
+                    color="warning",
+                    className="mb-0",
+                ),
+            )
+        marker = {
+            "request_id": f"restore-{time.time_ns()}",
+            "reason": "restore-unavailable",
+        }
+        return (
+            initial_store(),
+            initial_store(),
+            result,
+            marker,
             dbc.Alert(
-                f"当前数据集已切换为：{label}",
-                color="success",
-                className="py-2",
+                "无法恢复 Current Dataset，已清除失效上下文；查询输入和最近记录均已保留。",
+                color="danger",
+                className="mb-0",
             ),
-            "rs-data-view",
-            "rs-data-view d-none",
+        )
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("dataset-session-store", "data", allow_duplicate=True),
+        Output("dataset-context-commit", "data", allow_duplicate=True),
+        Output("global-dataset-notice", "children", allow_duplicate=True),
+        Input("data-current-refresh-btn", "n_clicks"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_current_dataset(n_clicks, app_store):
+        if n_clicks is None:
+            raise PreventUpdate
+        current = app_store if isinstance(app_store, dict) else {}
+        if not current.get("dataset_id"):
+            raise PreventUpdate
+        was_revision_changed = current.get("context_state") == "revision-changed"
+        result = svc.revalidate_current_dataset(
+            current,
+            adopt_revision=was_revision_changed,
+        )
+        state = str(result.get("state") or "unavailable")
+        if state == "active":
+            marker = (
+                {
+                    "request_id": f"refresh-{time.time_ns()}",
+                    "reason": "revision-adopted",
+                }
+                if was_revision_changed
+                else {}
+            )
+            message = (
+                "已采用 Current Dataset 的最新源修订；查询条件已保留但尚未重新运行。"
+                if was_revision_changed
+                else "Current Dataset 的身份和源修订仍然有效。"
+            )
+            return (
+                result.get("context"),
+                result.get("context"),
+                marker,
+                dbc.Alert(message, color="success", className="mb-0"),
+            )
+        if state == "revision-changed":
+            return (
+                result.get("context"),
+                result.get("context"),
+                {
+                    "request_id": f"refresh-{time.time_ns()}",
+                    "reason": "revision-changed",
+                },
+                dbc.Alert(
+                    "检测到源修订变化。旧证据已停止作为当前结果；"
+                    "请选择“更新当前数据集状态”采用新修订。",
+                    color="warning",
+                    className="mb-0",
+                ),
+            )
+        return (
+            initial_store(),
+            initial_store(),
+            {
+                "request_id": f"refresh-{time.time_ns()}",
+                "reason": "current-unavailable",
+            },
+            dbc.Alert(
+                "Current Dataset 已不可用，已清除失效上下文；查询输入和最近记录均已保留。",
+                color="danger",
+                className="mb-0",
+            ),
         )
 
     def _channel_columns(items: list[tuple[str, str, int | None]]) -> list[dict[str, Any]]:
@@ -2042,6 +2777,13 @@ def register_callbacks(app: Any) -> None:
         State("species-mass-tol", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "species"}, "data"),
+                True,
+                False,
+            ),
+        ],
     )
     def _search_species(n_clicks, query, kind, mass_tol, store):
         if n_clicks is None:
@@ -2168,6 +2910,19 @@ def register_callbacks(app: Any) -> None:
         State("species-grid-store", "data"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output(
+                    {
+                        "type": "dataset-bound-operation",
+                        "name": "species-structures",
+                    },
+                    "data",
+                ),
+                True,
+                False,
+            ),
+        ],
     )
     def _load_mass_formula_structures(
         selected_rows,
@@ -2251,6 +3006,19 @@ def register_callbacks(app: Any) -> None:
         State("app-store", "data"),
         State("species-grid-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output(
+                    {
+                        "type": "dataset-bound-operation",
+                        "name": "species-detail",
+                    },
+                    "data",
+                ),
+                True,
+                False,
+            ),
+        ],
     )
     def _show_species_detail(
         formula_selected_rows,
@@ -2477,6 +3245,13 @@ def register_callbacks(app: Any) -> None:
         State("rxn-share-positive", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "reactions"}, "data"),
+                True,
+                False,
+            ),
+        ],
     )
     def _search_reactions(
         n_clicks,
@@ -2777,6 +3552,11 @@ def register_callbacks(app: Any) -> None:
         prevent_initial_call=True,
         running=[
             (
+                Output({"type": "dataset-bound-operation", "name": "intermediate"}, "data"),
+                True,
+                False,
+            ),
+            (
                 Output("inter-progress", "children"),
                 "正在读取物种时间序列、计算寿命与通量候选…",
                 "",
@@ -3042,6 +3822,11 @@ def register_callbacks(app: Any) -> None:
         prevent_initial_call=True,
         running=[
             (
+                Output({"type": "dataset-bound-operation", "name": "evolution"}, "data"),
+                True,
+                False,
+            ),
+            (
                 Output("evolution-progress", "children"),
                 "正在读取时间序列、对齐多体系并生成曲线…",
                 "",
@@ -3225,6 +4010,11 @@ def register_callbacks(app: Any) -> None:
         State("app-store", "data"),
         prevent_initial_call=True,
         running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "element-distribution"}, "data"),
+                True,
+                False,
+            ),
             (
                 Output("element-distribution-progress", "children"),
                 "正在读取元素分布索引并应用筛选…",
@@ -3458,6 +4248,13 @@ def register_callbacks(app: Any) -> None:
         State("event-rxn-max", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "events"}, "data"),
+                True,
+                False,
+            ),
+        ],
     )
     def _locate_reaction_events(
         rxn_clicks,
@@ -3743,6 +4540,16 @@ def register_callbacks(app: Any) -> None:
         ),
         State("event-environment-radius", "value"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output(
+                    {"type": "dataset-bound-operation", "name": "trajectory"},
+                    "data",
+                ),
+                True,
+                False,
+            ),
+        ],
     )
     def _extract_selected_event(
         _open_clicks,
@@ -4301,6 +5108,13 @@ def register_callbacks(app: Any) -> None:
         State("event-path-max-details", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "event-paths"}, "data"),
+                True,
+                False,
+            ),
+        ],
     )
     def _run_event_path_analysis(
         n_clicks,
@@ -4586,6 +5400,13 @@ def register_callbacks(app: Any) -> None:
         State("pathway-target-max-carbon", "value"),
         State("app-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (
+                Output({"type": "dataset-bound-operation", "name": "pathways"}, "data"),
+                True,
+                False,
+            ),
+        ],
     )
     def _search_pathways(
         n_clicks,

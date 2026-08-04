@@ -85,6 +85,16 @@ from reacnet_scope.batch_services import (
     run_grouped_batch_comparison,
     scan_batch_conditions,
 )
+from reacnet_scope.dataset_context import (
+    begin_dataset_switch,
+    current_dataset_from_validation,
+    inspect_dataset_candidate,
+    is_same_dataset_revision,
+    resolve_dataset_switch,
+    revalidate_current_dataset,
+    supersede_dataset_switch,
+    validate_dataset_candidate,
+)
 
 
 def find_pathways(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -180,4 +190,12 @@ __all__ = [
     "scan_batch_conditions",
     "run_grouped_batch_comparison",
     "run_batch_comparison",
+    "begin_dataset_switch",
+    "current_dataset_from_validation",
+    "inspect_dataset_candidate",
+    "is_same_dataset_revision",
+    "resolve_dataset_switch",
+    "revalidate_current_dataset",
+    "supersede_dataset_switch",
+    "validate_dataset_candidate",
 ]
