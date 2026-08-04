@@ -71,7 +71,6 @@ from reacnet_scope.rng_events import (  # noqa: E402
     reaction_key,
 )
 from reacnet_scope.datasets import (  # noqa: E402
-    ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
 )
 from reacnet_scope.trajectory import (  # noqa: E402
@@ -268,8 +267,13 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
             return {"state": "invalid", "message": str(exc)}
 
     timeline_path = str(artifact_paths.get("timeline") or "")
-    event_path = timeline_path or str(artifact_paths.get("reactionevent") or "")
+    reactionevent_path = str(artifact_paths.get("reactionevent") or "")
     molecule_path = str(artifact_paths.get("molecules") or "")
+    event_path = timeline_path or (
+        reactionevent_path
+        if molecule_path and Path(molecule_path).is_file()
+        else ""
+    )
     if event_path and Path(event_path).is_file():
         try:
             event_status = EVENT_EVIDENCE_STORE.status(
@@ -310,6 +314,49 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _candidate_capability_states(
+    candidate: dict[str, Any],
+    indexes: Mapping[str, str],
+) -> dict[str, str]:
+    """Describe independently usable analysis evidence for one candidate.
+
+    This stays metadata-only: source availability comes from the discovery
+    snapshot and derived-index states come from their small manifests.
+    """
+    artifact_paths = dict(candidate.get("artifact_paths") or {})
+
+    def source_state(kind: str) -> str:
+        return "ready" if artifact_paths.get(kind) else "missing_source"
+
+    def prepared_state(kind: str, source_available: bool) -> str:
+        if not source_available:
+            return "missing_source"
+        state = str(indexes.get(kind) or "missing")
+        return {
+            "missing": "needs_preparation",
+            "building": "preparing",
+        }.get(state, state)
+
+    species_source = bool(artifact_paths.get("species"))
+    event_source = bool(
+        artifact_paths.get("timeline")
+        or (
+            artifact_paths.get("reactionevent")
+            and artifact_paths.get("molecules")
+        )
+    )
+    return {
+        "reaction_search": source_state("reaction"),
+        "species_abundance": prepared_state("composition", species_source),
+        "event_search": prepared_state("event", event_source),
+        "trajectory_evidence": prepared_state(
+            "trajectory",
+            bool(artifact_paths.get("trajectory")),
+        ),
+        "element_distribution": prepared_state("composition", species_source),
+    }
+
+
 def browse_dataset_location(path: str) -> dict[str, Any]:
     """Build a read-only directory and dataset-discovery browser snapshot."""
     current = validate_browse_path(path)
@@ -323,18 +370,27 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
 
     datasets: list[dict[str, Any]] = []
     for candidate in candidates:
+        index_states = _candidate_index_states(candidate)
+        capability_states = _candidate_capability_states(
+            candidate,
+            index_states,
+        )
         datasets.append(
             {
                 **candidate,
                 "auto_selected": len(candidates) == 1,
-                "completeness": f"{candidate['score']}/{len(ARTIFACT_SUFFIXES)}",
-                "index_states": _candidate_index_states(candidate),
+                "index_states": index_states,
+                "capability_states": capability_states,
             }
         )
     return {
         **listing,
         "breadcrumbs": _breadcrumbs_within_allowed_root(current),
         "datasets": datasets,
+        "counts": {
+            "subdirs": len(listing.get("subdirs") or []),
+            "datasets": len(datasets),
+        },
     }
 
 

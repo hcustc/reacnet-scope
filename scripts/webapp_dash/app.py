@@ -3159,33 +3159,73 @@ def _data_management_page() -> html.Div:
                     ),
                     html.Div(
                         [
-                            dbc.Button(
-                                "↑ 上一级",
-                                id="dir-browser-back-btn",
-                                color="secondary",
-                                size="sm",
-                                outline=True,
-                                disabled=True,
-                                className="mb-2",
-                            ),
-                            dbc.InputGroup(
+                            html.Div(
                                 [
-                                    dbc.Input(
-                                        id="dir-browser-path-input",
-                                        debounce=True,
-                                        placeholder="输入服务器目录或数据集公共前缀",
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                "数据工作区",
+                                                className="rs-data-section-kicker",
+                                            ),
+                                            html.H2(
+                                                "选择 Dataset Candidate",
+                                                id="data-browser-title",
+                                                className="rs-browser-title",
+                                                tabIndex=-1,
+                                            ),
+                                            html.P(
+                                                "浏览和选择只保存在当前标签页；只有“使用此数据集”会更改 Current Dataset。",
+                                                className="rs-browser-intro",
+                                            ),
+                                        ]
                                     ),
                                     dbc.Button(
-                                        "前往",
-                                        id="dir-browser-go-btn",
+                                        "上一级",
+                                        id="dir-browser-back-btn",
                                         color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                        disabled=True,
                                     ),
                                 ],
-                                className="rs-browser-path-control",
+                                className="rs-browser-heading",
+                            ),
+                            html.Section(
+                                [
+                                    html.H3("最近数据集", className="rs-browser-section-title"),
+                                    html.Div(
+                                        id="dir-browser-recent-datasets",
+                                        className="rs-browser-recent",
+                                    ),
+                                ],
+                                className="rs-browser-section",
                             ),
                             html.Div(
                                 id="dir-browser-current",
                                 className="rs-browser-current",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Label(
+                                        "筛选 Dataset Candidate 和子目录",
+                                        html_for="dir-browser-filter-input",
+                                        className="visually-hidden",
+                                    ),
+                                    dbc.Input(
+                                        id="dir-browser-filter-input",
+                                        type="search",
+                                        debounce=True,
+                                        placeholder="筛选当前目录中的候选或子目录",
+                                    ),
+                                    dbc.Button(
+                                        "清除筛选",
+                                        id="dir-browser-filter-clear-btn",
+                                        color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                    ),
+                                ],
+                                className="rs-browser-filter-row",
                             ),
                             html.Div(
                                 id="dir-browser-body",
@@ -3194,6 +3234,36 @@ def _data_management_page() -> html.Div:
                                     className="small text-muted",
                                 ),
                                 className="rs-browser-directory-list",
+                            ),
+                            html.Details(
+                                [
+                                    html.Summary("专家入口：输入服务器路径"),
+                                    html.Div(
+                                        [
+                                            dbc.Label(
+                                                "服务器目录或 Dataset Candidate 公共前缀",
+                                                html_for="dir-browser-path-input",
+                                                className="visually-hidden",
+                                            ),
+                                            dbc.Input(
+                                                id="dir-browser-path-input",
+                                                placeholder="输入服务器目录或数据集公共前缀",
+                                            ),
+                                            dbc.Button(
+                                                "前往",
+                                                id="dir-browser-go-btn",
+                                                color="secondary",
+                                            ),
+                                        ],
+                                        className="rs-browser-path-control",
+                                    ),
+                                    html.Div(
+                                        "按 Enter 或选择“前往”后才导航；失焦不会改变浏览位置。",
+                                        id="dir-browser-path-help",
+                                        className="rs-browser-path-help",
+                                    ),
+                                ],
+                                className="rs-browser-expert-path",
                             ),
                             html.Div(
                                 [
@@ -3205,14 +3275,13 @@ def _data_management_page() -> html.Div:
                                         outline=True,
                                     ),
                                     dbc.Button(
-                                        "加载数据集",
+                                        "使用此数据集",
                                         id="data-apply-btn",
-                                        color="success",
-                                        size="sm",
+                                        color="primary",
                                         disabled=True,
                                     ),
                                 ],
-                                className="d-flex justify-content-between mt-3",
+                                className="rs-browser-submit-row",
                             ),
                         ],
                         id="data-browser-view",

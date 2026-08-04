@@ -353,12 +353,33 @@ def test_browser_snapshot_exposes_breadcrumbs_and_one_dataset(tmp_path, monkeypa
         "path": str(data_dir),
     }
     assert snapshot["datasets"][0]["auto_selected"] is True
-    assert snapshot["datasets"][0]["completeness"] == "2/6"
     assert set(snapshot["datasets"][0]["index_states"]) == {
         "event",
         "trajectory",
         "composition",
     }
+    assert snapshot["datasets"][0]["capability_states"] == {
+        "reaction_search": "ready",
+        "species_abundance": "needs_preparation",
+        "event_search": "missing_source",
+        "trajectory_evidence": "missing_source",
+        "element_distribution": "needs_preparation",
+    }
+    assert snapshot["counts"] == {"subdirs": 0, "datasets": 1}
+
+
+def test_browser_snapshot_requires_complete_event_csv_pair(tmp_path, monkeypatch):
+    _allow_only(tmp_path, monkeypatch)
+    base = tmp_path / "run.lammpstrj"
+    Path(f"{base}.reactionevent.csv").touch()
+
+    without_molecules = svc.browse_dataset_location(str(tmp_path))["datasets"][0]
+    assert without_molecules["index_states"]["event"] == "missing"
+    assert without_molecules["capability_states"]["event_search"] == "missing_source"
+
+    Path(f"{base}.molecules.csv").touch()
+    with_molecules = svc.browse_dataset_location(str(tmp_path))["datasets"][0]
+    assert with_molecules["capability_states"]["event_search"] == "needs_preparation"
 
 
 def test_browser_snapshot_exposes_empty_and_ambiguous_dataset_states(
@@ -376,6 +397,42 @@ def test_browser_snapshot_exposes_empty_and_ambiguous_dataset_states(
     datasets = svc.browse_dataset_location(str(data_dir))["datasets"]
     assert len(datasets) == 2
     assert {item["auto_selected"] for item in datasets} == {False}
+
+
+def test_browser_snapshot_does_not_open_large_source_artifacts(
+    tmp_path, monkeypatch
+):
+    _allow_only(tmp_path, monkeypatch)
+    base = tmp_path / "run.lammpstrj"
+    sources = {
+        Path(f"{base}.reactionabcd"),
+        Path(f"{base}.species"),
+        Path(f"{base}.reactionevent.csv"),
+        Path(f"{base}.molecules.csv"),
+        base,
+    }
+    for source in sources:
+        source.touch()
+    source_names = {str(path) for path in sources}
+    real_builtin_open = open
+    real_path_open = Path.open
+
+    def forbidden_builtin_open(file, *args, **kwargs):
+        if str(file) in source_names:
+            raise AssertionError("browser opened a ReacNetGenerator source artifact")
+        return real_builtin_open(file, *args, **kwargs)
+
+    def forbidden_path_open(path, *args, **kwargs):
+        if str(path) in source_names:
+            raise AssertionError("browser opened a ReacNetGenerator source artifact")
+        return real_path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", forbidden_builtin_open)
+    monkeypatch.setattr(Path, "open", forbidden_path_open)
+
+    snapshot = svc.browse_dataset_location(str(tmp_path))
+
+    assert snapshot["counts"]["datasets"] == 1
 
 
 def test_browser_snapshot_rejects_invalid_paths_and_keeps_breadcrumbs_in_root(
@@ -463,3 +520,21 @@ def test_normalise_recent_datasets_deduplicates_sorts_and_limits():
             "loaded_at": 3,
         },
     ]
+
+
+def test_browser_snapshot_handles_scale_boundary_with_exact_counts(
+    tmp_path, monkeypatch
+):
+    _allow_only(tmp_path, monkeypatch)
+    for index in range(5_000):
+        (tmp_path / f"directory-{index:04d}").mkdir()
+    for index in range(200):
+        Path(f"{tmp_path / f'candidate-{index:03d}.lammpstrj'}.reactionabcd").touch()
+
+    snapshot = svc.browse_dataset_location(str(tmp_path))
+
+    assert snapshot["counts"] == {"subdirs": 5_000, "datasets": 200}
+    assert snapshot["subdirs"][0]["name"] == "directory-0000"
+    assert snapshot["subdirs"][-1]["name"] == "directory-4999"
+    assert snapshot["datasets"][0]["label"] == "candidate-000.lammpstrj"
+    assert snapshot["datasets"][-1]["label"] == "candidate-199.lammpstrj"

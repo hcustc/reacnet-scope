@@ -1129,7 +1129,7 @@ def register_callbacks(app: Any) -> None:
         Input("nav-data-management", "n_clicks"),
         Input("data-pick-btn", "n_clicks"),
         Input("dir-browser-cancel-btn", "n_clicks"),
-        Input({"type": "dir-browser-recent-entry", "folder": ALL, "base": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-recent-entry", "index": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
     def _switch_data_management_view(
@@ -1147,10 +1147,50 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("data-recent-datasets", "children"),
+        Output("dir-browser-recent-datasets", "children"),
         Input("recent-datasets", "data"),
     )
     def _show_recent_datasets(recent_records):
-        return _render_recent_datasets(recent_records)
+        return (
+            _render_recent_datasets(recent_records, interactive=False),
+            _render_recent_datasets(recent_records, interactive=True),
+        )
+
+    @app.callback(
+        Output("recent-datasets", "data", allow_duplicate=True),
+        Input({"type": "dir-browser-recent-remove", "index": ALL}, "n_clicks"),
+        State("recent-datasets", "data"),
+        prevent_initial_call=True,
+    )
+    def _remove_recent_dataset(_clicks, recent_records):
+        triggered = ctx.triggered_id
+        if (
+            _pattern_trigger_type(triggered) != "dir-browser-recent-remove"
+            or not _triggered_click_value()
+        ):
+            raise PreventUpdate
+        records = svc.normalise_recent_datasets(recent_records)
+        try:
+            index = int(triggered.get("index"))
+        except (AttributeError, TypeError, ValueError):
+            raise PreventUpdate
+        if not 0 <= index < len(records):
+            raise PreventUpdate
+        return [record for position, record in enumerate(records) if position != index]
+
+    app.clientside_callback(
+        """
+        function(nClicks) {
+            if (!nClicks) {
+                return window.dash_clientside.no_update;
+            }
+            return "";
+        }
+        """,
+        Output("dir-browser-filter-input", "value"),
+        Input("dir-browser-filter-clear-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("data-candidate-summary", "children"),
@@ -1176,10 +1216,10 @@ def register_callbacks(app: Any) -> None:
                     ],
                     className="rs-current-dataset-name",
                 )
-                status_text = f"当前已加载 · {ready}/7 个数据文件就绪"
+                status_text = "Current Dataset · Analysis Capability 状态按下方项目分别显示"
             else:
-                summary = html.Strong("尚未加载数据集")
-                status_text = "请切换到一个可用的数据集后继续。"
+                summary = html.Strong("尚无 Current Dataset")
+                status_text = "请选择 Dataset Candidate，并显式执行“使用此数据集”。"
             return (
                 summary,
                 status_text,
@@ -1193,15 +1233,23 @@ def register_callbacks(app: Any) -> None:
             status = svc.scan_dataset(folder, base=base)
         except svc.ServiceError as exc:
             return (
-                dbc.Alert(f"所选数据集不可用：{exc.message}", color="danger", className="py-2"),
-                f"读取失败: {exc.message}",
+                dbc.Alert(
+                    _browser_error_copy(str(exc.reason or "candidate_missing")),
+                    color="danger",
+                    className="py-2",
+                ),
+                "Dataset Candidate 验证失败；Current Dataset 未改变。",
                 _render_artifacts({}),
                 True,
             )
-        except Exception as exc:
+        except Exception:
             return (
-                dbc.Alert(f"所选数据集不可用：{exc}", color="danger", className="py-2"),
-                f"读取失败: {exc}",
+                dbc.Alert(
+                    "Dataset Candidate 暂时无法验证。Current Dataset 已保留；请重试或重新选择。",
+                    color="danger",
+                    className="py-2",
+                ),
+                "Dataset Candidate 验证失败；Current Dataset 未改变。",
                 _render_artifacts({}),
                 True,
             )
@@ -1225,7 +1273,7 @@ def register_callbacks(app: Any) -> None:
                 ],
                 className="rs-current-dataset-name",
             ),
-            f"待加载数据集已验证 · {ready}/7 个数据文件就绪",
+            "Dataset Candidate 已验证；使用此数据集前不会改变 Current Dataset。",
             artifact_html,
             False,
         )
@@ -1590,13 +1638,17 @@ def register_callbacks(app: Any) -> None:
         Output("data-rungroup", "value", allow_duplicate=True),
         Input("data-pick-btn", "n_clicks"),
         Input("data-folder-input", "value"),
-        Input("dir-browser-path-input", "value"),
+        Input("dir-browser-path-input", "n_submit"),
         Input("dir-browser-go-btn", "n_clicks"),
-        Input({"type": "dir-browser-entry", "path": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-root", "index": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-breadcrumb", "index": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-entry", "name": ALL}, "n_clicks"),
         Input("dir-browser-back-btn", "n_clicks"),
-        Input({"type": "dir-browser-dataset", "base": ALL}, "n_clicks"),
-        Input({"type": "dir-browser-recent-entry", "folder": ALL, "base": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-dataset", "name": ALL}, "n_clicks"),
+        Input({"type": "dir-browser-recent-entry", "index": ALL}, "n_clicks"),
+        Input("dir-browser-filter-input", "value"),
         State("dir-browser-path", "data"),
+        State("dir-browser-path-input", "value"),
         State("data-folder-input", "value"),
         State("dataset-browser-candidate", "data"),
         State("recent-datasets", "data"),
@@ -1606,13 +1658,17 @@ def register_callbacks(app: Any) -> None:
     def _handle_dir_browser(
         pick_clicks,
         manual_dataset_input,
-        path_input,
+        path_submit,
         go_clicks,
+        _root_clicks,
+        _breadcrumb_clicks,
         _entry_clicks,
         back_clicks,
         _dataset_clicks,
         _recent_clicks,
+        browser_filter,
         current_path,
+        path_input,
         folder_input,
         candidate,
         recent_records,
@@ -1635,7 +1691,13 @@ def register_callbacks(app: Any) -> None:
                 candidate=candidate,
                 app_store=app_store,
             )
-            return _build_dir_browser_response(start_path, recent_records)
+            return _build_dir_browser_response(
+                start_path,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
 
         # --- ADVANCED MANUAL INPUT -----------------------------------
         if triggered_id == "data-folder-input":
@@ -1688,26 +1750,101 @@ def register_callbacks(app: Any) -> None:
             )
 
         # --- PATH INPUT / GO -----------------------------------------
-        if triggered_id == "dir-browser-path-input" or triggered_id == "dir-browser-go-btn":
+        if (
+            isinstance(triggered_id, str)
+            and triggered_id in {"dir-browser-path-input", "dir-browser-go-btn"}
+        ):
             target = (path_input or "").strip()
             if not target:
-                return _build_dir_browser_response(
-                    current_path
-                    or _resolve_initial_browse_path(
-                        folder_input,
-                        candidate=candidate,
-                        app_store=app_store,
-                    ),
-                    recent_records,
-                    error="请输入服务器目录后再前往。",
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="empty_path",
+                    filter_text=browser_filter,
                 )
-            return _build_dir_browser_response(target, recent_records)
+            return _build_dir_browser_response(
+                target,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
+
+        # --- FILTER CURRENT LOCATION --------------------------------
+        if triggered_id == "dir-browser-filter-input":
+            if not str(current_path or "").strip():
+                raise PreventUpdate
+            return _refresh_browser_location(
+                current_path,
+                candidate,
+                filter_text=browser_filter,
+            )
+
+        # --- NAVIGATE TO ALLOWED ROOT -------------------------------
+        if _pattern_trigger_type(triggered_id) == "dir-browser-root":
+            if not _triggered_click_value():
+                raise PreventUpdate
+            target = _allowed_root_for_index(triggered_id.get("index"))
+            if target is None:
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="no_roots",
+                    filter_text=browser_filter,
+                )
+            return _build_dir_browser_response(
+                target,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
+
+        # --- NAVIGATE BY RELATIVE BREADCRUMB ------------------------
+        if _pattern_trigger_type(triggered_id) == "dir-browser-breadcrumb":
+            if not _triggered_click_value():
+                raise PreventUpdate
+            target = _breadcrumb_path_for_index(
+                current_path,
+                triggered_id.get("index"),
+            )
+            if target is None:
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="not_found",
+                    filter_text=browser_filter,
+                )
+            return _build_dir_browser_response(
+                target,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
 
         # --- NAVIGATE TO SUBDIR ---------------------------------------
         if _pattern_trigger_type(triggered_id) == "dir-browser-entry":
             if not _triggered_click_value():
                 raise PreventUpdate
-            return _build_dir_browser_response(triggered_id["path"], recent_records)
+            target = _subdirectory_path_for_name(
+                current_path,
+                triggered_id.get("name"),
+            )
+            if target is None:
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="not_found",
+                    filter_text=browser_filter,
+                )
+            return _build_dir_browser_response(
+                target,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
 
         # --- GO UP ----------------------------------------------------
         if triggered_id == "dir-browser-back-btn":
@@ -1718,12 +1855,19 @@ def register_callbacks(app: Any) -> None:
                 cur = svc.validate_browse_path(stored)
                 parent = str(cur.parent)
                 svc.validate_browse_path(parent)
-                return _build_dir_browser_response(parent, recent_records)
-            except svc.ServiceError:
                 return _build_dir_browser_response(
+                    parent,
+                    current_path=current_path,
+                    candidate=candidate,
+                    app_store=app_store,
+                    filter_text=browser_filter,
+                )
+            except svc.ServiceError:
+                return _recover_browser_error(
                     stored,
-                    recent_records,
-                    error="已在允许的根目录边界，无法继续返回上一级。",
+                    candidate,
+                    reason="root_boundary",
+                    filter_text=browser_filter,
                 )
 
         # --- SELECT DATASET CARD -------------------------------------
@@ -1732,18 +1876,30 @@ def register_callbacks(app: Any) -> None:
                 raise PreventUpdate
             return _select_browser_candidate(
                 current_path,
-                triggered_id.get("base", ""),
-                recent_records,
+                triggered_id.get("name", ""),
+                filter_text=browser_filter,
             )
 
         # --- SELECT RECENT DATASET -----------------------------------
         if _pattern_trigger_type(triggered_id) == "dir-browser-recent-entry":
             if not _triggered_click_value():
                 raise PreventUpdate
+            records = svc.normalise_recent_datasets(recent_records)
+            try:
+                record = records[int(triggered_id.get("index"))]
+            except (IndexError, TypeError, ValueError):
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="recent_missing",
+                    filter_text=browser_filter,
+                )
             return _select_browser_candidate(
-                triggered_id.get("folder", ""),
-                triggered_id.get("base", ""),
-                recent_records,
+                record.get("folder", ""),
+                Path(str(record.get("base") or "")).name,
+                filter_text=browser_filter,
+                fallback_path=current_path,
+                fallback_candidate=candidate,
             )
 
         raise PreventUpdate
@@ -1781,7 +1937,7 @@ def register_callbacks(app: Any) -> None:
                 no_update,
                 recent_records,
                 None,
-                dbc.Alert("请选择一个可用的数据集后再加载。", color="warning", className="py-2"),
+                dbc.Alert("请选择 Dataset Candidate 后再使用。", color="warning", className="py-2"),
                 no_update,
                 no_update,
             )
@@ -1794,7 +1950,7 @@ def register_callbacks(app: Any) -> None:
             selected_base_new = str(dataset.get("selected_base") or "")
             if selected_base_new != base:
                 raise svc.ServiceError("所选数据集已不存在，请重新选择。")
-        except Exception as exc:
+        except Exception:
             return (
                 store,
                 no_update,
@@ -1804,7 +1960,7 @@ def register_callbacks(app: Any) -> None:
                 recent_records,
                 None,
                 dbc.Alert(
-                    f"所选数据集不可用，未切换当前数据：{exc}",
+                    "Dataset Candidate 验证失败，Current Dataset、浏览位置和最近记录均未改变；请重新选择或重试。",
                     color="danger",
                     className="py-2",
                 ),
@@ -1844,7 +2000,7 @@ def register_callbacks(app: Any) -> None:
         )
         return (
             new_store,
-            folder,
+            label,
             label,
             "基础 {} · 事件 {} · 轨迹 {}".format(
                 "就绪" if (readiness.get("basic_analysis") or {}).get("ready") else "未就绪",
@@ -1855,7 +2011,7 @@ def register_callbacks(app: Any) -> None:
             recent,
             None,
             dbc.Alert(
-                f"已加载数据集：{label}",
+                f"当前数据集已切换为：{label}",
                 color="success",
                 className="py-2",
             ),
@@ -5150,6 +5306,26 @@ def register_callbacks(app: Any) -> None:
 
 # ── Directory browser helpers ───────────────────────────────────────
 
+_BROWSER_RENDER_LIMIT = 100
+
+_CAPABILITY_LABELS = {
+    "reaction_search": "反应检索",
+    "species_abundance": "物种丰度",
+    "event_search": "事件检索",
+    "trajectory_evidence": "轨迹证据",
+    "element_distribution": "元素分布",
+}
+
+_CAPABILITY_STATE_LABELS = {
+    "ready": "就绪",
+    "needs_preparation": "需准备",
+    "preparing": "准备中",
+    "stale": "已失效",
+    "invalid": "无效",
+    "missing_source": "缺少来源",
+}
+
+
 
 def _resolve_initial_browse_path(
     folder_input: str | None,
@@ -5164,11 +5340,9 @@ def _resolve_initial_browse_path(
     of the optional manual-input control while still honoring a freshly typed
     path.  Invalid or unavailable values fall back to the first allowed root.
     """
-    from pathlib import Path
-
     possible_inputs: list[str] = []
     selected = candidate if isinstance(candidate, dict) else {}
-    for key in ("folder", "base"):
+    for key in ("base", "folder"):
         value = str(selected.get(key) or "").strip()
         if value:
             possible_inputs.append(value)
@@ -5184,7 +5358,7 @@ def _resolve_initial_browse_path(
     for possible in possible_inputs:
         try:
             resolved = svc.resolve_dataset_input(possible)
-            return str(resolved["folder"])
+            return str(resolved.get("preferred_base") or resolved["folder"])
         except svc.ServiceError:
             continue
     # A deployment may configure roots that exclude the service account's
@@ -5223,6 +5397,66 @@ def _candidate_for_base(snapshot: dict[str, Any], base: str) -> dict[str, Any] |
         (item for item in snapshot.get("datasets") or [] if item.get("base") == target),
         None,
     )
+
+
+def _candidate_for_name(snapshot: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Resolve a client-visible candidate name through a fresh snapshot."""
+    target = str(name or "")
+    return next(
+        (
+            item
+            for item in snapshot.get("datasets") or []
+            if str(item.get("label") or "") == target
+        ),
+        None,
+    )
+
+
+def _allowed_roots() -> list[Path]:
+    """Return currently valid roots without exposing their absolute paths."""
+    roots: list[Path] = []
+    for configured in svc.ALLOWED_ROOTS:
+        try:
+            root = configured.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root.is_dir():
+            roots.append(root)
+    return roots
+
+
+def _allowed_root_for_index(raw_index: Any) -> str | None:
+    try:
+        return str(_allowed_roots()[int(raw_index)])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _breadcrumb_path_for_index(current_path: Any, raw_index: Any) -> str | None:
+    try:
+        snapshot = svc.browse_dataset_location(str(current_path or ""))
+        crumb = (snapshot.get("breadcrumbs") or [])[int(raw_index)]
+        return str(crumb.get("path") or "") or None
+    except (IndexError, TypeError, ValueError, svc.ServiceError):
+        return None
+
+
+def _subdirectory_path_for_name(current_path: Any, name: Any) -> str | None:
+    """Resolve an untrusted visible child name from the current snapshot."""
+    try:
+        snapshot = svc.browse_dataset_location(str(current_path or ""))
+    except svc.ServiceError:
+        return None
+    target = str(name or "")
+    item = next(
+        (
+            entry
+            for entry in snapshot.get("subdirs") or []
+            if str(entry.get("name") or "") == target
+        ),
+        None,
+    )
+    return str((item or {}).get("path") or "") or None
 
 
 def _validated_dataset_target(
@@ -5266,13 +5500,22 @@ def _build_dir_browser_snapshot_response(
     candidate: dict[str, str] | None,
     *,
     error: str = "",
+    filter_text: str = "",
+    path_input_value: Any = None,
 ) -> tuple:
     """Render one already-validated directory snapshot without rereading it."""
+    if path_input_value is None:
+        path_input_value = data["current_path"]
     return (
-        data["current_path"],
+        path_input_value,
         not bool(data.get("can_go_up")),
-        _render_browser_current(data, candidate, error=error),
-        _render_dir_browser_body(data, error=error),
+        _render_browser_current(
+            data,
+            candidate,
+            error=error,
+            filter_text=filter_text,
+        ),
+        _render_dir_browser_body(data, filter_text=filter_text),
         data["current_path"],
         candidate,
         candidate is None,
@@ -5281,75 +5524,208 @@ def _build_dir_browser_snapshot_response(
     )
 
 
-def _build_dir_browser_error_response(path: str, message: str) -> tuple:
+def _build_dir_browser_error_response(message: str) -> tuple:
     """Render a browser error without retrying the failed directory read."""
-    attempted = str(path or "")
     return (
-        attempted,
+        no_update,
         True,
-        _render_browser_current(None, None, error=message, path=attempted),
+        _render_browser_current(None, None, error=message),
         _render_dir_browser_error(message),
         no_update,
-        None,
+        no_update,
         True,
         no_update,
         no_update,
     )
 
 
+def _browser_error_copy(reason: str) -> str:
+    """Return actionable, path-safe feedback for one browser failure."""
+    return {
+        "empty_path": (
+            "未输入服务器路径。浏览位置、Dataset Candidate 和 Current Dataset 均未改变；"
+            "请输入允许根目录内的位置后按 Enter 或选择“前往”。"
+        ),
+        "path_out_of_bounds": (
+            "该位置不在允许根目录内。原浏览位置和 Current Dataset 已保留；"
+            "请选择下方允许根目录或修正专家路径。"
+        ),
+        "permission_denied": (
+            "没有读取目标位置的权限。原浏览位置和 Current Dataset 已保留；"
+            "请选择其他允许位置或联系管理员授权。"
+        ),
+        "not_found": (
+            "目标位置已不存在。原浏览位置和 Current Dataset 已保留；"
+            "请从仍可用的面包屑或允许根目录继续。"
+        ),
+        "not_directory": (
+            "目标不是可浏览目录。原浏览位置和 Current Dataset 已保留；"
+            "请输入目录或准确的 Dataset Candidate 公共前缀。"
+        ),
+        "recent_missing": (
+            "最近记录已失效。原浏览位置和 Current Dataset 已保留；"
+            "可移除该记录并从允许根目录重新查找。"
+        ),
+        "candidate_missing": (
+            "Dataset Candidate 已消失。当前目录和 Current Dataset 已保留；"
+            "请选择仍然存在的候选或继续浏览。"
+        ),
+        "root_boundary": (
+            "已到达允许根目录边界。浏览位置和 Current Dataset 均未改变。"
+        ),
+        "no_roots": (
+            "当前没有可用的允许根目录。Current Dataset 已保留；"
+            "请联系管理员检查浏览根配置。"
+        ),
+        "read_error": (
+            "目标位置暂时无法读取。原浏览位置和 Current Dataset 已保留；"
+            "请重试或选择其他允许位置。"
+        ),
+    }.get(
+        str(reason or ""),
+        "无法打开目标位置。原浏览位置和 Current Dataset 已保留；请修正输入后重试。",
+    )
+
+
+def _candidate_in_snapshot(
+    snapshot: dict[str, Any],
+    candidate: dict[str, Any] | None,
+) -> dict[str, str] | None:
+    selected = candidate if isinstance(candidate, dict) else {}
+    base = str(selected.get("base") or "")
+    actual = _candidate_for_base(snapshot, base) if base else None
+    return _compact_browser_candidate(actual) if actual else None
+
+
+def _refresh_browser_location(
+    current_path: Any,
+    candidate: dict[str, Any] | None,
+    *,
+    filter_text: Any = "",
+    error: str = "",
+) -> tuple:
+    try:
+        snapshot = svc.browse_dataset_location(str(current_path or ""))
+    except svc.ServiceError as exc:
+        return _build_dir_browser_error_response(
+            _browser_error_copy(str(exc.reason or "read_error"))
+        )
+    selected = _candidate_in_snapshot(snapshot, candidate)
+    if candidate and selected is None and not error:
+        error = _browser_error_copy("candidate_missing")
+    return _build_dir_browser_snapshot_response(
+        snapshot,
+        selected,
+        error=error,
+        filter_text=str(filter_text or ""),
+        path_input_value=no_update if error else None,
+    )
+
+
+def _recover_browser_error(
+    current_path: Any,
+    candidate: dict[str, Any] | None,
+    *,
+    reason: str,
+    filter_text: Any = "",
+) -> tuple:
+    message = _browser_error_copy(reason)
+    if str(current_path or "").strip():
+        return _refresh_browser_location(
+            current_path,
+            candidate,
+            filter_text=filter_text,
+            error=message,
+        )
+    return _build_dir_browser_error_response(message)
+
+
 def _build_dir_browser_response(
     path_str: str,
-    recent_records: list[dict[str, Any]] | None,
-    error: str = "",
+    *,
+    current_path: Any = "",
+    candidate: dict[str, Any] | None = None,
+    app_store: dict[str, Any] | None = None,
+    filter_text: Any = "",
 ) -> tuple:
     """Build a complete browser snapshot response without applying a dataset."""
     try:
         resolved = svc.resolve_dataset_input(path_str)
         data = svc.browse_dataset_location(resolved["folder"])
     except svc.ServiceError as exc:
-        return _build_dir_browser_error_response(
-            path_str,
-            str(exc.message),
+        return _recover_browser_error(
+            current_path,
+            candidate,
+            reason=str(exc.reason or "read_error"),
+            filter_text=filter_text,
         )
     datasets = data.get("datasets") or []
     preferred_base = str(resolved.get("preferred_base") or "")
     actual = (
         _candidate_for_base(data, preferred_base)
-        if preferred_base
-        else (datasets[0] if len(datasets) == 1 else None)
+        if preferred_base else None
     )
+    if actual is None and not preferred_base and len(datasets) == 1:
+        actual = datasets[0]
+    if actual is None and not preferred_base:
+        current = app_store if isinstance(app_store, dict) else {}
+        actual = _candidate_for_base(data, str(current.get("base") or ""))
     candidate = _compact_browser_candidate(actual) if actual else None
     if preferred_base and actual is None:
-        error = "当前目录未发现指定的数据集前缀。"
+        error = _browser_error_copy("candidate_missing")
+    else:
+        error = ""
     return _build_dir_browser_snapshot_response(
         data,
         candidate,
         error=error,
+        filter_text=str(filter_text or ""),
     )
 
 
 def _select_browser_candidate(
     folder: str,
-    base: str,
-    recent_records: list[dict[str, Any]] | None,
+    name: str,
+    *,
+    filter_text: Any = "",
+    fallback_path: Any = "",
+    fallback_candidate: dict[str, Any] | None = None,
 ) -> tuple:
     """Read a directory once then set its explicitly selected candidate."""
     try:
         snapshot = svc.browse_dataset_location(folder)
     except svc.ServiceError as exc:
-        return _build_dir_browser_error_response(
-            folder,
-            str(exc.message),
+        return _recover_browser_error(
+            fallback_path or folder,
+            fallback_candidate,
+            reason=(
+                "recent_missing"
+                if fallback_path
+                else str(exc.reason or "read_error")
+            ),
+            filter_text=filter_text,
         )
-    candidate = _candidate_for_base(snapshot, base)
+    candidate = _candidate_for_name(snapshot, name)
     if candidate is None:
+        if fallback_path:
+            return _recover_browser_error(
+                fallback_path,
+                fallback_candidate,
+                reason="recent_missing",
+                filter_text=filter_text,
+            )
         return _build_dir_browser_snapshot_response(
             snapshot,
             None,
-            error="该数据集已不存在，请从当前目录重新选择。",
+            error=_browser_error_copy("candidate_missing"),
+            filter_text=str(filter_text or ""),
         )
     compact = _compact_browser_candidate(candidate)
-    return _build_dir_browser_snapshot_response(snapshot, compact)
+    return _build_dir_browser_snapshot_response(
+        snapshot,
+        compact,
+        filter_text=str(filter_text or ""),
+    )
 
 
 def _render_browser_current(
@@ -5357,125 +5733,407 @@ def _render_browser_current(
     candidate: dict[str, str] | None,
     *,
     error: str = "",
-    path: str = "",
+    filter_text: str = "",
 ) -> Any:
-    """Render compact current-directory status and candidate rows."""
+    """Render allowed roots, relative breadcrumbs, and candidate radios."""
     snapshot = data or {}
-    current_path = str(snapshot.get("current_path") or path or "")
-    datasets = snapshot.get("datasets") or []
+    datasets = list(snapshot.get("datasets") or [])
     selected_base = str((candidate or {}).get("base") or "")
+    matched, visible = _bounded_browser_items(
+        datasets,
+        filter_text,
+        key="label",
+    )
+    if selected_base and not filter_text and not any(
+        str(item.get("base") or "") == selected_base for item in visible
+    ):
+        selected = _candidate_for_base(snapshot, selected_base)
+        if selected is not None:
+            visible = [*visible[: _BROWSER_RENDER_LIMIT - 1], selected]
+    visible_selection = any(
+        str(item.get("base") or "") == selected_base for item in visible
+    )
+
     if not datasets:
-        candidates: Any = html.Div(
-            "当前目录未发现 ReacNetGenerator 数据集，可继续进入子目录。",
+        candidate_content: Any = html.Div(
+            "当前目录没有 Dataset Candidate；可以继续浏览子目录。",
             className="rs-browser-empty-line",
+            **{"role": "status"},
+        )
+    elif not matched:
+        candidate_content = html.Div(
+            [
+                html.Span("没有候选匹配当前筛选。"),
+                html.Span(" 使用“清除筛选”恢复全部候选。"),
+            ],
+            className="rs-browser-empty-line is-filter-empty",
+            **{"role": "status"},
         )
     else:
-        candidates = html.Div(
+        candidate_content = html.Div(
             [
-            dbc.Button(
-                [
-                    html.Span(
-                        "●" if item["base"] == selected_base else "○",
-                        className="rs-browser-radio",
+                _render_candidate_radio(
+                    item,
+                    selected=(str(item.get("base") or "") == selected_base),
+                    tabbable=(
+                        str(item.get("base") or "") == selected_base
+                        or not visible_selection and position == 0
                     ),
-                    html.Strong(item["label"], className="rs-browser-candidate-name"),
-                    html.Span(
-                        f"文件完整度 {item['completeness']}",
-                        className="rs-browser-candidate-meta",
-                    ),
-                ],
-                id={"type": "dir-browser-dataset", "base": item["base"]},
-                color="light",
-                size="sm",
-                className=(
-                    "rs-browser-candidate-row is-selected"
-                    if item["base"] == selected_base
-                    else "rs-browser-candidate-row"
-                ),
-            )
-            for item in datasets
+                )
+                for position, item in enumerate(visible)
             ],
             className="rs-browser-candidate-list",
+            **{
+                "role": "radiogroup",
+                "aria-label": "Dataset Candidate",
+            },
         )
-    alert = html.Div(error, className="text-warning small") if error else None
-    return html.Div(
+    candidate_section = html.Section(
         [
             html.Div(
                 [
-                    html.Span("当前目录", className="text-muted"),
-                    html.Code(current_path, className="rs-browser-current-path"),
+                    html.H3(
+                        "Dataset Candidate",
+                        className="rs-browser-section-title",
+                    ),
+                    _render_item_count(
+                        shown=len(visible),
+                        matched=len(matched),
+                        total=len(datasets),
+                    ),
                 ],
-                className="rs-browser-current-line",
+                className="rs-browser-section-heading",
             ),
+            candidate_content,
+            _render_selected_candidate_details(snapshot, selected_base),
+        ],
+        className="rs-browser-section rs-browser-candidates",
+    )
+    alert = (
+        html.Div(
+            error,
+            className="rs-browser-region-alert",
+            **{"role": "alert"},
+        )
+        if error
+        else None
+    )
+    return html.Div(
+        [
+            _render_allowed_roots(),
+            _render_breadcrumbs(snapshot.get("breadcrumbs") or []),
             alert,
-            candidates,
+            candidate_section,
         ]
     )
 
 
-def _render_recent_datasets(records: list[dict[str, Any]] | None) -> Any:
-    """Render valid recent records without trusting browser-local storage."""
-    from pathlib import Path
+def _bounded_browser_items(
+    items: list[dict[str, Any]],
+    filter_text: Any,
+    *,
+    key: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    query = str(filter_text or "").strip().casefold()
+    matched = [
+        item
+        for item in items
+        if not query or query in str(item.get(key) or "").casefold()
+    ]
+    return matched, matched[:_BROWSER_RENDER_LIMIT]
 
+
+def _render_item_count(*, shown: int, matched: int, total: int) -> Any:
+    if matched == total:
+        text = f"显示 {shown} / 共 {total}"
+    else:
+        text = f"显示 {shown} / 匹配 {matched} / 共 {total}"
+    return html.Span(text, className="rs-browser-item-count")
+
+
+def _render_allowed_roots() -> Any:
+    roots = _allowed_roots()
+    if not roots:
+        content: Any = html.Div(
+            "没有可用的允许根目录。",
+            className="rs-browser-empty-line",
+            **{"role": "status"},
+        )
+    else:
+        labels: dict[str, int] = {}
+        buttons: list[Any] = []
+        for index, root in enumerate(roots):
+            base_label = root.name or "根目录"
+            labels[base_label] = labels.get(base_label, 0) + 1
+            label = (
+                base_label
+                if labels[base_label] == 1
+                else f"{base_label} {labels[base_label]}"
+            )
+            buttons.append(
+                html.Button(
+                    label,
+                    id={"type": "dir-browser-root", "index": index},
+                    type="button",
+                    className="rs-browser-root-button",
+                )
+            )
+        content = html.Div(buttons, className="rs-browser-root-list")
+    return html.Section(
+        [
+            html.H3("允许根目录", className="rs-browser-section-title"),
+            content,
+        ],
+        className="rs-browser-section rs-browser-roots",
+    )
+
+
+def _render_breadcrumbs(crumbs: list[dict[str, Any]]) -> Any:
+    buttons: list[Any] = []
+    for index, crumb in enumerate(crumbs):
+        buttons.append(
+            html.Button(
+                str(crumb.get("label") or "位置"),
+                id={"type": "dir-browser-breadcrumb", "index": index},
+                type="button",
+                className="rs-browser-breadcrumb-button",
+                **(
+                    {"aria-current": "location"}
+                    if index == len(crumbs) - 1
+                    else {}
+                ),
+            )
+        )
+    return html.Nav(
+        [
+            html.H3("当前位置", className="rs-browser-section-title"),
+            html.Div(buttons, className="rs-browser-breadcrumb-list"),
+        ],
+        className="rs-browser-section rs-browser-breadcrumbs",
+        **{"aria-label": "当前目录的相对面包屑"},
+    )
+
+
+def _render_candidate_radio(
+    item: dict[str, Any],
+    *,
+    selected: bool,
+    tabbable: bool,
+) -> Any:
+    capability_states = dict(item.get("capability_states") or {})
+    capability_badges = [
+        html.Span(
+            [
+                html.Span(label, className="rs-browser-capability-name"),
+                html.Span(
+                    _CAPABILITY_STATE_LABELS.get(
+                        str(capability_states.get(key) or "missing_source"),
+                        "不可用",
+                    ),
+                    className=(
+                        "rs-browser-capability-state is-"
+                        + str(capability_states.get(key) or "missing_source").replace("_", "-")
+                    ),
+                ),
+            ],
+            className="rs-browser-capability",
+        )
+        for key, label in _CAPABILITY_LABELS.items()
+    ]
+    return html.Button(
+        [
+            html.Span(className="rs-browser-radio-indicator", **{"aria-hidden": "true"}),
+            html.Span(
+                [
+                    html.Strong(
+                        str(item.get("label") or "未命名候选"),
+                        className="rs-browser-candidate-name",
+                    ),
+                    html.Span("当前目录", className="rs-browser-candidate-location"),
+                    html.Span(
+                        capability_badges,
+                        className="rs-browser-capability-list",
+                    ),
+                ],
+                className="rs-browser-candidate-content",
+            ),
+        ],
+        id={
+            "type": "dir-browser-dataset",
+            "name": str(item.get("label") or ""),
+        },
+        type="button",
+        role="radio",
+        tabIndex=0 if tabbable else -1,
+        className=(
+            "rs-browser-candidate-row is-selected"
+            if selected
+            else "rs-browser-candidate-row"
+        ),
+        **{"aria-checked": "true" if selected else "false"},
+    )
+
+
+def _render_selected_candidate_details(
+    snapshot: dict[str, Any],
+    selected_base: str,
+) -> Any:
+    selected = _candidate_for_base(snapshot, selected_base) if selected_base else None
+    if selected is None:
+        return None
+    artifact_names = sorted(
+        Path(str(path)).name
+        for path in (selected.get("artifact_paths") or {}).values()
+    )
+    return html.Details(
+        [
+            html.Summary("展开候选来源详情"),
+            html.Div(
+                [
+                    html.Div("完整公共前缀", className="rs-browser-detail-label"),
+                    html.Code(selected_base),
+                    html.Div("发现的源工件", className="rs-browser-detail-label"),
+                    html.Ul([html.Li(name) for name in artifact_names]),
+                ],
+                className="rs-browser-candidate-details-body",
+            ),
+        ],
+        className="rs-browser-candidate-details",
+    )
+
+
+def _render_recent_datasets(
+    records: list[dict[str, Any]] | None,
+    *,
+    interactive: bool = True,
+) -> Any:
+    """Render revalidated recent records with a recoverable remove action."""
     entries: list[Any] = []
-    for record in svc.normalise_recent_datasets(records or []):
+    for index, record in enumerate(svc.normalise_recent_datasets(records or [])):
         folder = str(record.get("folder") or "")
         base = str(record.get("base") or "")
         try:
-            available = bool(folder and base and svc.validate_browse_path(folder).is_dir())
+            snapshot = svc.browse_dataset_location(folder)
+            available = _candidate_for_base(snapshot, base) is not None
         except svc.ServiceError:
             available = False
         label = str(record.get("label") or Path(base).name or folder)
-        if available:
+        if not interactive:
             entries.append(
-                dbc.Button(
-                    label,
-                    id={"type": "dir-browser-recent-entry", "folder": folder, "base": base},
-                    color="link",
-                    size="sm",
-                    className="rs-browser-recent-entry",
+                html.Span(
+                    label if available else f"{label}（不可用）",
+                    className=(
+                        "rs-browser-recent-label"
+                        if available
+                        else "rs-browser-recent-unavailable"
+                    ),
                 )
             )
-        else:
-            entries.append(html.Span(f"{label}（不可用）", className="rs-browser-recent-unavailable"))
+            continue
+        entries.append(
+            html.Div(
+                [
+                    html.Button(
+                        label if available else f"{label}（不可用）",
+                        id={"type": "dir-browser-recent-entry", "index": index},
+                        type="button",
+                        disabled=not available,
+                        className=(
+                            "rs-browser-recent-entry"
+                            if available
+                            else "rs-browser-recent-unavailable"
+                        ),
+                    ),
+                    html.Button(
+                        "移除",
+                        id={"type": "dir-browser-recent-remove", "index": index},
+                        type="button",
+                        className="rs-browser-recent-remove",
+                        **{"aria-label": f"从最近数据集中移除 {label}"},
+                    ),
+                ],
+                className="rs-browser-recent-item",
+            )
+        )
     if not entries:
-        return None
-    return html.Section([html.H6("最近加载"), html.Div(entries, className="rs-browser-recent-list")])
+        return html.Div(
+            "暂无最近数据集记录。",
+            className="rs-browser-empty-line",
+            **{"role": "status"},
+        )
+    return html.Div(entries, className="rs-browser-recent-list")
 
 
 def _render_dir_browser_error(message: str) -> Any:
     """Render a recoverable error inside the directory-list section."""
     return html.Div(
-        [html.Span("⚠ "), html.Span(message)],
-        className="text-danger small py-2",
+        message,
+        className="rs-browser-region-alert",
+        **{"role": "alert"},
     )
 
 
-def _render_dir_browser_body(data: dict[str, Any], error: str = "") -> Any:
+def _render_dir_browser_body(
+    data: dict[str, Any],
+    *,
+    filter_text: str = "",
+) -> Any:
     """Render only the subdirectory section for a browser snapshot."""
-    subdirs: list[dict[str, Any]] = data.get("subdirs", [])
+    subdirs: list[dict[str, Any]] = list(data.get("subdirs") or [])
+    matched, visible = _bounded_browser_items(
+        subdirs,
+        filter_text,
+        key="name",
+    )
     if not subdirs:
-        directory_list: Any = html.Div("当前目录没有子文件夹", className="rs-browser-empty-line")
+        directory_list: Any = html.Div(
+            "当前目录没有子目录。",
+            className="rs-browser-empty-line",
+            **{"role": "status"},
+        )
+    elif not matched:
+        directory_list = html.Div(
+            "没有子目录匹配当前筛选；使用“清除筛选”恢复全部子目录。",
+            className="rs-browser-empty-line is-filter-empty",
+            **{"role": "status"},
+        )
     else:
         directory_list = html.Div(
             [
-                dbc.Button(
+                html.Button(
                     [
-                        html.Span("📁", className="rs-browser-folder-icon"),
                         html.Span(item.get("name", ""), className="rs-browser-folder-name"),
-                        html.Span("›", className="rs-browser-chevron"),
+                        html.Span(
+                            "无读取权限" if not item.get("accessible", True) else "打开",
+                            className="rs-browser-directory-action",
+                        ),
                     ],
-                    id={"type": "dir-browser-entry", "path": item["path"]},
-                    color="light",
-                    size="sm",
+                    id={"type": "dir-browser-entry", "name": item["name"]},
+                    type="button",
                     disabled=not bool(item.get("accessible", True)),
                     className="rs-browser-directory-entry",
                 )
-                for item in subdirs
+                for item in visible
             ],
             className="rs-browser-directory-list",
         )
-    return directory_list
+    return html.Section(
+        [
+            html.Div(
+                [
+                    html.H3("子目录", className="rs-browser-section-title"),
+                    _render_item_count(
+                        shown=len(visible),
+                        matched=len(matched),
+                        total=len(subdirs),
+                    ),
+                ],
+                className="rs-browser-section-heading",
+            ),
+            directory_list,
+        ],
+        className="rs-browser-section rs-browser-subdirectories",
+    )
 
 
 # ── Shared column factories ─────────────────────────────────────────
