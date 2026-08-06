@@ -22,12 +22,14 @@ from reacnet_scope.workspace_services import (
     cancel_dataset_preparation,
     candidates_from_status,
     clear_dataset_index,
+    dataset_analysis_capabilities,
     dataset_capabilities,
     dataset_label,
     dataset_preparation_status,
     dataset_readiness,
     dataset_ready_count,
     list_directory,
+    list_preparation_tasks,
     normalise_recent_datasets,
     prepare_dataset_workspace,
     resolve_dataset_input,
@@ -85,6 +87,16 @@ from reacnet_scope.batch_services import (
     run_grouped_batch_comparison,
     scan_batch_conditions,
 )
+from reacnet_scope.dataset_context import (
+    begin_dataset_switch,
+    current_dataset_from_validation,
+    inspect_dataset_candidate,
+    is_same_dataset_revision,
+    resolve_dataset_switch,
+    revalidate_current_dataset,
+    supersede_dataset_switch,
+    validate_dataset_candidate,
+)
 
 
 def find_pathways(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -127,7 +139,9 @@ __all__ = [
     "dataset_ready_count",
     "dataset_capabilities",
     "dataset_readiness",
+    "dataset_analysis_capabilities",
     "dataset_preparation_status",
+    "list_preparation_tasks",
     "prepare_dataset_workspace",
     "cancel_dataset_preparation",
     "clear_dataset_index",
@@ -180,4 +194,12 @@ __all__ = [
     "scan_batch_conditions",
     "run_grouped_batch_comparison",
     "run_batch_comparison",
+    "begin_dataset_switch",
+    "current_dataset_from_validation",
+    "inspect_dataset_candidate",
+    "is_same_dataset_revision",
+    "resolve_dataset_switch",
+    "revalidate_current_dataset",
+    "supersede_dataset_switch",
+    "validate_dataset_candidate",
 ]

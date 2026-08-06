@@ -24,10 +24,17 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
     root = Path(directory).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"dataset folder not found: {root}")
-    groups: dict[str, dict[str, Path]] = defaultdict(dict)
+    groups: dict[str, dict[str, tuple[Path, float]]] = defaultdict(dict)
     with os.scandir(root) as entries:
         for entry in entries:
-            if not entry.is_file(follow_symlinks=False):
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+            except (FileNotFoundError, OSError):
+                # Source artifacts can disappear while a live simulation or
+                # cleanup job is updating the directory.  One vanished entry
+                # must not invalidate every other Dataset Candidate.
                 continue
             # Removable media copied from macOS commonly contains AppleDouble
             # sidecars such as ``._run.lammpstrj.species``.  They mirror real
@@ -40,26 +47,28 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
                     base = str(root / entry.name[: -len(suffix)])
                     if kind == "trajectory":
                         base = str(root / entry.name)
-                    groups[base][kind] = Path(entry.path)
+                    groups[base][kind] = (Path(entry.path), mtime)
                     break
     candidates = [
         {
             "folder": str(root),
             "base": base,
             "label": Path(base).name,
-            "kinds": sorted(paths),
-            "artifact_paths": {kind: str(path) for kind, path in paths.items()},
-            "score": len(paths),
-            "mtime": max(path.stat().st_mtime for path in paths.values()),
+            "kinds": sorted(artifacts),
+            "artifact_paths": {
+                kind: str(path)
+                for kind, (path, _mtime) in artifacts.items()
+            },
+            "score": len(artifacts),
+            "mtime": max(mtime for _path, mtime in artifacts.values()),
         }
-        for base, paths in groups.items()
+        for base, artifacts in groups.items()
     ]
     return sorted(
         candidates,
         key=lambda item: (
-            -int(item["score"]),
-            -float(item["mtime"]),
             str(item["label"]).casefold(),
+            str(item["label"]),
         ),
     )
 

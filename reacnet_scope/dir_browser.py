@@ -182,7 +182,7 @@ def list_directory(path_str: str) -> dict[str, Any]:
         raise DirBrowserError(f"读取目录失败: {exc}", reason="read_error") from exc
 
     # Stable, case-insensitive sort.
-    subdirs.sort(key=lambda d: d["name"].casefold())
+    subdirs.sort(key=lambda d: (d["name"].casefold(), d["name"]))
 
     return {
         "current_path": str(path),

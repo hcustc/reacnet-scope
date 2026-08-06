@@ -63,21 +63,25 @@ def test_discovery_separates_prefixes_and_ignores_unknown_files(tmp_path):
     assert by_label["first.lammpstrj"]["kinds"] == ["species"]
 
 
-def test_discovery_sorts_by_completeness_then_latest_mtime(tmp_path):
-    newer = tmp_path / "newer.lammpstrj"
-    older = tmp_path / "older.lammpstrj"
-    for base in (newer, older):
-        Path(f"{base}.reactionabcd").write_text("fixture")
-        Path(f"{base}.species").write_text("fixture")
-    for path in (Path(f"{older}.reactionabcd"), Path(f"{older}.species")):
-        os.utime(path, (100, 100))
-    for path in (Path(f"{newer}.reactionabcd"), Path(f"{newer}.species")):
+def test_discovery_sorts_stably_by_name_not_completeness_or_mtime(tmp_path):
+    alpha = tmp_path / "Alpha.lammpstrj"
+    beta = tmp_path / "beta.lammpstrj"
+    Path(f"{alpha}.species").write_text("fixture")
+    Path(f"{beta}.reactionabcd").write_text("fixture")
+    Path(f"{beta}.species").write_text("fixture")
+    Path(f"{beta}.reactionevent.csv").write_text("fixture")
+    os.utime(Path(f"{alpha}.species"), (100, 100))
+    for path in (
+        Path(f"{beta}.reactionabcd"),
+        Path(f"{beta}.species"),
+        Path(f"{beta}.reactionevent.csv"),
+    ):
         os.utime(path, (200, 200))
 
     candidates = discover_dataset_candidates(tmp_path)
 
     assert [item["label"] for item in candidates] == [
-        "newer.lammpstrj", "older.lammpstrj"
+        "Alpha.lammpstrj", "beta.lammpstrj"
     ]
 
 

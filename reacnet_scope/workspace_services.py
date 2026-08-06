@@ -71,7 +71,6 @@ from reacnet_scope.rng_events import (  # noqa: E402
     reaction_key,
 )
 from reacnet_scope.datasets import (  # noqa: E402
-    ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
 )
 from reacnet_scope.trajectory import (  # noqa: E402
@@ -116,6 +115,9 @@ from reacnet_scope.queries import (  # noqa: E402
 
 
 from reacnet_scope.service_types import ServiceError
+from reacnet_scope.capabilities import (
+    analysis_capability_evidence,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +193,28 @@ def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
                 )
             readiness = dataset.setdefault("readiness", {})
             readiness["event_search"] = event_status
+        compact_artifacts = artifacts_from_status(payload)
+        species_path = str(compact_artifacts.get("species") or "")
+        if species_path:
+            try:
+                composition_status = SPECIES_COMPOSITION_STORE.status(
+                    species_path,
+                    metadata_only=True,
+                )
+            except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+                composition_status = {"state": "invalid", "message": str(exc)}
+        else:
+            composition_status = {"state": "missing"}
+        dataset["analysis_capabilities"] = analysis_capability_evidence(
+            compact_artifacts,
+            index_statuses={
+                "event": dict((dataset.get("readiness") or {}).get("event_search") or {}),
+                "trajectory": dict(
+                    (dataset.get("readiness") or {}).get("trajectory_evidence") or {}
+                ),
+                "composition": composition_status,
+            },
+        )
         return payload
     except Exception as exc:
         raise ServiceError(f"扫描数据目录失败: {exc}") from exc
@@ -268,8 +292,13 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
             return {"state": "invalid", "message": str(exc)}
 
     timeline_path = str(artifact_paths.get("timeline") or "")
-    event_path = timeline_path or str(artifact_paths.get("reactionevent") or "")
+    reactionevent_path = str(artifact_paths.get("reactionevent") or "")
     molecule_path = str(artifact_paths.get("molecules") or "")
+    event_path = timeline_path or (
+        reactionevent_path
+        if molecule_path and Path(molecule_path).is_file()
+        else ""
+    )
     if event_path and Path(event_path).is_file():
         try:
             event_status = EVENT_EVIDENCE_STORE.status(
@@ -310,6 +339,45 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _candidate_capability_states(
+    candidate: dict[str, Any],
+    indexes: Mapping[str, str],
+) -> dict[str, str]:
+    """Describe independently usable analysis evidence for one candidate.
+
+    This stays metadata-only: source availability comes from the discovery
+    snapshot and derived-index states come from their small manifests.
+    """
+    # Compatibility view retained for older API consumers.  New UI surfaces
+    # consume the richer ``analysis_capabilities`` evidence below.
+    artifact_paths = dict(candidate.get("artifact_paths") or {})
+
+    def prepared(kind: str, available: bool) -> str:
+        if not available:
+            return "missing_source"
+        return {
+            "missing": "needs_preparation",
+            "building": "preparing",
+        }.get(str(indexes.get(kind) or "missing"), str(indexes.get(kind)))
+
+    species_source = bool(artifact_paths.get("species"))
+    event_source = bool(
+        artifact_paths.get("timeline")
+        or (artifact_paths.get("reactionevent") and artifact_paths.get("molecules"))
+    )
+    return {
+        "reaction_search": (
+            "ready" if artifact_paths.get("reaction") else "missing_source"
+        ),
+        "species_abundance": prepared("composition", species_source),
+        "event_search": prepared("event", event_source),
+        "trajectory_evidence": prepared(
+            "trajectory", bool(artifact_paths.get("trajectory"))
+        ),
+        "element_distribution": prepared("composition", species_source),
+    }
+
+
 def browse_dataset_location(path: str) -> dict[str, Any]:
     """Build a read-only directory and dataset-discovery browser snapshot."""
     current = validate_browse_path(path)
@@ -323,18 +391,31 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
 
     datasets: list[dict[str, Any]] = []
     for candidate in candidates:
+        index_states = _candidate_index_states(candidate)
+        capability_states = _candidate_capability_states(
+            candidate,
+            index_states,
+        )
         datasets.append(
             {
                 **candidate,
                 "auto_selected": len(candidates) == 1,
-                "completeness": f"{candidate['score']}/{len(ARTIFACT_SUFFIXES)}",
-                "index_states": _candidate_index_states(candidate),
+                "index_states": index_states,
+                "capability_states": capability_states,
+                "analysis_capabilities": analysis_capability_evidence(
+                    candidate.get("artifact_paths") or {},
+                    index_statuses=index_states,
+                ),
             }
         )
     return {
         **listing,
         "breadcrumbs": _breadcrumbs_within_allowed_root(current),
         "datasets": datasets,
+        "counts": {
+            "subdirs": len(listing.get("subdirs") or []),
+            "datasets": len(datasets),
+        },
     }
 
 
@@ -443,6 +524,13 @@ def dataset_readiness(status: dict[str, Any]) -> dict[str, Any]:
     return dict(dataset.get("readiness", {}) or {})
 
 
+def dataset_analysis_capabilities(status: dict[str, Any]) -> dict[str, Any]:
+    """Return named, explained Analysis Capability evidence."""
+
+    dataset = status.get("dataset", {}) if status else {}
+    return dict(dataset.get("analysis_capabilities", {}) or {})
+
+
 def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]:
     """Return the read-only preparation view for one selected dataset."""
     configured_workspace_root = os.environ.get(
@@ -477,7 +565,12 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     else:
         composition = {"state": "missing"}
     composition["source_available"] = bool(species_source)
+    tasks: dict[str, dict[str, Any]] = {}
     if selected_base:
+        task_dataset = preparation.discover_dataset(
+            str(Path(selected_base).parent),
+            Path(selected_base).name,
+        )
         for capability, item in (
             ("event", events),
             ("trajectory", trajectory),
@@ -490,9 +583,20 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             )
             if not task:
                 continue
+            task["matches_current_revision"] = bool(
+                task.get("source_revision")
+                == preparation._capability_source_revision(
+                    task_dataset,
+                    capability,
+                )
+            )
+            tasks[capability] = task
             item["task"] = task
             task_state = str(task.get("state") or "")
-            if task_state in {"running", "cancel_requested"}:
+            if (
+                task_state in {"running", "cancel_requested"}
+                and task["matches_current_revision"]
+            ):
                 item["state"] = "building"
             elif task_state == "interrupted":
                 item["task_state"] = "interrupted"
@@ -547,6 +651,15 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             f"{shlex.quote(str(Path(selected_base).parent))} "
             f"--base {shlex.quote(Path(selected_base).name)}"
         )
+    capabilities = analysis_capability_evidence(
+        artifacts,
+        index_statuses={
+            "event": events,
+            "trajectory": trajectory,
+            "composition": composition,
+        },
+        tasks=tasks,
+    )
     return {
         "dataset_id": dataset_id,
         "base": selected_base,
@@ -561,6 +674,8 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "events": events,
         "trajectory": trajectory,
         "composition": composition,
+        "analysis_capabilities": capabilities,
+        "tasks": list(tasks.values()),
         "rng_event_command": "--reaction-event --show-molecule-time",
         "event_command": preparation_command(
             "event",
@@ -578,6 +693,61 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             available=bool(species_source),
         ),
     }
+
+
+def list_preparation_tasks(
+    targets: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Read persisted task facts for known datasets without changing context.
+
+    Callers normally pass the tab-local candidate/current dataset plus shared
+    recent records.  The task facts themselves always come from the Dataset
+    Workspace, so separate tabs observe the same ownership and progress.
+    """
+
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in targets or ():
+        if not isinstance(raw, Mapping):
+            continue
+        folder = str(raw.get("folder") or "").strip()
+        base = str(raw.get("base") or "").strip()
+        if not folder or not base:
+            continue
+        try:
+            folder_path = validate_browse_path(folder)
+            base_path = validate_browse_path(base)
+            if not folder_path.is_dir():
+                continue
+            paths = resolve_dataset_paths(
+                base_path.parent,
+                base_path.name,
+                persist_identity=False,
+            )
+            dataset = preparation.discover_dataset(str(folder_path), base_path.name)
+        except (ServiceError, FileNotFoundError, OSError, RuntimeError):
+            continue
+        for capability in ("event", "trajectory", "composition"):
+            task = preparation._read_preparation_task(dataset, capability)
+            if not task:
+                continue
+            value = {
+                **task,
+                "dataset_id": str(task.get("dataset_id") or paths.dataset_id),
+                "dataset_label": str(
+                    task.get("dataset_label")
+                    or raw.get("label")
+                    or base_path.name
+                ),
+                "folder": str(task.get("folder") or folder_path),
+                "base": str(task.get("base") or base_path),
+                "capability": capability,
+            }
+            found[(value["dataset_id"], capability)] = value
+    return sorted(
+        found.values(),
+        key=lambda item: int(item.get("updated_at_epoch") or 0),
+        reverse=True,
+    )
 
 
 def prepare_dataset_workspace(

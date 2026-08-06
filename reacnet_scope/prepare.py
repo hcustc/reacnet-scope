@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -159,16 +160,50 @@ def _task_record_lock(path: Path):
         lock_path.unlink(missing_ok=True)
 
 
+class PreparationSourceRevisionChangedError(RuntimeError):
+    """The task's bound source revision changed while it was running."""
+
+
 def _source_revision(path_text: str) -> dict[str, Any]:
     path = Path(path_text)
     if not path.is_file():
-        return {"path": str(path), "exists": False}
+        return {"path": str(path), "exists": False, "fingerprint": ""}
     stat = path.stat()
-    return {
+    revision = {
         "path": str(path.resolve()),
         "exists": True,
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+    }
+    encoded = json.dumps(revision, sort_keys=True, separators=(",", ":"))
+    return {
+        **revision,
+        "fingerprint": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+
+def _capability_source_revision(
+    dataset: dict[str, str], capability: str
+) -> dict[str, Any]:
+    if capability == "event":
+        primary, molecules = _event_source_paths(dataset)
+        paths = [primary, *([molecules] if molecules else [])]
+    elif capability == "trajectory":
+        paths = [dataset["trajectory"]]
+    elif capability == "composition":
+        paths = [dataset["species"]]
+    else:
+        paths = []
+    artifacts = [_source_revision(path) for path in paths]
+    encoded = json.dumps(
+        artifacts,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "fingerprint": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "artifacts": artifacts,
     }
 
 
@@ -324,18 +359,23 @@ def _run_preparation_task(
         Path(dataset["base"]).parent,
         Path(dataset["base"]).name,
     )
+    bound_revision = _capability_source_revision(dataset, capability)
     task: dict[str, Any] = {
-        "task_version": 1,
+        "task_version": 2,
         "dataset_id": paths.dataset_id,
+        "dataset_label": Path(dataset["base"]).name,
+        "folder": str(Path(dataset["base"]).parent),
+        "base": str(Path(dataset["base"])),
         "capability": capability,
         "action": action,
         "state": "running",
         "pid": os.getpid(),
         "process_start_token": _process_start_token(os.getpid()),
-        "source_revision": _source_revision(source_file),
+        "source_revision": bound_revision,
+        "source_artifact_revision": _source_revision(source_file),
         "started_at_epoch": int(time.time()),
         "updated_at_epoch": int(time.time()),
-        "progress": 0.0,
+        "phase": "starting",
     }
     with _task_record_lock(task_path):
         try:
@@ -356,6 +396,10 @@ def _run_preparation_task(
         _write_task_record(task_path, task)
 
     def task_report(update: dict[str, Any]) -> None:
+        if _capability_source_revision(dataset, capability) != bound_revision:
+            raise PreparationSourceRevisionChangedError(
+                "Preparation Task source revision changed; unpublished work was discarded."
+            )
         with _task_record_lock(task_path):
             try:
                 current = json.loads(task_path.read_text(encoding="utf-8"))
@@ -365,12 +409,15 @@ def _run_preparation_task(
                 raise KeyboardInterrupt
             task.update(
                 {
-                    "progress": float(update.get("progress", 0.0) or 0.0),
-                    "phase": str(update.get("phase") or ""),
+                    "phase": str(update.get("phase") or task.get("phase") or "running"),
                     "message": str(update.get("message") or ""),
                     "updated_at_epoch": int(time.time()),
                 }
             )
+            progress = update.get("progress")
+            if isinstance(progress, (int, float)):
+                task["progress"] = min(max(float(progress), 0.0), 1.0)
+                task["progress_trusted"] = True
             _write_task_record(task_path, task)
         report(update)
 
@@ -380,6 +427,17 @@ def _run_preparation_task(
         task.update(
             {
                 "state": "canceled",
+                "updated_at_epoch": int(time.time()),
+            }
+        )
+        with _task_record_lock(task_path):
+            _write_task_record(task_path, task)
+        raise
+    except PreparationSourceRevisionChangedError as exc:
+        task.update(
+            {
+                "state": "superseded",
+                "message": str(exc),
                 "updated_at_epoch": int(time.time()),
             }
         )
@@ -397,6 +455,20 @@ def _run_preparation_task(
         with _task_record_lock(task_path):
             _write_task_record(task_path, task)
         raise
+    if _capability_source_revision(dataset, capability) != bound_revision:
+        task.update(
+            {
+                "state": "superseded",
+                "message": (
+                    "Preparation Task source revision changed before completion; "
+                    "the result is not current evidence."
+                ),
+                "updated_at_epoch": int(time.time()),
+            }
+        )
+        with _task_record_lock(task_path):
+            _write_task_record(task_path, task)
+        raise PreparationSourceRevisionChangedError(str(task["message"]))
     with _task_record_lock(task_path):
         try:
             current = json.loads(task_path.read_text(encoding="utf-8"))
@@ -410,6 +482,8 @@ def _run_preparation_task(
                     else "completed"
                 ),
                 "progress": 1.0,
+                "progress_trusted": True,
+                "phase": "completed",
                 "updated_at_epoch": int(time.time()),
             }
         )

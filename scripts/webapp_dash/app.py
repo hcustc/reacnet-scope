@@ -262,34 +262,6 @@ def _sidebar() -> html.Aside:
     )
 
 
-def _global_operation_progress() -> html.Div:
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Span("正在读取或处理数据", className="rs-global-progress-label"),
-                    html.Span("请稍候", className="rs-global-progress-hint"),
-                ],
-                className="rs-global-progress-copy",
-            ),
-            html.Div(
-                html.Span(className="rs-global-progress-value"),
-                className="rs-global-progress-track",
-                role="progressbar",
-                **{
-                    "aria-label": "正在读取或处理数据",
-                    "aria-valuemin": "0",
-                    "aria-valuemax": "100",
-                },
-            ),
-        ],
-        id="global-operation-progress",
-        className="rs-global-operation-progress",
-        role="status",
-        **{"aria-live": "polite"},
-    )
-
-
 def _page_header() -> html.Div:
     return html.Div(
         [
@@ -314,7 +286,23 @@ def _page_header() -> html.Div:
                 ],
                 className="rs-page-heading",
             ),
-            html.Div("需要导入数据", id="page-data-status", className="rs-page-status is-blocked"),
+            html.Div(
+                [
+                    html.Div(
+                        "需要选择数据集",
+                        id="page-data-status",
+                        className="rs-page-status is-blocked",
+                    ),
+                    dbc.Button(
+                        "前往数据管理",
+                        id="page-capability-manage-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                    ),
+                ],
+                className="rs-page-capability-status",
+            ),
         ],
         className="rs-page-header",
         id="page-header",
@@ -2825,7 +2813,6 @@ def _channel_grid(grid_id: str) -> dash_table.DataTable:
 def _data_index_readiness_row(
     kind: str,
     label: str,
-    filename: str,
     purpose: str,
 ) -> html.Div:
     return html.Div(
@@ -2833,7 +2820,6 @@ def _data_index_readiness_row(
             html.Div(
                 [
                     html.Div(label, className="rs-index-name"),
-                    html.Div(filename, className="rs-index-filename"),
                 ]
             ),
             html.Div(purpose, className="rs-index-purpose"),
@@ -2843,7 +2829,7 @@ def _data_index_readiness_row(
                 className="rs-index-status-cell",
             ),
             dbc.Button(
-                "创建/重建",
+                "准备索引",
                 id=f"data-prep-{kind}-btn",
                 color="secondary",
                 size="sm",
@@ -2886,11 +2872,11 @@ def _data_cache_management_card() -> html.Div:
                             html.Div(
                                 [
                                     html.Div(
-                                        "索引就绪状态",
+                                        "Analysis Capability 与 Preparation Task",
                                         className="rs-data-section-title",
                                     ),
                                     html.Div(
-                                        "每种派生索引保留一个直接操作；索引只写入 Dataset Workspace。",
+                                        "每项能力独立判断；任务始终绑定实际数据集、源修订与能力。",
                                         className="rs-card-subtitle",
                                     ),
                                 ]
@@ -2906,9 +2892,9 @@ def _data_cache_management_card() -> html.Div:
                     html.Div(id="data-prep-status-alert"),
                     html.Div(
                         [
-                            html.Div("索引"),
+                            html.Div("Analysis Capability"),
                             html.Div("用途"),
-                            html.Div("状态与规模"),
+                            html.Div("状态与原因"),
                             html.Div("操作"),
                         ],
                         className="rs-index-readiness-header",
@@ -2918,20 +2904,17 @@ def _data_cache_management_card() -> html.Div:
                         [
                             _data_index_readiness_row(
                                 "event",
-                                "事件索引",
-                                "events.sqlite3",
+                                "事件检索",
                                 "反应事件检索、路径证据与事件跳转",
                             ),
                             _data_index_readiness_row(
                                 "trajectory",
-                                "轨迹帧索引",
-                                "trajectory.sqlite3",
+                                "轨迹证据",
                                 "按时间步定位帧并提取局部反应轨迹",
                             ),
                             _data_index_readiness_row(
                                 "composition",
-                                "元素分布索引",
-                                "element-distribution.sqlite3",
+                                "元素分布",
                                 "元素分布演化、时间采样与代表物种下钻",
                             ),
                         ],
@@ -2955,6 +2938,21 @@ def _data_cache_management_card() -> html.Div:
                         className="rs-index-background-task",
                     ),
                     html.Div(id="data-prep-action-alert", className="rs-index-action-alert"),
+                    html.Section(
+                        [
+                            html.Div("Preparation Task", className="rs-data-section-title"),
+                            html.Div(
+                                "任务事实来自 Dataset Workspace；切换 Current Dataset 不会取消或改属任务。",
+                                className="rs-card-subtitle",
+                            ),
+                            html.Div(
+                                id="data-preparation-tasks",
+                                className="rs-preparation-task-list",
+                                **{"aria-live": "polite"},
+                            ),
+                        ],
+                        className="rs-preparation-task-section",
+                    ),
                 ],
                 className="rs-data-section rs-index-readiness-section",
             ),
@@ -3095,7 +3093,7 @@ def _data_management_page() -> html.Div:
                                                     html.Div(
                                                         [
                                                             html.Span(
-                                                                "基础分析文件",
+                                                                "Analysis Capability",
                                                                 className="rs-summary-metric-label",
                                                             ),
                                                             html.Div(
@@ -3159,33 +3157,74 @@ def _data_management_page() -> html.Div:
                     ),
                     html.Div(
                         [
-                            dbc.Button(
-                                "↑ 上一级",
-                                id="dir-browser-back-btn",
-                                color="secondary",
-                                size="sm",
-                                outline=True,
-                                disabled=True,
-                                className="mb-2",
-                            ),
-                            dbc.InputGroup(
+                            html.Div(
                                 [
-                                    dbc.Input(
-                                        id="dir-browser-path-input",
-                                        debounce=True,
-                                        placeholder="输入服务器目录或数据集公共前缀",
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                "数据工作区",
+                                                className="rs-data-section-kicker",
+                                            ),
+                                            html.H2(
+                                                "选择 Dataset Candidate",
+                                                id="data-browser-title",
+                                                className="rs-browser-title",
+                                                tabIndex=-1,
+                                            ),
+                                            html.P(
+                                                "浏览和选择只保存在当前标签页；只有“使用此数据集”会更改 Current Dataset。",
+                                                className="rs-browser-intro",
+                                            ),
+                                        ]
                                     ),
                                     dbc.Button(
-                                        "前往",
-                                        id="dir-browser-go-btn",
+                                        "上一级",
+                                        id="dir-browser-back-btn",
                                         color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                        disabled=True,
                                     ),
                                 ],
-                                className="rs-browser-path-control",
+                                className="rs-browser-heading",
+                            ),
+                            html.Section(
+                                [
+                                    html.H3("最近数据集", className="rs-browser-section-title"),
+                                    html.Div(
+                                        id="dir-browser-recent-datasets",
+                                        className="rs-browser-recent",
+                                    ),
+                                ],
+                                className="rs-browser-section",
                             ),
                             html.Div(
                                 id="dir-browser-current",
                                 className="rs-browser-current",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Label(
+                                        "筛选 Dataset Candidate 和子目录",
+                                        html_for="dir-browser-filter-input",
+                                        className="visually-hidden",
+                                    ),
+                                    dbc.Input(
+                                        id="dir-browser-filter-input",
+                                        type="search",
+                                        debounce=True,
+                                        placeholder="筛选当前目录中的候选或子目录",
+                                    ),
+                                    dbc.Button(
+                                        "清除筛选",
+                                        id="dir-browser-filter-clear-btn",
+                                        color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                    ),
+                                ],
+                                id="dir-browser-filter-row",
+                                className="rs-browser-filter-row",
                             ),
                             html.Div(
                                 id="dir-browser-body",
@@ -3194,6 +3233,37 @@ def _data_management_page() -> html.Div:
                                     className="small text-muted",
                                 ),
                                 className="rs-browser-directory-list",
+                            ),
+                            html.Details(
+                                [
+                                    html.Summary("专家入口：输入服务器路径"),
+                                    html.Div(
+                                        [
+                                            dbc.Label(
+                                                "服务器目录或 Dataset Candidate 公共前缀",
+                                                html_for="dir-browser-path-input",
+                                                className="visually-hidden",
+                                            ),
+                                            dbc.Input(
+                                                id="dir-browser-path-input",
+                                                placeholder="输入服务器目录或数据集公共前缀",
+                                            ),
+                                            dbc.Button(
+                                                "前往",
+                                                id="dir-browser-go-btn",
+                                                color="secondary",
+                                            ),
+                                        ],
+                                        className="rs-browser-path-control",
+                                    ),
+                                    html.Div(
+                                        "按 Enter 或选择“前往”后才导航；失焦不会改变浏览位置。",
+                                        id="dir-browser-path-help",
+                                        className="rs-browser-path-help",
+                                    ),
+                                ],
+                                id="dir-browser-expert-path",
+                                className="rs-browser-expert-path",
                             ),
                             html.Div(
                                 [
@@ -3205,14 +3275,19 @@ def _data_management_page() -> html.Div:
                                         outline=True,
                                     ),
                                     dbc.Button(
-                                        "加载数据集",
+                                        "刷新状态",
+                                        id="data-current-refresh-btn",
+                                        color="secondary",
+                                        outline=True,
+                                    ),
+                                    dbc.Button(
+                                        "使用此数据集",
                                         id="data-apply-btn",
-                                        color="success",
-                                        size="sm",
+                                        color="primary",
                                         disabled=True,
                                     ),
                                 ],
-                                className="d-flex justify-content-between mt-3",
+                                className="rs-browser-submit-row",
                             ),
                         ],
                         id="data-browser-view",
@@ -3257,12 +3332,58 @@ def _index_clear_confirm_modal() -> dbc.Modal:
     )
 
 
+_QUERY_CONTROL_PREFIXES = (
+    "species-",
+    "rxn-",
+    "inter-",
+    "evolution-",
+    "element-distribution-",
+    "event-",
+    "pathway-",
+)
+_PERSISTABLE_QUERY_CONTROLS = (
+    dcc.Input,
+    dcc.Textarea,
+    dcc.Dropdown,
+    dcc.RadioItems,
+    dcc.Checklist,
+    dcc.Slider,
+    dbc.Checkbox,
+)
+_DATASET_BOUND_CONTROL_IDS = {
+    "event-extract-id",
+    "event-frame-slider",
+    "event-path-additional-sources",
+    "event-path-current-replicate",
+    "event-path-occurrence-selector",
+    "evolution-species-file",
+    "evolution-species-files",
+}
+
+
+def _enable_query_session_persistence(component: Any) -> None:
+    """Keep query inputs/preferences tab-local across a browser reload."""
+
+    component_id = getattr(component, "id", None)
+    if (
+        isinstance(component_id, str)
+        and component_id.startswith(_QUERY_CONTROL_PREFIXES)
+        and component_id not in _DATASET_BOUND_CONTROL_IDS
+        and isinstance(component, _PERSISTABLE_QUERY_CONTROLS)
+    ):
+        component.persistence = True
+        component.persistence_type = "session"
+    children = getattr(component, "children", None)
+    for child in children if isinstance(children, (list, tuple)) else [children]:
+        if child is not None:
+            _enable_query_session_persistence(child)
+
+
 def build_layout() -> html.Div:
     """Build the full application layout."""
-    return html.Div(
+    layout = html.Div(
         [
             _topbar(),
-            _global_operation_progress(),
             html.Div(
                 [
                     _sidebar(),
@@ -3287,11 +3408,69 @@ def build_layout() -> html.Div:
                 id="app-body",
             ),
             _index_clear_confirm_modal(),
+            html.Div(
+                id="global-dataset-notice",
+                className="rs-global-dataset-notice",
+                role="status",
+                **{"aria-live": "polite", "aria-atomic": "true"},
+            ),
+            dcc.Interval(
+                id="global-dataset-notice-timeout",
+                interval=8000,
+                n_intervals=0,
+                disabled=True,
+            ),
+            html.Div(id="dataset-focus-sink", hidden=True),
             dcc.Store(id="dir-browser-path", storage_type="memory", data=""),
             dcc.Store(id="dataset-browser-candidate", storage_type="memory", data=None),
             dcc.Store(id="recent-datasets", storage_type="local", data=[]),
-            dcc.Store(id="app-store", storage_type="session", data=cb.initial_store()),
+            dcc.Store(
+                id="app-store",
+                storage_type="memory",
+                data={**cb.initial_store(), "context_state": "restoring"},
+            ),
+            dcc.Store(
+                id="dataset-session-store",
+                storage_type="session",
+                data=cb.initial_store(),
+            ),
             dcc.Store(id="page-store", storage_type="session", data={"page": DEFAULT_PAGE}),
+            dcc.Store(id="dataset-switch-transaction", storage_type="memory", data={}),
+            dcc.Store(id="dataset-switch-validation", storage_type="memory", data={}),
+            dcc.Store(id="dataset-switch-navigation", storage_type="memory", data={}),
+            dcc.Store(id="dataset-context-commit", storage_type="memory", data={}),
+            dcc.Store(id="dataset-focus-request", storage_type="memory", data={}),
+            dcc.Store(id="dataset-restore-result", storage_type="memory", data={}),
+            dcc.Store(id="preparation-task-snapshot", storage_type="local", data=[]),
+            html.Div(
+                [
+                    dcc.Store(
+                        id={"type": "dataset-bound-operation", "name": name},
+                        storage_type="memory",
+                        data=False,
+                    )
+                    for name in (
+                        "species",
+                        "species-structures",
+                        "species-detail",
+                        "reactions",
+                        "intermediate",
+                        "evolution",
+                        "element-distribution",
+                        "events",
+                        "trajectory",
+                        "event-paths",
+                        "pathways",
+                    )
+                ],
+                hidden=True,
+            ),
+            dcc.Interval(
+                id="dataset-session-restore",
+                interval=100,
+                n_intervals=0,
+                max_intervals=1,
+            ),
             dcc.Store(id="species-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="rxn-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="inter-grid-store", storage_type="memory", data={"rows": []}),
@@ -3300,6 +3479,12 @@ def build_layout() -> html.Div:
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="data-clear-kind-store", storage_type="memory", data={}),
             dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
+            dcc.Interval(
+                id="preparation-task-refresh",
+                interval=2000,
+                n_intervals=0,
+                disabled=False,
+            ),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
             dcc.Store(id="pathway-store", storage_type="memory", data=None),
@@ -3319,6 +3504,8 @@ def build_layout() -> html.Div:
         ],
         className="rs-root",
     )
+    _enable_query_session_persistence(layout)
+    return layout
 
 
 def create_app() -> dash.Dash:
