@@ -5,7 +5,7 @@
 
 本文档定义 ReacNet Scope 当前版本的产品范围、领域语义、功能契约和发布验收基准。它不是对现有实现状态的声明；代码是否符合本文档，需要另行审查。
 
-术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准，难以逆转的设计决策以 [`docs/adr/`](adr/) 中已接受 ADR 为准。早于本文档的日期化设计稿和实施计划保留为历史资料；与本文档冲突时，不构成当前功能承诺。
+术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准，难以逆转的设计决策以 [`docs/adr/`](adr/) 中已接受 ADR 为准。Dash Web 的通用操作层级、状态、反馈、无障碍和视觉验收以 [`Dash UI 系统规范`](dash-ui-system-spec.md) 为准。早于本文档的日期化设计稿和实施计划保留为历史资料；与本文档或该 UI 规范冲突时，不构成当前功能承诺。
 
 ## 1. 产品定位
 
@@ -37,7 +37,7 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 发布必过的核心链路是：
 
-> 加载 ReacNetGenerator 数据集 → 检索 Species/Reaction Type → 发现 Candidate Path → 定位 Reaction Occurrence → 查看局部轨迹 → 导出可复核事件包
+> 设定 Current Dataset → 检索 Species/Reaction Type → 发现 Candidate Path → 定位 Reaction Occurrence → 查看局部轨迹 → 导出可复核事件包
 
 Reaction Path 包含两个不同对象：
 
@@ -125,6 +125,9 @@ Reaction Path 包含两个不同对象：
 - `base` 只作为内部字段，不在普通界面暴露“运行组”概念。
 - 发现只检查文件名、存在性和索引元数据，不读取大型源文件。
 - 无候选、越界、无权限、路径消失或候选变化时，保留原 Current Dataset。
+- Dataset Candidate 是标签页内的无副作用草稿；只有用户显式执行“使用此数据集”且候选通过源修订验证后，才原子替换 Current Dataset。
+- 切换清除旧数据集或旧修订绑定的结果与选择，保留仍有相同语义的查询输入，但不自动重新查询。
+- 候选与当前状态按 Analysis Capability 分项展示，不使用文件数量或单一“完整度”概括整个数据集。
 
 ### 8.3 Dataset Workspace
 
@@ -136,7 +139,7 @@ Reaction Path 包含两个不同对象：
 
 ## 9. Preparation Task
 
-- 加载数据集只做轻量发现和状态检查，不自动启动重型索引。
+- “使用此数据集”只做轻量发现、状态检查和上下文提交，不自动启动重型索引。
 - 用户在“管理数据”中显式启动、续建、重建、取消或清理任务，并可复制等价 CLI 命令。
 - 可提供显式“准备所有可用能力”，但不能隐藏在加载动作中。
 - 同一数据集、源修订和能力最多一个活动任务；重复启动返回已有任务。
@@ -157,6 +160,8 @@ Reaction Path 包含两个不同对象：
 工具可以独立进入。跨工具按钮只交接稳定身份和必要上下文，目标工具仍调用统一核心实现。
 
 Current Dataset、页面和工作流选择属于浏览器会话；索引、任务和数据集设置属于 Dataset Workspace。数据集切换清空旧选择。页面恢复前重新验证路径权限、数据集身份和源修订。
+
+所有数据依赖页面保持可导航和可配置，只阻断依赖缺失 Analysis Capability 的执行动作；能力缺失入口定位到“管理数据”中的对应准备操作。前台操作就近反馈，Preparation Task 在持续可见的任务区按数据集和能力显示，且不得因 Current Dataset 切换而改属、取消、跳页或抢焦点。
 
 ## 11. 查询与分析契约
 

@@ -292,24 +292,13 @@ def test_successful_switch_commits_context_resets_results_and_returns_to_source(
         result["global-dataset-notice"]["children"],
         ensure_ascii=False,
     )
-
-    reset_response = client.post(
-        "/_dash-update-component",
-        json=_payload(
-            client,
-            output_contains="species-grid-store.data",
-            changed="dataset-context-commit.data",
-            inputs={"dataset-context-commit": {"request_id": "request-1"}},
-            states={},
-        ),
-    )
-    assert reset_response.status_code == 200
-    reset = reset_response.get_json()["response"]
-    assert reset["species-grid-store"]["data"] == {"rows": []}
-    assert reset["rxn-grid-store"]["data"] == {"rows": []}
-    assert reset["event-selected-store"]["data"] is None
-    assert reset["pathway-store"]["data"] is None
-    assert reset["event-path-store"]["data"] is None
+    assert result["species-grid-store"]["data"] == {"rows": []}
+    assert result["rxn-grid-store"]["data"] == {"rows": []}
+    assert result["event-selected-store"]["data"] is None
+    assert result["pathway-store"]["data"] is None
+    assert result["event-path-store"]["data"] is None
+    assert result["event-frame-slider"]["value"] == 0
+    assert result["evolution-species-file"]["value"] == ""
 
 
 def test_direct_workspace_switch_stays_in_workspace(monkeypatch) -> None:
@@ -432,6 +421,9 @@ def test_session_restore_failure_clears_only_current_context(monkeypatch) -> Non
     assert result["app-store"]["data"]["dataset_id"] == ""
     assert result["dataset-restore-result"]["data"]["state"] == "unavailable"
     assert result["dataset-context-commit"]["data"]["reason"] == "restore-unavailable"
+    assert result["species-grid-store"]["data"] == {"rows": []}
+    assert result["event-selected-store"]["data"] is None
+    assert result["event-frame-slider"]["value"] == 0
     assert "最近记录" in json.dumps(
         result["global-dataset-notice"]["children"], ensure_ascii=False
     )
