@@ -51,6 +51,36 @@ PAGE_DATA_REQUIREMENTS = {
     "trajectory": ("trajectory", "轨迹文件与帧索引"),
 }
 
+PAGE_CAPABILITY_REQUIREMENTS = {
+    "species": "reaction_search",
+    "reactions": "reaction_search",
+    "pathway": "reaction_search",
+    "intermediate": "species_abundance",
+    "evolution": "species_abundance",
+    "element-distribution": "element_distribution",
+    "events": "event_search",
+    "trajectory": "trajectory_evidence",
+}
+
+_CAPABILITY_LABELS = {
+    "reaction_search": "反应检索",
+    "species_abundance": "物种丰度",
+    "event_search": "事件检索",
+    "trajectory_evidence": "轨迹证据",
+    "element_distribution": "元素分布",
+}
+
+_CAPABILITY_STATE_LABELS = {
+    "ready": "ready · 可用",
+    "needs-preparation": "needs-preparation · 需准备",
+    "needs_preparation": "needs-preparation · 需准备",
+    "preparing": "preparing · 准备中",
+    "stale": "stale · 已失效",
+    "invalid": "invalid · 无效",
+    "missing-source": "missing-source · 缺少来源",
+    "missing_source": "missing-source · 缺少来源",
+}
+
 _ELEMENT_SYMBOLS = (
     "H",
     "C",
@@ -252,6 +282,7 @@ def initial_store() -> dict[str, Any]:
         "context_state": "none",
         "label": "未选择",
         "capabilities": {},
+        "analysis_capabilities": {},
         "readiness": {},
         "artifacts": {},
         "selected_smiles": "",
@@ -259,6 +290,69 @@ def initial_store() -> dict[str, Any]:
         "selected_species_source": "",
         "inputs_pending": False,
     }
+
+
+def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
+    """Pair every dataset-bound UI value with its canonical empty state."""
+
+    def reset(component_id: str, prop: str, value: Any) -> tuple[Output, Any]:
+        return Output(component_id, prop, allow_duplicate=True), value
+
+    return (
+        reset("species-grid-store", "data", {"rows": []}),
+        reset("rxn-grid-store", "data", {"rows": []}),
+        reset("inter-grid-store", "data", {"rows": []}),
+        reset("evolution-payload-store", "data", None),
+        reset("element-distribution-payload-store", "data", None),
+        reset("event-grid-store", "data", {"rows": []}),
+        reset("event-selected-store", "data", None),
+        reset("event-viewer-store", "data", None),
+        reset("pathway-store", "data", None),
+        reset("pathway-context-store", "data", None),
+        reset("pathway-selected-step", "data", None),
+        reset("pathway-selected-path", "data", None),
+        reset("event-path-store", "data", None),
+        reset("event-path-context-store", "data", None),
+        reset("event-path-wizard-step", "data", 1),
+        reset("species-grid", "data", []),
+        reset("species-grid", "selected_rows", []),
+        reset("species-structure-grid", "data", []),
+        reset("species-structure-grid", "selected_rows", []),
+        reset("rxn-grid", "data", []),
+        reset("inter-grid", "data", []),
+        reset("event-grid", "data", []),
+        reset("event-grid", "selected_rows", []),
+        reset("pathway-grid", "data", []),
+        reset("pathway-grid", "selected_rows", []),
+        reset("pathway-evidence-grid", "data", []),
+        reset("event-path-comparison-grid", "data", []),
+        reset("event-path-signature-grid", "data", []),
+        reset("event-path-time-grid", "data", []),
+        reset("event-path-event-grid", "data", []),
+        reset("event-path-edge-grid", "data", []),
+        reset("event-path-cytoscape", "elements", []),
+        reset("evolution-graph", "figure", go.Figure()),
+        reset("element-distribution-composition-trend", "figure", go.Figure()),
+        reset("element-distribution-composition-table", "data", []),
+        reset("event-extract-id", "value", ""),
+        reset("event-frame-slider", "min", 0),
+        reset("event-frame-slider", "max", 0),
+        reset("event-frame-slider", "value", 0),
+        reset("event-frame-slider", "marks", {}),
+        reset("event-path-additional-sources", "value", ""),
+        reset("event-path-current-replicate", "value", ""),
+        reset("event-path-occurrence-selector", "value", None),
+        reset("evolution-species-file", "value", ""),
+        reset("evolution-species-files", "value", ""),
+    )
+
+
+def _dataset_bound_reset_outputs() -> tuple[Output, ...]:
+    return tuple(output for output, _value in _dataset_bound_resets())
+
+
+def _dataset_bound_reset_values() -> tuple[Any, ...]:
+    return tuple(value for _output, value in _dataset_bound_resets())
 
 
 def _current_dataset_id(store: dict[str, Any] | None) -> str:
@@ -371,21 +465,118 @@ def _format_bytes(value: Any) -> str:
     return f"{size:.1f} TiB"
 
 
+def _capability_state_class(state: Any) -> str:
+    return str(state or "invalid").replace("_", "-")
+
+
+def _render_analysis_capabilities(
+    capabilities: dict[str, Any] | None,
+    *,
+    class_name: str = "rs-analysis-capability-list",
+) -> Any:
+    values = dict(capabilities or {})
+    if not values:
+        return html.Div(
+            "尚无可检查的 Analysis Capability。",
+            className="rs-preparation-task-empty",
+        )
+    items: list[Any] = []
+    for key, label in _CAPABILITY_LABELS.items():
+        evidence = dict(values.get(key) or {})
+        state = _capability_state_class(evidence.get("state") or "missing-source")
+        items.append(
+            html.Div(
+                [
+                    html.Span(label, className="rs-capability-name"),
+                    html.Span(
+                        _CAPABILITY_STATE_LABELS.get(state, state),
+                        className=f"rs-capability-state is-{state}",
+                    ),
+                    html.Span(
+                        str(evidence.get("reason") or "状态原因暂不可用。"),
+                        className="rs-capability-reason",
+                    ),
+                ],
+                className="rs-analysis-capability-item",
+                **{"data-capability": key, "data-state": state},
+            )
+        )
+    return html.Div(items, className=class_name)
+
+
+def _capabilities_from_store(store: dict[str, Any] | None) -> dict[str, Any]:
+    current = store if isinstance(store, dict) else {}
+    values = dict(current.get("analysis_capabilities") or {})
+    if values:
+        return values
+    artifacts = dict(current.get("artifacts") or {})
+    readiness = dict(current.get("readiness") or {})
+
+    def direct(key: str, artifact: str, reason: str) -> None:
+        ready = bool(artifacts.get(artifact))
+        values[key] = {
+            "state": "ready" if ready else "missing-source",
+            "reason": reason if ready else f"缺少 {artifact} 源证据。",
+        }
+
+    direct("reaction_search", "reaction", "Reaction Evidence 可直接使用。")
+    direct("species_abundance", "species", "Species Abundance Evidence 可直接使用。")
+    for key, readiness_key, source in (
+        ("event_search", "event_search", "事件源证据"),
+        ("trajectory_evidence", "trajectory_evidence", "轨迹源文件"),
+    ):
+        item = dict(readiness.get(readiness_key) or {})
+        state = str(item.get("state") or "missing").replace("_", "-")
+        values[key] = {
+            "state": (
+                "ready"
+                if item.get("ready")
+                else "missing-source"
+                if state == "missing"
+                else "needs-preparation"
+            ),
+            "reason": (
+                f"{source}与索引可用。"
+                if item.get("ready")
+                else f"{source}尚未形成可用能力。"
+            ),
+        }
+    composition_ready = bool(artifacts.get("species"))
+    values["element_distribution"] = {
+        "state": "needs-preparation" if composition_ready else "missing-source",
+        "reason": (
+            "源证据可用；请在数据管理中显式准备元素分布索引。"
+            if composition_ready
+            else "缺少 .species Species Abundance Evidence。"
+        ),
+    }
+    return values
+
+
 def _preparation_state_text(item: dict[str, Any]) -> tuple[str, str]:
     state = str(item.get("state") or "missing")
+    task = dict(item.get("task") or {})
+    trusted_progress = task.get("progress") if task.get("progress_trusted") else None
+    preparing_text = (
+        f"preparing · {float(trusted_progress) * 100:.0f}%"
+        if isinstance(trusted_progress, (int, float))
+        else "preparing · 准备中"
+    )
     labels = {
-        "ready": ("就绪", "success"),
-        "building": (f"构建中 {float(item.get('progress', 0.0) or 0.0) * 100:.0f}%", "warning"),
-        "stale": ("已失效", "warning"),
-        "invalid": ("无效", "danger"),
-        "needs_preparation": ("待构建", "secondary"),
-        "missing_source": ("缺少源文件", "secondary"),
-        "missing": ("未准备", "secondary"),
+        "ready": ("ready · 可用", "success"),
+        "building": (preparing_text, "warning"),
+        "stale": ("stale · 已失效", "warning"),
+        "invalid": ("invalid · 无效", "danger"),
+        "needs_preparation": ("needs-preparation · 需准备", "secondary"),
+        "missing_source": ("missing-source · 缺少源文件", "secondary"),
+        "missing": ("needs-preparation · 需准备", "secondary"),
     }
     return labels.get(state, (state, "secondary"))
 
 
 def _preparation_item_detail(label: str, item: dict[str, Any]) -> str:
+    if item.get("capability_reason"):
+        return str(item["capability_reason"])
     detail = ""
     if label == "事件索引" and item.get("source_size"):
         if item.get("state") == "building":
@@ -491,9 +682,9 @@ def _render_next_preparation_action(
         return html.Div(
             [
                 html.Div("当前状态", className="rs-next-action-kicker"),
-                html.Div("分析索引已全部就绪", className="rs-next-action-title"),
+                html.Div("已就绪的能力可以直接使用", className="rs-next-action-title"),
                 html.Div(
-                    "可直接进入分析工作流；仅在源文件变化后重新构建。",
+                    "各 Analysis Capability 独立可用；无需等待无关能力。",
                     className="rs-next-action-copy",
                 ),
             ]
@@ -581,15 +772,31 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         className="rs-cache-meta-details",
     )
     recommended_kind = _recommended_preparation_kind(payload)
+    capabilities = dict(payload.get("analysis_capabilities") or {})
+
+    def with_reason(item: dict[str, Any], capability_key: str) -> dict[str, Any]:
+        return {
+            **item,
+            "capability_reason": str(
+                (capabilities.get(capability_key) or {}).get("reason") or ""
+            ),
+        }
+
     items = {
         "basic": ("基础分析文件", payload.get("basic") or {}),
-        "event": ("事件索引", payload.get("events") or {}),
-        "trajectory": ("轨迹帧索引", payload.get("trajectory") or {}),
-        "composition": ("元素分布索引", payload.get("composition") or {}),
+        "event": (
+            "事件索引",
+            with_reason(payload.get("events") or {}, "event_search"),
+        ),
+        "trajectory": (
+            "轨迹帧索引",
+            with_reason(payload.get("trajectory") or {}, "trajectory_evidence"),
+        ),
+        "composition": (
+            "元素分布索引",
+            with_reason(payload.get("composition") or {}, "element_distribution"),
+        ),
     }
-    ready_count = sum(
-        1 for _label, item in items.values() if item.get("state") == "ready"
-    )
     building_kind = next(
         (
             kind
@@ -599,12 +806,12 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         None,
     )
     global_status = (
-        f"正在准备{items[building_kind][0]}"
+        f"Preparation Task · {items[building_kind][0]}"
         if building_kind
-        else f"{ready_count} / {len(items)} 项就绪"
+        else "Analysis Capability 状态按项显示"
     )
     return {
-        "basic": _render_preparation_item(*items["basic"]),
+        "basic": _render_analysis_capabilities(payload.get("analysis_capabilities") or {}),
         "event": _render_preparation_item(*items["event"]),
         "trajectory": _render_preparation_item(*items["trajectory"]),
         "composition": _render_preparation_item(*items["composition"]),
@@ -612,14 +819,102 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
         "alert": alert,
         "next_action": _render_next_preparation_action(recommended_kind),
         "global_status": global_status,
-        "global_class": (
-            "rs-index-global-state is-ready"
-            if ready_count == len(items)
-            else "rs-index-global-state is-partial"
-        ),
+        "global_class": "rs-index-global-state",
         "refresh_label": f"状态自动刷新 · {updated_text}",
         "recommended_kind": recommended_kind,
     }
+
+
+def _render_preparation_tasks(tasks: list[dict[str, Any]]) -> Any:
+    if not tasks:
+        return html.Div(
+            "尚无 Preparation Task。任务只能在数据管理中显式启动。",
+            className="rs-preparation-task-empty",
+        )
+    capability_labels = {
+        "event": "事件检索",
+        "trajectory": "轨迹证据",
+        "composition": "元素分布",
+    }
+    state_labels = {
+        "running": "running · 运行中",
+        "cancel_requested": "running · 正在取消",
+        "completed": "succeeded · 已完成",
+        "canceled": "cancelled · 已取消",
+        "interrupted": "failed · 已中断，可续建",
+        "failed": "failed · 失败",
+        "superseded": "superseded · 源修订已变化",
+    }
+    cards: list[Any] = []
+    for task in tasks:
+        state = str(task.get("state") or "failed")
+        revision = dict(task.get("source_revision") or {})
+        fingerprint = str(revision.get("fingerprint") or "")
+        phase = str(task.get("phase") or task.get("message") or "未报告阶段")
+        progress = task.get("progress") if task.get("progress_trusted") else None
+        progress_text = (
+            f"可信进度 {float(progress) * 100:.0f}%"
+            if isinstance(progress, (int, float))
+            else "未提供可信百分比"
+        )
+        capability = str(task.get("capability") or "")
+        cards.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Strong(str(task.get("dataset_label") or "未命名数据集")),
+                            html.Span(
+                                f"Dataset Identity {task.get('dataset_id') or '-'}",
+                                className="rs-preparation-task-meta",
+                            ),
+                            html.Span(
+                                f"源修订 {fingerprint[:12] or '-'}",
+                                className="rs-preparation-task-meta",
+                            ),
+                        ],
+                        className="rs-preparation-task-identity",
+                    ),
+                    html.Div(
+                        [
+                            html.Strong(capability_labels.get(capability, capability)),
+                            html.Span(
+                                state_labels.get(state, state),
+                                className="rs-preparation-task-state",
+                            ),
+                        ],
+                        className="rs-preparation-task-identity",
+                    ),
+                    html.Div(
+                        [
+                            html.Span(f"阶段：{phase}"),
+                            html.Span(progress_text, className="rs-preparation-task-meta"),
+                        ],
+                        className="rs-preparation-task-progress",
+                    ),
+                    dbc.Button(
+                        "取消任务",
+                        id={
+                            "type": "preparation-task-cancel",
+                            "dataset": str(task.get("dataset_id") or ""),
+                            "capability": capability,
+                        },
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                        disabled=state not in {"running", "cancel_requested"},
+                    ),
+                ],
+                className="rs-preparation-task-card",
+                **{
+                    "data-dataset-id": str(task.get("dataset_id") or ""),
+                    "data-source-revision": fingerprint,
+                    "data-capability": capability,
+                    "data-state": state,
+                },
+            )
+        )
+    return cards
 
 
 def _event_frame_figure(viewer: dict[str, Any], frame_index: int, scope: str, *, compact: bool = False):
@@ -894,6 +1189,7 @@ def register_callbacks(app: Any) -> None:
         Output("page-description", "children"),
         Output("page-header", "style"),
         Output("app-body", "className"),
+        Output("dataset-focus-request", "data"),
         Input("nav-species", "n_clicks"),
         Input("nav-reactions", "n_clicks"),
         Input("nav-evolution", "n_clicks"),
@@ -906,6 +1202,7 @@ def register_callbacks(app: Any) -> None:
         Input("data-open-batch-compare-btn", "n_clicks"),
         Input("data-pick-btn", "n_clicks"),
         Input("open-data-modal", "n_clicks"),
+        Input("page-capability-manage-btn", "n_clicks"),
         Input("species-open-data-modal", "n_clicks"),
         Input("species-to-channels-btn", "n_clicks"),
         Input("species-to-evolution-btn", "n_clicks"),
@@ -968,6 +1265,7 @@ def register_callbacks(app: Any) -> None:
             "nav-data-management",
             "data-pick-btn",
             "open-data-modal",
+            "page-capability-manage-btn",
             "species-open-data-modal",
         }:
             page_id = "data-management"
@@ -997,6 +1295,7 @@ def register_callbacks(app: Any) -> None:
             triggered_id in {
                 "data-pick-btn",
                 "open-data-modal",
+                "page-capability-manage-btn",
                 "species-open-data-modal",
             }
             and stored_page in PAGE_IDS
@@ -1029,6 +1328,55 @@ def register_callbacks(app: Any) -> None:
             for key in ("return_page", "return_label"):
                 if stored_state.get(key):
                     page_state[key] = stored_state[key]
+        focus_request: Any = no_update
+        if triggered_id == "data-pick-btn":
+            focus_request = {
+                "token": f"picker-{time.time_ns()}",
+                "target": "data-browser-title",
+            }
+        elif triggered_id in {
+            "open-data-modal",
+            "page-capability-manage-btn",
+            "species-open-data-modal",
+            "nav-data-management",
+        }:
+            required_capability = PAGE_CAPABILITY_REQUIREMENTS.get(
+                str(stored_page or ""),
+                "",
+            )
+            preparation_target = {
+                "event_search": "data-prep-event-btn",
+                "trajectory_evidence": "data-prep-trajectory-btn",
+                "element_distribution": "data-prep-composition-btn",
+            }.get(required_capability, "data-prep-basic-status")
+            focus_request = {
+                "token": f"data-workspace-{time.time_ns()}",
+                "target": (
+                    preparation_target
+                    if triggered_id == "page-capability-manage-btn"
+                    else "data-candidate-summary"
+                ),
+            }
+        elif triggered_id == "dir-browser-cancel-btn":
+            focus_request = {
+                "token": f"cancel-{time.time_ns()}",
+                "target": str(
+                    ((stored_state.get("dataset_return") or {}).get("trigger"))
+                    or "data-candidate-summary"
+                ),
+            }
+        elif triggered_id == "dataset-switch-navigation":
+            focus_request = {
+                "token": str((switch_navigation or {}).get("request_id") or time.time_ns()),
+                "target": (
+                    "page-title"
+                    if page_id != "data-management"
+                    else "data-candidate-summary"
+                ),
+                "expected_text": (
+                    PAGE_LABELS[page_id] if page_id != "data-management" else ""
+                ),
+            }
         return (
             tuple(page_classes[pid] for pid in PAGE_IDS)
             + tuple(nav_classes[pid] for pid in TOP_NAV_PAGE_IDS)
@@ -1049,6 +1397,7 @@ def register_callbacks(app: Any) -> None:
                 PAGE_DESCRIPTIONS[page_id],
                 {},
                 "rs-body rs-tool-shell",
+                focus_request,
             )
         )
 
@@ -1073,18 +1422,11 @@ def register_callbacks(app: Any) -> None:
     def _update_page_data_status(page_store, app_store, pathway_tab):
         page_id = (page_store or {}).get("page") or "species"
         inputs_pending = bool((app_store or {}).get("inputs_pending"))
-        invalidated = set((app_store or {}).get("invalidated_artifacts") or [])
 
         def ready_status(message: str) -> tuple[str, str]:
             if inputs_pending:
                 message = f"{message} · 保留的查询输入尚未在当前数据集运行"
             return message, "rs-page-status is-ready"
-
-        def stale_status(label: str) -> tuple[str, str]:
-            return (
-                f"{label} 的源修订已变化；采用新修订后可继续",
-                "rs-page-status is-blocked",
-            )
 
         if page_id == "data-management":
             label = str((app_store or {}).get("label") or "").strip()
@@ -1101,57 +1443,31 @@ def register_callbacks(app: Any) -> None:
             if reaction_ready:
                 return "当前数据集可加入对比", "rs-page-status is-ready"
             return "可扫描目录或从数据管理加载", "rs-page-status is-independent"
-        if page_id == "events":
-            if invalidated & {"timeline", "reactionevent", "molecules"}:
-                return stale_status("事件证据")
-            artifacts = (app_store or {}).get("artifacts") or {}
-            event_ready = bool(
-                artifacts.get("reactionevent") and artifacts.get("molecules")
-            )
-            return (
-                ready_status("RNG 事件输出已就绪")
-                if event_ready
-                else ("需要 reactionevent.csv + molecules.csv", "rs-page-status is-blocked")
-            )
-        if page_id == "pathway" and pathway_tab == "concrete-event-paths":
-            if invalidated & {"timeline", "reactionevent", "molecules"}:
-                return stale_status("事件路径证据")
-            artifacts = (app_store or {}).get("artifacts") or {}
-            event_ready = bool(
-                artifacts.get("reactionevent") and artifacts.get("molecules")
-            )
-            return (
-                ready_status("事件轨迹证据已就绪")
-                if event_ready
-                else (
-                    "需要 reactionevent.csv + molecules.csv",
-                    "rs-page-status is-blocked",
-                )
-            )
-        if page_id == "trajectory":
-            if "trajectory" in invalidated:
-                return stale_status("轨迹证据")
-            readiness = (app_store or {}).get("readiness") or {}
-            trajectory_ready = bool(
-                (readiness.get("trajectory_evidence") or {}).get("ready")
-            )
-            return (
-                ready_status("轨迹帧索引已就绪")
-                if trajectory_ready
-                else ("需要轨迹文件与帧索引", "rs-page-status is-blocked")
-            )
-        artifact_key, artifact_label = PAGE_DATA_REQUIREMENTS.get(
-            page_id,
-            ("", ""),
+        capability_key = (
+            "event_search"
+            if page_id == "pathway" and pathway_tab == "concrete-event-paths"
+            else PAGE_CAPABILITY_REQUIREMENTS.get(page_id, "")
         )
-        artifacts = (app_store or {}).get("artifacts") or {}
-        if artifact_key and artifact_key in invalidated:
-            return stale_status(artifact_label or "当前能力")
-        if artifact_key and artifacts.get(artifact_key):
-            if page_id == "pathway":
-                return ready_status("聚合反应网络已就绪")
-            return ready_status(f"{artifact_label} 已就绪")
-        return f"需要 {artifact_label or '数据文件'}", "rs-page-status is-blocked"
+        if not capability_key:
+            return "此页面不依赖 Current Dataset", "rs-page-status is-independent"
+        label = _CAPABILITY_LABELS[capability_key]
+        if not (app_store or {}).get("dataset_id"):
+            return (
+                f"{label}：需要先选择 Current Dataset",
+                "rs-page-status is-blocked",
+            )
+        evidence = dict(
+            _capabilities_from_store(app_store).get(capability_key) or {}
+        )
+        state = _capability_state_class(evidence.get("state"))
+        reason = str(evidence.get("reason") or "状态原因暂不可用。")
+        state_label = _CAPABILITY_STATE_LABELS.get(state, state)
+        if state == "ready":
+            return ready_status(f"{label}：{state_label} · {reason}")
+        return (
+            f"{label}：{state_label} · {reason}",
+            "rs-page-status is-blocked",
+        )
 
     @app.callback(
         Output("rxn-search-btn", "disabled"),
@@ -1164,19 +1480,21 @@ def register_callbacks(app: Any) -> None:
         Input("app-store", "data"),
     )
     def _update_data_dependent_actions(app_store):
-        artifacts = (app_store or {}).get("artifacts") or {}
-        no_reaction = not bool(artifacts.get("reaction"))
-        no_species = not bool(artifacts.get("species"))
-        no_reaction_events = not bool(
-            artifacts.get("reactionevent") and artifacts.get("molecules")
-        )
-        no_trajectory = not bool(artifacts.get("trajectory"))
+        capabilities = _capabilities_from_store(app_store)
+
+        def blocked(key: str) -> bool:
+            return str((capabilities.get(key) or {}).get("state") or "") != "ready"
+
+        no_reaction = blocked("reaction_search")
+        no_species = blocked("species_abundance")
+        no_reaction_events = blocked("event_search")
+        no_trajectory = blocked("trajectory_evidence")
         return (
             no_reaction,
             no_reaction,
             no_species,
             no_species,
-            no_species,
+            blocked("element_distribution"),
             no_reaction_events,
             no_trajectory,
         )
@@ -1269,15 +1587,10 @@ def register_callbacks(app: Any) -> None:
                 else "源修订已变化 · 请采用新修订"
             )
             return label, label, status, "rs-badge rs-bad"
-        readiness = current.get("readiness") or {}
         return (
             label,
             label,
-            "基础 {} · 事件 {} · 轨迹 {}".format(
-                "就绪" if (readiness.get("basic_analysis") or {}).get("ready") else "未就绪",
-                "就绪" if (readiness.get("event_search") or {}).get("ready") else "未就绪",
-                "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
-            ),
+            "Analysis Capability 按项独立显示",
             "rs-badge",
         )
 
@@ -1374,10 +1687,15 @@ def register_callbacks(app: Any) -> None:
                     ],
                     className="rs-current-dataset-name",
                 )
-                status_text = "Current Dataset · Analysis Capability 状态按下方项目分别显示"
+                status_text = _render_analysis_capabilities(
+                    _capabilities_from_store(loaded)
+                )
             else:
                 summary = html.Strong("尚无 Current Dataset")
-                status_text = "请选择 Dataset Candidate，并显式执行“使用此数据集”。"
+                status_text = html.Div(
+                    "请选择 Dataset Candidate，并显式执行“使用此数据集”。",
+                    className="rs-preparation-task-empty",
+                )
             return (
                 summary,
                 status_text,
@@ -1426,7 +1744,9 @@ def register_callbacks(app: Any) -> None:
                 ],
                 className="rs-current-dataset-name",
             ),
-            "Dataset Candidate 的有限元数据已检查；使用此数据集前不会改变 Current Dataset。",
+            _render_analysis_capabilities(
+                svc.dataset_analysis_capabilities(status)
+            ),
             artifact_html,
         )
 
@@ -1552,6 +1872,9 @@ def register_callbacks(app: Any) -> None:
         Output("data-prep-event-btn", "className"),
         Output("data-prep-trajectory-btn", "className"),
         Output("data-prep-composition-btn", "className"),
+        Output("data-prep-event-btn", "children"),
+        Output("data-prep-trajectory-btn", "children"),
+        Output("data-prep-composition-btn", "children"),
         Input("page-store", "data"),
         Input("data-prep-refresh-btn", "n_clicks"),
         Input("data-prep-refresh", "n_intervals"),
@@ -1574,6 +1897,7 @@ def register_callbacks(app: Any) -> None:
                 "", "", "", "", "", "",
                 True, True, True, True,
                 "rs-index-action", "rs-index-action", "rs-index-action",
+                "准备索引", "准备索引", "准备索引",
             )
         try:
             target = _validated_dataset_target(candidate, app_store=app_store)
@@ -1589,6 +1913,7 @@ def register_callbacks(app: Any) -> None:
                 "", "", "", "", "", "",
                 True, True, True, False,
                 "rs-index-action", "rs-index-action", "rs-index-action",
+                "准备索引", "准备索引", "准备索引",
             )
         except Exception as exc:
             error = f"读取准备状态失败: {exc}"
@@ -1598,6 +1923,7 @@ def register_callbacks(app: Any) -> None:
                 "", "", "", "", "", "",
                 True, True, True, False,
                 "rs-index-action", "rs-index-action", "rs-index-action",
+                "准备索引", "准备索引", "准备索引",
             )
 
         events = payload.get("events") or {}
@@ -1628,6 +1954,16 @@ def register_callbacks(app: Any) -> None:
                 else "rs-index-action"
             )
 
+        def action_label(item: dict[str, Any]) -> str:
+            task_state = str((item.get("task") or {}).get("state") or "")
+            if task_state in {"interrupted", "canceled", "failed", "superseded"}:
+                return "续建索引"
+            if str(item.get("state") or "") in {"ready", "stale", "invalid"}:
+                return "重建索引"
+            if task_state in {"running", "cancel_requested"}:
+                return "任务运行中"
+            return "准备索引"
+
         return (
             rendered["basic"],
             rendered["event"],
@@ -1652,7 +1988,144 @@ def register_callbacks(app: Any) -> None:
             action_class("event"),
             action_class("trajectory"),
             action_class("composition"),
+            action_label(events),
+            action_label(trajectory),
+            action_label(composition),
         )
+
+    @app.callback(
+        Output("data-preparation-tasks", "children"),
+        Output("preparation-task-snapshot", "data"),
+        Output("global-dataset-notice", "children", allow_duplicate=True),
+        Input("preparation-task-refresh", "n_intervals"),
+        Input("dataset-browser-candidate", "data"),
+        Input("app-store", "data"),
+        Input("recent-datasets", "data"),
+        State("preparation-task-snapshot", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_persisted_preparation_tasks(
+        _tick,
+        candidate,
+        app_store,
+        recent_records,
+        previous_tasks,
+    ):
+        targets = [
+            candidate if isinstance(candidate, dict) else {},
+            app_store if isinstance(app_store, dict) else {},
+            *(recent_records if isinstance(recent_records, list) else []),
+            *(previous_tasks if isinstance(previous_tasks, list) else []),
+        ]
+        tasks = svc.list_preparation_tasks(targets)
+        previous = {
+            (str(item.get("dataset_id") or ""), str(item.get("capability") or "")): item
+            for item in (previous_tasks if isinstance(previous_tasks, list) else [])
+            if isinstance(item, dict)
+        }
+        current_dataset_id = str((app_store or {}).get("dataset_id") or "")
+        notice: Any = no_update
+        if ctx.triggered_id == "preparation-task-refresh":
+            completed = next(
+                (
+                    task
+                    for task in tasks
+                    if task.get("state") == "completed"
+                    and str(task.get("dataset_id") or "") != current_dataset_id
+                    and str(
+                        previous.get(
+                            (
+                                str(task.get("dataset_id") or ""),
+                                str(task.get("capability") or ""),
+                            ),
+                            {},
+                        ).get("state")
+                        or ""
+                    )
+                    in {"running", "cancel_requested"}
+                ),
+                None,
+            )
+            if completed:
+                capability_label = {
+                    "event": "事件检索",
+                    "trajectory": "轨迹证据",
+                    "composition": "元素分布",
+                }.get(str(completed.get("capability") or ""), "Analysis Capability")
+                notice = dbc.Alert(
+                    f"{completed.get('dataset_label') or '非 Current Dataset'} 的"
+                    f"{capability_label} Preparation Task 已完成。",
+                    color="info",
+                    className="mb-0",
+                )
+        return _render_preparation_tasks(tasks), tasks, notice
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("dataset-session-store", "data", allow_duplicate=True),
+        Input("preparation-task-refresh", "n_intervals"),
+        State("app-store", "data"),
+        State("dataset-session-store", "data"),
+        State("preparation-task-snapshot", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_current_capabilities_from_workspace(
+        _tick,
+        app_store,
+        session_store,
+        task_snapshot,
+    ):
+        current = app_store if isinstance(app_store, dict) else {}
+        dataset_id = str(current.get("dataset_id") or "")
+        if not dataset_id:
+            raise PreventUpdate
+        tasks = [
+            item
+            for item in (task_snapshot if isinstance(task_snapshot, list) else [])
+            if isinstance(item, dict)
+            and str(item.get("dataset_id") or "") == dataset_id
+        ]
+        if not tasks:
+            raise PreventUpdate
+        task_epoch = max(int(item.get("updated_at_epoch") or 0) for item in tasks)
+        task_token = json.dumps(
+            sorted(
+                (
+                    str(item.get("capability") or ""),
+                    str(item.get("state") or ""),
+                    int(item.get("updated_at_epoch") or 0),
+                    item.get("progress") if item.get("progress_trusted") else None,
+                )
+                for item in tasks
+            ),
+            separators=(",", ":"),
+        )
+        if task_token == str(current.get("capability_checked_task_token") or ""):
+            raise PreventUpdate
+        try:
+            validation = svc.validate_dataset_candidate(
+                str(current.get("folder") or ""),
+                str(current.get("base") or ""),
+            )
+        except (svc.ServiceError, OSError, RuntimeError):
+            raise PreventUpdate
+        if not svc.is_same_dataset_revision(current, validation):
+            raise PreventUpdate
+        updated = {
+            **current,
+            "analysis_capabilities": dict(
+                validation.get("analysis_capabilities") or {}
+            ),
+            "readiness": dict(validation.get("readiness") or {}),
+            "capability_checked_task_epoch": task_epoch,
+            "capability_checked_task_token": task_token,
+        }
+        persisted = (
+            {**dict(session_store or {}), **updated}
+            if str((session_store or {}).get("dataset_id") or "") == dataset_id
+            else updated
+        )
+        return updated, persisted
 
     @app.callback(
         Output("data-prep-action-alert", "children"),
@@ -1700,7 +2173,9 @@ def register_callbacks(app: Any) -> None:
             )
             set_progress(
                 dbc.Alert(
-                    f"已启动 {labels[kind]}后台任务；可在上方查看检查点进度。",
+                    f"{target.get('label') or Path(target['base']).name} · "
+                    f"{labels[kind]} Preparation Task 已启动；"
+                    "可在任务状态区查看阶段与可信进度。",
                     color="info",
                     className="py-2 mb-0",
                 )
@@ -1754,14 +2229,44 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("data-prep-cancel-result", "data"),
         Input("data-prep-cancel-btn", "n_clicks"),
+        Input({"type": "preparation-task-cancel", "dataset": ALL, "capability": ALL}, "n_clicks"),
         State("dataset-browser-candidate", "data"),
         State("app-store", "data"),
+        State("preparation-task-snapshot", "data"),
         prevent_initial_call=True,
     )
-    def _cancel_preparation_task(n_clicks, candidate, app_store):
-        if not n_clicks:
-            raise PreventUpdate
+    def _cancel_preparation_task(
+        n_clicks,
+        task_clicks,
+        candidate,
+        app_store,
+        task_snapshot,
+    ):
+        triggered = ctx.triggered_id
         try:
+            if isinstance(triggered, dict) and triggered.get("type") == "preparation-task-cancel":
+                if not _triggered_click_value():
+                    raise PreventUpdate
+                task = next(
+                    (
+                        item
+                        for item in (task_snapshot or [])
+                        if str(item.get("dataset_id") or "")
+                        == str(triggered.get("dataset") or "")
+                        and str(item.get("capability") or "")
+                        == str(triggered.get("capability") or "")
+                    ),
+                    None,
+                )
+                if not task:
+                    raise PreventUpdate
+                return svc.cancel_dataset_preparation(
+                    str(task.get("folder") or ""),
+                    base=str(task.get("base") or ""),
+                    kind=str(task.get("capability") or ""),
+                )
+            if not n_clicks:
+                raise PreventUpdate
             target = _validated_dataset_target(candidate, app_store=app_store)
             return svc.cancel_dataset_preparation(
                 target["folder"],
@@ -2395,7 +2900,7 @@ def register_callbacks(app: Any) -> None:
         Output("topbar-rungroup", "children"),
         Output("topbar-status", "children"),
         Output("topbar-status", "className"),
-        Output("dataset-focus-request", "data"),
+        *_dataset_bound_reset_outputs(),
         Input("dataset-switch-transaction", "data"),
         State("app-store", "data"),
         State("recent-datasets", "data"),
@@ -2430,14 +2935,10 @@ def register_callbacks(app: Any) -> None:
                 no_update,
                 no_update,
                 no_update,
-                {
-                    "token": str(request.get("request_id") or ""),
-                    "target": "page-title" if target_page != "data-management" else "data-browser-title",
-                },
+                *((no_update,) * len(_dataset_bound_reset_outputs())),
             )
 
         new_store = svc.current_dataset_from_validation(validation)
-        readiness = new_store.get("readiness") or {}
         recent = svc.normalise_recent_datasets(
             [
                 {
@@ -2471,37 +2972,10 @@ def register_callbacks(app: Any) -> None:
             "rs-data-view d-none",
             label,
             label,
-            "基础 {} · 事件 {} · 轨迹 {}".format(
-                "就绪" if (readiness.get("basic_analysis") or {}).get("ready") else "未就绪",
-                "就绪" if (readiness.get("event_search") or {}).get("ready") else "未就绪",
-                "就绪" if (readiness.get("trajectory_evidence") or {}).get("ready") else "未就绪",
-            ),
+            "Analysis Capability 按项独立显示",
             "rs-badge",
-            {
-                "token": str(request.get("request_id") or ""),
-                "target": "page-title" if target_page != "data-management" else "data-candidate-summary",
-            },
+            *_dataset_bound_reset_values(),
         )
-
-    @app.callback(
-        Output("dataset-focus-request", "data", allow_duplicate=True),
-        Input("data-pick-btn", "n_clicks"),
-        Input("dir-browser-cancel-btn", "n_clicks"),
-        State("page-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _request_dataset_focus(_pick_clicks, _cancel_clicks, page_store):
-        if ctx.triggered_id == "data-pick-btn":
-            return {"token": f"picker-{time.time_ns()}", "target": "data-browser-title"}
-        if ctx.triggered_id == "dir-browser-cancel-btn":
-            return {
-                "token": f"cancel-{time.time_ns()}",
-                "target": str(
-                    (((page_store or {}).get("dataset_return") or {}).get("trigger"))
-                    or "data-candidate-summary"
-                ),
-            }
-        raise PreventUpdate
 
     app.clientside_callback(
         """
@@ -2512,7 +2986,10 @@ def register_callbacks(app: Any) -> None:
             let attempts = 0;
             function focusWhenVisible() {
                 const target = document.getElementById(request.target);
-                if (target && target.getClientRects().length > 0) {
+                const expectedText = request.expected_text || "";
+                const textMatches = !expectedText ||
+                    (target && target.textContent.trim() === expectedText);
+                if (target && target.getClientRects().length > 0 && textMatches) {
                     if (!target.hasAttribute("tabindex")) {
                         target.setAttribute("tabindex", "-1");
                     }
@@ -2534,110 +3011,12 @@ def register_callbacks(app: Any) -> None:
     )
 
     @app.callback(
-        Output("species-grid-store", "data", allow_duplicate=True),
-        Output("rxn-grid-store", "data", allow_duplicate=True),
-        Output("inter-grid-store", "data", allow_duplicate=True),
-        Output("evolution-payload-store", "data", allow_duplicate=True),
-        Output("element-distribution-payload-store", "data", allow_duplicate=True),
-        Output("event-grid-store", "data", allow_duplicate=True),
-        Output("event-selected-store", "data", allow_duplicate=True),
-        Output("event-viewer-store", "data", allow_duplicate=True),
-        Output("pathway-store", "data", allow_duplicate=True),
-        Output("pathway-context-store", "data", allow_duplicate=True),
-        Output("pathway-selected-step", "data", allow_duplicate=True),
-        Output("pathway-selected-path", "data", allow_duplicate=True),
-        Output("event-path-store", "data", allow_duplicate=True),
-        Output("event-path-context-store", "data", allow_duplicate=True),
-        Output("event-path-wizard-step", "data", allow_duplicate=True),
-        Output("species-grid", "data", allow_duplicate=True),
-        Output("species-grid", "selected_rows", allow_duplicate=True),
-        Output("species-structure-grid", "data", allow_duplicate=True),
-        Output("species-structure-grid", "selected_rows", allow_duplicate=True),
-        Output("rxn-grid", "data", allow_duplicate=True),
-        Output("inter-grid", "data", allow_duplicate=True),
-        Output("event-grid", "data", allow_duplicate=True),
-        Output("event-grid", "selected_rows", allow_duplicate=True),
-        Output("pathway-grid", "data", allow_duplicate=True),
-        Output("pathway-grid", "selected_rows", allow_duplicate=True),
-        Output("pathway-evidence-grid", "data", allow_duplicate=True),
-        Output("event-path-comparison-grid", "data", allow_duplicate=True),
-        Output("event-path-signature-grid", "data", allow_duplicate=True),
-        Output("event-path-time-grid", "data", allow_duplicate=True),
-        Output("event-path-event-grid", "data", allow_duplicate=True),
-        Output("event-path-edge-grid", "data", allow_duplicate=True),
-        Output("event-path-cytoscape", "elements", allow_duplicate=True),
-        Output("evolution-graph", "figure", allow_duplicate=True),
-        Output("element-distribution-composition-trend", "figure", allow_duplicate=True),
-        Output("element-distribution-composition-table", "data", allow_duplicate=True),
-        Input("dataset-context-commit", "data"),
-        prevent_initial_call=True,
-    )
-    def _reset_dataset_bound_results(commit_marker):
-        if not (commit_marker or {}).get("request_id"):
-            raise PreventUpdate
-        return (
-            {"rows": []},
-            {"rows": []},
-            {"rows": []},
-            None,
-            None,
-            {"rows": []},
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1,
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            go.Figure(),
-            go.Figure(),
-            [],
-        )
-
-    @app.callback(
-        Output("event-extract-id", "value", allow_duplicate=True),
-        Output("event-frame-slider", "min", allow_duplicate=True),
-        Output("event-frame-slider", "max", allow_duplicate=True),
-        Output("event-frame-slider", "value", allow_duplicate=True),
-        Output("event-frame-slider", "marks", allow_duplicate=True),
-        Output("event-path-additional-sources", "value", allow_duplicate=True),
-        Output("event-path-current-replicate", "value", allow_duplicate=True),
-        Output("event-path-occurrence-selector", "value", allow_duplicate=True),
-        Output("evolution-species-file", "value", allow_duplicate=True),
-        Output("evolution-species-files", "value", allow_duplicate=True),
-        Input("dataset-context-commit", "data"),
-        prevent_initial_call=True,
-    )
-    def _reset_dataset_bound_controls(commit_marker):
-        if not (commit_marker or {}).get("request_id"):
-            raise PreventUpdate
-        return "", 0, 0, 0, {}, "", "", None, "", ""
-
-    @app.callback(
         Output("app-store", "data", allow_duplicate=True),
         Output("dataset-session-store", "data", allow_duplicate=True),
         Output("dataset-restore-result", "data"),
         Output("dataset-context-commit", "data", allow_duplicate=True),
         Output("global-dataset-notice", "children", allow_duplicate=True),
+        *_dataset_bound_reset_outputs(),
         Input("dataset-session-restore", "n_intervals"),
         State("dataset-session-store", "data"),
         prevent_initial_call=True,
@@ -2646,11 +3025,25 @@ def register_callbacks(app: Any) -> None:
         current = session_store if isinstance(session_store, dict) else {}
         if not current.get("dataset_id"):
             empty = initial_store()
-            return empty, empty, {"state": "none"}, {}, no_update
+            return (
+                empty,
+                empty,
+                {"state": "none"},
+                {},
+                no_update,
+                *_dataset_bound_reset_values(),
+            )
         result = svc.revalidate_current_dataset(current)
         state = str(result.get("state") or "unavailable")
         if state == "active":
-            return result.get("context"), result.get("context"), result, {}, no_update
+            return (
+                result.get("context"),
+                result.get("context"),
+                result,
+                {},
+                no_update,
+                *((no_update,) * len(_dataset_bound_reset_outputs())),
+            )
         if state == "revision-changed":
             marker = {
                 "request_id": f"restore-{time.time_ns()}",
@@ -2667,6 +3060,7 @@ def register_callbacks(app: Any) -> None:
                     color="warning",
                     className="mb-0",
                 ),
+                *_dataset_bound_reset_values(),
             )
         marker = {
             "request_id": f"restore-{time.time_ns()}",
@@ -2682,6 +3076,7 @@ def register_callbacks(app: Any) -> None:
                 color="danger",
                 className="mb-0",
             ),
+            *_dataset_bound_reset_values(),
         )
 
     @app.callback(
@@ -2689,6 +3084,7 @@ def register_callbacks(app: Any) -> None:
         Output("dataset-session-store", "data", allow_duplicate=True),
         Output("dataset-context-commit", "data", allow_duplicate=True),
         Output("global-dataset-notice", "children", allow_duplicate=True),
+        *_dataset_bound_reset_outputs(),
         Input("data-current-refresh-btn", "n_clicks"),
         State("app-store", "data"),
         prevent_initial_call=True,
@@ -2724,6 +3120,11 @@ def register_callbacks(app: Any) -> None:
                 result.get("context"),
                 marker,
                 dbc.Alert(message, color="success", className="mb-0"),
+                *(
+                    _dataset_bound_reset_values()
+                    if was_revision_changed
+                    else (no_update,) * len(_dataset_bound_reset_outputs())
+                ),
             )
         if state == "revision-changed":
             return (
@@ -2739,6 +3140,7 @@ def register_callbacks(app: Any) -> None:
                     color="warning",
                     className="mb-0",
                 ),
+                *_dataset_bound_reset_values(),
             )
         return (
             initial_store(),
@@ -2752,6 +3154,7 @@ def register_callbacks(app: Any) -> None:
                 color="danger",
                 className="mb-0",
             ),
+            *_dataset_bound_reset_values(),
         )
 
     def _channel_columns(items: list[tuple[str, str, int | None]]) -> list[dict[str, Any]]:
@@ -6129,25 +6532,6 @@ def register_callbacks(app: Any) -> None:
 
 _BROWSER_RENDER_LIMIT = 100
 
-_CAPABILITY_LABELS = {
-    "reaction_search": "反应检索",
-    "species_abundance": "物种丰度",
-    "event_search": "事件检索",
-    "trajectory_evidence": "轨迹证据",
-    "element_distribution": "元素分布",
-}
-
-_CAPABILITY_STATE_LABELS = {
-    "ready": "就绪",
-    "needs_preparation": "需准备",
-    "preparing": "准备中",
-    "stale": "已失效",
-    "invalid": "无效",
-    "missing_source": "缺少来源",
-}
-
-
-
 def _resolve_initial_browse_path(
     folder_input: str | None,
     *,
@@ -6741,20 +7125,36 @@ def _render_candidate_radio(
     selected: bool,
     tabbable: bool,
 ) -> Any:
-    capability_states = dict(item.get("capability_states") or {})
+    capabilities = dict(item.get("analysis_capabilities") or {})
+    compatibility_states = dict(item.get("capability_states") or {})
     capability_badges = [
         html.Span(
             [
                 html.Span(label, className="rs-browser-capability-name"),
                 html.Span(
                     _CAPABILITY_STATE_LABELS.get(
-                        str(capability_states.get(key) or "missing_source"),
+                        _capability_state_class(
+                            (capabilities.get(key) or {}).get("state")
+                            or compatibility_states.get(key)
+                            or "missing-source"
+                        ),
                         "不可用",
                     ),
                     className=(
                         "rs-browser-capability-state is-"
-                        + str(capability_states.get(key) or "missing_source").replace("_", "-")
+                        + _capability_state_class(
+                            (capabilities.get(key) or {}).get("state")
+                            or compatibility_states.get(key)
+                            or "missing-source"
+                        )
                     ),
+                ),
+                html.Span(
+                    str(
+                        (capabilities.get(key) or {}).get("reason")
+                        or "状态原因暂不可用。"
+                    ),
+                    className="rs-browser-capability-reason",
                 ),
             ],
             className="rs-browser-capability",
@@ -7650,13 +8050,14 @@ def _render_artifacts(artifacts: dict[str, str]) -> Any:
         "reaction": "Reaction",
         "species": "Species",
         "trajectory": "Trajectory",
+        "timeline": "Timeline",
+        "reactionevent": "Reaction Occurrence CSV",
+        "molecules": "Molecular Evidence CSV",
     }
     rows: list[Any] = []
-    ready = 0
     for key, label in labels.items():
         path = artifacts.get(key)
         if path:
-            ready += 1
             rows.append(
                 html.Div(
                     [
@@ -7680,7 +8081,7 @@ def _render_artifacts(artifacts: dict[str, str]) -> Any:
             )
     return html.Details(
         [
-            html.Summary(f"基础文件与路径 · {ready}/{len(labels)} 已找到"),
+            html.Summary("展开源工件与绝对路径"),
             html.Div(rows, className="rs-artifact-list"),
         ],
         className="rs-artifact-details",

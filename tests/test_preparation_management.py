@@ -475,7 +475,8 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert details is None
     assert workspace_meta is not None
     cache_text = json.dumps(cache_card, ensure_ascii=False)
-    assert "索引就绪状态" in cache_text
+    assert "Analysis Capability 与 Preparation Task" in cache_text
+    assert "data-preparation-tasks" in cache_text
     assert "危险操作：清理派生索引" in cache_text
     for component_id in (
         "data-prep-status",

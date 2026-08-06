@@ -20,6 +20,7 @@ from reacnet_scope.indexes import dataset_id_for_source
 from reacnet_scope.service_types import ServiceError
 from reacnet_scope.workspace_services import (
     artifacts_from_status,
+    dataset_analysis_capabilities,
     dataset_capabilities,
     dataset_label,
     dataset_readiness,
@@ -137,6 +138,7 @@ def validate_dataset_candidate(folder: str, base: str) -> dict[str, Any]:
         "artifacts": artifacts_from_status(status),
         "capabilities": dataset_capabilities(status),
         "readiness": dataset_readiness(status),
+        "analysis_capabilities": dataset_analysis_capabilities(status),
     }
 
 
@@ -286,6 +288,9 @@ def current_dataset_from_validation(
         "context_state": "active",
         "capabilities": dict(validation.get("capabilities") or {}),
         "readiness": dict(validation.get("readiness") or {}),
+        "analysis_capabilities": dict(
+            validation.get("analysis_capabilities") or {}
+        ),
         "artifacts": dict(validation.get("artifacts") or {}),
         "selected_smiles": "",
         "selected_formula": "",
@@ -336,6 +341,25 @@ def _revision_changed_context(
     for key, sources in readiness_sources.items():
         if key in readiness and sources & changed_kinds:
             readiness[key] = {"ready": False, "state": "stale"}
+    analysis_capability_sources = {
+        "reaction_search": {"reaction"},
+        "species_abundance": {"species"},
+        "event_search": {"timeline", "reactionevent", "molecules"},
+        "trajectory_evidence": {"trajectory"},
+        "element_distribution": {"species"},
+    }
+    analysis_capabilities = {
+        str(key): dict(value)
+        for key, value in dict(current.get("analysis_capabilities") or {}).items()
+    }
+    for key, sources in analysis_capability_sources.items():
+        if key in analysis_capabilities and sources & changed_kinds:
+            analysis_capabilities[key].update(
+                state="stale",
+                reason=(
+                    "源修订已变化；采用新修订并在需要时重建该能力的索引。"
+                ),
+            )
     artifacts = {
         str(kind): str(path)
         for kind, path in dict(current.get("artifacts") or {}).items()
@@ -349,6 +373,7 @@ def _revision_changed_context(
         "artifacts": artifacts,
         "capabilities": capabilities,
         "readiness": readiness,
+        "analysis_capabilities": analysis_capabilities,
         "selected_smiles": "",
         "selected_formula": "",
         "selected_species_source": "",

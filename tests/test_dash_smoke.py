@@ -245,7 +245,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "data-advanced-tools" not in layout_ids
     assert "data-global-min-tp" not in layout_ids
     assert "data-overrides-apply-btn" not in layout_ids
-    assert "global-operation-progress" in layout_ids
+    assert "global-operation-progress" not in layout_ids
+    assert "page-capability-manage-btn" in layout_ids
+    assert "data-preparation-tasks" in layout_ids
     assert "data-override-reaction" not in layout_ids
     assert "data-override-reactionevent" not in layout_ids
     assert "element-distribution-reference-smiles" in layout_ids
@@ -377,10 +379,8 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     element_distribution_refresh = _layout_node_by_id(layout, "element-distribution-index-refresh")
     operation_progress = _layout_node_by_id(layout, "global-operation-progress")
     assert element_distribution_refresh is not None
-    assert operation_progress is not None
+    assert operation_progress is None
     assert (element_distribution_refresh.get("props") or {}).get("disabled") is True
-    assert (operation_progress.get("props") or {}).get("role") == "status"
-    assert "progressbar" in json.dumps(operation_progress)
     layout_text = json.dumps(layout, ensure_ascii=False)
     assert "rs-advanced-menu" not in layout_text
     assert "rs-tool-menu" not in layout_text
@@ -1589,11 +1589,18 @@ def test_event_path_tab_reports_its_own_data_requirements() -> None:
             changed="pathway-analysis-tabs.active_tab",
             input_values={
                 "page-store": {"page": "pathway"},
-                "app-store": {
-                    "artifacts": {
-                        "reactionevent": "/data/run.reactionevent.csv",
-                        "molecules": "/data/run.molecules.csv",
-                    }
+                    "app-store": {
+                        "dataset_id": "dataset-1",
+                        "artifacts": {
+                            "reactionevent": "/data/run.reactionevent.csv",
+                            "molecules": "/data/run.molecules.csv",
+                        },
+                        "analysis_capabilities": {
+                            "event_search": {
+                                "state": "ready",
+                                "reason": "事件索引与当前源修订一致。",
+                            }
+                        },
                 },
                 "pathway-analysis-tabs": "concrete-event-paths",
             },
@@ -1604,7 +1611,8 @@ def test_event_path_tab_reports_its_own_data_requirements() -> None:
 
     assert response.status_code == 200
     body = response.get_json()["response"]
-    assert body["page-data-status"]["children"] == "事件轨迹证据已就绪"
+    assert "事件检索：ready · 可用" in body["page-data-status"]["children"]
+    assert "事件索引与当前源修订一致" in body["page-data-status"]["children"]
     assert body["page-data-status"]["className"] == "rs-page-status is-ready"
 
 
@@ -2843,6 +2851,9 @@ def _preparation_status_callback_payload(
             {"id": "data-prep-event-btn", "property": "className"},
             {"id": "data-prep-trajectory-btn", "property": "className"},
             {"id": "data-prep-composition-btn", "property": "className"},
+            {"id": "data-prep-event-btn", "property": "children"},
+            {"id": "data-prep-trajectory-btn", "property": "children"},
+            {"id": "data-prep-composition-btn", "property": "children"},
         ],
         "changedPropIds": ["data-prep-refresh-btn.n_clicks"],
         "inputs": [
@@ -4050,7 +4061,7 @@ def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_ca
     assert ".rs-browser-path-control .input-group" not in css
     assert ".rs-dataset-card" not in css
     assert ".rs-browser-path-control { flex-wrap: wrap; }" in css
-    assert 'body:has([data-dash-is-loading="true"]) .rs-global-operation-progress' in css
+    assert 'body:has([data-dash-is-loading="true"]) .rs-global-operation-progress' not in css
     assert ".rs-analysis-progress.is-running::after" in css
 
 

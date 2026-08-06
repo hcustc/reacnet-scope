@@ -262,34 +262,6 @@ def _sidebar() -> html.Aside:
     )
 
 
-def _global_operation_progress() -> html.Div:
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Span("正在读取或处理数据", className="rs-global-progress-label"),
-                    html.Span("请稍候", className="rs-global-progress-hint"),
-                ],
-                className="rs-global-progress-copy",
-            ),
-            html.Div(
-                html.Span(className="rs-global-progress-value"),
-                className="rs-global-progress-track",
-                role="progressbar",
-                **{
-                    "aria-label": "正在读取或处理数据",
-                    "aria-valuemin": "0",
-                    "aria-valuemax": "100",
-                },
-            ),
-        ],
-        id="global-operation-progress",
-        className="rs-global-operation-progress",
-        role="status",
-        **{"aria-live": "polite"},
-    )
-
-
 def _page_header() -> html.Div:
     return html.Div(
         [
@@ -314,7 +286,23 @@ def _page_header() -> html.Div:
                 ],
                 className="rs-page-heading",
             ),
-            html.Div("需要导入数据", id="page-data-status", className="rs-page-status is-blocked"),
+            html.Div(
+                [
+                    html.Div(
+                        "需要选择数据集",
+                        id="page-data-status",
+                        className="rs-page-status is-blocked",
+                    ),
+                    dbc.Button(
+                        "前往数据管理",
+                        id="page-capability-manage-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                    ),
+                ],
+                className="rs-page-capability-status",
+            ),
         ],
         className="rs-page-header",
         id="page-header",
@@ -2825,7 +2813,6 @@ def _channel_grid(grid_id: str) -> dash_table.DataTable:
 def _data_index_readiness_row(
     kind: str,
     label: str,
-    filename: str,
     purpose: str,
 ) -> html.Div:
     return html.Div(
@@ -2833,7 +2820,6 @@ def _data_index_readiness_row(
             html.Div(
                 [
                     html.Div(label, className="rs-index-name"),
-                    html.Div(filename, className="rs-index-filename"),
                 ]
             ),
             html.Div(purpose, className="rs-index-purpose"),
@@ -2843,7 +2829,7 @@ def _data_index_readiness_row(
                 className="rs-index-status-cell",
             ),
             dbc.Button(
-                "创建/重建",
+                "准备索引",
                 id=f"data-prep-{kind}-btn",
                 color="secondary",
                 size="sm",
@@ -2886,11 +2872,11 @@ def _data_cache_management_card() -> html.Div:
                             html.Div(
                                 [
                                     html.Div(
-                                        "索引就绪状态",
+                                        "Analysis Capability 与 Preparation Task",
                                         className="rs-data-section-title",
                                     ),
                                     html.Div(
-                                        "每种派生索引保留一个直接操作；索引只写入 Dataset Workspace。",
+                                        "每项能力独立判断；任务始终绑定实际数据集、源修订与能力。",
                                         className="rs-card-subtitle",
                                     ),
                                 ]
@@ -2906,9 +2892,9 @@ def _data_cache_management_card() -> html.Div:
                     html.Div(id="data-prep-status-alert"),
                     html.Div(
                         [
-                            html.Div("索引"),
+                            html.Div("Analysis Capability"),
                             html.Div("用途"),
-                            html.Div("状态与规模"),
+                            html.Div("状态与原因"),
                             html.Div("操作"),
                         ],
                         className="rs-index-readiness-header",
@@ -2918,20 +2904,17 @@ def _data_cache_management_card() -> html.Div:
                         [
                             _data_index_readiness_row(
                                 "event",
-                                "事件索引",
-                                "events.sqlite3",
+                                "事件检索",
                                 "反应事件检索、路径证据与事件跳转",
                             ),
                             _data_index_readiness_row(
                                 "trajectory",
-                                "轨迹帧索引",
-                                "trajectory.sqlite3",
+                                "轨迹证据",
                                 "按时间步定位帧并提取局部反应轨迹",
                             ),
                             _data_index_readiness_row(
                                 "composition",
-                                "元素分布索引",
-                                "element-distribution.sqlite3",
+                                "元素分布",
                                 "元素分布演化、时间采样与代表物种下钻",
                             ),
                         ],
@@ -2955,6 +2938,21 @@ def _data_cache_management_card() -> html.Div:
                         className="rs-index-background-task",
                     ),
                     html.Div(id="data-prep-action-alert", className="rs-index-action-alert"),
+                    html.Section(
+                        [
+                            html.Div("Preparation Task", className="rs-data-section-title"),
+                            html.Div(
+                                "任务事实来自 Dataset Workspace；切换 Current Dataset 不会取消或改属任务。",
+                                className="rs-card-subtitle",
+                            ),
+                            html.Div(
+                                id="data-preparation-tasks",
+                                className="rs-preparation-task-list",
+                                **{"aria-live": "polite"},
+                            ),
+                        ],
+                        className="rs-preparation-task-section",
+                    ),
                 ],
                 className="rs-data-section rs-index-readiness-section",
             ),
@@ -3095,7 +3093,7 @@ def _data_management_page() -> html.Div:
                                                     html.Div(
                                                         [
                                                             html.Span(
-                                                                "基础分析文件",
+                                                                "Analysis Capability",
                                                                 className="rs-summary-metric-label",
                                                             ),
                                                             html.Div(
@@ -3386,7 +3384,6 @@ def build_layout() -> html.Div:
     layout = html.Div(
         [
             _topbar(),
-            _global_operation_progress(),
             html.Div(
                 [
                     _sidebar(),
@@ -3444,6 +3441,7 @@ def build_layout() -> html.Div:
             dcc.Store(id="dataset-context-commit", storage_type="memory", data={}),
             dcc.Store(id="dataset-focus-request", storage_type="memory", data={}),
             dcc.Store(id="dataset-restore-result", storage_type="memory", data={}),
+            dcc.Store(id="preparation-task-snapshot", storage_type="local", data=[]),
             html.Div(
                 [
                     dcc.Store(
@@ -3481,6 +3479,12 @@ def build_layout() -> html.Div:
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
             dcc.Store(id="data-clear-kind-store", storage_type="memory", data={}),
             dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
+            dcc.Interval(
+                id="preparation-task-refresh",
+                interval=2000,
+                n_intervals=0,
+                disabled=False,
+            ),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
             dcc.Store(id="pathway-store", storage_type="memory", data=None),
