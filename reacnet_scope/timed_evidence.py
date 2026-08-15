@@ -8,6 +8,7 @@ import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Iterator, Literal
 
 import h5py
@@ -18,6 +19,47 @@ from .rng_events import MoleculeRow, reaction_key
 
 TimedEvidenceKind = Literal["native_hdf5", "legacy_csv"]
 
+_SUPPORTED_NATIVE_TIMELINE_SCHEMAS = frozenset({"1", "2"})
+
+_MEMBERSHIP_RANGE_CHUNK_SIZE = 262_144
+_MEMBERSHIP_ATOM_PREFETCH_BYTES = 16 * 1024**2
+_MEMBERSHIP_SLICE_RANGE_LIMIT = 8
+_MEMBERSHIP_CHECKPOINT_CHUNKS = 32
+_MEMBERSHIP_CHECKPOINT_SECONDS = 60.0
+_MEMBERSHIP_PROGRESS_SECONDS = 2.0
+_MEMBERSHIP_MATERIALIZE_FRAME_BLOCK = 1_024
+_MEMBERSHIP_MATERIALIZE_COLUMN_BYTES = 512 * 1024**2
+_EXACT_EVIDENCE_CACHE_LIMIT_BYTES = 512 * 1024**2
+_EXACT_DEFINITION_CACHE_LIMIT_BYTES = 1024**3
+_NATIVE_CACHE_MEMORY_RESERVE_BYTES = 2 * 1024**3
+
+
+def _available_memory_bytes() -> int:
+    """Best-effort available physical memory for optional native caches."""
+
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, UnicodeError, ValueError):
+        pass
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES")) * int(
+            os.sysconf("SC_PAGE_SIZE")
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def _can_cache_native_arrays(size: int, *, limit: int) -> bool:
+    size = max(0, int(size))
+    return bool(
+        size <= limit
+        and _available_memory_bytes()
+        >= size + _NATIVE_CACHE_MEMORY_RESERVE_BYTES
+    )
+
 
 class TimedEvidenceDataError(RuntimeError):
     """Timed evidence is missing, incomplete, incompatible, or unsupported."""
@@ -25,6 +67,49 @@ class TimedEvidenceDataError(RuntimeError):
     def __init__(self, message: str, *, state: str) -> None:
         super().__init__(message)
         self.state = str(state)
+
+
+def _merge_inclusive_ranges(
+    starts: np.ndarray[Any, Any],
+    ends: np.ndarray[Any, Any],
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    """Merge overlapping or adjacent inclusive ranges without Python row loops."""
+
+    if starts.size <= 1:
+        return starts, ends
+    if np.all(starts[1:] >= starts[:-1]):
+        sorted_starts = starts
+        sorted_ends = ends
+    else:
+        order = np.lexsort((ends, starts))
+        sorted_starts = starts[order]
+        sorted_ends = ends[order]
+    furthest_ends = np.maximum.accumulate(sorted_ends)
+    begins = np.empty(sorted_starts.size, dtype=bool)
+    begins[0] = True
+    begins[1:] = sorted_starts[1:] > furthest_ends[:-1] + 1
+    begin_indexes = np.flatnonzero(begins)
+    end_indexes = np.empty(begin_indexes.size, dtype=np.intp)
+    end_indexes[:-1] = begin_indexes[1:] - 1
+    end_indexes[-1] = sorted_starts.size - 1
+    return sorted_starts[begin_indexes], furthest_ends[end_indexes]
+
+
+def _inclusive_range_frames(
+    starts: np.ndarray[Any, Any],
+    ends: np.ndarray[Any, Any],
+) -> np.ndarray[Any, Any]:
+    """Expand disjoint inclusive ranges with one vectorized repeat."""
+
+    lengths = ends - starts + 1
+    frame_count = int(np.sum(lengths, dtype=np.int64))
+    range_offsets = np.empty(lengths.size, dtype=np.int64)
+    range_offsets[0] = 0
+    if lengths.size > 1:
+        np.cumsum(lengths[:-1], out=range_offsets[1:])
+    frames = np.repeat(starts - range_offsets, lengths)
+    frames += np.arange(frame_count, dtype=np.int64)
+    return frames.astype(np.intp, copy=False)
 
 
 @dataclass(frozen=True)
@@ -40,6 +125,7 @@ class TimedEvidenceSelection:
     schema_version: str = ""
     reaction_enabled: bool = True
     molecule_enabled: bool = False
+    transition_evidence_enabled: bool = False
     frame_count: int | None = None
 
     @property
@@ -60,6 +146,9 @@ class TimedEvidenceSelection:
             "schema_version": self.schema_version,
             "reaction_enabled": self.reaction_enabled,
             "molecule_enabled": self.molecule_enabled,
+            "transition_evidence_enabled": (
+                self.transition_evidence_enabled
+            ),
             "frame_count": self.frame_count,
             "capabilities": list(self.capabilities),
         }
@@ -93,7 +182,7 @@ class TransitionEvidence:
 
 
 class NativeHdf5EvidenceAdapter:
-    """Strict schema-1 streaming adapter for one native timeline source."""
+    """Strict streaming adapter for one supported native timeline source."""
 
     def __init__(self, selection: TimedEvidenceSelection) -> None:
         if selection.kind != "native_hdf5":
@@ -120,19 +209,78 @@ class NativeHdf5EvidenceAdapter:
             raise RuntimeError("native HDF5 adapter is not open")
         return self._handle
 
+    @property
+    def uses_exact_transition_evidence(self) -> bool:
+        return bool(
+            self.selection.molecule_enabled
+            and self.selection.transition_evidence_enabled
+        )
+
     def _load_indexes(self) -> None:
         handle = self.handle
         self.timesteps = np.asarray(handle["frames/timestep"], dtype=np.int64)
         self.reactants = tuple(str(value) for value in handle["reaction_types/reactant"].asstr()[...])
         self.products = tuple(str(value) for value in handle["reaction_types/product"].asstr()[...])
-        self.block_start = np.asarray(handle["reaction_events/block_start"], dtype=np.uint64)
-        self.block_length = np.asarray(handle["reaction_events/block_length"], dtype=np.uint64)
-        self.event_record_count = int(handle["reaction_events/count"].shape[0])
+        event_group = (
+            "transition_evidence"
+            if self.uses_exact_transition_evidence
+            else "reaction_events"
+        )
+        self.block_start = np.asarray(
+            handle[f"{event_group}/block_start"], dtype=np.uint64
+        )
+        self.block_length = np.asarray(
+            handle[f"{event_group}/block_length"], dtype=np.uint64
+        )
+        event_value = (
+            "reaction_id"
+            if self.uses_exact_transition_evidence
+            else "count"
+        )
+        self.event_record_count = int(
+            handle[f"{event_group}/{event_value}"].shape[0]
+        )
         if np.any(self.block_start + self.block_length > self.event_record_count):
             raise TimedEvidenceDataError(
                 "timeline HDF5 reaction blocks exceed event arrays",
                 state="incompatible",
             )
+        self._exact_transition_ids: np.ndarray[Any, Any] | None = None
+        self._exact_reaction_ids: np.ndarray[Any, Any] | None = None
+        self._exact_participant_offsets: np.ndarray[Any, Any] | None = None
+        self._exact_participant_ids: np.ndarray[Any, Any] | None = None
+        self._exact_participant_sides: np.ndarray[Any, Any] | None = None
+        if self.uses_exact_transition_evidence:
+            exact_names = (
+                "transition_evidence/transition_index",
+                "transition_evidence/reaction_id",
+                "transition_evidence/participant_offsets",
+                "transition_evidence/participant_molecule_id",
+                "transition_evidence/participant_side",
+            )
+            exact_bytes = sum(
+                int(np.prod(handle[name].shape))
+                * int(handle[name].dtype.itemsize)
+                for name in exact_names
+            )
+            if _can_cache_native_arrays(
+                exact_bytes, limit=_EXACT_EVIDENCE_CACHE_LIMIT_BYTES
+            ):
+                self._exact_transition_ids = np.asarray(
+                    handle[exact_names[0]], dtype=np.uint64
+                )
+                self._exact_reaction_ids = np.asarray(
+                    handle[exact_names[1]], dtype=np.uint32
+                )
+                self._exact_participant_offsets = np.asarray(
+                    handle[exact_names[2]], dtype=np.uint64
+                )
+                self._exact_participant_ids = np.asarray(
+                    handle[exact_names[3]], dtype=np.uint64
+                )
+                self._exact_participant_sides = np.asarray(
+                    handle[exact_names[4]], dtype=np.uint8
+                )
         self.molecule_ids = np.asarray([], dtype=np.uint64)
         self.species_ids = np.asarray([], dtype=np.uint32)
         self.atom_offsets = np.asarray([], dtype=np.uint64)
@@ -205,7 +353,14 @@ class NativeHdf5EvidenceAdapter:
             int(np.prod(handle[name].shape)) * int(handle[name].dtype.itemsize)
             for name in definition_names
         )
-        if definition_bytes <= 64 * 1024**2:
+        definition_limit = (
+            _EXACT_DEFINITION_CACHE_LIMIT_BYTES
+            if self.uses_exact_transition_evidence
+            else 64 * 1024**2
+        )
+        if _can_cache_native_arrays(
+            definition_bytes, limit=definition_limit
+        ):
             self._atom_ids_data = np.asarray(handle[definition_names[0]])
             self._bond_atoms_data = np.asarray(handle[definition_names[1]])
             self._bond_orders_data = np.asarray(handle[definition_names[2]])
@@ -243,7 +398,9 @@ class NativeHdf5EvidenceAdapter:
         *,
         start_offset: int = 0,
         resume: bool = False,
+        order: Literal["C", "F"] = "F",
         checkpoint: Callable[[int, int], None] | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> np.memmap[Any, Any]:
         """Expand molecule ranges into a disk-backed frame/atom lookup."""
 
@@ -254,30 +411,63 @@ class NativeHdf5EvidenceAdapter:
             dtype=self.membership_dtype,
             mode=mode,
             shape=shape,
+            order=order,
         )
         range_ids = self.handle["molecule_ranges/molecule_id"]
         range_starts = self.handle["molecule_ranges/start_frame"]
         range_ends = self.handle["molecule_ranges/end_frame"]
         total = int(range_ids.shape[0])
         offset = max(0, int(start_offset))
-        pending_id: int | None = None
-        pending_starts: list[np.ndarray[Any, Any]] = []
-        pending_ends: list[np.ndarray[Any, Any]] = []
-        group_count = 0
+        previous_molecule_id: int | None = None
+        chunk_count = 0
+        atom_dataset = self.handle["molecules/atom_ids"]
+        atom_values = (
+            self._atom_ids_data.astype(np.intp, copy=False)
+            if self._atom_ids_data is not None
+            else None
+        )
+        atom_prefetch = np.asarray([], dtype=np.intp)
+        atom_prefetch_start = 0
+        atom_prefetch_end = 0
+        last_checkpoint_at = monotonic()
+        last_progress_at = last_checkpoint_at
+        final_flushed = False
 
-        def apply_group(molecule_id: int, completed_offset: int) -> None:
-            nonlocal group_count
-            starts = np.concatenate(pending_starts).astype(np.int64, copy=False)
-            ends = np.concatenate(pending_ends).astype(np.int64, copy=False)
-            if (
-                np.any(starts < 0)
-                or np.any(ends < starts)
-                or np.any(ends >= shape[0])
+        def definition_atoms(definition_index: int) -> np.ndarray[Any, Any]:
+            nonlocal atom_prefetch
+            nonlocal atom_prefetch_start
+            nonlocal atom_prefetch_end
+            atom_start = int(self.atom_offsets[definition_index])
+            atom_end = int(self.atom_offsets[definition_index + 1])
+            if atom_values is not None:
+                return atom_values[atom_start:atom_end]
+            if not (
+                atom_prefetch_start <= atom_start
+                and atom_end <= atom_prefetch_end
             ):
-                raise TimedEvidenceDataError(
-                    "timeline HDF5 molecule range bounds are incompatible",
-                    state="incompatible",
+                item_count = max(
+                    _MEMBERSHIP_ATOM_PREFETCH_BYTES
+                    // max(int(atom_dataset.dtype.itemsize), 1),
+                    atom_end - atom_start,
                 )
+                atom_prefetch_start = atom_start
+                atom_prefetch_end = min(
+                    int(atom_dataset.shape[0]),
+                    atom_start + item_count,
+                )
+                atom_prefetch = np.asarray(
+                    atom_dataset[atom_prefetch_start:atom_prefetch_end],
+                    dtype=np.intp,
+                )
+            return atom_prefetch[
+                atom_start - atom_prefetch_start : atom_end - atom_prefetch_start
+            ]
+
+        def apply_segment(
+            molecule_id: int,
+            starts: np.ndarray[Any, Any],
+            ends: np.ndarray[Any, Any],
+        ) -> None:
             definition_index = int(np.searchsorted(self.molecule_ids, molecule_id))
             if (
                 definition_index >= self.molecule_ids.size
@@ -287,67 +477,194 @@ class NativeHdf5EvidenceAdapter:
                     "timeline HDF5 molecule range refers to an unknown molecule",
                     state="incompatible",
                 )
-            atom_start = int(self.atom_offsets[definition_index])
-            atom_end = int(self.atom_offsets[definition_index + 1])
-            atoms = np.asarray(
-                self.handle["molecules/atom_ids"][atom_start:atom_end],
-                dtype=np.int64,
-            )
-            order = np.lexsort((ends, starts))
-            starts = starts[order]
-            ends = ends[order]
-            merged: list[tuple[int, int]] = []
-            for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
-                if merged and start <= merged[-1][1] + 1:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-                else:
-                    merged.append((start, end))
-            for start, end in merged:
-                membership[start : end + 1, atoms] = molecule_id
-            group_count += 1
-            if checkpoint is not None and (
-                group_count % 256 == 0 or completed_offset == total
-            ):
-                membership.flush()
-                checkpoint(completed_offset, molecule_id)
+            atoms = definition_atoms(definition_index)
+            merged_starts, merged_ends = _merge_inclusive_ranges(starts, ends)
+            if not atoms.size:
+                return
+            if merged_starts.size <= _MEMBERSHIP_SLICE_RANGE_LIMIT:
+                for start, end in zip(
+                    merged_starts.tolist(),
+                    merged_ends.tolist(),
+                    strict=True,
+                ):
+                    membership[start : end + 1, atoms] = molecule_id
+                return
+            # The timeline can contain hundreds of millions of short,
+            # disjoint ranges.  One advanced assignment replaces one Python
+            # memmap assignment per range while keeping memory bounded by one
+            # molecule's frame count.
+            frames = _inclusive_range_frames(merged_starts, merged_ends)
+            membership[np.ix_(frames, atoms)] = molecule_id
 
-        chunk_size = 1_000_000
         while offset < total:
-            chunk_end = min(offset + chunk_size, total)
+            chunk_end = min(offset + _MEMBERSHIP_RANGE_CHUNK_SIZE, total)
             ids = np.asarray(range_ids[offset:chunk_end], dtype=np.uint64)
             starts = np.asarray(range_starts[offset:chunk_end], dtype=np.int64)
             ends = np.asarray(range_ends[offset:chunk_end], dtype=np.int64)
-            if ids.size == 0 or np.any(ids == 0) or np.any(ids[1:] < ids[:-1]):
+            if (
+                ids.size == 0
+                or np.any(ids == 0)
+                or np.any(ids[1:] < ids[:-1])
+                or (
+                    previous_molecule_id is not None
+                    and int(ids[0]) < previous_molecule_id
+                )
+            ):
                 raise TimedEvidenceDataError(
                     "timeline HDF5 molecule ranges must be grouped by molecule id",
+                    state="incompatible",
+                )
+            if (
+                np.any(starts < 0)
+                or np.any(ends < starts)
+                or np.any(ends >= shape[0])
+            ):
+                raise TimedEvidenceDataError(
+                    "timeline HDF5 molecule range bounds are incompatible",
                     state="incompatible",
                 )
             boundaries = np.flatnonzero(ids[1:] != ids[:-1]) + 1
             segment_starts = np.concatenate((np.asarray([0]), boundaries))
             segment_ends = np.concatenate((boundaries, np.asarray([ids.size])))
+            # Segments are safe to apply independently even when one molecule
+            # crosses a source-chunk boundary.  This bounds memory and permits
+            # checkpoints at exact range offsets inside a molecule group.
             for segment_start, segment_end in zip(
                 segment_starts.tolist(), segment_ends.tolist(), strict=True
             ):
                 molecule_id = int(ids[segment_start])
-                if pending_id is None:
-                    pending_id = molecule_id
-                elif molecule_id != pending_id:
-                    if molecule_id <= pending_id:
-                        raise TimedEvidenceDataError(
-                            "timeline HDF5 molecule ranges must be grouped by molecule id",
-                            state="incompatible",
-                        )
-                    apply_group(pending_id, offset + segment_start)
-                    pending_id = molecule_id
-                    pending_starts = []
-                    pending_ends = []
-                pending_starts.append(starts[segment_start:segment_end])
-                pending_ends.append(ends[segment_start:segment_end])
+                apply_segment(
+                    molecule_id,
+                    starts[segment_start:segment_end],
+                    ends[segment_start:segment_end],
+                )
+            previous_molecule_id = int(ids[-1])
             offset = chunk_end
-        if pending_id is not None:
-            apply_group(pending_id, total)
-        membership.flush()
+            chunk_count += 1
+            now = monotonic()
+            is_final = offset == total
+            should_checkpoint = checkpoint is not None and (
+                is_final
+                or chunk_count % _MEMBERSHIP_CHECKPOINT_CHUNKS == 0
+                or now - last_checkpoint_at >= _MEMBERSHIP_CHECKPOINT_SECONDS
+            )
+            if should_checkpoint:
+                assert previous_molecule_id is not None
+                membership.flush()
+                checkpoint(offset, previous_molecule_id)
+                last_checkpoint_at = now
+                final_flushed = is_final
+            if progress is not None and (
+                is_final
+                or should_checkpoint
+                or now - last_progress_at >= _MEMBERSHIP_PROGRESS_SECONDS
+            ):
+                assert previous_molecule_id is not None
+                progress(offset, previous_molecule_id)
+                last_progress_at = now
+        if not final_flushed:
+            membership.flush()
         return membership
+
+    def materialize_membership(
+        self,
+        membership: np.ndarray[Any, Any],
+        *,
+        overlay: np.ndarray[Any, Any] | None = None,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> np.ndarray[Any, Any]:
+        """Return a row-contiguous membership matrix for transition scans.
+
+        Molecule ranges arrive grouped by molecule, so they are built into a
+        column-major matrix.  Event association scans consecutive frames and
+        therefore uses one row-major RAM copy after the range build.  A
+        column-major overlay lets a legacy row-major checkpoint resume without
+        rewriting its already completed ranges.
+        """
+
+        if membership.shape != self.membership_shape:
+            raise TimedEvidenceDataError(
+                "membership matrix shape is incompatible",
+                state="incompatible",
+            )
+        total_frames, atom_count = (int(value) for value in membership.shape)
+        if progress is not None:
+            progress(0, atom_count)
+        if overlay is None and membership.flags.c_contiguous:
+            return membership
+        try:
+            if overlay is not None and (
+                overlay.shape != membership.shape
+                or overlay.dtype != membership.dtype
+            ):
+                raise TimedEvidenceDataError(
+                    "membership overlay is incompatible",
+                    state="incompatible",
+                )
+            row_values = (
+                np.empty(
+                    membership.shape,
+                    dtype=self.membership_dtype,
+                    order="C",
+                )
+                if overlay is None
+                else np.array(
+                    membership,
+                    dtype=self.membership_dtype,
+                    order="C",
+                    copy=True,
+                )
+            )
+            column_source = membership if overlay is None else overlay
+            atoms_per_block = max(
+                1,
+                _MEMBERSHIP_MATERIALIZE_COLUMN_BYTES
+                // max(total_frames * self.membership_dtype.itemsize, 1),
+            )
+            for atom_start in range(0, atom_count, atoms_per_block):
+                atom_end = min(atom_start + atoms_per_block, atom_count)
+                column_block = np.array(
+                    column_source[:, atom_start:atom_end],
+                    dtype=self.membership_dtype,
+                    order="F",
+                    copy=True,
+                )
+                for frame_start in range(
+                    0,
+                    total_frames,
+                    _MEMBERSHIP_MATERIALIZE_FRAME_BLOCK,
+                ):
+                    frame_end = min(
+                        frame_start + _MEMBERSHIP_MATERIALIZE_FRAME_BLOCK,
+                        total_frames,
+                    )
+                    row_block = np.array(
+                        column_block[frame_start:frame_end],
+                        dtype=self.membership_dtype,
+                        order="C",
+                        copy=True,
+                    )
+                    destination = row_values[
+                        frame_start:frame_end,
+                        atom_start:atom_end,
+                    ]
+                    if overlay is None:
+                        destination[...] = row_block
+                    else:
+                        np.copyto(
+                            destination,
+                            row_block,
+                            where=row_block != 0,
+                        )
+                if progress is not None:
+                    progress(atom_end, atom_count)
+                del column_block
+            return row_values
+        except (MemoryError, OSError) as exc:
+            raise TimedEvidenceDataError(
+                "insufficient memory to materialize molecule membership",
+                state="resource-exhausted",
+            ) from exc
 
     def _molecule(self, molecule_id: int) -> MoleculeRow:
         cached = self._definition_cache.get(molecule_id)
@@ -472,12 +789,14 @@ class NativeHdf5EvidenceAdapter:
     def transition(
         self,
         transition_index: int,
-        membership: np.memmap[Any, Any] | None,
+        membership: np.ndarray[Any, Any] | None,
     ) -> TransitionEvidence:
         index = int(transition_index)
         start = int(self.block_start[index])
         length = int(self.block_length[index])
         stop = start + length
+        if self.uses_exact_transition_evidence:
+            return self._exact_transition(index, start, stop)
         transition_ids = np.asarray(
             self.handle["reaction_events/transition_index"][start:stop],
             dtype=np.int64,
@@ -536,9 +855,123 @@ class NativeHdf5EvidenceAdapter:
             after_molecules=after,
         )
 
+    def _exact_transition(
+        self, index: int, start: int, stop: int
+    ) -> TransitionEvidence:
+        """Read schema-2 occurrence evidence without rebuilding membership."""
+
+        group = self.handle["transition_evidence"]
+        transition_source = (
+            self._exact_transition_ids
+            if self._exact_transition_ids is not None
+            else group["transition_index"]
+        )
+        reaction_source = (
+            self._exact_reaction_ids
+            if self._exact_reaction_ids is not None
+            else group["reaction_id"]
+        )
+        offset_source = (
+            self._exact_participant_offsets
+            if self._exact_participant_offsets is not None
+            else group["participant_offsets"]
+        )
+        participant_id_source = (
+            self._exact_participant_ids
+            if self._exact_participant_ids is not None
+            else group["participant_molecule_id"]
+        )
+        participant_side_source = (
+            self._exact_participant_sides
+            if self._exact_participant_sides is not None
+            else group["participant_side"]
+        )
+        transition_ids = np.asarray(
+            transition_source[start:stop], dtype=np.int64
+        )
+        if transition_ids.size and np.any(transition_ids != index):
+            raise TimedEvidenceDataError(
+                "timeline HDF5 transition evidence block ids are incompatible",
+                state="incompatible",
+            )
+        reaction_ids = np.asarray(
+            reaction_source[start:stop], dtype=np.int64
+        )
+        if np.any(reaction_ids < 1) or np.any(
+            reaction_ids > len(self.reactants)
+        ):
+            raise TimedEvidenceDataError(
+                "timeline HDF5 transition evidence reaction ids are incompatible",
+                state="incompatible",
+            )
+        participant_offsets = np.asarray(
+            offset_source[start : stop + 1],
+            dtype=np.uint64,
+        )
+        if participant_offsets.size != reaction_ids.size + 1 or np.any(
+            participant_offsets[1:] < participant_offsets[:-1]
+        ):
+            raise TimedEvidenceDataError(
+                "timeline HDF5 transition participant offsets are incompatible",
+                state="incompatible",
+            )
+        participant_start = int(participant_offsets[0])
+        participant_stop = int(participant_offsets[-1])
+        participant_ids = np.asarray(
+            participant_id_source[participant_start:participant_stop],
+            dtype=np.uint64,
+        )
+        participant_sides = np.asarray(
+            participant_side_source[participant_start:participant_stop],
+            dtype=np.uint8,
+        )
+        if (
+            participant_ids.shape != participant_sides.shape
+            or participant_ids.size != participant_stop - participant_start
+            or np.any(participant_ids == 0)
+            or np.any((participant_sides != 0) & (participant_sides != 1))
+        ):
+            raise TimedEvidenceDataError(
+                "timeline HDF5 transition participants are incompatible",
+                state="incompatible",
+            )
+
+        reactions: list[AggregatedReactionRecord] = []
+        before: list[MoleculeRow] = []
+        after: list[MoleculeRow] = []
+        for position, reaction_id in enumerate(reaction_ids):
+            reactions.append(
+                AggregatedReactionRecord(
+                    source_row=start + position + 1,
+                    transition_index=index,
+                    reactant=self.reactants[int(reaction_id) - 1],
+                    product=self.products[int(reaction_id) - 1],
+                    count=1,
+                )
+            )
+            local_start = int(participant_offsets[position]) - participant_start
+            local_stop = (
+                int(participant_offsets[position + 1]) - participant_start
+            )
+            for molecule_id, side in zip(
+                participant_ids[local_start:local_stop],
+                participant_sides[local_start:local_stop],
+                strict=True,
+            ):
+                row = self._molecule(int(molecule_id))
+                (before if int(side) == 0 else after).append(row)
+        return TransitionEvidence(
+            transition_index=index,
+            before_timestep=int(self.timesteps[index]),
+            after_timestep=int(self.timesteps[index + 1]),
+            reactions=tuple(reactions),
+            before_molecules=tuple(before),
+            after_molecules=tuple(after),
+        )
+
     def iter_transitions(
         self,
-        membership: np.memmap[Any, Any] | None,
+        membership: np.ndarray[Any, Any] | None,
         *,
         start: int = 0,
     ) -> Iterator[TransitionEvidence]:
@@ -582,7 +1015,7 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
             schema_version = _attribute_text(
                 handle.attrs.get("schema_version", "")
             )
-            if schema_version != "1":
+            if schema_version not in _SUPPORTED_NATIVE_TIMELINE_SCHEMAS:
                 raise TimedEvidenceDataError(
                     f"timeline HDF5 schema is incompatible: {schema_version or 'missing'}",
                     state="incompatible",
@@ -631,6 +1064,9 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
             molecule_enabled = bool(
                 handle.attrs.get("molecule_enabled", False)
             )
+            transition_evidence_enabled = bool(
+                handle.attrs.get("transition_evidence_enabled", False)
+            )
             if not reaction_enabled:
                 raise TimedEvidenceDataError(
                     "timeline HDF5 does not contain reaction evidence",
@@ -668,6 +1104,79 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
                     "timeline HDF5 reaction event arrays are incompatible",
                     state="incompatible",
                 )
+
+            if transition_evidence_enabled:
+                _require_dataset(
+                    handle,
+                    "transition_evidence/block_start",
+                    shape=(frame_count - 1,),
+                )
+                _require_dataset(
+                    handle,
+                    "transition_evidence/block_length",
+                    shape=(frame_count - 1,),
+                )
+                transition_ids = _require_dataset(
+                    handle, "transition_evidence/transition_index"
+                )
+                transition_reactions = _require_dataset(
+                    handle, "transition_evidence/reaction_id"
+                )
+                if (
+                    transition_ids.ndim != 1
+                    or transition_ids.shape != transition_reactions.shape
+                ):
+                    raise TimedEvidenceDataError(
+                        "timeline HDF5 transition event arrays are incompatible",
+                        state="incompatible",
+                    )
+                transition_count = transition_ids.shape[0]
+                participant_offsets = _require_dataset(
+                    handle,
+                    "transition_evidence/participant_offsets",
+                    shape=(transition_count + 1,),
+                )
+                participant_ids = _require_dataset(
+                    handle,
+                    "transition_evidence/participant_molecule_id",
+                )
+                participant_sides = _require_dataset(
+                    handle, "transition_evidence/participant_side"
+                )
+                bond_offsets = _require_dataset(
+                    handle,
+                    "transition_evidence/bond_change_offsets",
+                    shape=(transition_count + 1,),
+                )
+                bond_atoms = _require_dataset(
+                    handle, "transition_evidence/bond_atoms"
+                )
+                before_orders = _require_dataset(
+                    handle, "transition_evidence/before_order"
+                )
+                after_orders = _require_dataset(
+                    handle, "transition_evidence/after_order"
+                )
+                if (
+                    participant_ids.ndim != 1
+                    or participant_ids.shape != participant_sides.shape
+                    or participant_offsets.ndim != 1
+                    or bond_offsets.ndim != 1
+                    or bond_atoms.ndim != 2
+                    or bond_atoms.shape[1] != 2
+                    or before_orders.ndim != 1
+                    or before_orders.shape != after_orders.shape
+                    or before_orders.shape[0] != bond_atoms.shape[0]
+                    or int(participant_offsets[0]) != 0
+                    or int(participant_offsets[-1])
+                    != participant_ids.shape[0]
+                    or int(bond_offsets[0]) != 0
+                    or int(bond_offsets[-1]) != bond_atoms.shape[0]
+                ):
+                    raise TimedEvidenceDataError(
+                        "timeline HDF5 transition evidence arrays are incompatible",
+                        state="incompatible",
+                    )
 
             if molecule_enabled:
                 species = _require_dataset(handle, "species/name")
@@ -741,6 +1250,7 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
         schema_version=schema_version,
         reaction_enabled=True,
         molecule_enabled=molecule_enabled,
+        transition_evidence_enabled=transition_evidence_enabled,
         frame_count=frame_count,
     )
 

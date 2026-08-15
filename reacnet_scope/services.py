@@ -11,8 +11,8 @@ from typing import Any
 
 from reacnet_scope import analysis_services as _analysis
 from reacnet_scope.event_package import build_event_package
-from reacnet_scope.event_paths import analyze_event_paths
-from reacnet_scope.queries import STORE, build_dataset_status_payload
+from reacnet_scope.event_paths import verify_event_path
+from reacnet_scope.queries import build_dataset_status_payload
 from reacnet_scope.service_types import ServiceError
 from reacnet_scope.trajectory import load_timestep_ps, save_timestep_ps
 from reacnet_scope.workspace_services import (
@@ -28,6 +28,7 @@ from reacnet_scope.workspace_services import (
     dataset_preparation_status,
     dataset_readiness,
     dataset_ready_count,
+    dismiss_dataset_preparation_task,
     list_directory,
     list_preparation_tasks,
     normalise_recent_datasets,
@@ -39,13 +40,10 @@ from reacnet_scope.workspace_services import (
 from reacnet_scope.analysis_services import (
     build_channel_structure_detail,
     build_event_path_occurrence_elements,
-    build_pathway_elements,
     build_species_structure_items,
     collect_species_channels,
     compose_continuous_reaction_pair,
     detect_query_kind,
-    event_path_comparison_rows,
-    event_path_comparison_signature_rows,
     event_path_occurrence_rows,
     event_path_occurrences_for_signature,
     event_path_signature_rows,
@@ -63,7 +61,7 @@ from reacnet_scope.evidence_services import (
     batch_comparison_to_csv,
     build_element_distribution_species_drilldown,
     build_elemental_composition_evolution,
-    build_intermediate_candidates,
+    build_molecule_lineage_analysis,
     build_rng_event_visualization,
     build_species_evolution,
     composition_index_status,
@@ -74,9 +72,9 @@ from reacnet_scope.evidence_services import (
     event_viewer_trajectory_text,
     event_viewer_vmd_script,
     evolution_to_csv,
-    intermediate_candidates_to_csv,
     launch_event_in_ovito,
     locate_rng_events,
+    molecule_lineage_to_csv,
     ovito_launch_capability,
     parse_event_type_element_map,
     rows_to_csv,
@@ -99,26 +97,16 @@ from reacnet_scope.dataset_context import (
 )
 
 
-def find_pathways(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Call the pathway workflow while preserving the patchable legacy seam."""
-    previous = _analysis.STORE
-    _analysis.STORE = STORE
-    try:
-        return _analysis.find_pathways(*args, **kwargs)
-    finally:
-        _analysis.STORE = previous
-
-
-def analyze_event_paths_for_dash(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Call event-path analysis through the patchable legacy dependencies."""
-    previous_analyzer = _analysis.analyze_event_paths
+def verify_event_path_for_dash(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Call explicit path verification through patchable dependencies."""
+    previous_analyzer = _analysis.verify_event_path
     previous_validator = _analysis.validate_browse_path
-    _analysis.analyze_event_paths = analyze_event_paths
+    _analysis.verify_event_path = verify_event_path
     _analysis.validate_browse_path = validate_browse_path
     try:
-        return _analysis.analyze_event_paths_for_dash(*args, **kwargs)
+        return _analysis.verify_event_path_for_dash(*args, **kwargs)
     finally:
-        _analysis.analyze_event_paths = previous_analyzer
+        _analysis.verify_event_path = previous_analyzer
         _analysis.validate_browse_path = previous_validator
 
 
@@ -144,16 +132,13 @@ __all__ = [
     "list_preparation_tasks",
     "prepare_dataset_workspace",
     "cancel_dataset_preparation",
+    "dismiss_dataset_preparation_task",
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
-    "find_pathways",
-    "build_pathway_elements",
     "validate_event_path_sources_for_dash",
-    "analyze_event_paths_for_dash",
+    "verify_event_path_for_dash",
     "event_path_signature_rows",
-    "event_path_comparison_rows",
-    "event_path_comparison_signature_rows",
     "event_path_occurrences_for_signature",
     "event_path_signature_time_rows",
     "event_path_occurrence_rows",
@@ -168,12 +153,12 @@ __all__ = [
     "search_reactions_by_formula",
     "build_species_evolution",
     "evolution_to_csv",
-    "intermediate_candidates_to_csv",
     "build_elemental_composition_evolution",
     "composition_index_status",
     "build_element_distribution_species_drilldown",
-    "build_intermediate_candidates",
+    "build_molecule_lineage_analysis",
     "locate_rng_events",
+    "molecule_lineage_to_csv",
     "validate_pathway_step_occurrences",
     "rank_representative_events",
     "find_continuous_reactions",

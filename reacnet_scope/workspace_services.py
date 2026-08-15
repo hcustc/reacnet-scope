@@ -34,7 +34,6 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
-from reacnet_scope.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -55,7 +54,6 @@ from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope import dir_browser as _dir_browser  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
-    EventIndexEvidenceProvider,
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
@@ -64,7 +62,6 @@ from reacnet_scope.event_package import (  # noqa: E402
 from reacnet_scope.event_paths import (  # noqa: E402
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -90,7 +87,6 @@ from reacnet_scope.queries import (  # noqa: E402
     ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
-    build_intermediate_candidates_payload,
     build_species_plot_payload,
     collect_species_totals,
     collect_next_reactions,
@@ -482,7 +478,7 @@ def artifacts_from_status(status: dict[str, Any]) -> dict[str, str]:
     ):
         item = artifacts.get(key, {}) or {}
         path_text = item.get("path") or ""
-        if path_text:
+        if path_text and item.get("exists") is True:
             out[key] = path_text
     return out
 
@@ -516,7 +512,10 @@ def dataset_ready_count(status: dict[str, Any]) -> int:
 def dataset_capabilities(status: dict[str, Any]) -> dict[str, bool]:
     dataset = status.get("dataset", {}) if status else {}
     caps = dataset.get("capabilities", {}) or {}
-    return {key: bool(caps.get(key)) for key in ("species", "intermediate", "reaction", "events", "evolution", "transition")}
+    return {
+        key: bool(caps.get(key))
+        for key in ("species", "reaction", "events", "evolution", "transition")
+    }
 
 
 def dataset_readiness(status: dict[str, Any]) -> dict[str, Any]:
@@ -929,6 +928,44 @@ def cancel_dataset_preparation(
             "已请求取消 Preparation Task；最近检查点会保留。"
             if canceled
             else "当前没有活动的 Preparation Task。"
+        ),
+    }
+
+
+def dismiss_dataset_preparation_task(
+    folder: str,
+    *,
+    base: str,
+    kind: str,
+) -> dict[str, Any]:
+    """Dismiss one terminal task record while preserving its derived data."""
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"event", "trajectory", "composition"}:
+        raise ServiceError("无效准备能力", reason="invalid_preparation_kind")
+    folder_path = validate_browse_path(folder)
+    base_path = validate_browse_path(base)
+    candidate_bases = {
+        str(Path(item.get("base") or "").resolve())
+        for item in discover_dataset_candidates(folder_path)
+    }
+    if str(base_path) not in candidate_bases:
+        raise ServiceError(
+            "所选数据集已不存在，请重新选择。",
+            reason="invalid_dataset_candidate",
+        )
+    removed = preparation.dismiss_preparation_task(
+        str(folder_path),
+        base=base_path.name,
+        capability=normalized,
+    )
+    return {
+        "ok": True,
+        "kind": normalized,
+        "removed": bool(removed),
+        "message": (
+            "任务记录已移除；索引、检查点和源数据均已保留。"
+            if removed
+            else "任务仍在运行、正在取消，或记录已不存在，未执行移除。"
         ),
     }
 

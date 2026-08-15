@@ -11,8 +11,8 @@ from .event_paths import (
     EVENT_PATH_SCHEMA_VERSION,
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
-    enumerate_aggregate_reaction_paths,
+    normalize_reaction_sequence,
+    verify_event_path,
 )
 
 __all__ = [
@@ -24,6 +24,6 @@ __all__ = [
     "EVENT_PATH_SCHEMA_VERSION",
     "EventPathAnalysisError",
     "EventPathSource",
-    "analyze_event_paths",
-    "enumerate_aggregate_reaction_paths",
+    "normalize_reaction_sequence",
+    "verify_event_path",
 ]

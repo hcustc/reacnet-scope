@@ -7,13 +7,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import dataset_id_for_source
 from reacnet_scope import dir_browser
 from scripts import rng_query_cli as cli
 from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
-from scripts.webapp_dash.navigation import NAV_GROUPS, TOP_NAV_PAGE_IDS
+from scripts.webapp_dash.navigation import NAV_GROUPS, PAGE_SECTIONS, TOP_NAV_PAGE_IDS
 from reacnet_scope import services as svc
 
 
@@ -29,6 +31,23 @@ def _layout_string_ids(node: Any) -> set[str]:
     elif isinstance(node, list):
         for value in node:
             ids.update(_layout_string_ids(value))
+    return ids
+
+
+def _component_pattern_ids(node: Any) -> list[dict[str, Any]]:
+    if hasattr(node, "to_plotly_json"):
+        node = node.to_plotly_json()
+    ids: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        props = node.get("props") or {}
+        component_id = props.get("id")
+        if isinstance(component_id, dict):
+            ids.append(component_id)
+        for value in node.values():
+            ids.extend(_component_pattern_ids(value))
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            ids.extend(_component_pattern_ids(value))
     return ids
 
 
@@ -89,11 +108,10 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     for query_control_id in (
         "species-query",
         "rxn-reactants",
-        "inter-kind",
         "evolution-targets",
         "element-distribution-group-element",
         "event-reaction-text",
-        "pathway-start-smiles",
+        "event-path-reaction-sequence",
     ):
         props = (_layout_node_by_id(layout, query_control_id) or {})["props"]
         assert props["persistence"] is True
@@ -135,16 +153,22 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     }
     for navigation_id in {
         "nav-species",
-        "nav-intermediate",
-        "inter-to-pathway-btn",
-        "inter-to-evolution-btn",
         "species-to-channels-btn",
         "species-to-evolution-btn",
         "species-structure-grid",
         "species-structure-results",
         "species-structure-csv-btn",
+        "species-workspace-stage",
+        "species-stage-results-btn",
+        "species-stage-structures-btn",
+        "species-stage-detail-btn",
+        "species-stage-back-btn",
         "rxn-production-grid",
         "rxn-consumption-grid",
+        "rxn-production-csv-btn",
+        "rxn-production-csv-download",
+        "rxn-consumption-csv-btn",
+        "rxn-consumption-csv-download",
         "event-back-btn",
         "nav-trajectory",
         "page-trajectory",
@@ -174,6 +198,16 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         ((_layout_node_by_id(layout, "page-description") or {}).get("props") or {}).get(
             "children"
         )
+    )
+    reaction_channel_view = str(_layout_node_by_id(layout, "rxn-channel-view"))
+    assert "直接生成/消耗通道" not in reaction_channel_view
+    assert "这里是围绕焦点物种的单步" not in reaction_channel_view
+    assert "pathway-csv-btn" not in layout_ids
+    assert (
+        (_layout_node_by_id(layout, "event-path-csv-btn") or {})["props"][
+            "children"
+        ]
+        == "导出路径表 CSV"
     )
     assert (
         (_layout_node_by_id(layout, "species-to-event-btn") or {})["props"][
@@ -258,8 +292,16 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "element-distribution-include-zero" in layout_ids
     assert "element-distribution-filter-element" in layout_ids
     assert "element-distribution-filter-mode" in layout_ids
-    assert "inter-product-ratio" in layout_ids
-    assert "inter-reactant-ratio" in layout_ids
+    for removed_intermediate_id in {
+        "nav-intermediate",
+        "page-intermediate",
+        "inter-kind",
+        "inter-search-btn",
+        "inter-grid",
+        "inter-to-pathway-btn",
+        "inter-to-evolution-btn",
+    }:
+        assert removed_intermediate_id not in layout_ids
     for removed_advanced_id in {
         "element-distribution-advanced-search-btn",
         "element-distribution-advanced-species-files",
@@ -330,22 +372,28 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "pathway-open-events-btn",
         "pathway-evidence-alert",
         "pathway-evidence-grid",
-        "pathway-store",
-        "pathway-context-store",
     }:
-        assert pathway_id in layout_ids
-    assert (_layout_node_by_id(layout, "pathway-max-depth") or {})["props"]["value"] == 3
-    assert (_layout_node_by_id(layout, "pathway-max-branches") or {})["props"]["value"] == 5
-    assert (_layout_node_by_id(layout, "pathway-max-paths") or {})["props"]["value"] == 20
-    assert (_layout_node_by_id(layout, "pathway-max-expansions") or {})["props"]["value"] == 5000
-    assert (
-        (_layout_node_by_id(layout, "pathway-goal") or {})["props"]["value"]
-        == "ranked"
-    )
+        assert pathway_id not in layout_ids
     assert "page-transitions" not in layout_ids
     assert "nav-transitions" not in layout_ids
     assert "page-network" not in layout_ids
     assert "nav-network" not in layout_ids
+    layout_text = json.dumps(layout, ensure_ascii=False)
+    for expected_text in (
+        "查看直接反应通道",
+        "路径验证",
+        "Reaction Type 序列（2–8 步）",
+        "验证这条路径",
+        "有证据",
+    ):
+        assert expected_text in layout_text
+    for removed_text in (
+        "探索候选路径",
+        "从所选反应继续探索",
+        "搜索候选路径",
+        "候选路径网络",
+    ):
+        assert removed_text not in layout_text
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -385,7 +433,23 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "rs-advanced-menu" not in layout_text
     assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text
-    assert "使用此数据集" in layout_text
+    assert "加载并使用" in layout_text
+    assert "data-empty-pick-btn" in layout_ids
+    assert "data-change-pick-btn" in layout_ids
+    assert "data-open-species-btn" in layout_ids
+    recent_section = _layout_node_by_id(layout, "dir-browser-recent-section") or {}
+    path_locator = _layout_node_by_id(layout, "dir-browser-expert-path") or {}
+    assert recent_section.get("type") == "Section"
+    assert path_locator.get("type") == "Section"
+    assert "路径属于运行 ReacNet Scope 的计算机" in layout_text
+    assert "上一级" in layout_text
+    assert "直接定位" not in layout_text
+    assert "返回上级目录" not in layout_text
+    cache_management = _layout_node_by_id(layout, "data-cache-management") or {}
+    assert cache_management.get("type") == "Details"
+    assert (cache_management.get("props") or {}).get("open") is True
+    assert "索引构建与状态" in layout_text
+    assert "确认加载" not in layout_text
 
 
 def test_navigation_groups_cover_each_tool_once() -> None:
@@ -395,9 +459,17 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         for page_id in page_ids
     ]
 
-    assert len(grouped_pages) == 8
+    assert len(grouped_pages) == 7
     assert len(set(grouped_pages)) == len(grouped_pages)
     assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
+
+
+def test_element_distribution_is_grouped_with_trend_tools() -> None:
+    navigation = dict(NAV_GROUPS)
+
+    assert "element-distribution" in navigation["检索与趋势"]
+    assert "自动分析" not in navigation
+    assert PAGE_SECTIONS["element-distribution"] == "检索与趋势"
 
 
 def _callback_payload(
@@ -464,36 +536,6 @@ def _callback_payload(
     }
 
 
-def test_top_navigation_opens_automatic_analysis_tool() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "page-species.className" in str(item.get("output") or "")
-    )
-    input_ids = [item["id"] for item in dependency["inputs"]]
-    input_values = {item["id"]: 0 for item in dependency["inputs"]}
-    input_values["nav-intermediate"] = 1
-    payload = _callback_payload(
-        client,
-        input_ids=input_ids,
-        changed="nav-intermediate.n_clicks",
-        input_values=input_values,
-        state_values={"page-store": {"page": "species"}},
-        output_id="page-species",
-    )
-
-    response = client.post("/_dash-update-component", json=payload)
-
-    assert response.status_code == 200
-    body = response.get_json()["response"]
-    assert body["page-store"]["data"] == {"page": "intermediate"}
-    assert body["page-intermediate"]["className"] == "rs-page active"
-    assert body["nav-intermediate"]["className"] == "rs-top-nav-item active"
-    assert body["app-body"]["className"] == "rs-body rs-tool-shell"
-
-
 def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> None:
     reaction = tmp_path / "mass-structures.reactionabcd"
     structures = [
@@ -538,6 +580,10 @@ def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> No
     assert formula_rows[0]["formula"] == "C5H4O"
     assert formula_rows[0]["structure_count"] == 3
     assert search_body["species-grid"]["page_size"] == 20
+    formula_tooltip = search_body["species-grid"]["tooltip_data"][0]
+    assert formula_tooltip["formula"]["type"] == "markdown"
+    assert "/api/structure.svg?smiles=" in formula_tooltip["formula"]["value"]
+    assert "width=280&height=190" in formula_tooltip["formula"]["value"]
     assert "选择分子式可查看原始结构结果" in search_body["species-alert"]["children"]
 
     structure_response = client.post(
@@ -563,8 +609,165 @@ def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> No
     }
     assert len(structure_rows) == 3
     assert [row["smiles"] for row in structure_rows] == structures
+    structure_tooltip = structure_body["species-structure-grid"][
+        "tooltip_data"
+    ][0]
+    assert "%5BH%5D" in structure_tooltip["smiles"]["value"]
     assert "共 3 个结构" in structure_body["species-structure-alert"]["children"]
     assert "每页显示 50 条" in structure_body["species-structure-alert"]["children"]
+
+
+def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    stage_inputs = [
+        "species-search-btn",
+        "species-grid",
+        "species-structure-grid",
+        "species-stage-results-btn",
+        "species-stage-structures-btn",
+        "species-stage-detail-btn",
+        "species-stage-back-btn",
+    ]
+    base_values = {
+        "species-search-btn.n_clicks": 1,
+        "species-grid.selected_rows": [0],
+        "species-structure-grid.selected_rows": [],
+        "species-stage-results-btn.n_clicks": 0,
+        "species-stage-structures-btn.n_clicks": 0,
+        "species-stage-detail-btn.n_clicks": 0,
+        "species-stage-back-btn.n_clicks": 0,
+    }
+    grid_store = {"query_kind": "mass", "rows": [{"formula": "H2O"}]}
+
+    select_formula = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=stage_inputs,
+            changed="species-grid.selected_rows",
+            input_values=base_values,
+            state_values={
+                "species-workspace-stage": "results",
+                "species-grid-store": grid_store,
+                "species-structure-grid": [],
+            },
+            output_id="species-workspace-stage",
+        ),
+    )
+    assert select_formula.status_code == 200
+    assert select_formula.get_json()["response"]["species-workspace-stage"][
+        "data"
+    ] == "structures"
+
+    structure_rows = [{"formula": "H2O", "smiles": "[H]O[H]"}]
+    render_inputs = [
+        "species-workspace-stage",
+        "species-grid-store",
+        "species-structure-grid",
+        "species-grid",
+        "species-structure-grid",
+    ]
+    render_structures = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=render_inputs,
+            changed="species-workspace-stage.data",
+            input_values={
+                "species-workspace-stage.data": "structures",
+                "species-grid-store.data": grid_store,
+                "species-structure-grid.data": structure_rows,
+                "species-grid.selected_rows": [0],
+                "species-structure-grid.selected_rows": [],
+            },
+            state_values={},
+            output_id="species-result-stage",
+        ),
+    )
+    assert render_structures.status_code == 200
+    structures_view = render_structures.get_json()["response"]
+    assert structures_view["species-result-stage"]["style"] == {
+        "display": "none"
+    }
+    assert structures_view["species-structure-stage"]["style"] == {}
+    assert structures_view["species-stage-structures-btn"]["active"] is True
+    assert structures_view["species-stage-back-btn"]["children"] == (
+        "← 返回候选分子式"
+    )
+
+    select_detail_values = {
+        **base_values,
+        "species-structure-grid.selected_rows": [0],
+    }
+    select_detail = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=stage_inputs,
+            changed="species-structure-grid.selected_rows",
+            input_values=select_detail_values,
+            state_values={
+                "species-workspace-stage": "structures",
+                "species-grid-store": grid_store,
+                "species-structure-grid": structure_rows,
+            },
+            output_id="species-workspace-stage",
+        ),
+    )
+    assert select_detail.status_code == 200
+    assert select_detail.get_json()["response"]["species-workspace-stage"][
+        "data"
+    ] == "detail"
+
+    render_detail = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=render_inputs,
+            changed="species-workspace-stage.data",
+            input_values={
+                "species-workspace-stage.data": "detail",
+                "species-grid-store.data": grid_store,
+                "species-structure-grid.data": structure_rows,
+                "species-grid.selected_rows": [0],
+                "species-structure-grid.selected_rows": [0],
+            },
+            state_values={},
+            output_id="species-result-stage",
+        ),
+    )
+    assert render_detail.status_code == 200
+    detail_view = render_detail.get_json()["response"]
+    assert detail_view["species-detail-stage"]["style"] == {}
+    assert detail_view["species-stage-detail-btn"]["active"] is True
+    assert detail_view["species-stage-back-btn"]["children"] == (
+        "← 返回结构列表"
+    )
+
+    back_values = {
+        **select_detail_values,
+        "species-stage-back-btn.n_clicks": 1,
+    }
+    back_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=stage_inputs,
+            changed="species-stage-back-btn.n_clicks",
+            input_values=back_values,
+            state_values={
+                "species-workspace-stage": "detail",
+                "species-grid-store": grid_store,
+                "species-structure-grid": structure_rows,
+            },
+            output_id="species-workspace-stage",
+        ),
+    )
+    assert back_response.status_code == 200
+    assert back_response.get_json()["response"]["species-workspace-stage"][
+        "data"
+    ] == "structures"
 
 
 def test_batch_compare_opens_from_data_management() -> None:
@@ -673,6 +876,36 @@ def test_direct_data_workspace_navigation_has_no_false_return_source() -> None:
     }
 
 
+def test_data_workspace_opens_species_search_only_after_explicit_action() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["data-open-species-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="data-open-species-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "data-management"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "species"}
+    assert body["page-species"]["className"] == "rs-page active"
+
+
 def test_cancelling_dataset_selection_returns_to_source_page() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -740,6 +973,10 @@ def test_selected_species_channel_action_opens_reaction_search() -> None:
     assert body["page-store"]["data"] == {"page": "reactions"}
     assert body["page-reactions"]["className"] == "rs-page active"
     assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
+    assert body["page-title"]["children"] == "反应式检索"
+    assert body["page-header"]["className"] == (
+        "rs-page-header is-title-only"
+    )
 
 
 def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
@@ -855,14 +1092,12 @@ def test_selected_species_event_action_opens_reaction_channels() -> None:
             input_ids=[
                 "species-to-channels-btn",
                 "species-to-event-btn",
-                "rxn-channel-back-btn",
                 "nav-reactions",
             ],
             changed="species-to-event-btn.n_clicks",
             input_values={
                 "species-to-channels-btn": 0,
                 "species-to-event-btn": 1,
-                "rxn-channel-back-btn": 0,
                 "nav-reactions": 0,
             },
             state_values={},
@@ -876,36 +1111,307 @@ def test_selected_species_event_action_opens_reaction_channels() -> None:
     assert view["rxn-channel-view"]["style"] == {"display": "block"}
 
 
-def test_channel_view_returns_to_species_search() -> None:
+def test_channel_view_back_button_uses_navigation_history() -> None:
     app = create_app()
     client = app.server.test_client()
-    dependency = next(
+    dependencies = client.get("/_dash-dependencies").get_json()
+    back_dependencies = [
         item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "page-species.className" in str(item.get("output") or "")
-    )
-    input_ids = [item["id"] for item in dependency["inputs"]]
-    input_values = {item["id"]: 0 for item in dependency["inputs"]}
-    input_values["rxn-channel-back-btn"] = 1
+        for item in dependencies
+        if any(
+            input_item.get("id") == "rxn-channel-back-btn"
+            for input_item in item.get("inputs") or []
+        )
+    ]
 
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=input_ids,
-            changed="rxn-channel-back-btn.n_clicks",
-            input_values=input_values,
-            state_values={"page-store": {"page": "reactions"}},
-            output_id="page-species",
-        ),
+    assert len(back_dependencies) == 1
+    assert back_dependencies[0].get("clientside_function") is not None
+    assert "rxn-channel-history-store.data" in str(
+        back_dependencies[0].get("output") or ""
     )
+    label_dependency = next(
+        item
+        for item in dependencies
+        if [input_item.get("id") for input_item in item.get("inputs") or []]
+        == ["rxn-channel-history-store"]
+        and "rxn-channel-back-btn.children" in str(item.get("output") or "")
+    )
+    assert "rxn-channel-back-btn.title" in str(
+        label_dependency.get("output") or ""
+    )
+
+
+def test_reaction_structure_species_cards_expose_channel_focus_actions() -> None:
+    detail = {
+        "reaction_formulas": "CO -> C + O",
+        "reaction_smiles": "[C][O] -> [C] + [O]",
+        "reactants": [
+            {
+                "index": 0,
+                "smiles": "[C][O]",
+                "formula": "CO",
+                "occurrence": 1,
+                "occurrence_total": 1,
+                "structure_url": "/api/structure.svg?smiles=CO",
+            }
+        ],
+        "products": [
+            {
+                "index": 0,
+                "smiles": "[C]",
+                "formula": "C",
+                "occurrence": 1,
+                "occurrence_total": 1,
+                "structure_url": "/api/structure.svg?smiles=C",
+            }
+        ],
+    }
+
+    children = cb._reaction_structure_detail_children(
+        detail,
+        action_scope="channel",
+    )
+
+    assert _component_pattern_ids(children) == [
+        {
+            "type": "rxn-structure-species",
+            "scope": "channel",
+            "side": "reactant",
+            "index": 0,
+            "smiles": "[C][O]",
+            "formula": "CO",
+        },
+        {
+            "type": "rxn-structure-species",
+            "scope": "channel",
+            "side": "product",
+            "index": 0,
+            "smiles": "[C]",
+            "formula": "C",
+        },
+    ]
+
+
+def test_clicking_reaction_structure_species_loads_its_direct_channels(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    production = {
+        "reaction_formulas": "C + O -> CO",
+        "reaction_smiles": "[C] + [O] -> [C][O]",
+    }
+    consumption = {
+        "reaction_formulas": "CO -> C + O",
+        "reaction_smiles": "[C][O] -> [C] + [O]",
+    }
+
+    def fake_collect(artifacts, smiles, *, top):
+        captured.update({"artifacts": artifacts, "smiles": smiles, "top": top})
+        return {
+            "production_rows": [production],
+            "consumption_rows": [consumption],
+        }
+
+    monkeypatch.setattr(svc, "collect_species_channels", fake_collect)
+    client = create_app().server.test_client()
+    pattern_id = (
+        '{"formula":["ALL"],"index":["ALL"],"scope":["ALL"],'
+        '"side":["ALL"],"smiles":["ALL"],'
+        '"type":"rxn-structure-species"}'
+    )
+    clicked_id = {
+        "type": "rxn-structure-species",
+        "scope": "channel",
+        "side": "product",
+        "index": 0,
+        "smiles": "[C]",
+        "formula": "C",
+    }
+    payload = _callback_payload(
+        client,
+        input_ids=[pattern_id],
+        changed=(
+            f"{json.dumps(clicked_id, sort_keys=True, separators=(',', ':'))}"
+            ".n_clicks"
+        ),
+        input_values={pattern_id: [1]},
+        state_values={
+            "rxn-top": 7,
+            "app-store": {
+                "artifacts": {"reaction": "/tmp/example.reaction"},
+                "selected_smiles": "[C][O]",
+                "selected_formula": "CO",
+                "selected_species_source": "species_grid",
+            },
+            "rxn-channel-history-store": [
+                {"kind": "species", "label": "返回物种检索"}
+            ],
+            "rxn-production-grid.data": [production],
+            "rxn-production-grid.columns": [{"id": "reaction_formulas"}],
+            "rxn-production-grid.selected_rows": [0],
+            "rxn-consumption-grid.data": [consumption],
+            "rxn-consumption-grid.columns": [{"id": "reaction_formulas"}],
+            "rxn-consumption-grid.selected_rows": [],
+            "rxn-channel-selection-store": {
+                "lane": "production",
+                "row": production,
+            },
+            "rxn-channel-alert": "CO 的通道",
+        },
+        output_id="rxn-production-grid",
+    )
+    for input_item in payload["inputs"]:
+        if input_item["id"] == pattern_id:
+            input_item["id"] = clicked_id
+
+    response = client.post("/_dash-update-component", json=payload)
 
     assert response.status_code == 200
-    body = response.get_json()["response"]
-    assert body["page-store"]["data"] == {"page": "species"}
-    assert body["page-species"]["className"] == "rs-page active"
-    assert body["page-reactions"]["className"] == "rs-page"
-    assert body["nav-species"]["className"] == "rs-top-nav-item active"
+    result = response.get_json()["response"]
+    assert captured == {
+        "artifacts": {"reaction": "/tmp/example.reaction"},
+        "smiles": "[C]",
+        "top": 7,
+    }
+    assert result["rxn-production-grid"]["data"] == [production]
+    assert result["rxn-consumption-grid"]["data"] == [consumption]
+    assert result["rxn-production-grid"]["selected_rows"] == []
+    assert result["rxn-consumption-grid"]["selected_rows"] == []
+    assert result["rxn-production-grid"]["active_cell"] is None
+    assert result["rxn-consumption-grid"]["active_cell"] is None
+    assert result["rxn-channel-selection-store"]["data"] is None
+    assert result["rxn-channel-history-store"]["data"] == [
+        {"kind": "species", "label": "返回物种检索"},
+        {
+            "kind": "channel",
+            "label": "返回 CO 的通道",
+            "focus": {
+                "selected_smiles": "[C][O]",
+                "selected_formula": "CO",
+                "selected_species_source": "species_grid",
+            },
+            "production_data": [production],
+            "production_columns": [{"id": "reaction_formulas"}],
+            "production_selected_rows": [0],
+            "consumption_data": [consumption],
+            "consumption_columns": [{"id": "reaction_formulas"}],
+            "consumption_selected_rows": [],
+            "selection": {"lane": "production", "row": production},
+            "alert": "CO 的通道",
+        },
+    ]
+    assert result["app-store"]["data"]["selected_smiles"] == "[C]"
+    assert result["app-store"]["data"]["selected_formula"] == "C"
+    assert result["rxn-query-card"]["style"] == {"display": "none"}
+    assert result["rxn-results-card"]["style"] == {"display": "none"}
+    assert result["rxn-channel-view"]["style"] == {"display": "block"}
+
+    search_clicked_id = {**clicked_id, "scope": "search"}
+    search_payload = _callback_payload(
+        client,
+        input_ids=[pattern_id],
+        changed=(
+            f"{json.dumps(search_clicked_id, sort_keys=True, separators=(',', ':'))}"
+            ".n_clicks"
+        ),
+        input_values={pattern_id: [1]},
+        state_values={
+            "rxn-top": 7,
+            "app-store": {
+                "artifacts": {"reaction": "/tmp/example.reaction"},
+                "selected_smiles": "[O]",
+                "selected_formula": "O",
+                "selected_species_source": "reaction_search",
+            },
+            "rxn-channel-history-store": [],
+        },
+        output_id="rxn-production-grid",
+    )
+    for input_item in search_payload["inputs"]:
+        if input_item["id"] == pattern_id:
+            input_item["id"] = search_clicked_id
+
+    search_response = client.post(
+        "/_dash-update-component",
+        json=search_payload,
+    )
+
+    assert search_response.status_code == 200
+    search_result = search_response.get_json()["response"]
+    assert search_result["rxn-channel-history-store"]["data"] == [
+        {
+            "kind": "reaction-search",
+            "label": "返回反应式检索",
+            "focus": {
+                "selected_smiles": "[O]",
+                "selected_formula": "O",
+                "selected_species_source": "reaction_search",
+            },
+        }
+    ]
+
+
+def test_mounting_channel_species_cards_does_not_change_focus(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_collect(_artifacts, smiles, *, top):
+        calls.append(smiles)
+        return {"production_rows": [], "consumption_rows": []}
+
+    monkeypatch.setattr(svc, "collect_species_channels", fake_collect)
+    client = create_app().server.test_client()
+    pattern_id = (
+        '{"formula":["ALL"],"index":["ALL"],"scope":["ALL"],'
+        '"side":["ALL"],"smiles":["ALL"],'
+        '"type":"rxn-structure-species"}'
+    )
+    mounted_id = {
+        "type": "rxn-structure-species",
+        "scope": "channel",
+        "side": "reactant",
+        "index": 0,
+        "smiles": "[H]",
+        "formula": "H",
+    }
+    payload = _callback_payload(
+        client,
+        input_ids=[pattern_id],
+        changed=(
+            f"{json.dumps(mounted_id, sort_keys=True, separators=(',', ':'))}"
+            ".n_clicks"
+        ),
+        input_values={pattern_id: [0]},
+        state_values={
+            "rxn-top": 50,
+            "app-store": {
+                "artifacts": {"reaction": "/tmp/example.reaction"},
+                "selected_smiles": "C6H5ClO",
+                "selected_formula": "C6H5ClO",
+                "selected_species_source": "reaction_structure",
+            },
+            "rxn-channel-history-store": [],
+            "rxn-production-grid.data": [],
+            "rxn-production-grid.columns": [],
+            "rxn-production-grid.selected_rows": [],
+            "rxn-consumption-grid.data": [],
+            "rxn-consumption-grid.columns": [],
+            "rxn-consumption-grid.selected_rows": [1],
+            "rxn-channel-selection-store": {
+                "lane": "consumption",
+                "row": {"reaction_formulas": "H + C6H5ClO -> HCl + C6H5O"},
+            },
+            "rxn-channel-alert": "C6H5ClO 的通道",
+        },
+        output_id="rxn-production-grid",
+    )
+    for input_item in payload["inputs"]:
+        if input_item["id"] == pattern_id:
+            input_item["id"] = mounted_id
+
+    response = client.post("/_dash-update-component", json=payload)
+
+    assert response.status_code == 204
+    assert calls == []
 
 
 def test_selected_species_loads_exact_production_and_consumption_channels(
@@ -947,14 +1453,12 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
             input_ids=[
                 "species-to-channels-btn",
                 "species-to-event-btn",
-                "rxn-channel-back-btn",
                 "nav-reactions",
             ],
             changed="species-to-channels-btn.n_clicks",
             input_values={
                 "species-to-channels-btn": 1,
                 "species-to-event-btn": 0,
-                "rxn-channel-back-btn": 0,
                 "nav-reactions": 0,
             },
             state_values={},
@@ -1002,9 +1506,92 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "id": "reaction_formulas",
         "name": "反应式",
     }
-    assert "生成通道 1 条，消耗通道 1 条" in body["rxn-channel-alert"]["children"]
+    assert body["rxn-channel-alert"]["children"] == ""
     assert body["rxn-production-grid"]["selected_rows"] == []
     assert body["rxn-consumption-grid"]["selected_rows"] == []
+    assert body["rxn-production-grid"]["active_cell"] is None
+    assert body["rxn-consumption-grid"]["active_cell"] is None
+
+
+def test_species_channel_tables_export_loaded_rows_as_csv() -> None:
+    client = create_app().server.test_client()
+    production = {
+        "reaction_formulas": "C + O -> CO",
+        "reaction_smiles": "[C] + [O] -> [C][O]",
+        "forward_tp": 10,
+        "reverse_tp": 2,
+        "net_tp": 8,
+        "ratio_pct": 80.0,
+    }
+    consumption = {
+        "reaction_formulas": "CO -> C + O",
+        "reaction_smiles": "[C][O] -> [C] + [O]",
+        "forward_tp": 7,
+        "reverse_tp": 3,
+        "net_tp": 4,
+        "ratio_pct": 40.0,
+    }
+    input_ids = ["rxn-production-csv-btn", "rxn-consumption-csv-btn"]
+    state_values = {
+        "rxn-production-grid": [production],
+        "rxn-consumption-grid": [consumption],
+        "app-store": {
+            "selected_formula": "CO",
+            "selected_smiles": "[C][O]",
+        },
+    }
+
+    production_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="rxn-production-csv-btn.n_clicks",
+            input_values={
+                "rxn-production-csv-btn": 1,
+                "rxn-consumption-csv-btn": 0,
+            },
+            state_values=state_values,
+            output_id="rxn-production-csv-download",
+        ),
+    )
+    assert production_response.status_code == 200
+    production_download = production_response.get_json()["response"][
+        "rxn-production-csv-download"
+    ]["data"]
+    assert production_download["filename"] == "CO-production-channels.csv"
+    production_rows = list(
+        csv.DictReader(io.StringIO(production_download["content"]))
+    )
+    assert production_rows[0]["channel_role"] == "production"
+    assert production_rows[0]["reaction_formula"] == "C + O -> CO"
+    assert production_rows[0]["net_tp"] == "8"
+
+    consumption_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="rxn-consumption-csv-btn.n_clicks",
+            input_values={
+                "rxn-production-csv-btn": 1,
+                "rxn-consumption-csv-btn": 1,
+            },
+            state_values=state_values,
+            output_id="rxn-production-csv-download",
+        ),
+    )
+    assert consumption_response.status_code == 200
+    consumption_download = consumption_response.get_json()["response"][
+        "rxn-consumption-csv-download"
+    ]["data"]
+    assert consumption_download["filename"] == "CO-consumption-channels.csv"
+    consumption_rows = list(
+        csv.DictReader(io.StringIO(consumption_download["content"]))
+    )
+    assert consumption_rows[0]["channel_role"] == "consumption"
+    assert consumption_rows[0]["reaction_formula"] == "CO -> C + O"
+    assert consumption_rows[0]["share_pct"] == "40.0"
 
 
 def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> None:
@@ -1021,15 +1608,21 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
             input_ids=[
                 "rxn-production-grid",
                 "rxn-consumption-grid",
+                "rxn-production-grid",
+                "rxn-consumption-grid",
             ],
             changed="rxn-consumption-grid.selected_rows",
             input_values={
+                "rxn-production-grid.active_cell": None,
+                "rxn-consumption-grid.active_cell": None,
                 "rxn-production-grid.selected_rows": [],
                 "rxn-consumption-grid.selected_rows": [0],
             },
             state_values={
                 "rxn-production-grid.data": [],
                 "rxn-consumption-grid.data": [row],
+                "rxn-production-grid.derived_virtual_indices": [],
+                "rxn-consumption-grid.derived_virtual_indices": [0],
             },
             output_id="rxn-channel-selection-store",
         ),
@@ -1093,6 +1686,63 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
         event_response.get_json()["response"]["event-reaction-text"]["value"]
         == "[C][O] -> [C] + [O]"
     )
+
+
+def test_clicking_channel_row_switches_selection_in_place() -> None:
+    production = {
+        "reaction_formulas": "C + O -> CO",
+        "reaction_smiles": "[C] + [O] -> [C][O]",
+    }
+    consumption_rows = [
+        {
+            "reaction_formulas": "CO -> C + O",
+            "reaction_smiles": "[C][O] -> [C] + [O]",
+        },
+        {
+            "reaction_formulas": "CO + H -> C + OH",
+            "reaction_smiles": "[C][O] + [H] -> [C] + [O][H]",
+        },
+    ]
+    client = create_app().server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "rxn-production-grid",
+                "rxn-consumption-grid",
+                "rxn-production-grid",
+                "rxn-consumption-grid",
+            ],
+            changed="rxn-consumption-grid.active_cell",
+            input_values={
+                "rxn-production-grid.active_cell": None,
+                "rxn-consumption-grid.active_cell": {
+                    "row": 0,
+                    "column": 0,
+                    "column_id": "reaction_formulas",
+                },
+                "rxn-production-grid.selected_rows": [0],
+                "rxn-consumption-grid.selected_rows": [],
+            },
+            state_values={
+                "rxn-production-grid.data": [production],
+                "rxn-consumption-grid.data": consumption_rows,
+                "rxn-production-grid.derived_virtual_indices": [0],
+                "rxn-consumption-grid.derived_virtual_indices": [1, 0],
+            },
+            output_id="rxn-channel-selection-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["rxn-channel-selection-store"]["data"] == {
+        "lane": "consumption",
+        "row": {**consumption_rows[1], "role_label": "消耗"},
+    }
+    assert result["rxn-production-grid"]["selected_rows"] == []
+    assert result["rxn-consumption-grid"]["selected_rows"] == [1]
 
 
 def test_event_page_returns_to_originating_reaction_channel() -> None:
@@ -1223,85 +1873,6 @@ def test_event_selection_opens_independent_trajectory_page_and_returns() -> None
     assert returned["page-events"]["className"] == "rs-page active"
     assert returned["page-trajectory"]["className"] == "rs-page"
     assert returned["nav-events"]["className"] == "rs-top-nav-item active"
-
-
-def test_selected_intermediate_can_become_pathway_start() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    input_ids = [
-        "species-to-pathway-btn",
-        "rxn-to-pathway-btn",
-        "inter-to-pathway-btn",
-    ]
-    payload = _callback_payload(
-        client,
-        input_ids=input_ids,
-        changed="inter-to-pathway-btn.n_clicks",
-        input_values={
-            "species-to-pathway-btn": 0,
-            "rxn-to-pathway-btn": 0,
-            "inter-to-pathway-btn": 1,
-        },
-        state_values={
-            "species-grid": [],
-            "rxn-grid": [],
-            "inter-grid.selected_rows": [0],
-            "inter-grid.data": [{"formula": "HO", "smiles": "[H][O]"}],
-            "app-store": {},
-        },
-        output_id="pathway-start-smiles",
-    )
-
-    response = client.post("/_dash-update-component", json=payload)
-
-    assert response.status_code == 200
-    body = response.get_json()["response"]
-    assert body["pathway-start-smiles"]["value"] == "[H][O]"
-
-
-def _pathway_payload() -> dict[str, Any]:
-    return {
-        "paths": [
-            {
-                "rank": 1,
-                "species": ["[H]", "[H][O]"],
-                "formulas": ["H", "HO"],
-                "score": 0.7,
-                "evidence_status": "evidence_linked",
-                "steps": [
-                    {
-                        "reaction_key": "[H]+[O]->[H][O]",
-                        "traversal_direction": "downstream",
-                        "reactants": ["[H]", "[O]"],
-                        "products": ["[H][O]"],
-                        "focal_input": "[H]",
-                        "focal_output": "[H][O]",
-                        "forward_tp": 7,
-                        "reverse_tp": 2,
-                        "net_tp": 5,
-                        "net_share": 0.625,
-                        "directionality": 5 / 9,
-                        "event_coverage": 0.8,
-                        "time_coverage": 0.4,
-                        "event_total": 5,
-                        "matched_event_total": 4,
-                        "distinct_intervals": 3,
-                        "score": 0.6,
-                        "evidence_status": "evidence_linked",
-                        "score_version": "candidate-path/v1",
-                        "source_references": ["/cache/events.sqlite3"],
-                    }
-                ],
-            }
-        ],
-        "query": {"start_smiles": "[H]"},
-        "reason": "ok",
-        "truncated": False,
-        "expansions": 1,
-        "evidence_status": "evidence_linked",
-        "score_version": "candidate-path/v1",
-        "source_signatures": {},
-    }
 
 
 def _event_path_dash_payload() -> dict[str, Any]:
@@ -1454,10 +2025,6 @@ def test_event_path_dash_layout_exposes_analysis_and_audit_controls() -> None:
     ids = _layout_string_ids(layout)
 
     for component_id in {
-        "pathway-concept-guide",
-        "pathway-concept-aggregate",
-        "pathway-concept-actual",
-        "pathway-analysis-tabs",
         "event-path-wizard-step",
         "event-path-progress-1",
         "event-path-step-1",
@@ -1467,9 +2034,8 @@ def test_event_path_dash_layout_exposes_analysis_and_audit_controls() -> None:
         "event-path-step-3",
         "event-path-run-btn",
         "event-path-additional-sources",
+        "event-path-reaction-sequence",
         "event-path-signature-grid",
-        "event-path-comparison-chart",
-        "event-path-comparison-grid",
         "event-path-summary-explanation",
         "event-path-occurrence-selector",
         "event-path-time-grid",
@@ -1479,6 +2045,8 @@ def test_event_path_dash_layout_exposes_analysis_and_audit_controls() -> None:
         "event-path-store",
     }:
         assert component_id in ids
+    assert "pathway-search-btn" not in ids
+    assert "pathway-analysis-tabs" not in ids
 
 
 def test_event_path_wizard_auto_detects_current_data_and_advances(monkeypatch) -> None:
@@ -1548,7 +2116,7 @@ def test_event_path_wizard_auto_detects_current_data_and_advances(monkeypatch) -
                 "event-path-current-replicate": "rp3",
                 "event-path-source-mode": "current",
                 "event-path-additional-sources": "",
-                "event-path-length": 3,
+                "event-path-reaction-sequence": "A->B\nB->C\nC->D",
             },
             output_id="event-path-wizard-step",
         ),
@@ -1578,15 +2146,15 @@ def test_event_path_wizard_auto_detects_current_data_and_advances(monkeypatch) -
     assert "is-active" in render_body["event-path-progress-2"]["className"]
 
 
-def test_event_path_tab_reports_its_own_data_requirements() -> None:
+def test_path_verification_page_reports_event_evidence_requirements() -> None:
     app = create_app()
     client = app.server.test_client()
     response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["page-store", "app-store", "pathway-analysis-tabs"],
-            changed="pathway-analysis-tabs.active_tab",
+            input_ids=["page-store", "app-store"],
+            changed="page-store.data",
             input_values={
                 "page-store": {"page": "pathway"},
                     "app-store": {
@@ -1602,7 +2170,6 @@ def test_event_path_tab_reports_its_own_data_requirements() -> None:
                             }
                         },
                 },
-                "pathway-analysis-tabs": "concrete-event-paths",
             },
             state_values={},
             output_id="page-data-status",
@@ -1611,7 +2178,7 @@ def test_event_path_tab_reports_its_own_data_requirements() -> None:
 
     assert response.status_code == 200
     body = response.get_json()["response"]
-    assert "事件检索：ready · 可用" in body["page-data-status"]["children"]
+    assert "事件检索：可用" in body["page-data-status"]["children"]
     assert "事件索引与当前源修订一致" in body["page-data-status"]["children"]
     assert body["page-data-status"]["className"] == "rs-page-status is-ready"
 
@@ -1620,6 +2187,15 @@ def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
     monkeypatch,
 ) -> None:
     report = _event_path_dash_payload()
+    report["verification"] = {
+        "status": "supported",
+        "message": "观察到完整事件链。",
+    }
+    report["paths"] = [
+        item
+        for item in report["paths"]
+        if item["signature_id"] == "sig-chemistry"
+    ]
     captured = {}
 
     def fake_analyze(artifacts, **query):
@@ -1627,7 +2203,7 @@ def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
         captured["query"] = query
         return report
 
-    monkeypatch.setattr(svc, "analyze_event_paths_for_dash", fake_analyze)
+    monkeypatch.setattr(svc, "verify_event_path_for_dash", fake_analyze)
     app = create_app()
     client = app.server.test_client()
     run_response = client.post(
@@ -1641,8 +2217,7 @@ def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
                 "event-path-current-replicate": "rep1",
                 "event-path-source-mode": "multiple",
                 "event-path-additional-sources": "rep2=/data/rep2/run.lammpstrj",
-                "event-path-length": 3,
-                "event-path-start-smiles": "A",
+                "event-path-reaction-sequence": "A->B\nB->C\nC->D",
                 "event-path-max-interval-gap": 2,
                 "event-path-max-timestep-gap": 100,
                 "event-path-max-details": 50,
@@ -1661,37 +2236,27 @@ def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
     assert captured["query"] == {
         "current_replicate": "rep1",
         "additional_sources": "rep2=/data/rep2/run.lammpstrj",
-        "path_length": 3,
-        "start_smiles": "A",
+        "reaction_sequence": "A->B\nB->C\nC->D",
         "max_interval_gap": 2,
         "max_timestep_gap": 100,
         "max_occurrence_details": 50,
     }
     run_body = run_response.get_json()["response"]
     assert run_body["event-path-store"]["data"] == report
-    assert run_body["event-path-comparison-grid"]["data"][0]["confirmed"] == 1
     reading_guide = str(
         run_body["event-path-summary-explanation"]["children"]
     )
-    assert "10.00%" in reading_guide
-    assert "不是产率、转化率或事件占比" in reading_guide
+    assert "结论：有证据" in reading_guide
+    assert "完整事件链" in reading_guide
 
     filter_response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=[
-                "event-path-store",
-                "event-path-filter-flags",
-                "event-path-min-reproduction",
-                "event-path-min-lineages",
-            ],
+            input_ids=["event-path-store"],
             changed="event-path-store.data",
             input_values={
                 "event-path-store": report,
-                "event-path-filter-flags": ["hide_pure_h"],
-                "event-path-min-reproduction": 0,
-                "event-path-min-lineages": 1,
             },
             state_values={},
             output_id="event-path-signature-grid",
@@ -1745,461 +2310,24 @@ def test_event_path_dash_analysis_filters_and_renders_concrete_occurrence(
     ] == "7"
 
 
-def test_pathway_search_preserves_exact_zero_threshold(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_find(_artifacts, start_smiles, **limits):
-        captured["start_smiles"] = start_smiles
-        captured.update(limits)
-        return _pathway_payload()
-
-    monkeypatch.setattr(svc, "find_pathways", fake_find)
-    app = create_app()
-    client = app.server.test_client()
-    inputs = ["pathway-search-btn"]
-    states = {
-        "pathway-start-smiles": "[H]",
-        "pathway-direction": "upstream",
-        "pathway-max-depth": 4,
-        "pathway-max-branches": 6,
-        "pathway-max-paths": 7,
-        "pathway-min-net-tp": 2,
-        "pathway-min-directionality": 0,
-        "app-store": {
-            "dataset_id": "dataset-A",
-            "artifacts": {"reaction": "/tmp/run.reactionabcd"},
-        },
-    }
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=inputs,
-            changed="pathway-search-btn.n_clicks",
-            input_values={"pathway-search-btn": 1},
-            state_values=states,
-        ),
-    )
-
-    assert response.status_code == 200
-    assert captured == {
-        "start_smiles": "[H]",
-        "direction": "upstream",
-        "max_depth": 4,
-        "max_branches": 6,
-        "max_paths": 7,
-        "max_expansions": 5000,
-        "min_net_tp": 2,
-        "min_directionality": 0,
-    }
-    result = response.get_json()["response"]
-    row = result["pathway-grid"]["data"][0]
-    assert row["formula_chain"] == "H → HO"
-    assert row["smiles_chain"] == "[H] → [H][O]"
-    assert row["path_score"] == 0.7
-    assert row["weakest_step_score"] == 0.6
-    assert row["depth"] == 1
-    assert row["evidence_badge"] == "各步可查事件（未证整链）"
-    assert result["pathway-store"]["data"] == _pathway_payload()
-    assert result["pathway-context-store"]["data"] == {
-        "schema_version": "reacnet-scope/pathway-context/v1",
-        "dataset_id": "dataset-A",
-        "source_signatures": {},
-    }
 
 
-def test_pathway_search_passes_small_fragment_carbon_goal(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_find(_artifacts, _start_smiles, **limits):
-        captured.update(limits)
-        return _pathway_payload()
-
-    monkeypatch.setattr(svc, "find_pathways", fake_find)
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-search-btn"],
-            changed="pathway-search-btn.n_clicks",
-            input_values={"pathway-search-btn": 1},
-            state_values={
-                "pathway-start-smiles": "[C][C][C][C][C][C]",
-                "pathway-direction": "downstream",
-                "pathway-max-depth": 6,
-                "pathway-max-branches": 10,
-                "pathway-max-paths": 20,
-                "pathway-max-expansions": 300,
-                "pathway-min-net-tp": 1,
-                "pathway-min-directionality": 0,
-                "pathway-goal": "small_fragments",
-                "pathway-target-max-carbon": 3,
-                "app-store": {
-                    "dataset_id": "dataset-A",
-                    "artifacts": {"reaction": "/tmp/run.reactionabcd"},
-                },
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    assert captured["target_max_carbon"] == 3
-    assert captured["max_expansions"] == 300
-    assert captured["evidence_mode"] == "network_only"
 
 
-def test_pathway_search_reports_distinct_empty_reasons_and_truncation(monkeypatch) -> None:
-    app = create_app()
-    client = app.server.test_client()
-    base = _pathway_payload()
-    cases = [
-        ("species_absent", "不在当前反应网络"),
-        ("no_positive_net_continuation", "没有正净通量"),
-        ("filtered_by_thresholds", "阈值过滤"),
-    ]
-    for reason, expected in cases:
-        payload = {**base, "paths": [], "reason": reason, "expansions": 3}
-        monkeypatch.setattr(
-            svc,
-            "find_pathways",
-            lambda *_args, _payload=payload, **_kwargs: _payload,
-        )
-        response = client.post(
-            "/_dash-update-component",
-            json=_callback_payload(
-                client,
-                input_ids=["pathway-search-btn"],
-                changed="pathway-search-btn.n_clicks",
-                input_values={"pathway-search-btn": 1},
-                state_values={
-                    "pathway-start-smiles": "[H]",
-                    "pathway-direction": "downstream",
-                    "pathway-max-depth": 3,
-                    "pathway-max-branches": 5,
-                    "pathway-max-paths": 20,
-                    "pathway-min-net-tp": 1,
-                    "pathway-min-directionality": 0.05,
-                    "app-store": {"artifacts": {"reaction": "run.reactionabcd"}},
-                },
-            ),
-        )
-        assert response.status_code == 200
-        assert expected in str(
-            response.get_json()["response"]["pathway-alert"]["children"]
-        )
-
-    truncated = {**base, "truncated": True, "expansions": 5000}
-    monkeypatch.setattr(
-        svc,
-        "find_pathways",
-        lambda *_args, **_kwargs: truncated,
-    )
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-search-btn"],
-            changed="pathway-search-btn.n_clicks",
-            input_values={"pathway-search-btn": 1},
-            state_values={
-                "pathway-start-smiles": "[H]",
-                "pathway-direction": "downstream",
-                "pathway-max-depth": 3,
-                "pathway-max-branches": 5,
-                "pathway-max-paths": 20,
-                "pathway-min-net-tp": 1,
-                "pathway-min-directionality": 0.05,
-                "app-store": {"artifacts": {"reaction": "run.reactionabcd"}},
-            },
-        ),
-    )
-    alert = str(response.get_json()["response"]["pathway-alert"]["children"])
-    assert "截断" in alert
-    assert "expansions=5000" in alert
 
 
-def test_species_and_reaction_handoffs_preserve_exact_smiles() -> None:
-    app = create_app()
-    client = app.server.test_client()
-
-    species_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "species-to-pathway-btn",
-                "rxn-to-pathway-btn",
-                "inter-to-pathway-btn",
-            ],
-            changed="species-to-pathway-btn.n_clicks",
-            input_values={
-                "species-to-pathway-btn": 1,
-                "rxn-to-pathway-btn": None,
-                "inter-to-pathway-btn": None,
-            },
-            state_values={
-                "species-grid.selected_rows": [0],
-                "species-grid.data": [{"smiles": "[C@@H](O)[Cl]"}],
-                "rxn-grid.selected_rows": [],
-                "rxn-grid.data": [],
-                "inter-grid.selected_rows": [],
-                "inter-grid.data": [],
-                "app-store": {"selected_smiles": "wrong"},
-            },
-        ),
-    )
-    assert species_response.status_code == 200
-    assert (
-        species_response.get_json()["response"]["pathway-start-smiles"]["value"]
-        == "[C@@H](O)[Cl]"
-    )
-
-    reaction_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "species-to-pathway-btn",
-                "rxn-to-pathway-btn",
-                "inter-to-pathway-btn",
-            ],
-            changed="rxn-to-pathway-btn.n_clicks",
-            input_values={
-                "species-to-pathway-btn": None,
-                "rxn-to-pathway-btn": 1,
-                "inter-to-pathway-btn": None,
-            },
-            state_values={
-                "species-grid.selected_rows": [],
-                "species-grid.data": [],
-                "rxn-grid.selected_rows": [0],
-                "rxn-grid.data": [
-                    {
-                        "reactant_smiles": ["[13CH3]", "[OH-]"],
-                        "reaction_smiles": "[13CH3] + [OH-] -> [13CH3][OH-]",
-                    }
-                ],
-                "inter-grid.selected_rows": [],
-                "inter-grid.data": [],
-                "app-store": {},
-            },
-        ),
-    )
-    assert reaction_response.status_code == 200
-    assert (
-        reaction_response.get_json()["response"]["pathway-start-smiles"]["value"]
-        == "[13CH3]"
-    )
 
 
-def test_selected_pathway_step_handoff_uses_full_reaction_text() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    reaction_text = "[H] + [O] + [O] -> [H][O] + [O]"
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-open-events-btn"],
-            changed="pathway-open-events-btn.n_clicks",
-            input_values={"pathway-open-events-btn": 1},
-            state_values={
-                "pathway-selected-step": {
-                    "reaction_text": reaction_text,
-                    "reaction_key": "[H]+[O]+[O]->[H][O]+[O]",
-                }
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    assert response.get_json()["response"]["event-reaction-text"]["value"] == reaction_text
 
 
-def test_pathway_downloads_use_store_payload_without_search(monkeypatch) -> None:
-    payload = _pathway_payload()
-
-    def forbidden_search(*_args, **_kwargs):
-        raise AssertionError("downloads must not recompute the search")
-
-    monkeypatch.setattr(svc, "find_pathways", forbidden_search)
-    app = create_app()
-    client = app.server.test_client()
-    json_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-json-btn"],
-            changed="pathway-json-btn.n_clicks",
-            input_values={"pathway-json-btn": 1},
-            state_values={"pathway-store": payload},
-        ),
-    )
-    assert json_response.status_code == 200
-    json_download = json_response.get_json()["response"]["pathway-json-download"]["data"]
-    assert json.loads(json_download["content"]) == cli._pathway_document(payload)
-
-    csv_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["pathway-csv-btn"],
-            changed="pathway-csv-btn.n_clicks",
-            input_values={"pathway-csv-btn": 1},
-            state_values={"pathway-store": payload},
-        ),
-    )
-    assert csv_response.status_code == 200
-    csv_download = csv_response.get_json()["response"]["pathway-csv-download"]["data"]
-    with io.StringIO(csv_download["content"]) as handle:
-        reader = csv.DictReader(handle)
-        dash_rows = list(reader)
-        assert reader.fieldnames == cli.PATHWAY_CSV_FIELDS
-    expected_rows = [
-        {field: "" if value is None else str(value) for field, value in row.items()}
-        for row in cli._pathway_csv_rows(payload)
-    ]
-    assert dash_rows == expected_rows
 
 
-def test_selected_path_handoff_keeps_exact_stable_ids() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    payload = _pathway_payload()
-    rows = [
-        {
-            "rank": 1,
-            "formula_chain": "H → HO",
-            "smiles_chain": "[H] → [H][O]",
-        }
-    ]
-    selection_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "pathway-store",
-                "pathway-grid",
-                "pathway-cytoscape",
-            ],
-            changed="pathway-grid.selected_rows",
-            input_values={
-                "pathway-store": payload,
-                "pathway-grid": [0],
-                "pathway-cytoscape": None,
-            },
-            state_values={"pathway-grid": rows},
-        ),
-    )
-    assert selection_response.status_code == 200
-    selected = selection_response.get_json()["response"]["pathway-selected-path"]["data"]
-    assert selected == {
-        "path_rank": 1,
-        "species_ids": ["[H]", "[H][O]"],
-        "reaction_keys": ["[H]+[O]->[H][O]"],
-    }
-    selected_step = selection_response.get_json()["response"][
-        "pathway-selected-step"
-    ]["data"]
-    assert selected_step["step_index"] == 1
-    assert selected_step["reaction_text"] == "[H] + [O] -> [H][O]"
-    assert (
-        selection_response.get_json()["response"]["pathway-open-events-btn"][
-            "disabled"
-        ]
-        is False
-    )
-    clear_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "pathway-store",
-                "pathway-grid",
-                "pathway-cytoscape",
-            ],
-            changed="pathway-store.data",
-            input_values={
-                "pathway-store": _pathway_payload(),
-                "pathway-grid": [],
-                "pathway-cytoscape": None,
-            },
-            state_values={"pathway-grid": []},
-        ),
-    )
-    assert clear_response.status_code == 200
-    cleared = clear_response.get_json()["response"]
-    assert cleared["pathway-selected-path"]["data"] is None
 
 
-def test_selected_single_step_path_queries_time_evidence(monkeypatch) -> None:
-    def fake_validate(artifacts, step, *, max_occurrences):
-        assert artifacts == {"reactionevent": "/tmp/run.reactionevent.csv"}
-        assert step["reaction_text"] == "[H] + [O] -> [H][O]"
-        assert max_occurrences == 20
-        return {
-            "rows": [
-                {
-                    "occurrence_rank": 1,
-                    "evidence_source": "RNG 事件",
-                    "event_id": "evt-1",
-                    "timestep_index": 10,
-                    "reaction_smiles": step["reaction_text"],
-                }
-            ],
-            "evidence_level": "rng_event",
-            "message": "找到 1 条精确匹配的 RNG 反应事件。",
-        }
 
-    monkeypatch.setattr(
-        svc,
-        "validate_pathway_step_occurrences",
-        fake_validate,
-    )
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "pathway-selected-path",
-                "pathway-selected-step",
-                "app-store",
-            ],
-            changed="pathway-selected-step.data",
-            input_values={
-                "pathway-selected-path": {
-                    "path_rank": 1,
-                    "species_ids": ["[H]", "[H][O]"],
-                    "reaction_keys": ["[H]+[O]->[H][O]"],
-                },
-                "pathway-selected-step": {
-                    "step_index": 1,
-                    "reaction_text": "[H] + [O] -> [H][O]",
-                },
-                "app-store": {
-                    "artifacts": {
-                        "reactionevent": "/tmp/run.reactionevent.csv"
-                    },
-                },
-            },
-            state_values={},
-        ),
-    )
 
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["pathway-evidence-grid"]["data"][0]["event_id"] == "evt-1"
-    assert "只有 1 步，不存在两步连续性" in result[
-        "pathway-evidence-alert"
-    ]["children"]
-    assert "精确匹配的 RNG 反应事件" in result[
-        "pathway-evidence-alert"
-    ]["children"]
+
+
 
 
 def test_loading_another_dataset_drops_cross_dataset_species_selection(
@@ -2323,79 +2451,8 @@ def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
     assert ids[0] != ids[2]
     assert ids[0] == ids[3]
 
-def test_pathway_reset_trigger_kind_prioritizes_dataset_changes() -> None:
-    class FakeContext:
-        def __init__(
-            self,
-            prop_ids: list[str],
-            *,
-            triggered_id: str | None = None,
-        ) -> None:
-            self.triggered_prop_ids = {
-                prop_id: prop_id.split(".", 1)[0]
-                for prop_id in prop_ids
-            }
-            self.triggered_id = triggered_id
-
-    old_context = {
-        "schema_version": "reacnet-scope/pathway-context/v1",
-        "dataset_id": "dataset-A",
-    }
-    assert cb._pathway_reset_trigger_kind(
-        FakeContext(["app-store.data"], triggered_id="app-store"),
-        {"dataset_id": "dataset-B"},
-        old_context,
-    ) == "dataset"
-    assert cb._pathway_reset_trigger_kind(
-        FakeContext(["app-store.data"], triggered_id="app-store"),
-        {"dataset_id": "dataset-A", "selected_smiles": "[H]"},
-        old_context,
-    ) is None
-    assert cb._pathway_reset_trigger_kind(
-        FakeContext(["app-store.data"], triggered_id="app-store"),
-        {},
-        old_context,
-    ) == "dataset"
-    assert cb._pathway_reset_trigger_kind(
-        FakeContext([], triggered_id=None),
-        {"dataset_id": "dataset-A"},
-        old_context,
-    ) is None
 
 
-def test_dataset_change_clears_pathway_selection() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    old_context = {
-        "schema_version": "reacnet-scope/pathway-context/v1",
-        "dataset_id": "dataset-A",
-        "source_signatures": {},
-    }
-
-    changed_dataset = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=["app-store"],
-            changed="app-store.data",
-            input_values={"app-store": {"dataset_id": "dataset-B"}},
-            state_values={
-                "pathway-context-store": old_context,
-            },
-            output_id="pathway-context-store",
-        ),
-    )
-    assert changed_dataset.status_code == 200
-    changed = changed_dataset.get_json()["response"]
-    assert changed["pathway-store"]["data"] is None
-    assert changed["pathway-context-store"]["data"] is None
-    assert changed["pathway-selected-path"]["data"] is None
-    assert changed["pathway-selected-step"]["data"] is None
-    assert changed["pathway-grid"]["selected_rows"] == []
-    assert changed["pathway-grid"]["data"] == []
-    assert changed["pathway-cytoscape"]["elements"] == []
-    assert changed["pathway-cytoscape"]["tapNodeData"] is None
-    assert changed["pathway-open-events-btn"]["disabled"] is True
 
 
 def test_element_distribution_callback_passes_generic_filters(monkeypatch) -> None:
@@ -2701,6 +2758,140 @@ def test_data_picker_swaps_views_and_return_preserves_applied_data() -> None:
     assert "d-none" not in returned_result["data-overview-view"]["className"]
     assert "d-none" in returned_result["data-browser-view"]["className"]
     assert "app-store" not in returned_result
+
+
+def test_dataset_picker_keeps_index_management_reachable() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    layout = client.get("/_dash-layout").get_json()
+
+    index_button = _layout_node_by_id(layout, "data-browser-index-btn") or {}
+    assert (index_button.get("props") or {}).get("children") == "返回索引管理"
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_data_view_callback_payload(
+            client,
+            changed="data-browser-index-btn.n_clicks",
+            values={"data-browser-index-btn": 1},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert "d-none" not in result["data-overview-view"]["className"]
+    assert "d-none" in result["data-browser-view"]["className"]
+    index_management = _layout_node_by_id(layout, "data-cache-management") or {}
+    assert (index_management.get("props") or {}).get("open") is True
+    assert "索引构建与状态" in json.dumps(
+        index_management,
+        ensure_ascii=False,
+    )
+
+
+def test_recent_dataset_click_opens_browser_without_pattern_id_error() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "data-overview-view.className" in item["output"]
+        and "data-browser-view.className" in item["output"]
+        and any(value["id"] == "data-pick-btn" for value in item["inputs"])
+    )
+    recent_input_id = next(
+        item["id"]
+        for item in dependency["inputs"]
+        if "dir-browser-recent-entry" in str(item["id"])
+    )
+    changed = (
+        json.dumps(
+            {"index": 0, "type": "dir-browser-recent-entry"},
+            separators=(",", ":"),
+        )
+        + ".n_clicks"
+    )
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_data_view_callback_payload(
+            client,
+            changed=changed,
+            values={recent_input_id: [1]},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert "d-none" in result["data-overview-view"]["className"]
+    assert "d-none" not in result["data-browser-view"]["className"]
+
+
+def test_recent_dataset_mount_does_not_reopen_browser() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "data-overview-view.className" in item["output"]
+        and "data-browser-view.className" in item["output"]
+        and any(value["id"] == "data-pick-btn" for value in item["inputs"])
+    )
+    recent_input_id = next(
+        item["id"]
+        for item in dependency["inputs"]
+        if "dir-browser-recent-entry" in str(item["id"])
+    )
+    changed = (
+        json.dumps(
+            {"index": 0, "type": "dir-browser-recent-entry"},
+            separators=(",", ":"),
+        )
+        + ".n_clicks"
+    )
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_data_view_callback_payload(
+            client,
+            changed=changed,
+            values={recent_input_id: [0]},
+        ),
+    )
+
+    assert response.status_code == 204
+
+
+def test_empty_workspace_picker_initializes_and_selects_single_dataset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    client = create_app().server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="data-empty-pick-btn.n_clicks",
+            values={"data-empty-pick-btn": 1},
+            state_values={
+                "dir-browser-path": "",
+                "data-folder-input": "",
+                "dataset-browser-candidate": None,
+                "recent-datasets": [],
+                "app-store": cb.initial_store(),
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["dir-browser-path"]["data"] == str(tmp_path)
+    assert result["dataset-browser-candidate"]["data"] == candidate
+    assert result["data-apply-btn"]["disabled"] is False
 
 
 def _load_dataset_callback_payload(
@@ -3116,6 +3307,127 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
     ):
         property_name = "content" if component_id.endswith("-copy") else "children"
         assert result[component_id][property_name] == command
+
+
+def test_running_index_task_keeps_clear_action_clickable_and_explains_next_step(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = _discovered_candidate(tmp_path)
+
+    def fake_preparation(folder: str, *, base: str = "") -> dict[str, Any]:
+        assert (folder, base) == (candidate["folder"], candidate["base"])
+        return {
+            "events": {
+                "state": "building",
+                "index_size": 1024,
+                "task": {"state": "running"},
+            },
+            "trajectory": {"state": "missing"},
+            "composition": {"state": "missing"},
+        }
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(svc, "dataset_preparation_status", fake_preparation)
+    app = create_app()
+    client = app.server.test_client()
+
+    status_response = client.post(
+        "/_dash-update-component",
+        json=_preparation_status_callback_payload(
+            client,
+            candidate=candidate,
+            store={},
+        ),
+    )
+
+    assert status_response.status_code == 200
+    status = status_response.get_json()["response"]
+    assert status["data-clear-event-btn"]["disabled"] is False
+
+    click_response = client.post(
+        "/_dash-update-component",
+        json=_clear_confirmation_callback_payload(
+            client,
+            candidate=candidate,
+            store={},
+            kind="event",
+        ),
+    )
+
+    assert click_response.status_code == 200
+    clicked = click_response.get_json()["response"]
+    assert clicked["data-clear-confirm-modal"]["is_open"] is False
+    feedback = json.dumps(
+        clicked["data-prep-clear-alert"]["children"],
+        ensure_ascii=False,
+    )
+    assert "先取消后台任务" in feedback
+
+
+def test_terminal_preparation_task_record_can_be_dismissed(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_dismiss(folder: str, *, base: str, kind: str) -> dict[str, Any]:
+        calls.append((folder, base, kind))
+        return {"ok": True, "removed": True, "message": "任务记录已移除。"}
+
+    monkeypatch.setattr(svc, "dismiss_dataset_preparation_task", fake_dismiss)
+    client = create_app().server.test_client()
+    cancel_pattern = (
+        '{"capability":["ALL"],"dataset":["ALL"],'
+        '"type":"preparation-task-cancel"}'
+    )
+    dismiss_pattern = (
+        '{"capability":["ALL"],"dataset":["ALL"],'
+        '"type":"preparation-task-dismiss"}'
+    )
+    dismiss_id = {
+        "type": "preparation-task-dismiss",
+        "dataset": "dataset-a",
+        "capability": "event",
+    }
+    task = {
+        "dataset_id": "dataset-a",
+        "folder": "/data/run-a",
+        "base": "/data/run-a/run.lammpstrj",
+        "capability": "event",
+        "state": "interrupted",
+    }
+    payload = _callback_payload(
+        client,
+        input_ids=["data-prep-cancel-btn", cancel_pattern, dismiss_pattern],
+        changed=(
+            f"{json.dumps(dismiss_id, sort_keys=True, separators=(',', ':'))}"
+            ".n_clicks"
+        ),
+        input_values={
+            "data-prep-cancel-btn": None,
+            cancel_pattern: [0],
+            dismiss_pattern: [1],
+        },
+        state_values={
+            "dataset-browser-candidate": None,
+            "app-store": {},
+            "preparation-task-snapshot": [task],
+        },
+        output_id="data-prep-cancel-result",
+    )
+    for input_item in payload["inputs"]:
+        if input_item["id"] == dismiss_pattern:
+            input_item["id"] = dismiss_id
+
+    response = client.post("/_dash-update-component", json=payload)
+
+    assert response.status_code == 200
+    assert calls == [
+        ("/data/run-a", "/data/run-a/run.lammpstrj", "event")
+    ]
+    assert response.get_json()["response"]["data-prep-cancel-result"]["data"] == {
+        "ok": True,
+        "removed": True,
+        "message": "任务记录已移除。",
+    }
 
 
 def test_preparation_refresh_uses_local_sidecar_workspace_by_default(
@@ -3744,6 +4056,8 @@ def test_directory_browser_requires_explicit_choice_for_multiple_datasets(tmp_pa
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
     assert rendered.count("rs-browser-candidate-row") == 2
     assert "is-selected" not in rendered
+    assert "项分析功能可直接使用" in rendered
+    assert "rs-browser-capability-list" not in rendered
 
     selected = {"type": "dir-browser-dataset", "name": "rp4.lammpstrj"}
     card_payload = _browser_callback_payload(
@@ -3920,9 +4234,9 @@ def test_invalid_expert_path_preserves_browser_candidate_and_hides_attempted_pat
     assert result["dir-browser-path"]["data"] == str(allowed)
     assert result["dataset-browser-candidate"]["data"] == candidate
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "不在允许根目录内" in rendered
+    assert "不可浏览" in rendered
     assert str(outside) not in rendered
-    assert "Current Dataset" in rendered
+    assert "当前数据集" in rendered
 
 
 def test_large_browser_rendering_is_bounded_counted_and_filterable(
@@ -3976,7 +4290,7 @@ def test_large_browser_rendering_is_bounded_counted_and_filterable(
     directories = json.dumps(result["dir-browser-body"]["children"], ensure_ascii=False)
     assert candidates.count("rs-browser-candidate-row") == 1
     assert "显示 1 / 匹配 1 / 共 200" in candidates
-    assert "没有子目录匹配当前筛选" in directories
+    assert "没有文件夹匹配当前筛选" in directories
 
 
 def test_filter_keeps_one_visible_candidate_in_radio_tab_order(tmp_path, monkeypatch) -> None:
@@ -4044,9 +4358,38 @@ def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
     )
 
     assert "old run（不可用）" in payload
+    assert "/missing" in payload
+    assert "rs-browser-recent-path" in payload
     assert '"disabled": true' in payload
     assert "dir-browser-recent-remove" in payload
     assert "从最近数据集中移除 old run" in payload
+
+
+def test_starting_location_switcher_uses_friendly_names_and_full_paths(
+    monkeypatch,
+) -> None:
+    roots = [
+        Path.home().resolve(),
+        Path("/media/huangchen"),
+        Path("/data"),
+        Path("/mnt"),
+    ]
+    monkeypatch.setattr(cb, "_allowed_roots", lambda: roots)
+
+    rendered = cb._render_allowed_roots()
+    payload = json.dumps(
+        rendered,
+        default=lambda value: value.to_plotly_json(),
+        ensure_ascii=False,
+    )
+
+    for label in ("主目录", "外接数据", "共享数据", "其他挂载"):
+        assert label in payload
+    for root in roots:
+        assert str(root) in payload
+    assert "切换起始位置" in payload
+    assert "可访问位置" not in payload
+    assert "huangchen 2" not in payload
 
 
 def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_card_rule() -> None:
@@ -4063,6 +4406,40 @@ def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_ca
     assert ".rs-browser-path-control { flex-wrap: wrap; }" in css
     assert 'body:has([data-dash-is-loading="true"]) .rs-global-operation-progress' not in css
     assert ".rs-analysis-progress.is-running::after" in css
+
+
+def test_species_tooltips_can_overflow_their_grid_wrappers() -> None:
+    client = create_app().server.test_client()
+    layout = json.dumps(client.get("/_dash-layout").get_json())
+    css = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+
+    assert layout.count("rs-grid-wrap rs-species-grid-wrap") == 2
+    assert ".rs-species-grid-wrap {\n    overflow: visible;\n}" in css
+
+
+def test_compact_sidebar_override_follows_all_desktop_shell_rules() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+
+    compact_marker = "/* Final compact-sidebar breakpoint contract"
+    assert compact_marker in css
+    compact_css = css[css.index(compact_marker) :]
+    assert "@media (max-width: 1180px) and (min-width: 769px)" in compact_css
+    assert "--rs-nav-width: 76px;" in compact_css
+    assert "flex-direction: column;" in compact_css
+    assert ".rs-sidebar-brand .rs-brand-copy" in compact_css
+    assert "display: none;" in compact_css
 
 
 def test_event_viewer_assets_are_vendored_and_offline_ready() -> None:
@@ -4235,6 +4612,149 @@ def test_unresolved_event_selection_does_not_open_a_blank_trajectory() -> None:
     )
 
 
+def test_molecule_lineage_workspace_runs_from_a_concrete_participant(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    report = {
+        "query": {"event_id": "rngevt-root"},
+        "summary": {
+            "molecule_node_count": 4,
+            "event_count": 2,
+            "recrossing_episode_count": 1,
+            "aggregate_trend": "growth",
+        },
+        "truncations": [{"reason": "persistent_depth_limit"}],
+        "views": {"persistent": {"elements": []}, "raw": {"elements": []}},
+        "event_nodes": [],
+    }
+
+    def fake_lineage(artifacts, event_row, **kwargs):
+        captured.update(artifacts=artifacts, event_row=event_row, **kwargs)
+        return report
+
+    monkeypatch.setattr(svc, "build_molecule_lineage_analysis", fake_lineage)
+    client = create_app().server.test_client()
+    row = {
+        "event_id": "rngevt-root",
+        "association_status": "matched",
+        "reactant_participants": [
+            {"species": "[C][H]", "atom_ids": [1, 2]}
+        ],
+        "product_participants": [
+            {"species": "[C]", "atom_ids": [1]},
+            {"species": "[H]", "atom_ids": [2]},
+        ],
+    }
+    selected = {"row": row, "kind": "rng_event", "config": {}}
+    viewer = {"event_id": "rngevt-root", "frames": [], "meta": {}}
+
+    prepared_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-selected-store", "event-viewer-store"],
+            changed="event-viewer-store.data",
+            input_values={
+                "event-selected-store": selected,
+                "event-viewer-store": viewer,
+            },
+            state_values={},
+            output_id="molecule-lineage-participant",
+        ),
+    )
+    assert prepared_response.status_code == 200
+    prepared = prepared_response.get_json()["response"]
+    assert prepared["molecule-lineage-card"]["style"] == {"display": "block"}
+    assert prepared["molecule-lineage-participant"]["value"] == "reactant:0"
+    assert len(prepared["molecule-lineage-participant"]["options"]) == 3
+    assert prepared["molecule-lineage-run-btn"]["disabled"] is False
+
+    run_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["molecule-lineage-run-btn"],
+            changed="molecule-lineage-run-btn.n_clicks",
+            input_values={"molecule-lineage-run-btn": 1},
+            state_values={
+                "molecule-lineage-participant": "reactant:0",
+                "molecule-lineage-anchor-mode": "atom_ids",
+                "molecule-lineage-anchor-value": "1",
+                "molecule-lineage-depth-backward": 3,
+                "molecule-lineage-depth-forward": 3,
+                "molecule-lineage-node-limit": 100,
+                "molecule-lineage-recross-window": 5,
+                "event-selected-store": selected,
+                "event-viewer-store": viewer,
+                "app-store": {
+                    "artifacts": {
+                        "reactionevent": "/data/run.reactionevent.csv",
+                        "molecules": "/data/run.molecules.csv",
+                    }
+                },
+            },
+            output_id="molecule-lineage-store",
+        ),
+    )
+    assert run_response.status_code == 200
+    result = run_response.get_json()["response"]
+    assert result["molecule-lineage-store"]["data"] == report
+    assert result["molecule-lineage-results"]["style"] == {}
+    assert result["molecule-lineage-json-btn"]["disabled"] is False
+    assert captured["side"] == "reactant"
+    assert captured["participant_index"] == 0
+    assert captured["anchor_mode"] == "atom_ids"
+    assert captured["anchor_atom_ids"] == [1]
+    assert captured["recrossing_window"] == 5
+
+
+def test_lineage_event_click_updates_selection_and_drilldown_request() -> None:
+    client = create_app().server.test_client()
+    event = {
+        "event_id": "rngevt-next",
+        "node_id": "event::rngevt-next",
+        "kind": "event",
+        "association_status": "matched",
+        "atom_id_list": [1, 3],
+        "reactant_participants": [{"species": "[C]", "atom_ids": [1]}],
+        "product_participants": [{"species": "[C][O]", "atom_ids": [1, 3]}],
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "molecule-lineage-cytoscape",
+                "molecule-lineage-event-grid",
+            ],
+            changed="molecule-lineage-cytoscape.tapNodeData",
+            input_values={
+                "molecule-lineage-cytoscape.tapNodeData": {
+                    "kind": "event",
+                    "event_id": "rngevt-next",
+                },
+                "molecule-lineage-event-grid.selected_row_ids": [],
+            },
+            state_values={
+                "molecule-lineage-event-grid": [],
+                "molecule-lineage-store": {"event_nodes": [event]},
+                "event-selected-store": {
+                    "config": {"before_frames": 2, "after_frames": 4}
+                },
+            },
+            output_id="molecule-lineage-drilldown-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    drilldown = result["molecule-lineage-drilldown-store"]["data"]
+    assert drilldown["row"] == event
+    assert drilldown["kind"] == "rng_event"
+    assert drilldown["config"] == {"before_frames": 2, "after_frames": 4}
+
+
 def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -4285,16 +4805,18 @@ def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=[
-                "event-extract-btn",
-                "trajectory-refresh-btn",
-                "event-type-map-clear-btn",
-            ],
+                input_ids=[
+                    "event-extract-btn",
+                    "trajectory-refresh-btn",
+                    "event-type-map-clear-btn",
+                    "molecule-lineage-drilldown-store",
+                ],
             changed="trajectory-refresh-btn.n_clicks",
             input_values={
                 "event-extract-btn": 1,
                 "trajectory-refresh-btn": 1,
-                "event-type-map-clear-btn": 0,
+                    "event-type-map-clear-btn": 0,
+                    "molecule-lineage-drilldown-store": None,
             },
             state_values={
                 "event-selected-store": {
@@ -4344,16 +4866,18 @@ def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=[
-                "event-extract-btn",
-                "trajectory-refresh-btn",
-                "event-type-map-clear-btn",
-            ],
+                input_ids=[
+                    "event-extract-btn",
+                    "trajectory-refresh-btn",
+                    "event-type-map-clear-btn",
+                    "molecule-lineage-drilldown-store",
+                ],
             changed="event-type-map-clear-btn.n_clicks",
             input_values={
                 "event-extract-btn": 1,
                 "trajectory-refresh-btn": 1,
-                "event-type-map-clear-btn": 1,
+                    "event-type-map-clear-btn": 1,
+                    "molecule-lineage-drilldown-store": None,
             },
             state_values={
                 "event-selected-store": {

@@ -307,6 +307,13 @@ def _task_process_is_owner(task: dict[str, Any]) -> bool:
 
 
 _ACTIVE_TASK_STATES = {"running", "cancel_requested"}
+_TERMINAL_TASK_STATES = {
+    "completed",
+    "canceled",
+    "interrupted",
+    "failed",
+    "superseded",
+}
 
 
 def _read_preparation_task(
@@ -547,6 +554,28 @@ def request_cancellation(
             )
     except (OSError, TypeError, ValueError):
         pass
+    return True
+
+
+def dismiss_preparation_task(
+    case: str,
+    *,
+    base: str = "",
+    capability: str,
+) -> bool:
+    """Remove one terminal task record without touching derived evidence."""
+    dataset = discover_dataset(case, base)
+    task_path = _preparation_task_path(dataset, capability)
+    with _task_record_lock(task_path):
+        try:
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return False
+        if not isinstance(task, dict):
+            return False
+        if str(task.get("state") or "") not in _TERMINAL_TASK_STATES:
+            return False
+        task_path.unlink(missing_ok=True)
     return True
 
 

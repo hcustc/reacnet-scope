@@ -205,7 +205,7 @@ def test_session_revalidation_distinguishes_active_revision_changed_and_unavaila
     assert changed["context"]["capabilities"]["events"] == current[
         "capabilities"
     ]["events"]
-    assert changed["context"]["capabilities"]["intermediate"] is False
+    assert "intermediate" not in changed["context"]["capabilities"]
     assert changed["context"]["capabilities"]["evolution"] is False
     assert changed["context"]["readiness"]["basic_analysis"] == {
         "ready": False,

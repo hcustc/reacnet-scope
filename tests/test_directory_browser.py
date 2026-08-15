@@ -322,10 +322,35 @@ class AllowedRootsTests(unittest.TestCase):
                 self.assertIn(d, roots)
                 self.assertNotIn(Path.home(), roots)
 
-    def test_skips_nonexistent_default_roots(self):
-        roots = get_allowed_roots()
-        for r in roots:
-            self.assertTrue(r.exists(), f"Root {r} should exist")
+    def test_keeps_default_media_root_when_mount_appears_after_startup(self):
+        media_root = Path("/media") / Path.home().name
+        target = media_root / "T3000" / "rng_data_2500K"
+        real_exists = Path.exists
+        real_is_dir = Path.is_dir
+
+        with mock.patch.dict(os.environ, {"REACNET_SCOPE_ALLOWED_ROOTS": ""}):
+            with mock.patch.object(
+                Path,
+                "exists",
+                new=lambda path: (
+                    False if path == media_root else real_exists(path)
+                ),
+            ):
+                startup_roots = get_allowed_roots()
+
+        old_roots = dir_browser.ALLOWED_ROOTS
+        dir_browser.ALLOWED_ROOTS = startup_roots
+        try:
+            with mock.patch.object(
+                Path,
+                "is_dir",
+                new=lambda path: (
+                    True if path == media_root else real_is_dir(path)
+                ),
+            ):
+                self.assertEqual(validate_browse_path(str(target)), target)
+        finally:
+            dir_browser.ALLOWED_ROOTS = old_roots
 
 
 # ======================================================================

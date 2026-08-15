@@ -10,8 +10,10 @@ from reacnet_scope.event_paths import (
     EVENT_PATH_SCHEMA_VERSION,
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
-    enumerate_aggregate_reaction_paths,
+    _analyze_event_paths as analyze_event_paths,
+    _enumerate_aggregate_reaction_paths as enumerate_aggregate_reaction_paths,
+    normalize_reaction_sequence,
+    verify_event_path,
 )
 from reacnet_scope.network import Reaction
 from scripts import rng_query_cli as cli
@@ -219,6 +221,58 @@ def test_event_paths_are_concrete_time_ordered_and_atom_continuous(
     assert comparison["realization_rate"] == 0.25
 
 
+def test_explicit_path_verification_only_matches_the_supplied_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    source = _write_chain_source(tmp_path, "explicit", (0,))
+
+    supported = verify_event_path(
+        [source],
+        ["A -> B", "B -> C", "C -> D"],
+    )
+    not_observed = verify_event_path(
+        [source],
+        ["A -> B", "B -> C", "C -> Z"],
+    )
+
+    assert supported["verification"]["status"] == "supported"
+    assert supported["query"]["reaction_keys"] == ["A->B", "B->C", "C->D"]
+    assert supported["summary"]["actual_path_occurrence_count"] == 1
+    assert "comparison" not in supported
+    assert not_observed["verification"]["status"] == "not_observed"
+    assert not_observed["summary"]["actual_path_occurrence_count"] == 0
+    assert not_observed["paths"] == []
+
+
+def test_explicit_path_verification_reports_inconclusive_when_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    source = _write_chain_source(tmp_path, "bounded-explicit", (0,))
+
+    report = verify_event_path(
+        [source],
+        ["A->B", "B->C", "C->D"],
+        max_expansions=1,
+    )
+
+    assert report["verification"]["status"] == "inconclusive"
+    assert report["summary"]["actual_path_occurrence_count"] == 0
+
+
+def test_reaction_sequence_normalization_is_exact_and_multiplicity_preserving() -> None:
+    assert normalize_reaction_sequence(
+        [" B + A → C ", "C + C -> D"]
+    ) == ("A+B->C", "C+C->D")
+    with pytest.raises(ValueError, match="2 to 8"):
+        normalize_reaction_sequence(["A->B"])
+    with pytest.raises(ValueError, match="exactly one"):
+        normalize_reaction_sequence(["A-B", "B->C"])
+
+
 def test_species_reachability_without_same_molecule_instance_is_not_actual_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,7 +425,7 @@ def test_replicate_labels_must_be_unique(tmp_path: Path) -> None:
         analyze_event_paths([source, source])
 
 
-def test_event_paths_cli_accepts_repeat_prefixes_and_exports_report(
+def test_verify_path_cli_accepts_explicit_sequence_and_exports_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -379,13 +433,19 @@ def test_event_paths_cli_accepts_repeat_prefixes_and_exports_report(
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     source = _write_chain_source(tmp_path / "data", "run", (0,))
     common_prefix = source.reactionevent_file[: -len(".reactionevent.csv")]
-    output = tmp_path / "reports" / "event-paths.json"
+    output = tmp_path / "reports" / "path-verification.json"
 
     exit_code = cli.main(
         [
-            "event-paths",
+            "verify-path",
             "--source",
             f"replicate-1={common_prefix}",
+            "--reaction",
+            "A->B",
+            "--reaction",
+            "B->C",
+            "--reaction",
+            "C->D",
             "--out-json",
             str(output),
         ]
@@ -395,10 +455,11 @@ def test_event_paths_cli_accepts_repeat_prefixes_and_exports_report(
     document = json.loads(output.read_text(encoding="utf-8"))
     assert document["schema_version"] == EVENT_PATH_SCHEMA_VERSION
     assert document["summary"]["actual_path_occurrence_count"] == 1
+    assert document["verification"]["status"] == "supported"
     assert document["paths"][0]["replicate_reproduction_rate"] == 1.0
     terminal = capsys.readouterr().out
     assert "actual_occurrences=1" in terminal
-    assert "realization_rate=0.25" in terminal
+    assert "status=supported" in terminal
 
 
 def test_event_paths_cli_source_prefers_native_timeline(tmp_path: Path) -> None:
@@ -415,7 +476,17 @@ def test_event_paths_cli_source_prefers_native_timeline(tmp_path: Path) -> None:
 def test_event_paths_cli_rejects_malformed_source_without_traceback(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    exit_code = cli.main(["event-paths", "--source", "missing-equals"])
+    exit_code = cli.main(
+        [
+            "verify-path",
+            "--source",
+            "missing-equals",
+            "--reaction",
+            "A->B",
+            "--reaction",
+            "B->C",
+        ]
+    )
 
     assert exit_code == 2
     captured = capsys.readouterr()

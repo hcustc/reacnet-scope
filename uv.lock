@@ -1644,7 +1644,24 @@ web = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ase" },
+    { name = "dash", extra = ["diskcache"] },
+    { name = "dash-bootstrap-components" },
+    { name = "dash-cytoscape" },
+    { name = "matplotlib" },
     { name = "pytest" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+test = [
+    { name = "ase" },
+    { name = "dash", extra = ["diskcache"] },
+    { name = "dash-bootstrap-components" },
+    { name = "dash-cytoscape" },
+    { name = "matplotlib" },
+    { name = "pytest" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.metadata]
@@ -1665,7 +1682,24 @@ requires-dist = [
 provides-extras = ["plot", "web", "trajectory"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8,<9" }]
+dev = [
+    { name = "ase", specifier = ">=3.23,<4" },
+    { name = "dash", extras = ["diskcache"], specifier = ">=4,<5" },
+    { name = "dash-bootstrap-components", specifier = ">=2,<3" },
+    { name = "dash-cytoscape", specifier = ">=1,<2" },
+    { name = "matplotlib", specifier = ">=3.8" },
+    { name = "pytest", specifier = ">=8,<9" },
+    { name = "scipy", specifier = ">=1.11" },
+]
+test = [
+    { name = "ase", specifier = ">=3.23,<4" },
+    { name = "dash", extras = ["diskcache"], specifier = ">=4,<5" },
+    { name = "dash-bootstrap-components", specifier = ">=2,<3" },
+    { name = "dash-cytoscape", specifier = ">=1,<2" },
+    { name = "matplotlib", specifier = ">=3.8" },
+    { name = "pytest", specifier = ">=8,<9" },
+    { name = "scipy", specifier = ">=1.11" },
+]
 
 [[package]]
 name = "requests"

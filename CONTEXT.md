@@ -24,6 +24,10 @@ _Avoid_: Molecular formula, formula group
 A directed, stoichiometry-preserving equation of exact species identities shared by any number of reaction occurrences; ordering within each reaction side is not significant.
 _Avoid_: Reaction event, event row
 
+**Direct Reaction Channel**:
+A reaction type viewed relative to one focal species and classified as a production channel when that species is on the product side or a consumption channel when it is on the reactant side; it is a one-step query and does not recursively expand a path.
+_Avoid_: Path Verification, Event Path
+
 **Aggregated Reaction Record**:
 The count of one reaction type detected within one transition.
 _Avoid_: Reaction occurrence, event
@@ -44,21 +48,29 @@ _Avoid_: Reaction network, molecular evidence
 Analyzed-frame species identities and their abundance counts, sufficient for species lookup, time evolution, and abundance-based screening.
 _Avoid_: Molecular evidence, species index
 
-**Intermediate Candidate**:
-A species selected by explicit abundance-shape and lifetime criteria for further evidence review; it is not a confirmed mechanistic intermediate.
-_Avoid_: Intermediate, confirmed intermediate
-
-**Candidate Path**:
-A bounded sequence of reaction types that is reachable in aggregated reaction evidence and remains a hypothesis until occurrence evidence is reviewed.
-_Avoid_: Confirmed pathway, reaction mechanism
-
 **Event Path**:
 A temporally ordered sequence of reaction occurrences linked by continuity of a molecular instance and its atom lineage in the available evidence; it does not establish causality or a unique mechanism.
 _Avoid_: Confirmed mechanism, mechanistic proof
 
+**Path Verification**:
+The evidence check of one user-supplied sequence of exact reaction types against strict Event Path continuity rules; it does not discover, complete, score, or rank paths.
+_Avoid_: Path search, mechanism prediction, automatic pathway analysis
+
 **Molecular Evidence**:
 Frame-specific species, atom membership, and bond structure used to associate reaction occurrences with molecular participants.
 _Avoid_: Reaction evidence, trajectory coordinates
+
+**Molecule Instance**:
+A concrete molecular participant identified by one analyzed frame, exact Species, atom-ID set, and intramolecular bond set. The same stored molecule definition may recur in disjoint frame ranges, so a Species or molecule-definition ID alone is not an instance identity.
+_Avoid_: Species, molecule definition, abundance trace
+
+**Molecule Lineage**:
+A bounded, bidirectional evidence graph that starts from one Molecule Instance and follows anchor atoms through their nearest resolvable Reaction Occurrences. It preserves co-participants and leaving fragments as context and does not establish a mechanism, causality, or a unique molecular history.
+_Avoid_: Mechanism network, automatic pathway discovery, Species evolution
+
+**Fast Recrossing Episode**:
+A sequence in which the same anchor atom set returns within a configured number of analyzed frames to the exact same Species, atom-ID set, and intramolecular bond set. A persistent view may fold the sequence, but the raw Reaction Occurrences remain available.
+_Avoid_: Reversible reaction type, equilibrium proof
 
 **Current Dataset**:
 The one ReacNetGenerator dataset whose evidence is available to the ordinary analysis tools at a time. Selecting datasets for a cross-condition comparison does not make them current.

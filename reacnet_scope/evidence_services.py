@@ -34,7 +34,6 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
-from reacnet_scope.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -54,7 +53,6 @@ from reacnet_scope.composition import (  # noqa: E402
 from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
-    EventIndexEvidenceProvider,
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
@@ -63,7 +61,12 @@ from reacnet_scope.event_package import (  # noqa: E402
 from reacnet_scope.event_paths import (  # noqa: E402
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
+)
+from reacnet_scope.molecule_lineage import (  # noqa: E402
+    LineageElementMappingError,
+    MoleculeLineageError,
+    build_molecule_lineage,
+    molecule_lineage_to_csv,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -90,7 +93,6 @@ from reacnet_scope.queries import (  # noqa: E402
     ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
-    build_intermediate_candidates_payload,
     build_species_plot_payload,
     collect_species_totals,
     collect_next_reactions,
@@ -318,28 +320,6 @@ def evolution_to_csv(payload: dict[str, Any]) -> str:
             row.append(vals[i] if i < len(vals) else "")
         writer.writerow(row)
     return buf.getvalue()
-
-
-def intermediate_candidates_to_csv(payload: Mapping[str, Any] | None) -> str:
-    """Export candidate rows with the exact rule and parameter audit trail."""
-    document = dict(payload or {})
-    query_json = json.dumps(
-        document.get("query") or {},
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    rows = [
-        {
-            "schema_version": document.get("schema_version") or "",
-            "rule_version": document.get("rule_version") or "",
-            "scoring_version": document.get("scoring_version") or "",
-            "query_parameters_json": query_json,
-            **dict(row),
-        }
-        for row in document.get("rows") or []
-    ]
-    return rows_to_csv(rows)
 
 
 def build_elemental_composition_evolution(
@@ -637,85 +617,6 @@ def build_element_distribution_species_drilldown(
     }
 
 
-def build_intermediate_candidates(
-    artifacts: dict[str, str],
-    *,
-    kind: str = "intermediate",
-    top: int = 120,
-    abundance_threshold: float = 5.0,
-    start_ratio_max: float = 0.1,
-    decay_alpha: float = 0.8,
-    product_ratio_min: float = 0.95,
-    reactant_start_ratio_min: float = 0.9,
-    fwhm_min_frames: float = 1.0,
-    timestep_ps: float | None = None,
-    require_fwhm: bool = True,
-    with_flux: bool = True,
-    flux_top: int = 10,
-) -> dict[str, Any]:
-    """Build the intermediate-candidate query model for Dash."""
-    reac_path = (artifacts.get("reaction") or "").strip()
-    species_path = (artifacts.get("species") or "").strip()
-    if not species_path and reac_path:
-        species_path = derive_species_path(reac_path)
-    if not species_path or not os.path.exists(species_path):
-        raise ServiceError("缺少 .species 数据文件", reason="missing_species_file")
-    requested_with_flux = bool(with_flux)
-    flux_available = bool(reac_path and os.path.exists(reac_path))
-    effective_with_flux = requested_with_flux and flux_available
-    conversion: float | None
-    try:
-        if timestep_ps is None:
-            conversion = load_timestep_ps(species_path)
-        else:
-            conversion = float(timestep_ps)
-            save_timestep_ps(species_path, conversion)
-    except (TrajectoryFrameError, TypeError, ValueError) as exc:
-        raise ServiceError(str(exc), reason="invalid_timestep") from exc
-    params = {
-        "reac": [reac_path or ""],
-        "min_tp": [str(_reaction_min_tp(artifacts))],
-        "species_file": [species_path],
-        "kind": [kind if kind in {"intermediate", "product", "reactant", "all"} else "intermediate"],
-        "top": [str(max(1, int(top)))],
-        "abundance_threshold": [str(float(abundance_threshold))],
-        "start_ratio_max": [str(float(start_ratio_max))],
-        "decay_alpha": [str(float(decay_alpha))],
-        "product_ratio_min": [str(float(product_ratio_min))],
-        "reactant_start_ratio_min": [str(float(reactant_start_ratio_min))],
-        "fwhm_min_frames": [str(float(fwhm_min_frames))],
-        "timestep_ps": [str(conversion) if conversion is not None else ""],
-        "require_fwhm": ["1" if require_fwhm else "0"],
-        "with_flux": ["1" if effective_with_flux else "0"],
-        "flux_top": [str(max(0, int(flux_top)))],
-    }
-    try:
-        result = build_intermediate_candidates_payload(params)
-        result.setdefault("query", {})["with_flux_requested"] = requested_with_flux
-        result.setdefault("meta", {})["flux_enrichment"] = {
-            "requested": requested_with_flux,
-            "available": flux_available,
-            "applied": effective_with_flux,
-            "reason": (
-                ""
-                if flux_available or not requested_with_flux
-                else "reaction_network_missing"
-            ),
-        }
-        return result
-    except (IndexNotReadyError, IndexBuildInProgressError, IndexStaleError, IndexInvalidError) as exc:
-        raise ServiceError(
-            f"Species Abundance Index 未就绪: {exc}",
-            reason="species_index_not_ready",
-        ) from exc
-    except FileNotFoundError as exc:
-        raise ServiceError(str(exc), reason="missing_file") from exc
-    except ValueError as exc:
-        raise ServiceError(str(exc), reason="bad_request") from exc
-    except Exception as exc:
-        raise ServiceError(f"筛选中间体候选失败: {exc}") from exc
-
-
 def locate_rng_events(
     artifacts: dict[str, str],
     reaction_text: str,
@@ -793,6 +694,160 @@ def locate_rng_events(
         "time_basis": payload.get("time_basis"),
     }
     return payload
+
+
+def _lineage_atom_elements(
+    artifacts: Mapping[str, str],
+    event_row: Mapping[str, Any],
+    viewer: Mapping[str, Any] | None,
+) -> dict[int, str]:
+    """Read one indexed frame to resolve stable atom ID -> element values."""
+
+    trajectory_file = str(artifacts.get("trajectory") or "").strip()
+    if trajectory_file and Path(trajectory_file).is_file():
+        try:
+            index = TRAJECTORY_INDEX_STORE.open_required(trajectory_file)
+            available = index.frames
+            if not available:
+                raise ServiceError(
+                    "轨迹帧索引不包含任何帧",
+                    reason="empty_trajectory_index",
+                )
+            requested = int(
+                event_row.get("before_timestep")
+                if event_row.get("before_timestep") is not None
+                else event_row.get("after_timestep")
+            )
+            position = bisect_left(available, requested)
+            choices = [
+                offset
+                for offset in (position - 1, position)
+                if 0 <= offset < len(available)
+            ]
+            nearest = min(
+                choices,
+                key=lambda offset: abs(int(available[offset]) - requested),
+            )
+            frame_number = int(available[nearest])
+            byte_range = index.offsets_for([frame_number]).get(frame_number)
+            if byte_range is None:
+                raise ServiceError(
+                    "轨迹索引没有返回谱系锚点帧",
+                    reason="missing_frame_offsets",
+                )
+            mapping = dict((viewer or {}).get("meta", {}).get("type_element_map") or {})
+            if not mapping:
+                mapping = load_type_element_map(trajectory_file)
+            with open(trajectory_file, "rb") as source:
+                source.seek(int(byte_range[0]))
+                block = source.read(int(byte_range[1]) - int(byte_range[0]))
+            frame = read_lammps_frame_block(
+                block,
+                type_element_map=mapping,
+            )
+            return {
+                int(atom_id): str(atom.get("element") or "")
+                for atom_id, atom in (frame.get("atoms") or {}).items()
+                if str(atom.get("element") or "")
+            }
+        except ServiceError:
+            raise
+        except IndexNotReadyError as exc:
+            raise ServiceError(str(exc), reason="index_not_ready") from exc
+        except (
+            IndexInvalidError,
+            IndexStaleError,
+            OSError,
+            TrajectoryDependencyError,
+            TrajectoryFrameError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ServiceError(
+                f"无法读取谱系锚点帧的元素信息：{exc}",
+                reason="lineage_element_mapping",
+            ) from exc
+
+    elements: dict[int, str] = {}
+    for frame in (viewer or {}).get("frames") or []:
+        for atom in frame.get("atoms") or []:
+            element = str(atom.get("element") or "").strip()
+            if element:
+                elements[int(atom["id"])] = element
+    return elements
+
+
+def build_molecule_lineage_analysis(
+    artifacts: dict[str, str],
+    event_row: Mapping[str, Any],
+    *,
+    side: str,
+    participant_index: int,
+    viewer: Mapping[str, Any] | None = None,
+    anchor_mode: str = "non_hydrogen",
+    anchor_elements: Iterable[str] = (),
+    anchor_atom_ids: Iterable[int] = (),
+    depth_backward: int = 3,
+    depth_forward: int = 3,
+    max_molecule_nodes: int = 100,
+    recrossing_window: int = 5,
+) -> dict[str, Any]:
+    """Build one UI-ready molecule lineage from prepared event evidence."""
+
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        raise ServiceError(
+            "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
+            reason="missing_reactionevent",
+        )
+    mode = str(anchor_mode or "non_hydrogen")
+    atom_elements = (
+        _lineage_atom_elements(artifacts, event_row, viewer)
+        if mode in {"non_hydrogen", "elements"}
+        else {}
+    )
+    try:
+        report = build_molecule_lineage(
+            reactionevent_file,
+            molecules_file,
+            event_id=str(event_row.get("event_id") or ""),
+            side=side,
+            participant_index=participant_index,
+            atom_elements=atom_elements,
+            anchor_mode=mode,
+            anchor_elements=anchor_elements,
+            anchor_atom_ids=anchor_atom_ids,
+            depth_backward=depth_backward,
+            depth_forward=depth_forward,
+            max_molecule_nodes=max_molecule_nodes,
+            recrossing_window=recrossing_window,
+        )
+    except LineageElementMappingError as exc:
+        raise ServiceError(
+            "默认非氢锚点需要完整元素映射。请先在轨迹页确认 "
+            f"Type → Element，或改用“全部原子/指定 Atom IDs”：{exc}",
+            reason="lineage_element_mapping",
+        ) from exc
+    except (
+        MoleculeLineageError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ServiceError(str(exc), reason="molecule_lineage") from exc
+    report.setdefault("source_signatures", {})
+    trajectory = str(artifacts.get("trajectory") or "").strip()
+    if trajectory and Path(trajectory).is_file():
+        stat = os.stat(trajectory)
+        report["source_signatures"]["trajectory"] = {
+            "path": os.path.abspath(trajectory),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    return report
 
 
 def validate_pathway_step_occurrences(

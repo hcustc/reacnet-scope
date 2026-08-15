@@ -560,7 +560,7 @@ class OnlineIndexContractTests(unittest.TestCase):
             "stale",
         )
 
-    def test_evolution_and_intermediate_queries_never_open_species_source(self) -> None:
+    def test_evolution_query_never_opens_species_source(self) -> None:
         species = self.root / "online.species"
         species.write_text(
             "Timestep 0: C 0\nTimestep 10: C 10\nTimestep 20: C 0\n",
@@ -578,14 +578,8 @@ class OnlineIndexContractTests(unittest.TestCase):
             evolution = dash_services.build_species_evolution(
                 {"species": str(species)}, ["smiles:C"]
             )
-            intermediate = dash_services.build_intermediate_candidates(
-                {"species": str(species)},
-                with_flux=False,
-                fwhm_min_frames=1,
-            )
 
         self.assertEqual(evolution["meta"]["source_mode"], "prepared_index")
-        self.assertEqual(intermediate["meta"]["source_mode"], "prepared_index")
 
 
 if __name__ == "__main__":

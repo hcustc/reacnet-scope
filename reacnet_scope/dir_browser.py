@@ -33,12 +33,15 @@ def get_allowed_roots() -> list[Path]:
     variable ``REACNET_SCOPE_ALLOWED_ROOTS`` to a colon-separated list
     of paths to override the defaults.
 
-    Only directories that actually exist are returned.
+    Configured roots are retained even while temporarily unavailable.  Their
+    current existence and readability are checked when the browser uses them,
+    so removable or network-mounted storage can appear after the service has
+    started without requiring a restart.
     """
     env_override = os.environ.get("REACNET_SCOPE_ALLOWED_ROOTS", "")
     if env_override:
         roots = [Path(p).expanduser().resolve() for p in env_override.split(":") if p.strip()]
-        return [r for r in roots if r.exists() and r.is_dir()]
+        return roots
 
     home = Path.home()
     username = home.name
@@ -48,7 +51,7 @@ def get_allowed_roots() -> list[Path]:
         Path("/mnt"),
         Path("/data"),
     ]
-    return [c for c in candidates if c.exists() and c.is_dir()]
+    return candidates
 
 
 ALLOWED_ROOTS: list[Path] = get_allowed_roots()

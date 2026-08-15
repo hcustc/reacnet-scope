@@ -10,7 +10,7 @@ browser machine.
 ```bash
 git clone <repository-url> reacnet-scope
 cd reacnet-scope
-uv sync --extra web
+uv sync --locked --no-dev --extra web --extra trajectory
 ```
 
 For a quick private-network trial, bind the existing entry point to the host
@@ -18,7 +18,7 @@ interface:
 
 ```bash
 REACNET_SCOPE_ALLOWED_ROOTS="/home/$USER:/media/$USER:/data:/mnt:/scratch" \
-  uv run reacnet-scope serve --host 0.0.0.0 --port 8060
+  .venv/bin/reacnet-scope serve --host 0.0.0.0 --port 8060
 ```
 
 `REACNET_SCOPE_ALLOWED_ROOTS` controls which server directories are visible in
@@ -36,7 +36,7 @@ The repository provides `scripts.webapp_dash.wsgi:server` for a standard WSGI
 process manager. On the remote host, run:
 
 ```bash
-uv run --with gunicorn gunicorn \
+uv run --locked --no-dev --extra web --extra trajectory --with gunicorn gunicorn \
   -c deploy/gunicorn.conf.py \
   scripts.webapp_dash.wsgi:server
 ```
@@ -71,14 +71,14 @@ export REACNET_SCOPE_DEPLOYMENT_MODE=remote
 Build or resume every required index and publish the dataset manifest:
 
 ```bash
-uv run reacnet-scope prepare build all /srv/reacnet-data/case
-uv run reacnet-scope prepare status /srv/reacnet-data/case
+.venv/bin/reacnet-scope prepare build all /srv/reacnet-data/case
+.venv/bin/reacnet-scope prepare status /srv/reacnet-data/case
 ```
 
 Prepare the trajectory frame index when needed:
 
 ```bash
-uv run reacnet-scope prepare build trajectory /srv/reacnet-data/case
+.venv/bin/reacnet-scope prepare build trajectory /srv/reacnet-data/case
 ```
 
 The preparation command supports event, trajectory and element-distribution
@@ -92,7 +92,7 @@ checkpoints.
   and reads only selected frame ranges.
 
   ```bash
-  uv run reacnet-scope prepare build trajectory /data/case
+  .venv/bin/reacnet-scope prepare build trajectory /data/case
   ```
 
 - Trajectory indexes are SQLite databases under
@@ -101,8 +101,10 @@ checkpoints.
   indexes cause a fast query error. Query callbacks never build them
   implicitly; only an explicit management-page action or
   `reacnet-scope prepare build trajectory` command starts a build.
-- Reaction-event search prefers a complete schema-1 `.timeline.h5` and falls
+- Reaction-event search prefers a complete schema-1/2 `.timeline.h5` and falls
   back to `.reactionevent.csv` only when the native source is absent.
+  Schema 2 Transition Evidence is indexed directly without reconstructing a
+  full frame-by-atom membership matrix.
   Molecular Evidence (native or `.molecules.csv`) adds atom, bond, and
   physical-timestep evidence.
 - Repeated time-evolution requests reuse a file-versioned species catalog in

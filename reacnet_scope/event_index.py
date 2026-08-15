@@ -47,6 +47,33 @@ from .timed_evidence import (
 
 EVENT_EVIDENCE_SCHEMA_VERSION = 4
 EVENT_ASSOCIATION_ALGORITHM_VERSION = 3
+_MEMBERSHIP_MATERIALIZATION_RESERVE_BYTES = 4 * 1024**3
+
+
+def _available_memory_bytes() -> int:
+    """Best-effort physical memory availability without a new dependency."""
+
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, UnicodeError, ValueError):
+        pass
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES")) * int(
+            os.sysconf("SC_PAGE_SIZE")
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def _can_materialize_membership(membership_bytes: int) -> bool:
+    required = (
+        max(0, int(membership_bytes)) * 2
+        + _MEMBERSHIP_MATERIALIZATION_RESERVE_BYTES
+    )
+    return _available_memory_bytes() >= required
 
 
 class EventNotFoundError(LookupError):
@@ -94,6 +121,14 @@ _EVENT_SELECT_COLUMNS = """
     product_text,atom_ids_json,reactant_bonds_json,
     product_bonds_json,reactant_participants_json,
     product_participants_json,association_status,occurrence
+"""
+
+_EVENT_SELECT_COLUMNS_E = """
+    e.event_id,e.reaction_key,e.source_row,e.timestep_index,
+    e.before_timestep,e.after_timestep,e.reactant_text,
+    e.product_text,e.atom_ids_json,e.reactant_bonds_json,
+    e.product_bonds_json,e.reactant_participants_json,
+    e.product_participants_json,e.association_status,e.occurrence
 """
 
 
@@ -827,7 +862,7 @@ class EventEvidenceStore:
             "reactionevent_file": str(reaction_path.resolve()),
             "primary_file": str(reaction_path.resolve()),
             "timeline_file": (
-                str(reaction_path.resolve()) if native_selection else ""
+                str(reaction_path.resolve()) if native_path else ""
             ),
             "source_kind": str(
                 details.get(
@@ -840,9 +875,12 @@ class EventEvidenceStore:
             "source_schema_version": str(
                 details.get(
                     "source_schema_version",
-                    native_selection.schema_version
-                    if native_selection
-                    else "",
+                    meta.get(
+                        "source_schema_version",
+                        native_selection.schema_version
+                        if native_selection
+                        else "",
+                    ),
                 )
             ),
             "capabilities": list(
@@ -850,7 +888,10 @@ class EventEvidenceStore:
                 if native_selection
                 else (
                     ("reaction", "molecule")
-                    if molecule_available
+                    if (
+                        molecule_available
+                        or meta.get("association_available", "0") == "1"
+                    )
                     else ("reaction",)
                 )
             ),
@@ -1170,18 +1211,31 @@ class EventEvidenceStore:
                 return opened
         building_path = Path(f"{index_path}.building")
         membership_path = Path(f"{building_path}.membership")
+        membership_overlay_path = Path(f"{membership_path}.overlay-f")
         connection = self._connect_for_build(building_path)
         existing = {
             str(key): str(value)
             for key, value in connection.execute("SELECT key,value FROM meta")
         }
         association_available = bool(selection.molecule_enabled)
+        exact_transition_evidence = bool(
+            association_available
+            and selection.transition_evidence_enabled
+        )
+        association_source = (
+            "transition_evidence"
+            if exact_transition_evidence
+            else ("molecule_ranges" if association_available else "none")
+        )
         compatible = bool(existing) and (
             int(existing.get("schema_version", 0) or 0)
             == EVENT_EVIDENCE_SCHEMA_VERSION
             and existing.get("build_state") == "building"
             and existing.get("source_kind") == "native_hdf5"
-            and existing.get("source_schema_version") == "1"
+            and existing.get("source_schema_version")
+            == selection.schema_version
+            and existing.get("association_source", association_source)
+            == association_source
             and existing.get("reactionevent_file") == reaction_source[0]
             and int(existing.get("reactionevent_size", -1) or -1)
             == reaction_source[1]
@@ -1201,31 +1255,105 @@ class EventEvidenceStore:
             connection.close()
             building_path.unlink(missing_ok=True)
             membership_path.unlink(missing_ok=True)
+            membership_overlay_path.unlink(missing_ok=True)
             connection = self._connect_for_build(building_path)
             existing = {}
         resumed = compatible
         try:
             with NativeHdf5EvidenceAdapter(selection) as adapter:
-                membership: np.memmap[Any, Any] | None = None
+                membership: np.ndarray[Any, Any] | None = None
+                primary_membership: np.memmap[Any, Any] | None = None
+                overlay_membership: np.memmap[Any, Any] | None = None
                 range_offset = int(existing.get("range_offset", 0) or 0)
                 membership_complete = (
-                    existing.get("membership_complete", "0") == "1"
+                    exact_transition_evidence
+                    or existing.get("membership_complete", "0") == "1"
                 )
-                expected_membership_size = int(
-                    np.prod(adapter.membership_shape)
-                    * adapter.membership_dtype.itemsize
-                )
-                can_resume_membership = (
+                membership_layout = existing.get("membership_layout", "C")
+                if membership_layout not in {"C", "F", "C+F"}:
+                    membership_layout = "C"
+                expected_membership_size = 0
+                can_materialize_membership = False
+                if association_available and not exact_transition_evidence:
+                    expected_membership_size = int(
+                        np.prod(adapter.membership_shape)
+                        * adapter.membership_dtype.itemsize
+                    )
+                    can_materialize_membership = _can_materialize_membership(
+                        expected_membership_size
+                    )
+                primary_membership_valid = (
                     compatible
                     and membership_path.is_file()
                     and membership_path.stat().st_size
                     == expected_membership_size
                 )
-                if association_available:
-                    if not can_resume_membership:
+                overlay_membership_valid = (
+                    compatible
+                    and membership_overlay_path.is_file()
+                    and membership_overlay_path.stat().st_size
+                    == expected_membership_size
+                )
+                if association_available and not exact_transition_evidence:
+                    membership_range_count = int(
+                        adapter.handle["molecule_ranges/molecule_id"].shape[0]
+                    )
+                    if not primary_membership_valid:
                         membership_path.unlink(missing_ok=True)
+                        membership_overlay_path.unlink(missing_ok=True)
                         range_offset = 0
                         membership_complete = False
+                        membership_layout = (
+                            "F" if can_materialize_membership else "C"
+                        )
+                        overlay_membership_valid = False
+                    elif membership_layout == "C+F" and not overlay_membership_valid:
+                        membership_overlay_path.unlink(missing_ok=True)
+                        range_offset = int(
+                            existing.get(
+                                "membership_base_range_offset",
+                                range_offset,
+                            )
+                            or 0
+                        )
+                        membership_complete = False
+
+                    if (
+                        membership_layout in {"F", "C+F"}
+                        and not can_materialize_membership
+                    ):
+                        raise TimedEvidenceDataError(
+                            "column-major molecule membership requires "
+                            "additional RAM before transition indexing",
+                            state="resource-exhausted",
+                        )
+
+                    if (
+                        membership_layout == "C"
+                        and primary_membership_valid
+                        and not membership_complete
+                        and range_offset >= membership_range_count
+                    ):
+                        membership_complete = True
+
+                    if (
+                        membership_layout == "C"
+                        and primary_membership_valid
+                        and not membership_complete
+                        and can_materialize_membership
+                    ):
+                        membership_layout = "C+F"
+                        membership_overlay_path.unlink(missing_ok=True)
+                        overlay_membership_valid = False
+                        _write_meta(
+                            connection,
+                            {
+                                "membership_layout": membership_layout,
+                                "membership_base_range_offset": range_offset,
+                                "updated_at_epoch": int(time.time()),
+                            },
+                        )
+                        connection.commit()
 
                     def checkpoint_membership(
                         completed_offset: int, molecule_id: int
@@ -1239,7 +1367,8 @@ class EventEvidenceStore:
                                     reaction_source[0]
                                 ),
                                 "source_kind": "native_hdf5",
-                                "source_schema_version": "1",
+                                "source_schema_version": selection.schema_version,
+                                "association_source": association_source,
                                 "reactionevent_file": reaction_source[0],
                                 "reactionevent_size": reaction_source[1],
                                 "reactionevent_mtime_ns": reaction_source[2],
@@ -1253,6 +1382,7 @@ class EventEvidenceStore:
                                 "time_basis": "physical_timestep",
                                 "range_offset": completed_offset,
                                 "completed_molecule_id": molecule_id,
+                                "membership_layout": membership_layout,
                                 "membership_complete": 0,
                                 "event_count": 0,
                                 "reaction_type_count": 0,
@@ -1264,17 +1394,17 @@ class EventEvidenceStore:
                             },
                         )
                         connection.commit()
+
+                    def report_membership_progress(
+                        completed_offset: int, molecule_id: int
+                    ) -> None:
                         if progress_callback:
                             progress_callback(
                                 {
                                     "progress": min(
                                         completed_offset
                                         / max(
-                                            int(
-                                                adapter.handle[
-                                                    "molecule_ranges/molecule_id"
-                                                ].shape[0]
-                                            ),
+                                            membership_range_count,
                                             1,
                                         )
                                         * 0.45,
@@ -1282,35 +1412,120 @@ class EventEvidenceStore:
                                     ),
                                     "phase": "indexing_molecule_ranges",
                                     "message": (
-                                        "Checkpointed native molecule "
-                                        f"{molecule_id}"
+                                        f"Indexed {completed_offset:,}/"
+                                        f"{membership_range_count:,} native "
+                                        "molecule ranges "
+                                        f"(molecule {molecule_id:,})"
                                     ),
                                 }
                             )
 
                     if membership_complete:
-                        membership = np.memmap(
+                        primary_membership = np.memmap(
                             membership_path,
                             dtype=adapter.membership_dtype,
                             mode="r+",
                             shape=adapter.membership_shape,
+                            order=(
+                                "F" if membership_layout == "F" else "C"
+                            ),
                         )
+                        if membership_layout == "C+F":
+                            overlay_membership = np.memmap(
+                                membership_overlay_path,
+                                dtype=adapter.membership_dtype,
+                                mode="r+",
+                                shape=adapter.membership_shape,
+                                order="F",
+                            )
                     else:
-                        membership = adapter.build_membership(
-                            membership_path,
-                            start_offset=range_offset,
-                            resume=can_resume_membership,
-                            checkpoint=checkpoint_membership,
+                        build_path = (
+                            membership_overlay_path
+                            if membership_layout == "C+F"
+                            else membership_path
                         )
+                        build_resume = (
+                            overlay_membership_valid
+                            if membership_layout == "C+F"
+                            else primary_membership_valid
+                        )
+                        built_membership = adapter.build_membership(
+                            build_path,
+                            start_offset=range_offset,
+                            resume=build_resume,
+                            order=(
+                                "F"
+                                if membership_layout in {"F", "C+F"}
+                                else "C"
+                            ),
+                            checkpoint=checkpoint_membership,
+                            progress=(
+                                report_membership_progress
+                                if progress_callback
+                                else None
+                            ),
+                        )
+                        if membership_layout == "C+F":
+                            overlay_membership = built_membership
+                            primary_membership = np.memmap(
+                                membership_path,
+                                dtype=adapter.membership_dtype,
+                                mode="r+",
+                                shape=adapter.membership_shape,
+                                order="C",
+                            )
+                        else:
+                            primary_membership = built_membership
                         membership_complete = True
                         _write_meta(
                             connection,
                             {
                                 "membership_complete": 1,
+                                "membership_layout": membership_layout,
                                 "updated_at_epoch": int(time.time()),
                             },
                         )
                         connection.commit()
+
+                    def report_materialization_progress(
+                        completed_atoms: int, total_atoms: int
+                    ) -> None:
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "progress": 0.45,
+                                    "phase": "materializing_molecule_membership",
+                                    "message": (
+                                        f"Materialized {completed_atoms:,}/"
+                                        f"{total_atoms:,} membership atom columns"
+                                    ),
+                                }
+                            )
+
+                    if membership_layout == "C":
+                        membership = primary_membership
+                    elif membership_layout == "F":
+                        assert primary_membership is not None
+                        membership = adapter.materialize_membership(
+                            primary_membership,
+                            progress=(
+                                report_materialization_progress
+                                if progress_callback
+                                else None
+                            ),
+                        )
+                    else:
+                        assert primary_membership is not None
+                        assert overlay_membership is not None
+                        membership = adapter.materialize_membership(
+                            primary_membership,
+                            overlay=overlay_membership,
+                            progress=(
+                                report_materialization_progress
+                                if progress_callback
+                                else None
+                            ),
+                        )
 
                 if not existing:
                     _write_meta(
@@ -1322,7 +1537,8 @@ class EventEvidenceStore:
                                 reaction_source[0]
                             ),
                             "source_kind": "native_hdf5",
-                            "source_schema_version": "1",
+                            "source_schema_version": selection.schema_version,
+                            "association_source": association_source,
                             "reactionevent_file": reaction_source[0],
                             "reactionevent_size": reaction_source[1],
                             "reactionevent_mtime_ns": reaction_source[2],
@@ -1339,6 +1555,7 @@ class EventEvidenceStore:
                             ),
                             "time_basis": "physical_timestep",
                             "range_offset": range_offset,
+                            "membership_layout": membership_layout,
                             "membership_complete": int(
                                 membership_complete
                             ),
@@ -1364,6 +1581,10 @@ class EventEvidenceStore:
                     existing.get("reaction_type_count", 0) or 0
                 )
                 transition_count = int(selection.frame_count or 1) - 1
+                transition_progress_base = (
+                    0.0 if exact_transition_evidence else 0.45
+                )
+                transition_progress_span = 0.95 - transition_progress_base
                 for batch in adapter.iter_transitions(
                     membership,
                     start=completed_transition + 1,
@@ -1557,8 +1778,8 @@ class EventEvidenceStore:
                     if progress_callback and should_checkpoint:
                         progress_callback(
                             {
-                                "progress": 0.45
-                                + 0.5
+                                "progress": transition_progress_base
+                                + transition_progress_span
                                 * (completed_transition + 1)
                                 / max(transition_count, 1),
                                 "phase": "checkpoint_event_index",
@@ -1591,7 +1812,8 @@ class EventEvidenceStore:
                         "build_state": "ready",
                         "dataset_id": dataset_id_for_source(reaction_source[0]),
                         "source_kind": "native_hdf5",
-                        "source_schema_version": "1",
+                        "source_schema_version": selection.schema_version,
+                        "association_source": association_source,
                         "reactionevent_file": reaction_source[0],
                         "reactionevent_size": reaction_source[1],
                         "reactionevent_mtime_ns": reaction_source[2],
@@ -1620,9 +1842,16 @@ class EventEvidenceStore:
                     },
                 )
                 connection.commit()
-                if membership is not None:
+                if isinstance(membership, np.memmap):
                     membership.flush()
+                if membership is not None:
                     del membership
+                if overlay_membership is not None:
+                    overlay_membership.flush()
+                    del overlay_membership
+                if primary_membership is not None:
+                    primary_membership.flush()
+                    del primary_membership
         finally:
             connection.close()
         _assert_source_unchanged(
@@ -1630,6 +1859,7 @@ class EventEvidenceStore:
         )
         os.replace(building_path, index_path)
         membership_path.unlink(missing_ok=True)
+        membership_overlay_path.unlink(missing_ok=True)
         if progress_callback:
             progress_callback(
                 {
@@ -2451,6 +2681,90 @@ class EventEvidenceStore:
             "association_available": opened["association_available"],
         }
 
+    def query_nearest_atom_events(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        atom_ids: Iterable[int],
+        *,
+        timestep_index: int,
+        direction: str,
+        limit: int = 256,
+    ) -> dict[str, Any]:
+        """Return the nearest indexed interval involving any supplied atom.
+
+        This deliberately does not infer molecular continuity.  Consumers
+        must still verify the exact participant Species and atom-ID set on
+        the appropriate side of each returned event.
+        """
+
+        opened = self.open_required(reactionevent_file, molecules_file)
+        if not opened["association_available"]:
+            raise IndexInvalidError(
+                "Event evidence index has no molecule/atom association"
+            )
+        direction_text = str(direction or "").strip().lower()
+        if direction_text not in {"backward", "forward"}:
+            raise ValueError("direction must be backward or forward")
+        normalized_atoms = sorted(
+            {
+                _strict_int(value, "atom_id", minimum=1)
+                for value in atom_ids
+            }
+        )
+        if not normalized_atoms:
+            raise ValueError("atom_ids must contain at least one atom")
+        safe_limit = max(1, min(int(limit), 10_000))
+        comparator = "<" if direction_text == "backward" else ">"
+        order = "DESC" if direction_text == "backward" else "ASC"
+        placeholders = ",".join("?" for _value in normalized_atoms)
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            records = connection.execute(
+                f"""
+                SELECT DISTINCT {_EVENT_SELECT_COLUMNS_E}
+                FROM events AS e
+                JOIN event_atoms AS a ON a.event_id=e.event_id
+                WHERE a.atom_id IN ({placeholders})
+                  AND e.timestep_index {comparator} ?
+                ORDER BY e.timestep_index {order},e.source_row,e.event_id
+                LIMIT ?
+                """,
+                (
+                    *normalized_atoms,
+                    int(timestep_index),
+                    safe_limit,
+                ),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event atom index is corrupt: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+
+        rows: list[dict[str, Any]] = []
+        nearest_interval: int | None = None
+        for rank, record in enumerate(records, 1):
+            candidate = _event_payload_from_record(record, event_index=rank)
+            candidate_interval = int(candidate["timestep_index"])
+            if nearest_interval is None:
+                nearest_interval = candidate_interval
+            if candidate_interval != nearest_interval:
+                break
+            rows.append(candidate)
+        return {
+            "rows": rows,
+            "direction": direction_text,
+            "atom_ids": normalized_atoms,
+            "anchor_timestep_index": int(timestep_index),
+            "nearest_timestep_index": nearest_interval,
+            "candidate_limit": safe_limit,
+            "candidate_limit_reached": len(records) >= safe_limit,
+            "association_available": True,
+            "time_basis": opened["time_basis"],
+        }
+
     def reaction_summary(
         self,
         reactionevent_file: str,
@@ -2539,6 +2853,7 @@ class EventEvidenceStore:
             index_path,
             Path(f"{index_path}.building"),
             Path(f"{index_path}.building.membership"),
+            Path(f"{index_path}.building.membership.overlay-f"),
         )
         removed: list[str] = []
         released_bytes = 0
@@ -2558,185 +2873,3 @@ class EventEvidenceStore:
 
 
 EVENT_EVIDENCE_STORE = EventEvidenceStore()
-
-
-class EventIndexEvidenceProvider:
-    """Adapt one ready event index to the candidate-path evidence protocol."""
-
-    def __init__(
-        self,
-        reactionevent_file: str,
-        molecules_file: str = "",
-        *,
-        store: EventEvidenceStore = EVENT_EVIDENCE_STORE,
-        opened: dict[str, Any] | None = None,
-    ) -> None:
-        self._reactionevent_file = os.path.abspath(reactionevent_file)
-        self._molecules_file = (
-            os.path.abspath(molecules_file)
-            if str(molecules_file or "").strip()
-            else ""
-        )
-        self._store = store
-        self._source_label = (
-            "timeline"
-            if self._reactionevent_file.lower().endswith(".timeline.h5")
-            else "reactionevent"
-        )
-        self._opened = dict(
-            opened
-            if opened is not None
-            else store.open_required(
-                self._reactionevent_file,
-                self._molecules_file,
-            )
-        )
-        self._index_path = os.path.abspath(str(self._opened["index_path"]))
-        self._source_identities = {
-            self._source_label: self._identity(self._reactionevent_file),
-            "event_index": self._identity(self._index_path),
-        }
-        if self._molecules_file:
-            self._source_identities["molecules"] = self._identity(
-                self._molecules_file
-            )
-        self._source_signatures = {
-            self._source_label: self._signature(self._reactionevent_file),
-            "event_index": {
-                **self._signature(self._index_path),
-                "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
-            },
-        }
-        if self._molecules_file:
-            self._source_signatures["molecules"] = self._signature(
-                self._molecules_file
-            )
-
-    @staticmethod
-    def _identity(path_text: str) -> tuple[int, int, int, int] | None:
-        try:
-            stat = os.stat(path_text)
-        except OSError:
-            return None
-        return (
-            int(stat.st_dev),
-            int(stat.st_ino),
-            int(stat.st_size),
-            int(stat.st_mtime_ns),
-        )
-
-    @staticmethod
-    def _signature(path_text: str) -> dict[str, Any]:
-        path = os.path.abspath(path_text)
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return {"path": path}
-        return {
-            "path": path,
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-        }
-
-    @property
-    def source_signatures(self) -> dict[str, dict[str, Any]]:
-        return {
-            name: dict(signature)
-            for name, signature in self._source_signatures.items()
-        }
-
-    def assert_current(self) -> None:
-        """Reject source replacement instead of mixing query snapshots."""
-        paths = {
-            self._source_label: self._reactionevent_file,
-            "event_index": self._index_path,
-        }
-        if self._molecules_file:
-            paths["molecules"] = self._molecules_file
-        for name, path in paths.items():
-            expected = self._source_identities[name]
-            if expected is None:
-                continue
-            actual = self._identity(path)
-            if actual != expected:
-                error_type = (
-                    IndexInvalidError
-                    if name == "event_index"
-                    else IndexStaleError
-                )
-                raise error_type(
-                    f"Event evidence {name} changed during pathway query"
-                )
-
-    def reaction_summaries(
-        self,
-        reaction_keys: Iterable[str],
-    ) -> dict[str, dict[str, Any]]:
-        selected = tuple(
-            sorted({str(key) for key in reaction_keys if str(key)})
-        )
-        if not selected:
-            return {}
-        self.assert_current()
-        try:
-            found = self._store.reaction_summary(
-                self._reactionevent_file,
-                self._molecules_file,
-                selected,
-            )
-        except IndexNotReadyError:
-            raise
-        except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
-            raise IndexInvalidError(
-                f"Event evidence batch query is invalid: {exc}"
-            ) from exc
-        self.assert_current()
-        available_intervals = _strict_int(
-            self._opened.get("available_intervals"),
-            "available_intervals",
-            minimum=0,
-        )
-        summaries: dict[str, dict[str, Any]] = {}
-        for key in selected:
-            summaries[key] = {
-                "reaction_key": key,
-                "total_events": 0,
-                "matched_events": 0,
-                "distinct_intervals": 0,
-                "available_intervals": available_intervals,
-                "source_references": (self._index_path,),
-                **dict(found.get(key, {})),
-            }
-            total_events = _strict_int(
-                summaries[key].get("total_events"),
-                "reaction summary total_events",
-                minimum=0,
-            )
-            matched_events = _strict_int(
-                summaries[key].get("matched_events"),
-                "reaction summary matched_events",
-                minimum=0,
-            )
-            distinct_intervals = _strict_int(
-                summaries[key].get("distinct_intervals"),
-                "reaction summary distinct_intervals",
-                minimum=0,
-            )
-            if matched_events > total_events:
-                raise IndexInvalidError(
-                    "Event evidence index reaction summary "
-                    "matched_events is invalid"
-                )
-            if distinct_intervals > available_intervals:
-                raise IndexInvalidError(
-                    "Event evidence index reaction summary "
-                    "distinct_intervals is invalid"
-                )
-            summaries[key].update(
-                total_events=total_events,
-                matched_events=matched_events,
-                distinct_intervals=distinct_intervals,
-                available_intervals=available_intervals,
-            )
-            summaries[key]["source_references"] = (self._index_path,)
-        return summaries

@@ -34,7 +34,6 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
-from reacnet_scope.pathways import find_candidate_paths  # noqa: E402
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -54,7 +53,6 @@ from reacnet_scope.composition import (  # noqa: E402
 from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
-    EventIndexEvidenceProvider,
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
@@ -63,7 +61,6 @@ from reacnet_scope.event_package import (  # noqa: E402
 from reacnet_scope.event_paths import (  # noqa: E402
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -90,7 +87,6 @@ from reacnet_scope.queries import (  # noqa: E402
     ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
-    build_intermediate_candidates_payload,
     build_species_plot_payload,
     collect_species_totals,
     collect_next_reactions,

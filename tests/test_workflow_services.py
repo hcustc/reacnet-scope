@@ -538,19 +538,20 @@ def test_dash_event_path_service_combines_current_and_additional_repeats(
         Path(f"{prefix}.reactionabcd").touch()
     captured = {}
 
-    def fake_analyze(sources, **limits):
+    def fake_verify(sources, reaction_keys, **limits):
         captured["sources"] = list(sources)
+        captured["reaction_keys"] = list(reaction_keys)
         captured["limits"] = limits
         return {"schema_version": "event-path/v1", "summary": {}}
 
-    monkeypatch.setattr(svc, "analyze_event_paths", fake_analyze)
+    monkeypatch.setattr(svc, "verify_event_path", fake_verify)
     monkeypatch.setattr(
         svc,
         "validate_browse_path",
         lambda value: Path(value).expanduser().resolve(),
     )
 
-    result = svc.analyze_event_paths_for_dash(
+    result = svc.verify_event_path_for_dash(
         {
             "reactionevent": f"{current}.reactionevent.csv",
             "molecules": f"{current}.molecules.csv",
@@ -558,8 +559,7 @@ def test_dash_event_path_service_combines_current_and_additional_repeats(
         },
         current_replicate="rep1",
         additional_sources=f"rep2={second}",
-        path_length=4,
-        start_smiles="[C]",
+        reaction_sequence="A->B\nB->C\nC->D\nD->E",
         max_interval_gap=2,
         max_timestep_gap=100,
         max_occurrence_details=25,
@@ -569,12 +569,11 @@ def test_dash_event_path_service_combines_current_and_additional_repeats(
     assert [item.replicate for item in captured["sources"]] == ["rep1", "rep2"]
     assert captured["sources"][1].reactionevent_file == f"{second}.reactionevent.csv"
     assert captured["limits"] == {
-        "path_length": 4,
-        "start_smiles": "[C]",
         "max_interval_gap": 2,
         "max_timestep_gap": 100,
         "max_occurrence_details": 25,
     }
+    assert captured["reaction_keys"] == ["A->B", "B->C", "C->D", "D->E"]
 
 
 def test_dash_event_path_service_requires_molecule_association(tmp_path: Path) -> None:
@@ -582,8 +581,9 @@ def test_dash_event_path_service_requires_molecule_association(tmp_path: Path) -
     event_file.touch()
 
     try:
-        svc.analyze_event_paths_for_dash(
+        svc.verify_event_path_for_dash(
             {"reactionevent": str(event_file)},
+            reaction_sequence="A->B\nB->C",
         )
     except svc.ServiceError as exc:
         assert exc.reason == "missing_event_path_source"

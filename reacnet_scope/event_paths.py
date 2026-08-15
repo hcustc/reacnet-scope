@@ -27,7 +27,7 @@ from .event_index import (
     _event_payload_from_record,
 )
 from .indexes import IndexInvalidError, _readonly_connection
-from .rng_events import reaction_key
+from .rng_events import canonical_reaction_key, reaction_key
 
 
 EVENT_PATH_SCHEMA_VERSION = "event-path/v1"
@@ -35,6 +35,30 @@ EVENT_PATH_SCHEMA_VERSION = "event-path/v1"
 
 class EventPathAnalysisError(RuntimeError):
     """Raised when indexed evidence cannot support atom-continuous paths."""
+
+
+def normalize_reaction_sequence(values: Iterable[str]) -> tuple[str, ...]:
+    """Normalize a user-supplied sequence of exact RNG Reaction Types."""
+
+    normalized: list[str] = []
+    for position, value in enumerate(values, 1):
+        text = str(value or "").strip().replace("→", "->")
+        if not text:
+            continue
+        if text.count("->") != 1:
+            raise ValueError(
+                f"reaction {position} must contain exactly one '->': {text!r}"
+            )
+        left, right = text.split("->", 1)
+        reactants, products = reaction_key(left, right)
+        if not reactants or not products:
+            raise ValueError(
+                f"reaction {position} must have reactants and products: {text!r}"
+            )
+        normalized.append(canonical_reaction_key(reactants, products))
+    if not 2 <= len(normalized) <= 8:
+        raise ValueError("reaction sequence must contain 2 to 8 reactions")
+    return tuple(normalized)
 
 
 @dataclass(frozen=True)
@@ -448,6 +472,7 @@ def _enumerate_actual_paths(
     *,
     path_length: int,
     start_smiles: str,
+    expected_reaction_keys: Sequence[str] | None,
     max_interval_gap: int | None,
     max_timestep_gap: int | None,
     max_expansions: int,
@@ -512,6 +537,13 @@ def _enumerate_actual_paths(
                 emit(path_nodes, path_edges, lineage)
             return
         for edge in adjacency.get(path_nodes[-1].event_id, ()):
+            next_node = node_by_id[edge.to_event_id]
+            if (
+                expected_reaction_keys is not None
+                and next_node.reaction_key
+                != expected_reaction_keys[len(path_nodes)]
+            ):
+                continue
             if state.expansions >= max_expansions:
                 state.truncated = True
                 return
@@ -524,7 +556,7 @@ def _enumerate_actual_paths(
             if not next_lineage:
                 continue
             walk(
-                [*path_nodes, node_by_id[edge.to_event_id]],
+                [*path_nodes, next_node],
                 [*path_edges, edge],
                 frozenset(next_lineage),
             )
@@ -533,6 +565,11 @@ def _enumerate_actual_paths(
 
     for node in nodes:
         if start_smiles and start_smiles not in node.reactant_terms:
+            continue
+        if (
+            expected_reaction_keys is not None
+            and node.reaction_key != expected_reaction_keys[0]
+        ):
             continue
         walk([node], [], None)
         if state.truncated:
@@ -597,7 +634,7 @@ def _aggregate_document(
     }
 
 
-def enumerate_aggregate_reaction_paths(
+def _enumerate_aggregate_reaction_paths(
     reactions: Iterable[Reaction],
     *,
     path_length: int = 3,
@@ -758,7 +795,7 @@ def _compare_aggregate_networks(
         reactions_by_key = {
             reaction.key: reaction for reaction in network.reactions
         }
-        baseline = enumerate_aggregate_reaction_paths(
+        baseline = _enumerate_aggregate_reaction_paths(
             network.reactions,
             path_length=path_length,
             start_smiles=start_smiles,
@@ -858,16 +895,18 @@ def _compare_aggregate_networks(
     }
 
 
-def analyze_event_paths(
+def _analyze_event_paths(
     sources: Iterable[EventPathSource],
     *,
     path_length: int = 3,
     start_smiles: str = "",
+    expected_reaction_keys: Sequence[str] | None = None,
     max_interval_gap: int | None = None,
     max_timestep_gap: int | None = None,
     max_occurrence_details: int = 10_000,
     max_expansions: int = 1_000_000,
     max_network_paths: int = 100_000,
+    compare_aggregate_network: bool = True,
 ) -> dict[str, Any]:
     """Analyze concrete atom-continuous event paths across independent repeats.
 
@@ -882,8 +921,15 @@ def analyze_event_paths(
     labels = [str(source.replicate).strip() for source in source_list]
     if len(set(labels)) != len(labels):
         raise ValueError("replicate labels must be unique")
-    safe_path_length = _bounded_integer(
-        path_length, "path_length", minimum=2, maximum=8
+    normalized_expected = (
+        normalize_reaction_sequence(expected_reaction_keys)
+        if expected_reaction_keys is not None
+        else None
+    )
+    safe_path_length = (
+        len(normalized_expected)
+        if normalized_expected is not None
+        else _bounded_integer(path_length, "path_length", minimum=2, maximum=8)
     )
     safe_interval_gap = _optional_nonnegative_integer(
         max_interval_gap, "max_interval_gap"
@@ -940,6 +986,7 @@ def analyze_event_paths(
             edges,
             path_length=safe_path_length,
             start_smiles=normalized_start,
+            expected_reaction_keys=normalized_expected,
             max_interval_gap=safe_interval_gap,
             max_timestep_gap=safe_timestep_gap,
             max_expansions=safe_max_expansions,
@@ -990,13 +1037,21 @@ def analyze_event_paths(
             tuple(item["reaction_keys"]),
         )
     )
-    comparison = _compare_aggregate_networks(
-        source_list,
-        actual_by_replicate,
-        actual_complete_by_replicate,
-        path_length=safe_path_length,
-        start_smiles=normalized_start,
-        max_network_paths=safe_max_network_paths,
+    comparison = (
+        _compare_aggregate_networks(
+            source_list,
+            actual_by_replicate,
+            actual_complete_by_replicate,
+            path_length=safe_path_length,
+            start_smiles=normalized_start,
+            max_network_paths=safe_max_network_paths,
+        )
+        if compare_aggregate_network
+        else {
+            "comparison_available": False,
+            "comparison_complete": False,
+            "reason": "disabled_for_explicit_path_verification",
+        }
     )
     return {
         "schema_version": EVENT_PATH_SCHEMA_VERSION,
@@ -1015,6 +1070,7 @@ def analyze_event_paths(
         "query": {
             "path_length": safe_path_length,
             "start_smiles": normalized_start,
+            "reaction_keys": list(normalized_expected or ()),
             "max_interval_gap": safe_interval_gap,
             "max_timestep_gap": safe_timestep_gap,
             "max_occurrence_details": safe_detail_limit,
@@ -1039,10 +1095,57 @@ def analyze_event_paths(
     }
 
 
+def verify_event_path(
+    sources: Iterable[EventPathSource],
+    reaction_keys: Iterable[str],
+    *,
+    max_interval_gap: int | None = None,
+    max_timestep_gap: int | None = None,
+    max_occurrence_details: int = 10_000,
+    max_expansions: int = 1_000_000,
+) -> dict[str, Any]:
+    """Verify one explicitly supplied Reaction Type sequence against evidence."""
+
+    normalized = normalize_reaction_sequence(reaction_keys)
+    report = _analyze_event_paths(
+        sources,
+        expected_reaction_keys=normalized,
+        max_interval_gap=max_interval_gap,
+        max_timestep_gap=max_timestep_gap,
+        max_occurrence_details=max_occurrence_details,
+        max_expansions=max_expansions,
+        compare_aggregate_network=False,
+    )
+    report.pop("comparison", None)
+    query = report.get("query") or {}
+    query.pop("start_smiles", None)
+    query.pop("max_network_paths_per_replicate", None)
+    occurrence_count = int(
+        (report.get("summary") or {}).get("actual_path_occurrence_count") or 0
+    )
+    truncated = bool((report.get("summary") or {}).get("traversal_truncated"))
+    if occurrence_count:
+        status = "supported"
+        message = "观察到满足严格时间、分子实例和原子连续性约束的完整事件链。"
+    elif truncated:
+        status = "inconclusive"
+        message = "验证达到展开上限，现有结果不足以判断该路径是否发生。"
+    else:
+        status = "not_observed"
+        message = "在当前索引证据和限制条件下未观察到这条完整事件链。"
+    report["verification"] = {
+        "status": status,
+        "reaction_keys": list(normalized),
+        "occurrence_count": occurrence_count,
+        "message": message,
+    }
+    return report
+
+
 __all__ = [
     "EVENT_PATH_SCHEMA_VERSION",
     "EventPathAnalysisError",
     "EventPathSource",
-    "analyze_event_paths",
-    "enumerate_aggregate_reaction_paths",
+    "normalize_reaction_sequence",
+    "verify_event_path",
 ]

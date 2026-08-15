@@ -7,7 +7,7 @@ Common use cases:
 3) Query reaction channels by formula equation (e.g. C6H4O2+C6H4->C12H8O2)
 4) Compute TOP-N share from a CSV metric column
 5) Export one indexed RNG event as a reproducible evidence ZIP
-6) Analyze time-ordered, exact-molecule, atom-continuous RNG event paths
+6) Verify an explicit time-ordered, exact-molecule, atom-continuous event path
 """
 
 from __future__ import annotations
@@ -36,11 +36,6 @@ from reacnet_scope.network import (  # noqa: E402
     ReactionNetwork,
     parse_reactionabcd,
     smiles_to_formula_fast,
-)
-from reacnet_scope.pathway_export import (  # noqa: E402
-    PATHWAY_CSV_FIELDS,
-    pathway_csv_rows as _pathway_csv_rows,
-    pathway_document as _pathway_document,
 )
 
 
@@ -108,17 +103,6 @@ def write_csv(path: str, fieldnames: Sequence[str], rows: Iterable[dict]) -> Non
         w.writeheader()
         for row in rows:
             w.writerow(row)
-
-
-def find_pathways_service(
-    artifacts: dict[str, str],
-    start_smiles: str,
-    **limits: object,
-) -> dict:
-    """Load the shared read-only pathway adapter only for this subcommand."""
-    from reacnet_scope.services import find_pathways
-
-    return find_pathways(artifacts, start_smiles, **limits)
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -278,30 +262,6 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_intermediate_candidates(args: argparse.Namespace) -> int:
-    from reacnet_scope.prepare import discover_dataset
-    from reacnet_scope.services import ServiceError, build_intermediate_candidates
-
-    try:
-        dataset = discover_dataset(args.case, args.base)
-        species_path = str(dataset.get("species") or "")
-        reaction_path = str(dataset.get("reaction") or "")
-        if not species_path:
-            raise FileNotFoundError("dataset has no .species source")
-        result = build_intermediate_candidates(
-            {"reaction": reaction_path, "species": species_path},
-            top=int(args.top),
-            fwhm_min_frames=float(args.fwhm_min_frames),
-            timestep_ps=args.timestep_ps,
-            with_flux=not args.no_flux,
-        )
-    except (FileNotFoundError, OSError, RuntimeError, ValueError, ServiceError) as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        return 2
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0
-
-
 def cmd_batch_compare(args: argparse.Namespace) -> int:
     from reacnet_scope.services import run_grouped_batch_comparison
 
@@ -339,15 +299,6 @@ def cmd_batch_compare(args: argparse.Namespace) -> int:
 def _reaction_base(reaction_path: str) -> str:
     suffix = ".reactionabcd"
     return reaction_path[: -len(suffix)] if reaction_path.endswith(suffix) else reaction_path
-
-
-def _pathway_artifacts(reaction_path: str) -> dict[str, str]:
-    base = _reaction_base(reaction_path)
-    return {
-        "reaction": reaction_path,
-        "reactionevent": f"{base}.reactionevent.csv",
-        "molecules": f"{base}.molecules.csv",
-    }
 
 
 def _write_json_atomic(path: str, document: dict) -> None:
@@ -402,59 +353,6 @@ def _write_bytes_atomic(
     return target
 
 
-def _print_pathway_table(payload: dict) -> None:
-    paths = payload.get("paths", [])
-    print(
-        f"# candidate_paths={len(paths)}, reason={payload.get('reason', '')}, "
-        f"truncated={payload.get('truncated', False)}, "
-        f"evidence={payload.get('evidence_status', 'network_only')}"
-    )
-    print("rank,score,steps,evidence_status,species")
-    for path in paths:
-        species = " -> ".join(str(item) for item in path.get("species", []))
-        print(
-            f"{path.get('rank')},{path.get('score')},{len(path.get('steps', []))},"
-            f"{path.get('evidence_status')},{species}"
-        )
-
-
-def cmd_pathway(args: argparse.Namespace) -> int:
-    artifacts = _pathway_artifacts(args.reac)
-    try:
-        payload = find_pathways_service(
-            artifacts,
-            args.start_smiles,
-            direction=args.direction,
-            max_depth=args.max_depth,
-            max_branches=args.max_branches,
-            max_paths=args.max_paths,
-            max_expansions=args.max_expansions,
-            min_net_tp=args.min_net_tp,
-            min_directionality=args.min_directionality,
-        )
-    except Exception as exc:
-        from reacnet_scope.services import ServiceError
-
-        if not isinstance(exc, ServiceError):
-            raise
-        print(f"[ERROR] {exc.message}", file=sys.stderr)
-        return 2
-    document = _pathway_document(payload)
-    _print_pathway_table(payload)
-
-    preparation_command = payload.get("preparation_command")
-    if preparation_command:
-        print(preparation_command, file=sys.stderr)
-
-    if args.out_json:
-        _write_json_atomic(args.out_json, document)
-        print(f"[OK] wrote: {args.out_json}")
-    if args.out_csv:
-        write_csv(args.out_csv, PATHWAY_CSV_FIELDS, _pathway_csv_rows(payload))
-        print(f"[OK] wrote: {args.out_csv}")
-    return 0
-
-
 _EVENT_PATH_SOURCE_SUFFIXES = (
     ".timeline.h5",
     ".reactionevent.csv",
@@ -497,24 +395,16 @@ def _event_path_source_from_spec(spec: str):
 
 def _print_event_path_table(payload: dict[str, object], *, top: int) -> None:
     summary = dict(payload.get("summary", {}))
-    comparison = dict(payload.get("comparison", {}))
+    verification = dict(payload.get("verification", {}))
     print(
-        "# actual_occurrences={actual}, signatures={signatures}, "
+        "# status={status}, actual_occurrences={actual}, signatures={signatures}, "
         "atom_lineages={lineages}, replicates={replicates}, complete={complete}".format(
+            status=verification.get("status", "inconclusive"),
             actual=summary.get("actual_path_occurrence_count", 0),
             signatures=summary.get("actual_path_signature_count", 0),
             lineages=summary.get("independent_atom_lineage_support_count", 0),
             replicates=summary.get("replicate_count", 0),
             complete=summary.get("statistics_complete", False),
-        )
-    )
-    print(
-        "# aggregate_pairs={aggregate}, confirmed_pairs={confirmed}, "
-        "aggregate_only={aggregate_only}, realization_rate={rate}".format(
-            aggregate=comparison.get("aggregate_reachable_pair_count", 0),
-            confirmed=comparison.get("confirmed_pair_count", 0),
-            aggregate_only=comparison.get("aggregate_only_pair_count"),
-            rate=comparison.get("realization_rate"),
         )
     )
     print(
@@ -535,11 +425,11 @@ def _print_event_path_table(payload: dict[str, object], *, top: int) -> None:
         )
 
 
-def cmd_event_paths(args: argparse.Namespace) -> int:
-    """Analyze strict-time, exact-molecule, atom-continuous RNG paths."""
+def cmd_verify_path(args: argparse.Namespace) -> int:
+    """Verify one strict-time, exact-molecule, atom-continuous RNG path."""
     from reacnet_scope.event_paths import (
         EventPathAnalysisError,
-        analyze_event_paths,
+        verify_event_path,
     )
     from reacnet_scope.indexes import (
         IndexInvalidError,
@@ -549,15 +439,13 @@ def cmd_event_paths(args: argparse.Namespace) -> int:
 
     try:
         sources = [_event_path_source_from_spec(value) for value in args.source]
-        payload = analyze_event_paths(
+        payload = verify_event_path(
             sources,
-            path_length=args.path_length,
-            start_smiles=args.start_smiles,
+            args.reaction,
             max_interval_gap=args.max_interval_gap,
             max_timestep_gap=args.max_timestep_gap,
             max_occurrence_details=args.max_occurrence_details,
             max_expansions=args.max_expansions,
-            max_network_paths=args.max_network_paths,
         )
     except (
         EventPathAnalysisError,
@@ -1135,7 +1023,7 @@ def _bounded_float(name: str, minimum: float, maximum: float):
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "ReacNetGenerator 检索、候选/实际事件路径、绘图与事件证据包导出工具。"
+            "ReacNetGenerator 检索、明确路径验证、绘图与事件证据包导出工具。"
         )
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1266,28 +1154,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp_events.add_argument("--offset", type=_bounded_int("offset", 0), default=0)
     sp_events.set_defaults(func=cmd_events)
 
-    sp_intermediate = sub.add_parser(
-        "intermediate-candidates",
-        help="查询中间体候选",
-    )
-    sp_intermediate.add_argument("case", help="数据集目录或公共前缀")
-    sp_intermediate.add_argument("--base", default="")
-    sp_intermediate.add_argument("--top", type=_bounded_int("top", 1, 500), default=120)
-    sp_intermediate.add_argument(
-        "--fwhm-min-frames",
-        type=_bounded_float("fwhm-min-frames", 0.0, 1_000_000.0),
-        default=1.0,
-        help="最小 FWHM（Analyzed Frame 数量）",
-    )
-    sp_intermediate.add_argument(
-        "--timestep-ps",
-        type=_bounded_float("timestep-ps", 0.000000001, 1_000_000.0),
-        default=None,
-        help="显式确认并保存 timestep 到 ps 的换算；未提供时保留 frame 语义",
-    )
-    sp_intermediate.add_argument("--no-flux", action="store_true")
-    sp_intermediate.set_defaults(func=cmd_intermediate_candidates)
-
     sp_batch = sub.add_parser("batch-compare", help="按 Simulation Condition 对比 Replicate")
     sp_batch.add_argument(
         "--group",
@@ -1304,73 +1170,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_batch.add_argument("--top", type=_bounded_int("top", 1, 500), default=50)
     sp_batch.set_defaults(func=cmd_batch_compare)
 
-    sp_pathway = sub.add_parser(
-        "candidate-paths",
-        help="检索并排序有界候选反应路径（候选路线，不代表机理证明）",
-    )
-    sp_pathway.add_argument(
-        "--reac",
-        default=str(DEFAULT_REACTION_FILE),
-        help=f"reactionabcd 文件路径 (default: {DEFAULT_REACTION_FILE})",
-    )
-    sp_pathway.add_argument(
-        "--start-smiles",
-        required=True,
-        help="路径检索起始物种 SMILES",
-    )
-    sp_pathway.add_argument(
-        "--direction",
-        choices=["downstream", "upstream"],
-        default="downstream",
-        help="沿生成方向或溯源方向检索",
-    )
-    sp_pathway.add_argument(
-        "--max-depth",
-        type=_bounded_int("max_depth", 1, 12),
-        default=3,
-        help="最大路径步数 (1-12)",
-    )
-    sp_pathway.add_argument(
-        "--max-branches",
-        type=_bounded_int("max_branches", 1, 100),
-        default=5,
-        help="每个状态保留的最大分支数 (1-100)",
-    )
-    sp_pathway.add_argument(
-        "--max-paths",
-        type=_bounded_int("max_paths", 1, 500),
-        default=20,
-        help="最大候选路径数 (1-500)",
-    )
-    sp_pathway.add_argument(
-        "--max-expansions",
-        type=_bounded_int("max_expansions", 1, 1_000_000),
-        default=5000,
-        help="最大搜索展开数 (1-1000000)",
-    )
-    sp_pathway.add_argument(
-        "--min-net-tp",
-        type=_bounded_int("min_net_tp", 1),
-        default=1,
-        help="最小正向净反应次数 (>=1)",
-    )
-    sp_pathway.add_argument(
-        "--min-directionality",
-        type=_unit_float("min_directionality"),
-        default=0.05,
-        help="最小方向性阈值 (0-1)",
-    )
-    sp_pathway.add_argument("--out-json", default="", help="可选 JSON 输出路径")
-    sp_pathway.add_argument(
-        "--out-csv",
-        default="",
-        help="可选逐步扁平 CSV 输出路径",
-    )
-    sp_pathway.set_defaults(func=cmd_pathway)
-
     sp_event_paths = sub.add_parser(
-        "event-paths",
-        help="统计真实发生的时间有序、分子实例与原子连续 RNG 事件路径",
+        "verify-path",
+        help="验证明确给出的 Reaction Type 序列是否形成真实事件链",
     )
     sp_event_paths.add_argument(
         "--source",
@@ -1383,15 +1185,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sp_event_paths.add_argument(
-        "--path-length",
-        type=_bounded_int("path_length", 2, 8),
-        default=3,
-        help="事件节点数；默认 3，即 event1→event2→event3",
-    )
-    sp_event_paths.add_argument(
-        "--start-smiles",
-        default="",
-        help="可选：只分析首个事件消耗该精确 SMILES 的路径",
+        "--reaction",
+        action="append",
+        required=True,
+        metavar="REACTANTS->PRODUCTS",
+        help="按发生顺序给出完整 Reaction Type；重复 2–8 次",
     )
     sp_event_paths.add_argument(
         "--max-interval-gap",
@@ -1418,12 +1216,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="每个重复实验的实际路径展开上限",
     )
     sp_event_paths.add_argument(
-        "--max-network-paths",
-        type=_bounded_int("max_network_paths", 1),
-        default=100_000,
-        help="每个重复实验的聚合网络可达路径枚举上限",
-    )
-    sp_event_paths.add_argument(
         "--top",
         type=_bounded_int("top", 1),
         default=20,
@@ -1434,7 +1226,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="可选：完整、可审计 JSON 报告输出路径",
     )
-    sp_event_paths.set_defaults(func=cmd_event_paths)
+    sp_event_paths.set_defaults(func=cmd_verify_path)
 
     sp_export_event = sub.add_parser(
         "export-event",

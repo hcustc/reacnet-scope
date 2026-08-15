@@ -324,7 +324,6 @@ def _revision_changed_context(
         "species": {"reaction"},
         "reaction": {"reaction"},
         "transition": {"reaction"},
-        "intermediate": {"species"},
         "evolution": {"species"},
         "events": {"timeline", "reactionevent", "molecules"},
     }

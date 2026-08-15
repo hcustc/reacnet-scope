@@ -11,7 +11,7 @@
 
 ReacNet Scope 是面向 ReacNetGenerator 输出的反应分子动力学证据工作台。它组织并查询 Species Abundance Evidence、Reaction Evidence 和 Molecular Evidence，帮助用户从聚合反应网络逐步下钻到可复核的具体事件和局部轨迹。
 
-ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权威生产者。ReacNet Scope 负责索引、查询、关联、统计、候选分析、可视化和导出，不从原始轨迹运行第二套反应检测或通用成键判定。
+ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权威生产者。ReacNet Scope 负责索引、查询、关联、统计、证据验证、可视化和导出，不从原始轨迹运行第二套反应检测或通用成键判定。
 
 质谱实验解释是下游对接场景。当前产品不是峰检测、色谱处理、通用 `m/z` 解释或同位素包络软件。
 
@@ -37,21 +37,17 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 发布必过的核心链路是：
 
-> 加载 ReacNetGenerator 数据集 → 检索 Species/Reaction Type → 发现 Candidate Path → 定位 Reaction Occurrence → 查看局部轨迹 → 导出可复核事件包
+> 加载 ReacNetGenerator 数据集 → 检索 Species/Reaction Type → 定位 Reaction Occurrence → 查看局部轨迹 → 导出可复核事件包
 
-Reaction Path 包含两个不同对象：
+Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
 
-- Candidate Path：聚合 Reaction Evidence 中可达的有界假设路线。
-- Event Path：由具体 Reaction Occurrence 按时间、分子实例和原子谱系连接形成的事件序列。
-
-二者不得被称为已确认机理。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
+围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它不递归扩展路径。用户可据此形成待验证序列，但软件不会自动组合。
 
 ## 4. 正式辅助能力
 
 以下能力是正式功能，但不是核心链路的必经步骤：
 
 - Species 时间演化。
-- Intermediate Candidate 筛选。
 - Element Distribution Evolution。
 - 跨 Simulation Condition 与 Replicate 的批量对比。
 
@@ -61,7 +57,8 @@ Reaction Path 包含两个不同对象：
 
 当前版本明确不包括：
 
-- 机理网络、自动确认机理或因果推断。
+- 机理网络、自动路径发现/评分、自动确认机理或因果推断。
+- 基于丰度曲线、寿命或通量自动筛选中间体候选；现有规则未经充分验证，不作为产品功能或公共 API 提供。
 - 从轨迹重新检测反应或根据坐标覆盖 RNG 键变化。
 - `.route` 事件回退、Route 索引或 Route 原子迁移分析。
 - 旧静态 Web 和与 Dash 对等的第二套 Web 功能。
@@ -80,6 +77,7 @@ Reaction Path 包含两个不同对象：
 - Reaction Type 是有方向、保留重复计量项的精确 Species 多重集合；同一侧的排列顺序不影响身份。
 - 分子式反应检索只用于发现。事件、路径、批量统计和导出必须使用精确 Reaction Type。
 - 跨工具交接传递精确 SMILES、Occurrence Identity 或稳定反应键，不能只传显示文字。
+- Path Verification 必须接收按顺序排列的完整 Reaction Type；不接受只有起点、终点或路径长度的自动搜索请求。
 
 ### 6.2 Reaction Occurrence
 
@@ -99,7 +97,7 @@ Reaction Path 包含两个不同对象：
 
 | 输入 | 提供的能力 | 规则 |
 | --- | --- | --- |
-| `.reactionabcd` | 聚合反应网络、反应检索、Candidate Path、通量 | 保留方向和化学计量 |
+| `.reactionabcd` | 聚合反应网络、反应检索、通量 | 保留方向和化学计量 |
 | `.species` | Species Abundance Evidence | 经离线物种丰度索引消费 |
 | 完整 `.timeline.h5` | Reaction Evidence 与可选 Molecular Evidence | 首选原生 Timed Evidence Source |
 | `.reactionevent.csv` + `.molecules.csv` | 旧数据的事件与分子证据 | 仅在原生文件完全不存在时回退 |
@@ -149,9 +147,8 @@ Reaction Path 包含两个不同对象：
 
 侧栏采用始终可见的工具箱：
 
-- 检索与趋势：物种检索、反应式检索、时间演化。
-- 事件证据：反应事件、轨迹查看。
-- 自动分析：中间体候选、反应路径、元素分布演化。
+- 检索与趋势：物种检索、反应式检索、时间演化、元素分布演化。
+- 事件证据：反应事件、轨迹查看、路径验证。
 - 数据工作区：管理数据、批量对比。
 
 工具可以独立进入。跨工具按钮只交接稳定身份和必要上下文，目标工具仍调用统一核心实现。
@@ -166,7 +163,7 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 - 精确质量容差使用 Da，显式 `0` 必须保留；结果显示 Da 与 ppm 误差。
 - 质量结果可按分子式聚合展示，但必须下钻到全部具体 Species。
 - 不静默枚举仅针对 Cl 的同位素组合；通用同位素检索需要独立未来设计。
-- Reaction 搜索保留方向和化学计量，提供生成/消耗通道，并可交接 Candidate Path 或 Reaction Occurrence。
+- Reaction 搜索保留方向和化学计量，提供生成/消耗通道，并可交接 Reaction Occurrence。
 
 ### 11.2 Species 时间演化
 
@@ -190,62 +187,17 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 - 换算绑定 Dataset Workspace 并写入导出参数。
 - 多数据集物理时间对比要求每个数据集分别具有明确换算。
 
-### 11.4 Intermediate Candidate
+### 11.4 Path Verification 与 Event Path
 
-- 名称始终为“中间体候选”，不得宣称已确认中间体。
-- 分类展示起始、峰值、末值、起止比例、峰值位置、FWHM 和全部阈值。
-- 物理时间未确认时，FWHM 使用 Analyzed Frame 数量。
-- 通量富集与丰度分类分离；缺少 `.reactionabcd` 时仍可筛选，但不显示通量通道。
-- 规则和评分有版本号，参数可修改，导出记录实际参数。
-- 候选可以交接时间演化或 Candidate Path 继续核查。
-
-### 11.5 Candidate Path
-
-提供两种明确模式：
-
-- 证据排名：事件索引就绪时使用事件关联和时间覆盖；缺失或过期时显式降级 `network_only` 并给出准备命令。
-- 快速网络粗筛：只读取 `.reactionabcd`，不访问事件、轨迹或 Species 时间索引。
-
-所有入口的正式默认参数为：
-
-| 参数 | 默认 | 有效范围 |
-| --- | ---: | ---: |
-| `max_depth` | 3 | 1–12 |
-| `max_branches` | 5 | 1–100 |
-| `max_paths` | 20 | 1–500 |
-| `max_expansions` | 5000 | 1–1,000,000 |
-| `min_net_tp` | 1 | >= 1 |
-| `min_directionality` | 0.05 | 0–1 |
-
-Dash 提供可修改输入，`max_expansions` 可置于高级设置。用户明确选择“快速搜索”预设时切换为 `4 / 4 / 10 / 300`，之后仍可逐项修改。结果记录实际参数；触及展开上限时标记 `truncated`。达到深度上限不等于真实终产物。
-
-`candidate-path/v1` 单步评分为：
-
-```text
-0.40 * net_share
-+ 0.25 * directionality
-+ 0.20 * event_coverage
-+ 0.15 * time_coverage
-```
-
-没有事件证据时，只使用前两项并归一化。整条路径评分为：
-
-```text
-0.70 * geometric_mean(step_scores) + 0.30 * min(step_scores)
-```
-
-UI 和导出显示原始指标、未四舍五入值、评分版本和查询参数。改变权重必须发布新评分版本。
-
-### 11.6 Event Path
-
+- 输入是用户按顺序明确给出的 2–8 个完整 Reaction Type；不从起点物种自动扩展。
+- 验证结果是 `supported`、`not_observed` 或 `inconclusive`；只有完整且未截断的遍历可以给出 `not_observed`。
 - 节点是 Reaction Occurrence，不是 Reaction Type。
 - 边要求时间严格向后、共享同一精确分子实例，并连接到该实例第一次后续消耗。
 - 三事件及更长路径要求至少一个原子 ID 贯穿相邻边，形成连续原子谱系。
 - 跨 Replicate 统计以“Replicate + 原子谱系”为独立支持单位，报告时间间隔和复现率。
 - 缺少 Molecular Evidence 时拒绝分析，不退化为同名 Species 拼接。
-- 聚合网络可达但无 Event Path 表示“当前轨迹证据未支持”，不表示化学上不可能。
 
-### 11.7 Reaction Occurrence 与轨迹查看
+### 11.5 Reaction Occurrence 与轨迹查看
 
 - 事件页查询并选择具体 Reaction Occurrence；未解析发生可统计但不可打开轨迹。
 - 默认显示全部参与原子，可切换仅反应核或周围环境。
@@ -256,7 +208,18 @@ UI 和导出显示原始指标、未四舍五入值、评分版本和查询参�
 - 映射保存在独立数据集设置中，允许部分映射；只有所选原子全部映射时生成 ExtXYZ。
 - 缺少轨迹索引或 ASE 时仍可查看事件元数据，但明确禁用轨迹和相应导出。
 
-### 11.8 可复核事件包
+#### 11.5.1 Molecule Lineage
+
+- 输入必须是某个 Reaction Occurrence 一侧的具体 Molecule Instance，不接受只有 Species 的起点。
+- 连续性使用精确 Species、atom-ID 集合和最近可解析事件；结构回穿还要求分子内键集合完全相同。
+- 默认锚点为全部非氢原子，缺少可靠 atom ID → element 映射时失败关闭；允许显式改为全部原子、指定元素或指定 Atom IDs。
+- 拆分时展开所有保留锚点的分支；合并的无锚点共同反应物和无锚点离去片段只作为上下文。
+- 默认向前/向后各 3 次持久变化、最多 100 个分子节点、Fast Recrossing Episode 窗口 5 个 Analyzed Frames；所有边界和证据断点必须写入报告。
+- 原始视图、事件表和导出保留全部 Reaction Occurrence；持久视图可以折叠严格结构回穿。
+- 事件只使用中性结构变化标签；增长/降解仅作重原子规模汇总，不输出机理、因果或唯一历史断言。
+- JSON/CSV 必须包含参数、来源签名、分子节点、事件、连接、键变化、回穿段和截断原因，并能按稳定 `event_id` 下钻局部轨迹。
+
+### 11.6 可复核事件包
 
 事件包是确定性 ZIP，固定包含：
 
@@ -268,7 +231,7 @@ UI 和导出显示原始指标、未四舍五入值、评分版本和查询参�
 
 内容记录事件身份、来源签名、原子范围、键变化、帧、坐标处理、元素映射和提取参数。映射不完整时仍导出 ZIP 和 LAMMPS 轨迹，只省略 ExtXYZ 并说明原因。CLI 默认不覆盖目标，覆盖必须显式指定。
 
-### 11.9 Element Distribution Evolution
+### 11.7 Element Distribution Evolution
 
 - 用户选择分组元素；数据含碳时可默认 C，但不得写死。
 - 默认统计至少含一个分组元素的 Species，提供包含 `E0` 的显式选项。
@@ -280,7 +243,7 @@ UI 和导出显示原始指标、未四舍五入值、评分版本和查询参�
 
 只保留一个通用核心、一个 Dash 页面和 CLI `element-distribution`。删除 C/O/Cl 固定 schema、第二套 Carbon 模式和旧 `carbon-plot`。
 
-### 11.10 Batch Compare
+### 11.8 Batch Compare
 
 - 每个输入明确归属 Simulation Condition 和 Replicate；目录自动识别只作建议，用户运行前可检查和修改。
 - 使用有方向、保留计量数的精确 SMILES Reaction Type 匹配。
@@ -299,9 +262,7 @@ UI 和导出显示原始指标、未四舍五入值、评分版本和查询参�
 - `reactions`
 - `events`
 - `species-evolution`
-- `intermediate-candidates`
-- `candidate-paths`
-- `event-paths`
+- `verify-path`
 - `export-event`
 - `element-distribution`
 - `batch-compare`
@@ -350,7 +311,7 @@ UI 和导出显示原始指标、未四舍五入值、评分版本和查询参�
 5. 具备核心单元/契约测试、Dash 或 CLI 集成测试和代表性真实数据验收。
 6. 通过跨平台核心测试与 Dash smoke test。
 
-RP3 验收至少固定验证反应类型数、事件数、事件关联、已知 Candidate Path、Event Path、局部帧和事件包成员。大型数据验收验证结构性能契约与回归指标。自动测试不启动 OVITO；OVITO 打开属于受控人工验收。
+RP3 验收至少固定验证反应类型数、事件数、事件关联、已知路径验证结论、Event Path、局部帧和事件包成员。大型数据验收验证结构性能契约与回归指标。自动测试不启动 OVITO；OVITO 打开属于受控人工验收。
 
 ## 17. 已知的当前实现偏差
 
@@ -359,9 +320,8 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知 
 - 旧静态 Web 仍存在，Dash 仍导入其业务逻辑。
 - `.route` 索引和事件回退仍存在。
 - `rng_tools` 与 `reacnet_scope` 分裂，Dash 服务和回调文件过大。
-- 时间演化和中间体筛选仍可能在请求中完整扫描 `.species`。
+- 时间演化仍可能在请求中完整扫描 `.species`。
 - 组成索引、UI 和 CLI 仍写死 C/O/Cl 或 Carbon。
-- Candidate Path 的 Dash 默认值与 API/CLI 不一致，`max_expansions` 未直接暴露。
 - 质量检索仍存在仅针对 Cl 的同位素组合特例。
 - 时间相关页面仍可能静默使用 `0.0001 ps`。
 - CLI 仍暴露历史命令和独立入口，缺少部分正式批处理能力。

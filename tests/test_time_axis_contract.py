@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
-import json
-
 import pytest
 
 from reacnet_scope import services as svc
@@ -58,52 +54,6 @@ def test_species_evolution_defaults_to_timestep_and_persists_explicit_conversion
 
     assert confirmed["x_values"] == [0.0, 0.02, 0.04]
     assert persisted["x_values"] == confirmed["x_values"]
-
-
-def test_intermediate_candidates_use_analyzed_frames_without_conversion(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
-    species = tmp_path / "candidate.species"
-    _write_species(species)
-    SPECIES_COMPOSITION_STORE.build(str(species))
-
-    payload = svc.build_intermediate_candidates(
-        {"species": str(species)},
-        with_flux=False,
-        fwhm_min_frames=1,
-    )
-
-    assert payload["meta"]["time_axis"] == "analyzed_frame"
-    assert payload["meta"]["dt_ps"] is None
-    assert payload["rows"][0]["fwhm_frames"] == 1
-    assert payload["rows"][0]["peak_analyzed_frame"] == 1.0
-    assert payload["rows"][0]["fwhm_ps"] is None
-    assert payload["rows"][0]["peak_time_ps"] is None
-
-    physical = svc.build_intermediate_candidates(
-        {"species": str(species)},
-        timestep_ps=0.002,
-        product_ratio_min=0.96,
-        reactant_start_ratio_min=0.91,
-        fwhm_min_frames=1,
-    )
-    assert physical["rows"][0]["peak_time_ps"] == 0.02
-    assert physical["meta"]["flux_enrichment"] == {
-        "requested": True,
-        "available": False,
-        "applied": False,
-        "reason": "reaction_network_missing",
-    }
-    assert physical["rule_version"] == "intermediate-classification/v1"
-    assert physical["scoring_version"] == "intermediate-score/v1"
-    exported = svc.intermediate_candidates_to_csv(physical)
-    exported_row = next(csv.DictReader(io.StringIO(exported)))
-    exported_query = json.loads(exported_row["query_parameters_json"])
-    assert exported_row["rule_version"] == "intermediate-classification/v1"
-    assert exported_query["product_ratio_min"] == 0.96
-    assert exported_query["reactant_start_ratio_min"] == 0.91
 
 
 def test_species_evolution_csv_keeps_raw_values_and_both_coordinates(
@@ -168,31 +118,3 @@ def test_multi_dataset_evolution_csv_keeps_each_source_coordinates(
     assert "first,,C,1,10,2.0" in exported
     assert "second,,C,0,5,3.0" in exported
     assert "second,,C,1,20,4.0" in exported
-
-
-def test_intermediate_uses_index_position_for_irregular_analyzed_frames(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
-    species = tmp_path / "irregular.species"
-    species.write_text(
-        "Timestep 5: C 0\n"
-        "Timestep 10: C 2\n"
-        "Timestep 30: C 9\n",
-        encoding="utf-8",
-    )
-    SPECIES_COMPOSITION_STORE.build(str(species))
-
-    payload = svc.build_intermediate_candidates(
-        {"species": str(species)},
-        kind="all",
-        with_flux=False,
-        require_fwhm=False,
-        timestep_ps=0.002,
-    )
-
-    assert payload["rows"][0]["peak_analyzed_frame"] == 2
-    assert payload["rows"][0]["peak_time_ps"] == 0.06
-    assert payload["rows"][0]["fwhm_ps"] is None
-    assert payload["meta"]["dt_ps"] is None

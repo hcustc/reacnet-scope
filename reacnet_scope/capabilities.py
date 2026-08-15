@@ -25,8 +25,8 @@ CAPABILITY_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "key": "species_abundance",
         "label": "物种丰度",
         "source_kinds": ("species",),
-        "preparation_kind": "",
-        "ready_reason": "已发现 Species Abundance Evidence，可直接查询丰度与演化。",
+        "preparation_kind": "composition",
+        "ready_reason": "Species Abundance Index 已就绪，可查询物种丰度与时间演化。",
         "missing_reason": "缺少 .species Species Abundance Evidence。",
     },
     {

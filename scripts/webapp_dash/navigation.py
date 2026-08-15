@@ -11,7 +11,6 @@ PAGE_IDS: Final[tuple[str, ...]] = (
     "evolution",
     "events",
     "trajectory",
-    "intermediate",
     "pathway",
     "element-distribution",
     "data-management",
@@ -24,8 +23,7 @@ PAGE_LABELS: Final[dict[str, str]] = {
     "evolution": "时间演化",
     "events": "反应事件",
     "trajectory": "轨迹查看",
-    "intermediate": "中间体候选",
-    "pathway": "反应路径",
+    "pathway": "路径验证",
     "element-distribution": "元素分布演化",
     "data-management": "管理数据",
     "batch-compare": "批量对比",
@@ -37,8 +35,7 @@ PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
     "evolution": "绘制单个或多组物种的时间演化曲线，比较生成与消耗趋势。",
     "events": "从反应通道定位 RNG 事件，建立可复核的轨迹证据入口。",
     "trajectory": "检查局部反应轨迹、关键帧和原子环境，并导出外部分析脚本。",
-    "intermediate": "按寿命、丰度与通量筛选中间体候选，衔接后续路径分析。",
-    "pathway": "先从聚合反应网络寻找可能路线，再用时间、分子实例和原子 ID 验证真实发生路径。",
+    "pathway": "输入明确的 Reaction Type 序列，用时间、分子实例和原子 ID 核查完整事件链。",
     "element-distribution": "按数据集中发现的元素分组和筛选物种，追踪分布随时间的变化。",
     "data-management": "选择当前数据集、检查文件就绪状态，并准备 Dataset Workspace 派生索引。",
     "batch-compare": "跨多个数据集比较反应检出、通量与条件差异。",
@@ -50,26 +47,27 @@ PAGE_SECTIONS: Final[dict[str, str]] = {
     "evolution": "检索与趋势",
     "events": "事件证据",
     "trajectory": "事件证据",
-    "intermediate": "自动分析",
-    "pathway": "自动分析",
-    "element-distribution": "自动分析",
+    "pathway": "事件证据",
+    "element-distribution": "检索与趋势",
     "data-management": "数据工作区",
     "batch-compare": "数据工作区",
 }
 
 # Compact, font-independent marks keep navigation legible without another
 # icon-font or network dependency.
+# Offline SVG icons are served from the Dash assets folder.  Visible text
+# labels stay adjacent to every icon, so these images are decorative and are
+# hidden from assistive technology in the navigation controls.
 PAGE_ICONS: Final[dict[str, str]] = {
-    "species": "Sp",
-    "reactions": "Rx",
-    "evolution": "Ev",
-    "events": "Et",
-    "trajectory": "Tr",
-    "intermediate": "In",
-    "pathway": "Pw",
-    "element-distribution": "Ed",
-    "data-management": "Dm",
-    "batch-compare": "Cp",
+    "species": "/assets/icons/species.svg",
+    "reactions": "/assets/icons/reactions.svg",
+    "evolution": "/assets/icons/evolution.svg",
+    "events": "/assets/icons/events.svg",
+    "trajectory": "/assets/icons/trajectory.svg",
+    "pathway": "/assets/icons/pathway.svg",
+    "element-distribution": "/assets/icons/element-distribution.svg",
+    "data-management": "/assets/icons/data-management.svg",
+    "batch-compare": "/assets/icons/batch-compare.svg",
 }
 
 PAGE_CLASS_NAMES: Final[dict[str, str]] = {
@@ -85,6 +83,7 @@ NAV_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
             "species",
             "reactions",
             "evolution",
+            "element-distribution",
         ),
     ),
     (
@@ -92,14 +91,7 @@ NAV_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
         (
             "events",
             "trajectory",
-        ),
-    ),
-    (
-        "自动分析",
-        (
-            "intermediate",
             "pathway",
-            "element-distribution",
         ),
     ),
 )

@@ -50,6 +50,7 @@ packages = ["reacnet_scope", "scripts"]
 include = [
   "/README.md",
   "/LICENSE",
+  "/start-reacnet-scope.sh",
   "/pyproject.toml",
   "/uv.lock",
   "/examples",
@@ -61,8 +62,18 @@ include = [
 
 [tool.uv]
 package = true
+default-groups = ["dev"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8,<9",
+  { include-group = "test" },
+]
+test = [
+  "pytest>=8,<9",
+  "dash[diskcache]>=4,<5",
+  "dash-bootstrap-components>=2,<3",
+  "dash-cytoscape>=1,<2",
+  "matplotlib>=3.8",
+  "scipy>=1.11",
+  "ase>=3.23,<4",
 ]

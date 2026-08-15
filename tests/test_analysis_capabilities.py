@@ -25,7 +25,7 @@ def test_capabilities_are_independent_and_always_explain_their_state() -> None:
 
     assert {key: item["state"] for key, item in evidence.items()} == {
         "reaction_search": "ready",
-        "species_abundance": "ready",
+        "species_abundance": "needs-preparation",
         "event_search": "missing-source",
         "trajectory_evidence": "missing-source",
         "element_distribution": "needs-preparation",

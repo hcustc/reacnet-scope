@@ -12,7 +12,6 @@ This module never reimplements analysis logic.  It only:
 
 from __future__ import annotations
 
-import base64
 import csv
 import io
 import json
@@ -27,14 +26,12 @@ import tempfile
 import time
 from contextlib import redirect_stdout
 from functools import lru_cache
-from bisect import bisect_left, bisect_right
 from pathlib import Path
 from collections import Counter
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
-from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
-from reacnet_scope.pathways import find_candidate_paths  # noqa: E402
+from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts  # noqa: E402
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -54,7 +51,6 @@ from reacnet_scope.composition import (  # noqa: E402
 from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
-    EventIndexEvidenceProvider,
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
@@ -63,7 +59,7 @@ from reacnet_scope.event_package import (  # noqa: E402
 from reacnet_scope.event_paths import (  # noqa: E402
     EventPathAnalysisError,
     EventPathSource,
-    analyze_event_paths,
+    verify_event_path,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -87,10 +83,8 @@ from reacnet_scope.trajectory import (  # noqa: E402
     select_local_environment,
 )
 from reacnet_scope.queries import (  # noqa: E402
-    ReactionSourceChangedError,
     STORE,
     build_dataset_status_payload,
-    build_intermediate_candidates_payload,
     build_species_plot_payload,
     collect_species_totals,
     collect_next_reactions,
@@ -135,59 +129,6 @@ def _file_signature(path_text: str) -> tuple[str, int, int]:
     return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
 
 
-def _pathway_formula(smiles: str) -> str:
-    return formula_from_counts(count_atoms_fast(smiles))
-
-
-def _pathway_source_snapshot(
-    path_text: str,
-) -> dict[str, Any]:
-    return reaction_source_signature(
-        str(Path(path_text).expanduser().resolve())
-    )
-
-
-def _pathway_assert_source_current(
-    path_text: str,
-    expected: Mapping[str, Any],
-) -> None:
-    try:
-        actual = _pathway_source_snapshot(path_text)
-    except OSError as exc:
-        raise ServiceError(
-            "reactionabcd 文件在路径查询期间发生变化，请重试",
-            reason="reaction_source_stale",
-        ) from exc
-    except ReactionSourceChangedError as exc:
-        raise ServiceError(
-            "reactionabcd 文件在路径查询期间发生变化，请重试",
-            reason="reaction_source_stale",
-        ) from exc
-    if actual.get("sha256") != expected.get("sha256"):
-        raise ServiceError(
-            "reactionabcd 文件在路径查询期间发生变化，请重试",
-            reason="reaction_source_stale",
-        )
-
-
-def _load_reaction_network_snapshot(
-    reaction_path: str,
-    min_tp: int,
-) -> tuple[ReactionNetwork, dict[str, Any]]:
-    """Load a network and its exact content signature as one snapshot."""
-    get_with_signature = getattr(STORE, "get_with_signature", None)
-    if callable(get_with_signature):
-        network, signature = get_with_signature(reaction_path, min_tp)
-        if not isinstance(signature, Mapping):
-            raise RuntimeError("reaction source signature is invalid")
-        return network, dict(signature)
-
-    # A historical ``get`` result has no verifiable content provenance.  Parse
-    # a fresh captured byte snapshot instead of pairing an opaque cached object
-    # with the digest of whatever happens to be at the path now.
-    return load_reaction_network_snapshot(reaction_path, min_tp)
-
-
 def _reaction_min_tp(artifacts: Mapping[str, Any]) -> int:
     """Return the session-level reaction throughput threshold."""
     try:
@@ -196,399 +137,6 @@ def _reaction_min_tp(artifacts: Mapping[str, Any]) -> int:
         return 1
 
 
-def _pathway_preparation_command(
-    reaction_path: str,
-    reactionevent_path: str,
-    *,
-    rebuild: bool,
-) -> str:
-    source = reactionevent_path or reaction_path
-    action = "rebuild" if rebuild else "build"
-    return f"reacnet-scope prepare {action} event {shlex.quote(source)}"
-
-
-_PATHWAY_QUERY_KEYS = {
-    "direction",
-    "max_depth",
-    "max_branches",
-    "max_paths",
-    "max_expansions",
-    "min_net_tp",
-    "min_directionality",
-    "target_max_carbon",
-    "evidence_mode",
-}
-
-
-def find_pathways(
-    artifacts: dict[str, str],
-    start_smiles: str,
-    **limits: Any,
-) -> dict[str, Any]:
-    """Find candidate paths, linking a ready SQLite event index if present."""
-    query_limits = dict(limits)
-    evidence_mode = str(
-        query_limits.pop("evidence_mode", "auto") or "auto"
-    )
-    if evidence_mode not in {"auto", "network_only"}:
-        raise ServiceError(
-            "evidence_mode 必须是 auto 或 network_only",
-            reason="bad_pathway_query",
-        )
-    reaction_path = (artifacts.get("reaction") or "").strip()
-    if (
-        not reaction_path.lower().endswith(".reactionabcd")
-        or not Path(reaction_path).is_file()
-    ):
-        raise ServiceError(
-            "需要 .reactionabcd 文件",
-            reason="missing_reac",
-        )
-
-    unknown_limits = sorted(set(limits) - _PATHWAY_QUERY_KEYS)
-    if unknown_limits:
-        raise ServiceError(
-            f"无效的路径查询参数: {', '.join(unknown_limits)}",
-            reason="bad_pathway_query",
-        )
-
-    try:
-        network, reaction_signature = _load_reaction_network_snapshot(
-            reaction_path,
-            _reaction_min_tp(artifacts),
-        )
-        _pathway_assert_source_current(reaction_path, reaction_signature)
-    except FileNotFoundError as exc:
-        raise ServiceError(
-            "需要 .reactionabcd 文件",
-            reason="missing_reac",
-        ) from exc
-    except ReactionSourceChangedError as exc:
-        raise ServiceError(
-            "reactionabcd 文件在路径查询期间发生变化，请重试",
-            reason="reaction_source_stale",
-        ) from exc
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ServiceError(
-            f"无法加载反应网络: {exc}",
-            reason="bad_reac",
-        ) from exc
-
-    reactionevent_path, molecules_path = _event_artifact_paths(artifacts)
-    evidence_provider: EventIndexEvidenceProvider | None = None
-    rebuild_event_index = False
-    if (
-        evidence_mode == "auto"
-        and reactionevent_path
-        and Path(reactionevent_path).is_file()
-    ):
-        molecules_path = (
-            molecules_path
-            if molecules_path and Path(molecules_path).is_file()
-            else ""
-        )
-        try:
-            opened = EVENT_EVIDENCE_STORE.open_required(
-                reactionevent_path,
-                molecules_path,
-            )
-            evidence_provider = EventIndexEvidenceProvider(
-                reactionevent_path,
-                molecules_path,
-                store=EVENT_EVIDENCE_STORE,
-                opened=opened,
-            )
-        except (IndexStaleError, IndexInvalidError):
-            rebuild_event_index = True
-        except IndexNotReadyError:
-            rebuild_event_index = False
-
-    try:
-        try:
-            result = find_candidate_paths(
-                network,
-                start_smiles,
-                evidence_provider=evidence_provider,
-                **query_limits,
-            )
-            if evidence_provider is not None:
-                evidence_provider.assert_current()
-        except IndexNotReadyError:
-            evidence_provider = None
-            rebuild_event_index = True
-            result = find_candidate_paths(
-                network,
-                start_smiles,
-                evidence_provider=None,
-                **query_limits,
-            )
-    except (TypeError, ValueError) as exc:
-        message = str(exc)
-        if isinstance(exc, TypeError) or any(
-            name in message for name in _PATHWAY_QUERY_KEYS
-        ):
-            raise ServiceError(
-                f"无效的路径查询参数: {message}",
-                reason="bad_pathway_query",
-            ) from exc
-        raise
-
-    _pathway_assert_source_current(reaction_path, reaction_signature)
-    payload = result.as_dict()
-    payload.setdefault("query", {})["evidence_mode"] = evidence_mode
-    payload["search_stage"] = (
-        "network_shortlist"
-        if evidence_mode == "network_only"
-        else "evidence_ranked"
-    )
-    payload["evidence_deferred"] = evidence_mode == "network_only"
-    target_max_carbon = payload.get("query", {}).get("target_max_carbon")
-    max_depth = int(payload.get("query", {}).get("max_depth") or 0)
-    for path in payload["paths"]:
-        path["formulas"] = [
-            _pathway_formula(smiles)
-            for smiles in path["species"]
-        ]
-        for step in path["steps"]:
-            step["focal_input_formula"] = _pathway_formula(
-                step["focal_input"]
-            )
-            step["focal_output_formula"] = _pathway_formula(
-                step["focal_output"]
-            )
-            step["reactant_formulas"] = [
-                _pathway_formula(smiles)
-                for smiles in step["reactants"]
-            ]
-            step["product_formulas"] = [
-                _pathway_formula(smiles)
-                for smiles in step["products"]
-            ]
-        _annotate_pathway_endpoints(
-            path,
-            direction=str(
-                payload.get("query", {}).get("direction") or "downstream"
-            ),
-            target_max_carbon=(
-                int(target_max_carbon)
-                if target_max_carbon is not None
-                else None
-            ),
-            max_depth=max_depth,
-            search_truncated=bool(payload.get("truncated")),
-        )
-
-    payload["source_signatures"] = {
-        "reactionabcd": reaction_signature,
-        **dict(payload["source_signatures"]),
-    }
-    if evidence_provider is None and evidence_mode == "auto":
-        payload["preparation_command"] = _pathway_preparation_command(
-            reaction_path,
-            reactionevent_path,
-            rebuild=rebuild_event_index,
-        )
-    return payload
-
-
-def _pathway_species_summary(smiles: str) -> dict[str, Any]:
-    carbon_count = int(count_atoms_fast(smiles).get("C", 0))
-    return {
-        "smiles": smiles,
-        "formula": _pathway_formula(smiles),
-        "carbon_count": carbon_count,
-        "is_small_carbon_fragment": 0 < carbon_count <= 4,
-        "structure_url": (
-            "/api/structure.svg?"
-            f"smiles={quote(smiles, safe='')}&width=150&height=104&show_h=1"
-        ),
-    }
-
-
-def _annotate_pathway_endpoints(
-    path: dict[str, Any],
-    *,
-    direction: str,
-    target_max_carbon: int | None,
-    max_depth: int,
-    search_truncated: bool,
-) -> None:
-    """Expose full terminal hyperedge products and route-ending semantics."""
-    steps = path.get("steps") or []
-    species = [str(value) for value in path.get("species") or []]
-    terminal_smiles = species[-1] if species else ""
-    path["terminal_species"] = (
-        _pathway_species_summary(terminal_smiles)
-        if terminal_smiles
-        else None
-    )
-    terminal_carbon = int(
-        (path.get("terminal_species") or {}).get("carbon_count") or 0
-    )
-    if (
-        target_max_carbon is not None
-        and 0 < terminal_carbon <= target_max_carbon
-    ):
-        ending = "small_molecule_goal"
-    elif search_truncated and len(steps) < max_depth:
-        ending = "search_truncated"
-    elif len(steps) >= max_depth:
-        ending = "depth_limit"
-    else:
-        ending = "no_positive_continuation"
-    path["termination_reason"] = ending
-
-    last_step = steps[-1] if steps else {}
-    terminal_side = (
-        last_step.get("reactants")
-        if direction == "upstream"
-        else last_step.get("products")
-    ) or []
-    path["terminal_products"] = [
-        _pathway_species_summary(str(smiles))
-        for smiles in terminal_side
-    ]
-
-    fragments: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    fragmentation_steps: list[int] = []
-    for step_index, step in enumerate(steps, start=1):
-        focal_input = str(step.get("focal_input") or "")
-        input_carbon = int(count_atoms_fast(focal_input).get("C", 0))
-        output_side = (
-            step.get("reactants")
-            if direction == "upstream"
-            else step.get("products")
-        ) or []
-        step_fragmented = False
-        for raw_smiles in output_side:
-            summary = _pathway_species_summary(str(raw_smiles))
-            carbon_count = int(summary["carbon_count"])
-            if (
-                summary["is_small_carbon_fragment"]
-                and input_carbon > carbon_count
-            ):
-                step_fragmented = True
-                if summary["smiles"] not in seen:
-                    seen.add(summary["smiles"])
-                    fragments.append(summary)
-        if step_fragmented:
-            fragmentation_steps.append(step_index)
-    path["small_fragments"] = fragments
-    path["fragmentation_step_indices"] = fragmentation_steps
-    path["has_fragmentation"] = bool(fragmentation_steps)
-
-
-def _pathway_species_node_id(smiles: str) -> str:
-    encoded = base64.urlsafe_b64encode(smiles.encode("utf-8")).decode("ascii")
-    return f"species:{encoded}"
-
-
-def build_pathway_elements(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Build a lossless bipartite Cytoscape payload from serialized paths.
-
-    Species identity is the exact SMILES string.  Reaction nodes remain
-    path-local because the same reaction may occur at different ranks/steps.
-    Repeated reactants/products intentionally produce repeated edges.
-    """
-    species_classes: dict[str, set[str]] = {}
-    species_order: list[str] = []
-    reaction_nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    for path in payload.get("paths") or []:
-        rank = int(path.get("rank") or 0)
-        rank_class = f"path-rank-{rank}"
-        for step_index, step in enumerate(path.get("steps") or [], start=1):
-            reaction_key = str(step.get("reaction_key") or "")
-            encoded_key = base64.urlsafe_b64encode(
-                reaction_key.encode("utf-8")
-            ).decode("ascii")
-            reaction_id = (
-                f"reaction:{encoded_key}:path-{rank}-step-{step_index}"
-            )
-            reactants = [str(value) for value in step.get("reactants") or []]
-            products = [str(value) for value in step.get("products") or []]
-            reaction_text = (
-                f"{' + '.join(reactants)} -> {' + '.join(products)}"
-            )
-            classes = {"reaction", rank_class}
-            network_only = step.get("evidence_status") == "network_only"
-            if network_only:
-                classes.add("network-only")
-            reaction_nodes.append(
-                {
-                    "data": {
-                        "id": reaction_id,
-                        "node_kind": "reaction",
-                        "label": f"R{rank}.{step_index}",
-                        "path_rank": rank,
-                        "step_index": step_index,
-                        "reaction_key": reaction_key,
-                        "reaction_text": reaction_text,
-                        "score": step.get("score"),
-                        "evidence_status": step.get("evidence_status"),
-                    },
-                    "classes": " ".join(sorted(classes)),
-                }
-            )
-            for side, members in (("reactant", reactants), ("product", products)):
-                for occurrence, smiles in enumerate(members, start=1):
-                    if smiles not in species_classes:
-                        species_classes[smiles] = {"species"}
-                        species_order.append(smiles)
-                    species_classes[smiles].add(rank_class)
-                    species_id = _pathway_species_node_id(smiles)
-                    edge_id = (
-                        f"edge:{rank}:{step_index}:{side}:{occurrence}:"
-                        f"{encoded_key}"
-                    )
-                    if side == "reactant":
-                        source, target = species_id, reaction_id
-                    else:
-                        source, target = reaction_id, species_id
-                    edges.append(
-                        {
-                            "data": {
-                                "id": edge_id,
-                                "source": source,
-                                "target": target,
-                                "path_rank": rank,
-                                "step_index": step_index,
-                                "side": side,
-                                "occurrence": occurrence,
-                            },
-                            "classes": " ".join(
-                                [
-                                    rank_class,
-                                    side,
-                                    *(["network-only"] if network_only else []),
-                                ]
-                            ),
-                        }
-                    )
-        for item in path.get("terminal_products") or []:
-            smiles = str(item.get("smiles") or "")
-            if smiles and smiles in species_classes:
-                species_classes[smiles].add("terminal-product")
-                if item.get("is_small_carbon_fragment"):
-                    species_classes[smiles].add("small-fragment")
-    species_nodes = [
-        {
-            "data": {
-                "id": _pathway_species_node_id(smiles),
-                "node_kind": "species",
-                "label": _pathway_formula(smiles) or smiles,
-                "formula": _pathway_formula(smiles),
-                "smiles": smiles,
-            },
-            "classes": " ".join(sorted(species_classes[smiles])),
-        }
-        for smiles in species_order
-    ]
-    return [*species_nodes, *reaction_nodes, *edges]
-
-
-# ---------------------------------------------------------------------------
 # Concrete, atom-continuous event paths
 # ---------------------------------------------------------------------------
 
@@ -746,28 +294,31 @@ def validate_event_path_sources_for_dash(
     }
 
 
-def analyze_event_paths_for_dash(
+def verify_event_path_for_dash(
     artifacts: Mapping[str, Any],
     *,
     current_replicate: str = "current",
     additional_sources: str = "",
-    path_length: int = 3,
-    start_smiles: str = "",
+    reaction_sequence: str | Iterable[str],
     max_interval_gap: int | None = None,
     max_timestep_gap: int | None = None,
     max_occurrence_details: int = 1_000,
 ) -> dict[str, Any]:
-    """Run the strict event-path engine for the current Dash dataset."""
+    """Verify one explicit Reaction Type sequence for the current dataset."""
     sources = _event_path_sources_for_dash(
         artifacts,
         current_replicate=current_replicate,
         additional_sources=additional_sources,
     )
     try:
-        return analyze_event_paths(
+        reaction_keys = (
+            str(reaction_sequence or "").splitlines()
+            if isinstance(reaction_sequence, str)
+            else list(reaction_sequence)
+        )
+        return verify_event_path(
             sources,
-            path_length=int(path_length),
-            start_smiles=str(start_smiles or "").strip(),
+            reaction_keys,
             max_interval_gap=(
                 None if max_interval_gap in (None, "") else int(max_interval_gap)
             ),
@@ -790,7 +341,7 @@ def analyze_event_paths_for_dash(
         raise ServiceError(str(exc), reason="missing_event_path_source") from exc
     except (TypeError, ValueError) as exc:
         raise ServiceError(
-            f"无效的事件路径参数: {exc}",
+            f"无效的路径验证参数: {exc}",
             reason="bad_event_path_query",
         ) from exc
 
@@ -849,49 +400,6 @@ def event_path_signature_rows(
                 "support_is_lower_bound": bool(path.get("support_is_lower_bound")),
             }
         )
-    return rows
-
-
-def event_path_comparison_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in (report.get("comparison") or {}).get("per_replicate") or []:
-        rows.append(
-            {
-                "replicate": str(item.get("replicate") or ""),
-                "aggregate_reachable": int(
-                    item.get("aggregate_reachable_path_count") or 0
-                ),
-                "actual": int(item.get("actual_path_signature_count") or 0),
-                "confirmed": int(item.get("confirmed_actual_path_count") or 0),
-                "aggregate_only": item.get("aggregate_only_path_count"),
-                "actual_only": int(item.get("actual_only_path_count") or 0),
-                "realization_rate": item.get("realization_rate"),
-                "complete": bool(item.get("comparison_complete")),
-            }
-        )
-    return rows
-
-
-def event_path_comparison_signature_rows(
-    report: Mapping[str, Any],
-    classification: str,
-) -> list[dict[str, Any]]:
-    safe_class = str(classification or "confirmed")
-    if safe_class not in {"confirmed", "aggregate_only", "actual_only"}:
-        safe_class = "confirmed"
-    rows: list[dict[str, Any]] = []
-    for item in (report.get("comparison") or {}).get("per_replicate") or []:
-        replicate = str(item.get("replicate") or "")
-        for signature in item.get(safe_class) or []:
-            keys = [str(value) for value in signature.get("reaction_keys") or []]
-            rows.append(
-                {
-                    "replicate": replicate,
-                    "classification": safe_class,
-                    "signature_id": str(signature.get("signature_id") or ""),
-                    "reaction_path": _compact_event_path_text(" | ".join(keys)),
-                }
-            )
     return rows
 
 

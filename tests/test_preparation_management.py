@@ -24,6 +24,7 @@ from reacnet_scope.indexes import (
     resolve_dataset_paths,
 )
 from reacnet_scope import prepare
+from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
 from reacnet_scope import services as svc
 
@@ -463,7 +464,7 @@ def test_cancellation_does_not_signal_pid_with_different_start_token(
     assert json.loads(task_path.read_text(encoding="utf-8"))["state"] == "interrupted"
 
 
-def test_cache_management_is_visible_without_global_path_overrides() -> None:
+def test_index_management_is_expanded_without_global_path_overrides() -> None:
     app = create_app()
     layout = app.server.test_client().get("/_dash-layout").get_json()
     cache_card = _layout_node_by_id(layout, "data-cache-management")
@@ -471,13 +472,15 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     workspace_meta = _layout_node_by_id(layout, "data-prep-cache-meta")
 
     assert cache_card is not None
-    assert cache_card["type"] == "Div"
+    assert cache_card["type"] == "Details"
+    assert (cache_card.get("props") or {}).get("open") is True
     assert details is None
     assert workspace_meta is not None
     cache_text = json.dumps(cache_card, ensure_ascii=False)
-    assert "Analysis Capability 与 Preparation Task" in cache_text
+    assert "索引构建与状态" in cache_text
+    assert "按需准备分析能力" in cache_text
     assert "data-preparation-tasks" in cache_text
-    assert "危险操作：清理派生索引" in cache_text
+    assert "清理派生索引" in cache_text
     for component_id in (
         "data-prep-status",
         "data-prep-event-command",
@@ -498,10 +501,68 @@ def test_cache_management_is_visible_without_global_path_overrides() -> None:
     assert "路径覆盖与高级设置" not in cache_text
     assert "data-global-min-tp" not in cache_text
     assert "data-overrides-apply-btn" not in cache_text
-    assert "等效 CLI 命令" in cache_text
+    assert "位置 · 占用 · CLI 命令" in cache_text
     assert "data-rng-event-command" not in cache_text
     assert "元素分布索引" in cache_text
     assert "C/O/Cl 组成索引" not in cache_text
+
+
+def test_completed_preparation_tasks_are_collapsed_as_history() -> None:
+    rendered = cb._render_preparation_tasks(
+        [
+            {
+                "dataset_id": "dataset-a",
+                "dataset_label": "run-a",
+                "capability": "event",
+                "state": "running",
+                "phase": "indexing",
+            },
+            {
+                "dataset_id": "dataset-a",
+                "dataset_label": "run-a",
+                "capability": "trajectory",
+                "state": "completed",
+                "phase": "completed",
+            },
+        ]
+    )
+    payload = json.dumps(
+        rendered,
+        default=lambda value: value.to_plotly_json(),
+        ensure_ascii=False,
+    )
+
+    assert "历史任务（1）" in payload
+    assert '"type": "Details"' in payload
+    assert "running · 运行中" in payload
+    assert "succeeded · 已完成" in payload
+
+
+def test_failed_preparation_tasks_are_collapsed_and_removable() -> None:
+    rendered = cb._render_preparation_tasks(
+        [
+            {
+                "dataset_id": "dataset-a",
+                "dataset_label": "run-a",
+                "capability": "event",
+                "state": "interrupted",
+                "phase": "checkpoint_event_index",
+                "progress": 0.54,
+                "progress_trusted": True,
+            }
+        ]
+    )
+    payload = json.dumps(
+        rendered,
+        default=lambda value: value.to_plotly_json(),
+        ensure_ascii=False,
+    )
+
+    assert "当前没有运行中的任务" in payload
+    assert "历史任务（1）" in payload
+    assert "failed · 已中断，可续建" in payload
+    assert "preparation-task-dismiss" in payload
+    assert "移除记录" in payload
 
 
 def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
@@ -1421,6 +1482,57 @@ def test_dash_cancel_service_uses_persisted_preparation_task(
 
     assert result["cancellation_requested"] is True
     assert calls == [(str(tmp_path.resolve()), base.name, "all")]
+
+
+def test_dash_dismiss_service_removes_only_a_terminal_task_record(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    base, reactionevent, molecules = _event_only_dataset(tmp_path)
+    dataset = prepare.discover_dataset(str(tmp_path), base.name)
+    task_path = prepare._preparation_task_path(dataset, "event")
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+    task_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "dataset-a",
+                "capability": "event",
+                "state": "interrupted",
+                "checkpoint": {"source_offset": 42},
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = resolve_dataset_paths(tmp_path, base.name)
+    paths.event_index.write_bytes(b"preserved index")
+    source_bytes = reactionevent.read_bytes(), molecules.read_bytes()
+
+    result = svc.dismiss_dataset_preparation_task(
+        str(tmp_path),
+        base=str(base),
+        kind="event",
+    )
+
+    assert result["removed"] is True
+    assert not task_path.exists()
+    assert paths.event_index.read_bytes() == b"preserved index"
+    assert (reactionevent.read_bytes(), molecules.read_bytes()) == source_bytes
+
+    task_path.write_text(
+        json.dumps({"capability": "event", "state": "running"}),
+        encoding="utf-8",
+    )
+    active_result = svc.dismiss_dataset_preparation_task(
+        str(tmp_path),
+        base=str(base),
+        kind="event",
+    )
+
+    assert active_result["removed"] is False
+    assert task_path.exists()
 
 
 def test_ui_clear_service_manages_all_visible_index_types(
