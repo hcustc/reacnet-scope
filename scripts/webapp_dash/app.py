@@ -475,15 +475,6 @@ def _species_page() -> html.Div:
                                         ],
                                         inline=True,
                                         className="rs-segmented",
-                                        labelStyle={
-                                            "display": "inline-flex",
-                                            "alignItems": "center",
-                                            "justifyContent": "center",
-                                            "padding": "5px 14px",
-                                            "fontSize": "13px",
-                                            "border": "1px solid #d1d5db",
-                                            "cursor": "pointer",
-                                        },
                                     ),
                                 ],
                             ),
@@ -1771,6 +1762,159 @@ def _molecule_lineage_card() -> dbc.Card:
     )
 
 
+def _dft_geometry_card() -> dbc.Card:
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div("派生计算结构", className="rs-step-kicker"),
+                                html.H6("DFT 初始几何", className="rs-card-title mb-0"),
+                            ],
+                            className="rs-step-heading",
+                        ),
+                        html.Span(
+                            "不是过渡态或完整量化作业",
+                            className="rs-type-map-caption",
+                        ),
+                    ],
+                    className="rs-result-toolbar",
+                ),
+                html.Div(
+                    "只对具有精确 Molecular Evidence 的 matched 事件开放。",
+                    id="event-dft-alert",
+                    className="rs-step-note",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                dbc.Label("反应物 · before_timestep"),
+                                dcc.Checklist(
+                                    id="event-dft-reactants",
+                                    options=[],
+                                    value=[],
+                                    className="rs-dft-participants",
+                                ),
+                            ],
+                            className="rs-dft-side",
+                        ),
+                        html.Div(
+                            [
+                                dbc.Label("产物 · after_timestep"),
+                                dcc.Checklist(
+                                    id="event-dft-products",
+                                    options=[],
+                                    value=[],
+                                    className="rs-dft-participants",
+                                ),
+                            ],
+                            className="rs-dft-side",
+                        ),
+                    ],
+                    className="rs-dft-side-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                dbc.Label("输出方式", className="mb-1"),
+                                dcc.RadioItems(
+                                    id="event-dft-layout",
+                                    options=[
+                                        {"label": "合并复合物", "value": "combined"},
+                                        {"label": "每个分子", "value": "separate"},
+                                        {"label": "两者", "value": "both"},
+                                    ],
+                                    value="combined",
+                                    inline=True,
+                                    className="rs-compact-radio",
+                                ),
+                            ],
+                        ),
+                        dcc.Checklist(
+                            id="event-dft-unit-confirmation",
+                            options=[
+                                {
+                                    "label": "我确认源轨迹坐标单位为 Å",
+                                    "value": "angstrom",
+                                }
+                            ],
+                            value=[],
+                            className="rs-dft-unit-confirmation",
+                        ),
+                    ],
+                    className="rs-dft-options",
+                ),
+                html.Details(
+                    [
+                        html.Summary("可选：电荷与自旋多重度"),
+                        html.Div(
+                            "留空表示 unspecified；软件不会自动推断。",
+                            className="rs-step-note",
+                        ),
+                        html.Div(id="event-dft-electronic-states"),
+                    ],
+                    className="rs-dft-electronic-details",
+                ),
+                html.Div(
+                    [
+                        dbc.Button(
+                            "预检并生成预览",
+                            id="event-dft-preview-btn",
+                            color="success",
+                            size="sm",
+                        ),
+                        dbc.Button(
+                            "下载 DFT 几何 ZIP",
+                            id="event-dft-download-btn",
+                            color="primary",
+                            size="sm",
+                            disabled=True,
+                        ),
+                        dcc.Download(id="event-dft-download"),
+                    ],
+                    className="d-flex gap-2 flex-wrap mt-2",
+                ),
+                html.Div(id="event-dft-validation", className="mt-2"),
+                html.Div(
+                    [
+                        html.Div(id="event-dft-summary", className="rs-stat-row"),
+                        html.Div(
+                            [
+                                dcc.Dropdown(
+                                    id="event-dft-preview-file",
+                                    options=[],
+                                    value=None,
+                                    clearable=False,
+                                ),
+                                dcc.Clipboard(
+                                    id="event-dft-copy",
+                                    target_id="event-dft-preview-text",
+                                    title="复制 XYZ",
+                                ),
+                            ],
+                            className="rs-dft-preview-toolbar",
+                        ),
+                        html.Pre(
+                            id="event-dft-preview-text",
+                            className="rs-dft-preview-text",
+                        ),
+                    ],
+                    id="event-dft-preview-panel",
+                    style={"display": "none"},
+                ),
+            ],
+            className="p-2",
+        ),
+        className="rs-card rs-dft-card",
+        id="event-dft-card",
+        style={"display": "none"},
+    )
+
+
 def _trajectory_page() -> html.Div:
     ovito_capability = svc.ovito_launch_capability()
     source_card = dbc.Card(
@@ -2142,7 +2286,7 @@ def _trajectory_page() -> html.Div:
         style={"display": "none"},
     )
     return html.Div(
-        [source_card, viewer_card, _molecule_lineage_card()],
+        [source_card, viewer_card, _dft_geometry_card(), _molecule_lineage_card()],
         className="rs-page",
         id="page-trajectory",
     )
@@ -3523,6 +3667,7 @@ def build_layout() -> html.Div:
             ),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
+            dcc.Store(id="event-dft-store", storage_type="memory", data=None),
             dcc.Store(id="molecule-lineage-store", storage_type="memory", data=None),
             dcc.Store(
                 id="molecule-lineage-drilldown-store",

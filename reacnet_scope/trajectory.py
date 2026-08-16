@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
+from functools import wraps
 from io import StringIO
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -22,6 +25,19 @@ class TrajectoryDependencyError(RuntimeError):
 
 class TrajectoryFrameError(ValueError):
     """Raised when an indexed LAMMPS frame cannot be interpreted safely."""
+
+
+_SETTINGS_WRITE_LOCK = threading.RLock()
+
+
+def _serialized_settings_write(function: Any) -> Any:
+    """Serialize in-process read/modify/write cycles for dataset settings."""
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _SETTINGS_WRITE_LOCK:
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _ase_api() -> tuple[Any, Any, Any, Any]:
@@ -88,6 +104,34 @@ def dataset_settings_path(
     )
 
 
+def _write_dataset_settings(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically publish settings without sharing temp names across threads."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def load_type_element_map(trajectory_file: str) -> dict[str, str]:
     """Load a previously confirmed mapping without mutating cache state."""
     path = dataset_settings_path(trajectory_file)
@@ -117,6 +161,66 @@ def load_timestep_ps(source_file: str) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def load_coordinate_length_unit(source_file: str) -> str | None:
+    """Load the explicitly confirmed trajectory coordinate length unit."""
+    path = dataset_settings_path(source_file)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        setting = (payload.get("trajectory") or {}).get(
+            "coordinate_length_unit"
+        )
+    except (AttributeError, OSError, json.JSONDecodeError) as exc:
+        raise TrajectoryFrameError(f"数据集设置文件无效: {path}") from exc
+    if isinstance(setting, str):
+        value = setting
+        confirmed = True
+    elif isinstance(setting, dict):
+        value = setting.get("value")
+        confirmed = setting.get("confirmed") is True
+    elif setting is None:
+        return None
+    else:
+        raise TrajectoryFrameError(f"数据集坐标单位确认格式无效: {path}")
+    normalized = str(value or "").strip().lower()
+    if confirmed and normalized in {"angstrom", "å"}:
+        return "angstrom"
+    raise TrajectoryFrameError(f"数据集坐标单位确认无效: {path}")
+
+
+@_serialized_settings_write
+def save_coordinate_length_unit(
+    source_file: str,
+    value: str = "angstrom",
+) -> Path:
+    """Persist an explicit confirmation that trajectory lengths are Å."""
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"angstrom", "å"}:
+        raise TrajectoryFrameError("DFT 几何导出当前只支持 Å 坐标单位")
+    path = dataset_settings_path(source_file, persist_identity=True)
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrajectoryFrameError(f"数据集设置文件无效: {path}") from exc
+        if not isinstance(existing, dict):
+            raise TrajectoryFrameError(f"数据集设置格式无效: {path}")
+        payload.update(existing)
+    trajectory = payload.get("trajectory")
+    if not isinstance(trajectory, dict):
+        trajectory = {}
+    trajectory["coordinate_length_unit"] = {
+        "value": "angstrom",
+        "confirmed": True,
+    }
+    payload["trajectory"] = trajectory
+    _write_dataset_settings(path, payload)
+    return path
+
+
+@_serialized_settings_write
 def save_timestep_ps(source_file: str, value: float) -> Path:
     """Persist an explicitly confirmed timestep-to-ps conversion."""
     try:
@@ -139,16 +243,11 @@ def save_timestep_ps(source_file: str, value: float) -> Path:
         "timestep_ps": timestep_ps,
         "confirmed": True,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_dataset_settings(path, payload)
     return path
 
 
+@_serialized_settings_write
 def save_type_element_map(
     trajectory_file: str,
     values: Mapping[Any, Any],
@@ -170,13 +269,7 @@ def save_type_element_map(
         trajectory = {}
     trajectory["type_element_map"] = mapping
     payload["trajectory"] = trajectory
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_dataset_settings(path, payload)
     return path
 
 

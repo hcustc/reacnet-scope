@@ -188,6 +188,46 @@ uv run reacnet-scope export-event \
   --out EVENT_evidence.zip
 ```
 
+### DFT 初始几何导出
+
+对具有精确 Molecular Evidence 的 `matched` Reaction Occurrence，轨迹页面会显示
+独立的“DFT 初始几何”区域。反应物固定来自事件的 `before_timestep`，产物固定
+来自 `after_timestep`。可按两侧的具体 Molecule Instance 自选，并合并为反应物/
+产物复合物、逐分子导出或同时生成两种文件。
+
+导出器按侧别键图通过 PBC 重建完整分子，保留多分子反应接触的相对位置，再把
+非周期分子簇整体居中。它不旋转、优化或修键，也不会把中间轨迹帧声明为过渡态。
+元素映射必须完整，并需要一次性确认源轨迹坐标单位为 Å。电荷和自旋多重度可选，
+留空时明确记录为 `unspecified`，软件不会自动猜测。
+
+页面提供 XYZ 预检、质量警告、预览和复制。正式 ZIP 包含所选 XYZ、
+`manifest.json`、`atom_map.csv` 和 `README.txt`；这是从事件证据派生的 DFT
+初始几何，不会改变现有事件证据包。终端可导出同一格式：
+
+```bash
+uv run reacnet-scope export-dft-geometry \
+  --case /data/case \
+  --event-id EVENT_ID \
+  --reactants all \
+  --products all \
+  --layout both \
+  --type-map '1=C,2=H,3=O' \
+  --source-unit angstrom \
+  --state reactants=0,1 \
+  --state products=0,1 \
+  --out EVENT_dft_geometry.zip
+```
+
+`--reactants` 和 `--products` 也接受 `none` 或从 1 开始的分子序号（例如
+`1,3`）。使用 `--save-unit-confirmation` 可把 Å 确认保存到当前 Dataset
+Workspace；以后可省略 `--source-unit`。命令默认不覆盖已有文件，覆盖需要
+显式传入 `--force`。`--state` 的键必须与实际输出 XYZ 文件名（去掉 `.xyz`）
+完全一致；例如逐分子文件 `reactant-01-atoms-1-12.xyz` 使用
+`--state reactant-01-atoms-1-12=0,2`，未知或重复键会被拒绝。
+
+确定性以相同来源签名、路径、版本和导出参数为范围。manifest 保留绝对来源路径
+用于审计；在线导出不会为了跨目录副本生成内容哈希而扫描整条大型轨迹。
+
 命令默认不覆盖已有文件；需要替换时显式传入 `--force`。页面仍保留独立的
 “子轨迹”和“OVITO 脚本”下载；将两者放在同一目录后可运行：
 

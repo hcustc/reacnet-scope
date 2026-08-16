@@ -36,6 +36,10 @@ _Avoid_: Reaction occurrence, event
 One independently detected atom-connected change within a transition, whether or not its molecular participants can be resolved.
 _Avoid_: Aggregated reaction, reaction type
 
+**DFT Initial Geometry**:
+A non-periodic, atom-mapped cluster derived from the exact before or after frame of one matched Reaction Occurrence by reconstructing selected complete Molecule Instances through periodic boundaries. It is an auditable starting geometry, not an optimized structure, transition state, reaction path, or complete quantum-chemistry job.
+_Avoid_: DFT input, transition state, optimized geometry
+
 **Occurrence Identity**:
 A stable identity for a reaction occurrence derived from its transition, reaction type, and molecular participants rather than its source artifact layout.
 _Avoid_: Source row, HDF5 row ID

@@ -5,9 +5,14 @@ import json
 from pathlib import Path
 from zipfile import ZipFile
 
+import pytest
+
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
-from reacnet_scope.trajectory import dataset_settings_path
+from reacnet_scope.trajectory import (
+    dataset_settings_path,
+    load_coordinate_length_unit,
+)
 from scripts import rng_query_cli as cli
 
 
@@ -168,3 +173,156 @@ def test_export_event_cli_rejects_unknown_event_and_existing_output(
     captured = capsys.readouterr()
     assert "does not contain event unknown" in captured.err
     assert "output already exists" in captured.err
+
+
+def test_export_dft_geometry_cli_writes_selected_initial_geometries(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+    target = tmp_path / "dft-geometry.zip"
+
+    result = cli.main(
+        [
+            "export-dft-geometry",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--layout",
+            "both",
+            "--type-map",
+            "1=C,2=O",
+            "--source-unit",
+            "angstrom",
+            "--state",
+            "reactants=0,1",
+            "--state",
+            "products=0,1",
+            "--out",
+            str(target),
+        ]
+    )
+
+    assert result == 0
+    with ZipFile(target) as archive:
+        assert "reactants.xyz" in archive.namelist()
+        assert "products.xyz" in archive.namelist()
+        assert "reactant-01-atoms-1-1.xyz" in archive.namelist()
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["event"]["event_id"] == event_id
+        assert manifest["cross_side_atom_ids_match"] is True
+        assert manifest["source_signatures"]["trajectory_index"]["size"] > 0
+        assert manifest["source_signatures"]["event_index"]["size"] > 0
+    assert "DFT initial geometry package" in capsys.readouterr().out
+
+
+def test_export_dft_geometry_cli_requires_unit_confirmation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+
+    result = cli.main(
+        [
+            "export-dft-geometry",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--type-map",
+            "1=C,2=O",
+            "--out",
+            str(tmp_path / "dft-geometry.zip"),
+        ]
+    )
+
+    assert result == 2
+    assert "坐标单位为 Å" in capsys.readouterr().err
+
+
+def test_export_dft_geometry_cli_saves_unit_only_after_geometry_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+
+    failed = cli.main(
+        [
+            "export-dft-geometry",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--type-map",
+            "1=C",
+            "--save-unit-confirmation",
+            "--out",
+            str(tmp_path / "failed.zip"),
+        ]
+    )
+
+    assert failed == 2
+    assert load_coordinate_length_unit(str(trajectory)) is None
+    assert not (tmp_path / "failed.zip").exists()
+    capsys.readouterr()
+
+    succeeded = cli.main(
+        [
+            "export-dft-geometry",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--type-map",
+            "1=C,2=O",
+            "--save-unit-confirmation",
+            "--out",
+            str(tmp_path / "succeeded.zip"),
+        ]
+    )
+
+    assert succeeded == 0
+    assert load_coordinate_length_unit(str(trajectory)) == "angstrom"
+
+
+@pytest.mark.parametrize(
+    "state_args",
+    [
+        ["--state", "reactant=0,1"],
+        ["--state", "reactants=0,1", "--state", "reactants=0,3"],
+    ],
+)
+def test_export_dft_geometry_cli_rejects_unknown_and_duplicate_states(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    state_args: list[str],
+) -> None:
+    _trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+    target = tmp_path / "invalid-state.zip"
+
+    result = cli.main(
+        [
+            "export-dft-geometry",
+            "--case",
+            str(tmp_path),
+            "--event-id",
+            event_id,
+            "--type-map",
+            "1=C,2=O",
+            "--source-unit",
+            "angstrom",
+            *state_args,
+            "--out",
+            str(target),
+        ]
+    )
+
+    assert result == 2
+    assert not target.exists()
+    error = capsys.readouterr().err
+    assert "电子态" in error or "--state" in error

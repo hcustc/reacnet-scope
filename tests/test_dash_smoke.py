@@ -334,6 +334,17 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "event-atom-inspector",
         "event-core-atom-list",
         "event-atom-inspector-body",
+        "event-dft-card",
+        "event-dft-reactants",
+        "event-dft-products",
+        "event-dft-layout",
+        "event-dft-unit-confirmation",
+        "event-dft-preview-btn",
+        "event-dft-download-btn",
+        "event-dft-download",
+        "event-dft-preview-file",
+        "event-dft-preview-text",
+        "event-dft-copy",
     }:
         assert event_tool_id in layout_ids
     event_scope = _layout_node_by_id(layout, "event-view-scope") or {}
@@ -4423,6 +4434,30 @@ def test_species_tooltips_can_overflow_their_grid_wrappers() -> None:
     assert ".rs-species-grid-wrap {\n    overflow: visible;\n}" in css
 
 
+def test_species_query_kind_uses_one_segment_border_layer() -> None:
+    client = create_app().server.test_client()
+    node = _layout_node_by_id(
+        client.get("/_dash-layout").get_json(),
+        "species-query-kind",
+    )
+    assert node is not None
+    props = node["props"]
+    css = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+
+    # Dash 4 applies labelStyle to the inner text span, while the option's
+    # outer <label> is styled by CSS.  A border in both places produces the
+    # nested rectangles seen in the species query toolbar.
+    assert "labelStyle" not in props
+    assert ".rs-segmented > .dash-options-list-option {" in css
+    assert ".rs-segmented .dash-options-list-option-text {" in css
+
+
 def test_compact_sidebar_override_follows_all_desktop_shell_rules() -> None:
     css = (
         Path(__file__).parents[1]
@@ -4707,6 +4742,123 @@ def test_molecule_lineage_workspace_runs_from_a_concrete_participant(
     assert captured["anchor_mode"] == "atom_ids"
     assert captured["anchor_atom_ids"] == [1]
     assert captured["recrossing_window"] == 5
+
+
+def test_dft_geometry_card_prepares_exact_molecule_instances(monkeypatch) -> None:
+    monkeypatch.setattr(svc, "load_coordinate_length_unit", lambda _path: "angstrom")
+    client = create_app().server.test_client()
+    row = {
+        "event_id": "rngevt-dft",
+        "association_status": "matched",
+        "before_timestep": 10,
+        "after_timestep": 20,
+        "reactant_participants": [
+            {"species": "[C]", "atom_ids": [1]},
+            {"species": "[O]", "atom_ids": [2]},
+        ],
+        "product_participants": [
+            {"species": "[C][O]", "atom_ids": [1, 2]},
+        ],
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-selected-store", "event-viewer-store"],
+            changed="event-viewer-store.data",
+            input_values={
+                "event-selected-store": {"row": row, "kind": "rng_event"},
+                "event-viewer-store": {"event_id": "rngevt-dft"},
+            },
+            state_values={
+                "app-store": {"artifacts": {"trajectory": "/data/run.lammpstrj"}}
+            },
+            output_id="event-dft-reactants",
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()["response"]
+    assert payload["event-dft-card"]["style"] == {"display": "block"}
+    assert payload["event-dft-reactants"]["value"] == [0, 1]
+    assert payload["event-dft-products"]["value"] == [0]
+    assert payload["event-dft-unit-confirmation"]["value"] == ["angstrom"]
+    assert "timestep 10" in payload["event-dft-alert"]["children"]
+
+
+def test_dft_output_stems_and_electronic_states_follow_selection() -> None:
+    row = {
+        "reactant_participants": [
+            {"species": "[C]", "atom_ids": [1]},
+            {"species": "[O]", "atom_ids": [2, 4]},
+        ],
+        "product_participants": [
+            {"species": "[C][O]", "atom_ids": [1, 2, 4]},
+        ],
+    }
+
+    assert cb._dft_output_stems(row, [1], [0], "both") == [
+        "reactants",
+        "reactant-02-atoms-2-4",
+        "products",
+        "product-01-atoms-1-4",
+    ]
+    assert cb._dft_electronic_states_from_controls(
+        [0],
+        [{"type": "event-dft-charge", "stem": "reactants"}],
+        [1],
+        [{"type": "event-dft-multiplicity", "stem": "reactants"}],
+    ) == {"reactants": (0, 1)}
+
+
+@pytest.mark.parametrize("message", ["ASE unavailable", "Trajectory index is stale"])
+def test_dft_preview_turns_runtime_failures_into_alerts(
+    monkeypatch,
+    message: str,
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(svc, "build_dft_geometry_bundle", fail)
+    client = create_app().server.test_client()
+    charge_pattern = '{"stem":["ALL"],"type":"event-dft-charge"}'
+    multiplicity_pattern = (
+        '{"stem":["ALL"],"type":"event-dft-multiplicity"}'
+    )
+    selected = {
+        "row": {
+            "event_id": "rngevt-runtime",
+            "association_status": "matched",
+        }
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-dft-preview-btn"],
+            changed="event-dft-preview-btn.n_clicks",
+            input_values={"event-dft-preview-btn": 1},
+            state_values={
+                "event-dft-reactants": [0],
+                "event-dft-products": [],
+                "event-dft-layout": "combined",
+                "event-dft-unit-confirmation": [],
+                f"{charge_pattern}.value": [],
+                f"{charge_pattern}.id": [],
+                f"{multiplicity_pattern}.value": [],
+                f"{multiplicity_pattern}.id": [],
+                "event-selected-store": selected,
+                "app-store": {"artifacts": {"trajectory": "/data/run.lammpstrj"}},
+            },
+            output_id="event-dft-validation",
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()["response"]
+    rendered = json.dumps(payload["event-dft-validation"], ensure_ascii=False)
+    assert message in rendered
+    assert payload["event-dft-download-btn"]["disabled"] is True
 
 
 def test_lineage_event_click_updates_selection_and_drilldown_request() -> None:

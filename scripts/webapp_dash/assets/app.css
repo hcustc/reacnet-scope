@@ -23,6 +23,83 @@
     --rs-radius-sm: 8px;
 }
 
+.rs-dft-card {
+  border-left: 3px solid var(--bs-success, #198754);
+}
+
+.rs-dft-side-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.rs-dft-side {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 0.45rem;
+  padding: 0.65rem;
+}
+
+.rs-dft-participants label {
+  display: block;
+  margin-bottom: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.rs-dft-options,
+.rs-dft-preview-toolbar,
+.rs-dft-state-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.rs-dft-electronic-details {
+  margin-top: 0.75rem;
+}
+
+.rs-dft-state-row {
+  justify-content: flex-start;
+}
+
+.rs-dft-state-label {
+  min-width: 13rem;
+  font-family: var(--bs-font-monospace, monospace);
+}
+
+.rs-dft-state-input {
+  width: 9rem;
+}
+
+.rs-dft-preview-toolbar {
+  align-items: stretch;
+}
+
+.rs-dft-preview-toolbar .Select,
+.rs-dft-preview-toolbar > div:first-child {
+  flex: 1 1 20rem;
+}
+
+.rs-dft-preview-text {
+  max-height: 24rem;
+  overflow: auto;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 0.78rem;
+  white-space: pre;
+}
+
+@media (max-width: 760px) {
+  .rs-dft-side-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Concrete molecule-lineage workspace */
 .rs-molecule-lineage-card {
     margin-top: 12px;
@@ -1058,47 +1135,72 @@ html, body {
 /* ── Segmented RadioItems ─────────────────────────────────────────── */
 
 .rs-segmented {
-    display: inline-flex !important;
+    display: flex !important;
+    width: 100%;
     margin: 0;
+    gap: 0;
 }
 
-.rs-segmented label {
+.rs-segmented > .dash-options-list-option {
+    flex: 1 1 0;
+    align-items: stretch;
+    justify-content: center;
     border: 1px solid #d1d5db;
     margin-left: -1px;
+    margin-right: 0;
+    padding: 0;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
     user-select: none;
     min-height: 34px;
-    padding: 6px 10px !important;
     white-space: nowrap;
 }
 
-.rs-segmented label:first-of-type {
+.rs-segmented > .dash-options-list-option:first-child {
     margin-left: 0;
     border-radius: 6px 0 0 6px;
 }
 
-.rs-segmented label:last-of-type {
+.rs-segmented > .dash-options-list-option:last-child {
     border-radius: 0 6px 6px 0;
 }
 
 .rs-segmented input[type="radio"] {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
 }
 
-.rs-segmented input[type="radio"]:checked + label,
-.rs-segmented label:has(input:checked) {
+.rs-segmented .dash-options-list-option-text {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 10px;
+    border: 0;
+}
+
+.rs-segmented > .dash-options-list-option:has(input:checked) {
     background: var(--rs-accent);
     color: #fff;
     border-color: var(--rs-accent);
+    z-index: 1;
 }
 
-.rs-segmented label:hover {
+.rs-segmented > .dash-options-list-option:hover {
     background: #f3f4f6;
 }
 
-.rs-segmented input[type="radio"]:checked + label:hover,
-.rs-segmented label:has(input:checked):hover {
+.rs-segmented > .dash-options-list-option:has(input:checked):hover {
     background: #2563eb;
+}
+
+.rs-segmented > .dash-options-list-option:focus-within {
+    position: relative;
+    z-index: 2;
+    box-shadow: 0 0 0 3px rgba(40, 86, 216, .11);
 }
 
 .rs-subquery-row {
@@ -1739,7 +1841,7 @@ html, body {
     .rs-segmented {
         width: 100%;
     }
-    .rs-segmented label {
+    .rs-segmented > .dash-options-list-option {
         flex: 1 1 0;
     }
     #detail-body {
@@ -3825,24 +3927,27 @@ textarea,
     background: #fafbfc;
 }
 
-.rs-segmented label {
+.rs-segmented > .dash-options-list-option {
     min-height: 38px;
-    padding: 7px 12px !important;
     border-color: var(--rs-border-strong) !important;
     background: #fff;
     color: #59657a;
     font-size: 11px !important;
 }
 
-.rs-segmented label:first-of-type {
+.rs-segmented .dash-options-list-option-text {
+    padding: 7px 12px;
+}
+
+.rs-segmented > .dash-options-list-option:first-child {
     border-radius: 8px 0 0 8px;
 }
 
-.rs-segmented label:last-of-type {
+.rs-segmented > .dash-options-list-option:last-child {
     border-radius: 0 8px 8px 0;
 }
 
-.rs-segmented label:has(input:checked) {
+.rs-segmented > .dash-options-list-option:has(input:checked) {
     background: var(--rs-accent);
     color: #fff;
 }
@@ -3851,7 +3956,7 @@ textarea,
    species query grid on the same 38px box so end-alignment cannot stagger
    labels or control edges. */
 .rs-query-grid .dash-input-container,
-.rs-query-grid .rs-segmented label,
+.rs-query-grid .rs-segmented > .dash-options-list-option,
 .rs-query-grid .btn-sm {
     height: 38px;
     min-height: 38px;

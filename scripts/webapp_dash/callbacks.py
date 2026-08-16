@@ -271,6 +271,117 @@ def _event_type_map_from_controls(
     return dict(sorted(mapping.items(), key=lambda item: _atom_type_sort_key(item[0])))
 
 
+def _dft_participant_options(row: dict[str, Any], side: str) -> list[dict[str, Any]]:
+    label = "反应物" if side == "reactant" else "产物"
+    options = []
+    for index, participant in enumerate(row.get(f"{side}_participants") or []):
+        atom_ids = [int(value) for value in participant.get("atom_ids") or []]
+        options.append(
+            {
+                "label": (
+                    f"{label} {index + 1} · {participant.get('species') or '?'} · "
+                    f"{len(atom_ids)} atoms · IDs {','.join(map(str, atom_ids))}"
+                ),
+                "value": index,
+            }
+        )
+    return options
+
+
+def _dft_output_stems(
+    row: dict[str, Any],
+    reactant_indices: list[int] | None,
+    product_indices: list[int] | None,
+    layout: str,
+) -> list[str]:
+    stems: list[str] = []
+    for side, selected in (
+        ("reactant", reactant_indices or []),
+        ("product", product_indices or []),
+    ):
+        participants = row.get(f"{side}_participants") or []
+        valid = [int(value) for value in selected if 0 <= int(value) < len(participants)]
+        if not valid:
+            continue
+        if layout in {"combined", "both"}:
+            stems.append("reactants" if side == "reactant" else "products")
+        if layout in {"separate", "both"}:
+            for index in valid:
+                atom_ids = sorted(
+                    int(value)
+                    for value in (participants[index].get("atom_ids") or [])
+                )
+                if atom_ids:
+                    stems.append(
+                        f"{side}-{index + 1:02d}-atoms-{min(atom_ids)}-{max(atom_ids)}"
+                    )
+    return stems
+
+
+def _dft_electronic_states_from_controls(
+    charge_values: list[Any],
+    charge_ids: list[dict[str, Any]],
+    multiplicity_values: list[Any],
+    multiplicity_ids: list[dict[str, Any]],
+) -> dict[str, tuple[Any, Any]]:
+    charges = {
+        str(identifier.get("stem") or ""): value
+        for identifier, value in zip(charge_ids or [], charge_values or [])
+    }
+    multiplicities = {
+        str(identifier.get("stem") or ""): value
+        for identifier, value in zip(
+            multiplicity_ids or [], multiplicity_values or []
+        )
+    }
+    states: dict[str, tuple[Any, Any]] = {}
+    for stem in sorted(set(charges).union(multiplicities)):
+        charge = charges.get(stem)
+        multiplicity = multiplicities.get(stem)
+        if charge in {None, ""} and multiplicity in {None, ""}:
+            continue
+        if charge in {None, ""} or multiplicity in {None, ""}:
+            raise ValueError(f"{stem} 必须同时填写电荷和自旋多重度")
+        states[stem] = (charge, multiplicity)
+    return states
+
+
+def _build_dft_bundle_from_controls(
+    *,
+    selected: dict[str, Any] | None,
+    app_store: dict[str, Any] | None,
+    reactant_indices: list[int] | None,
+    product_indices: list[int] | None,
+    layout: str,
+    unit_confirmation: list[str] | None,
+    charge_values: list[Any],
+    charge_ids: list[dict[str, Any]],
+    multiplicity_values: list[Any],
+    multiplicity_ids: list[dict[str, Any]],
+) -> Any:
+    row = (selected or {}).get("row") or {}
+    artifacts = (app_store or {}).get("artifacts") or {}
+    trajectory = str(artifacts.get("trajectory") or "")
+    confirmed_now = "angstrom" in (unit_confirmation or [])
+    if confirmed_now:
+        svc.save_coordinate_length_unit(trajectory, "angstrom")
+    request = svc.DftGeometryRequest(
+        include_reactants=bool(reactant_indices),
+        include_products=bool(product_indices),
+        reactant_indices=tuple(int(value) for value in (reactant_indices or [])),
+        product_indices=tuple(int(value) for value in (product_indices or [])),
+        layout=str(layout or "combined"),
+        electronic_states=_dft_electronic_states_from_controls(
+            charge_values,
+            charge_ids,
+            multiplicity_values,
+            multiplicity_ids,
+        ),
+        source_length_unit="angstrom" if confirmed_now else None,
+    )
+    return svc.build_dft_geometry_bundle(artifacts, row, request)
+
+
 def initial_store() -> dict[str, Any]:
     return {
         "folder": "",
@@ -307,6 +418,7 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("event-grid-store", "data", {"rows": []}),
         reset("event-selected-store", "data", None),
         reset("event-viewer-store", "data", None),
+        reset("event-dft-store", "data", None),
         reset("molecule-lineage-store", "data", None),
         reset("molecule-lineage-drilldown-store", "data", None),
         reset("event-path-store", "data", None),
@@ -5832,6 +5944,283 @@ def register_callbacks(app: Any) -> None:
         )
         ovito_expression = svc.event_viewer_ovito_expression(viewer)
         return viewer, {"display": "block"}, summary, " · ".join(path_items), atom_ids_text, ovito_expression, 0, len(frames) - 1, anchor_index, marks, storyboard, "局部轨迹已按 PBC 重定位；3Dmol.js 用于快速查看，原始坐标可下载到 OVITO 复核。"
+
+    @app.callback(
+        Output("event-dft-card", "style"),
+        Output("event-dft-reactants", "options"),
+        Output("event-dft-reactants", "value"),
+        Output("event-dft-products", "options"),
+        Output("event-dft-products", "value"),
+        Output("event-dft-unit-confirmation", "value"),
+        Output("event-dft-preview-btn", "disabled"),
+        Output("event-dft-alert", "children"),
+        Input("event-selected-store", "data"),
+        Input("event-viewer-store", "data"),
+        State("app-store", "data"),
+    )
+    def _prepare_dft_geometry(selected, viewer, app_store):
+        row = (selected or {}).get("row") or {}
+        viewer_event_id = str((viewer or {}).get("event_id") or "")
+        event_id = str(row.get("event_id") or "")
+        if (
+            not row
+            or row.get("association_status") != "matched"
+            or not viewer
+            or viewer_event_id != event_id
+        ):
+            return {"display": "none"}, [], [], [], [], [], True, (
+                "只有具有精确 Molecular Evidence 的 matched 事件可以导出 DFT 几何。"
+            )
+        reactants = _dft_participant_options(row, "reactant")
+        products = _dft_participant_options(row, "product")
+        trajectory = str(
+            (((app_store or {}).get("artifacts") or {}).get("trajectory") or "")
+        )
+        try:
+            confirmed = svc.load_coordinate_length_unit(trajectory) == "angstrom"
+        except (OSError, ValueError):
+            confirmed = False
+        message = (
+            f"反应物使用 timestep {row.get('before_timestep')}；"
+            f"产物使用 timestep {row.get('after_timestep')}。"
+        )
+        return (
+            {"display": "block"},
+            reactants,
+            [option["value"] for option in reactants],
+            products,
+            [option["value"] for option in products],
+            ["angstrom"] if confirmed else [],
+            not bool(reactants or products),
+            message,
+        )
+
+    @app.callback(
+        Output("event-dft-electronic-states", "children"),
+        Input("event-dft-reactants", "value"),
+        Input("event-dft-products", "value"),
+        Input("event-dft-layout", "value"),
+        State("event-selected-store", "data"),
+    )
+    def _render_dft_electronic_states(
+        reactant_indices,
+        product_indices,
+        layout,
+        selected,
+    ):
+        row = (selected or {}).get("row") or {}
+        stems = _dft_output_stems(
+            row,
+            reactant_indices,
+            product_indices,
+            str(layout or "combined"),
+        )
+        if not stems:
+            return html.Div("选择至少一个 Molecule Instance。", className="rs-step-note")
+        return [
+            html.Div(
+                [
+                    html.Code(stem, className="rs-dft-state-label"),
+                    dbc.Input(
+                        id={"type": "event-dft-charge", "stem": stem},
+                        type="number",
+                        step=1,
+                        placeholder="总电荷",
+                        className="rs-dft-state-input",
+                    ),
+                    dbc.Input(
+                        id={"type": "event-dft-multiplicity", "stem": stem},
+                        type="number",
+                        min=1,
+                        step=1,
+                        placeholder="多重度",
+                        className="rs-dft-state-input",
+                    ),
+                ],
+                className="rs-dft-state-row",
+            )
+            for stem in stems
+        ]
+
+    @app.callback(
+        Output("event-dft-store", "data", allow_duplicate=True),
+        Output("event-dft-download-btn", "disabled", allow_duplicate=True),
+        Output("event-dft-preview-panel", "style", allow_duplicate=True),
+        Output("event-dft-validation", "children", allow_duplicate=True),
+        Output("event-dft-summary", "children", allow_duplicate=True),
+        Input("event-dft-reactants", "value"),
+        Input("event-dft-products", "value"),
+        Input("event-dft-layout", "value"),
+        Input("event-dft-unit-confirmation", "value"),
+        Input({"type": "event-dft-charge", "stem": ALL}, "value"),
+        Input({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
+        Input("event-selected-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _invalidate_dft_preview(
+        _reactants,
+        _products,
+        _layout,
+        _unit,
+        _charges,
+        _multiplicities,
+        _selected,
+    ):
+        return None, True, {"display": "none"}, [], []
+
+    @app.callback(
+        Output("event-dft-store", "data"),
+        Output("event-dft-validation", "children"),
+        Output("event-dft-summary", "children"),
+        Output("event-dft-preview-file", "options"),
+        Output("event-dft-preview-file", "value"),
+        Output("event-dft-preview-panel", "style"),
+        Output("event-dft-download-btn", "disabled"),
+        Input("event-dft-preview-btn", "n_clicks"),
+        State("event-dft-reactants", "value"),
+        State("event-dft-products", "value"),
+        State("event-dft-layout", "value"),
+        State("event-dft-unit-confirmation", "value"),
+        State({"type": "event-dft-charge", "stem": ALL}, "value"),
+        State({"type": "event-dft-charge", "stem": ALL}, "id"),
+        State({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
+        State({"type": "event-dft-multiplicity", "stem": ALL}, "id"),
+        State("event-selected-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[
+            (
+                Output(
+                    {"type": "dataset-bound-operation", "name": "dft-geometry"},
+                    "data",
+                ),
+                True,
+                False,
+            )
+        ],
+    )
+    def _preview_dft_geometry(
+        n_clicks,
+        reactant_indices,
+        product_indices,
+        layout,
+        unit_confirmation,
+        charge_values,
+        charge_ids,
+        multiplicity_values,
+        multiplicity_ids,
+        selected,
+        app_store,
+    ):
+        if n_clicks is None:
+            raise PreventUpdate
+        try:
+            bundle = _build_dft_bundle_from_controls(
+                selected=selected,
+                app_store=app_store,
+                reactant_indices=reactant_indices,
+                product_indices=product_indices,
+                layout=layout,
+                unit_confirmation=unit_confirmation,
+                charge_values=charge_values,
+                charge_ids=charge_ids,
+                multiplicity_values=multiplicity_values,
+                multiplicity_ids=multiplicity_ids,
+            )
+        except (
+            svc.DftGeometryError,
+            svc.ServiceError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            return (
+                None,
+                dbc.Alert(message, color="danger", className="py-2 mb-0"),
+                [],
+                [],
+                None,
+                {"display": "none"},
+                True,
+            )
+        manifest = bundle.manifest
+        warnings = [
+            warning
+            for geometry in manifest.get("geometries") or []
+            for warning in geometry.get("warnings") or []
+        ]
+        validation = dbc.Alert(
+            [
+                html.Div("几何完整性检查通过。"),
+                html.Ul(
+                    [html.Li(str(item.get("message") or "")) for item in warnings],
+                    className="mb-0 mt-1",
+                )
+                if warnings
+                else None,
+            ],
+            color="warning" if warnings else "success",
+            className="py-2 mb-0",
+        )
+        geometry_meta = manifest.get("geometries") or []
+        summary = [
+            html.Span(f"文件 {len(bundle.geometries)}", className="rs-stat-chip"),
+            html.Span(
+                f"最大 {max(int(item.get('atom_count') or 0) for item in geometry_meta)} 原子",
+                className="rs-stat-chip",
+            ),
+            html.Span(f"警告 {len(warnings)}", className="rs-stat-chip"),
+            html.Span("单位 Å", className="rs-stat-chip"),
+        ]
+        options = [
+            {"label": name, "value": name} for name in sorted(bundle.geometries)
+        ]
+        return (
+            bundle.preview_payload(),
+            validation,
+            summary,
+            options,
+            options[0]["value"],
+            {"display": "block"},
+            False,
+        )
+
+    @app.callback(
+        Output("event-dft-preview-text", "children"),
+        Input("event-dft-preview-file", "value"),
+        Input("event-dft-store", "data"),
+    )
+    def _render_dft_preview(filename, payload):
+        return str(((payload or {}).get("geometries") or {}).get(filename) or "")
+
+    @app.callback(
+        Output("event-dft-download", "data"),
+        Input("event-dft-download-btn", "n_clicks"),
+        State("event-dft-store", "data"),
+        State("event-selected-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_dft_geometry(
+        n_clicks,
+        payload,
+        selected,
+    ):
+        if n_clicks is None or not payload:
+            raise PreventUpdate
+        bundle = svc.DftGeometryBundle(
+            manifest=dict(payload.get("manifest") or {}),
+            geometries=dict(payload.get("geometries") or {}),
+            atom_map_csv=str(payload.get("atom_map_csv") or ""),
+            readme=str(payload.get("readme") or ""),
+        )
+        event_id = str(((selected or {}).get("row") or {}).get("event_id") or "event")
+        return dcc.send_bytes(
+            bundle.to_zip(),
+            f"{event_id}_dft_geometry.zip",
+            type="application/zip",
+        )
 
     @app.callback(
         Output("molecule-lineage-card", "style"),

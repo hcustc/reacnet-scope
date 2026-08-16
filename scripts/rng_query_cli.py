@@ -8,6 +8,7 @@ Common use cases:
 4) Compute TOP-N share from a CSV metric column
 5) Export one indexed RNG event as a reproducible evidence ZIP
 6) Verify an explicit time-ordered, exact-molecule, atom-continuous event path
+7) Export one matched occurrence as auditable DFT initial geometries
 """
 
 from __future__ import annotations
@@ -536,6 +537,130 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         print(f"[ERROR] {message}", file=sys.stderr)
         return 2
     print(f"[OK] wrote event package: {target} ({len(package)} bytes)")
+    return 0
+
+
+def _dft_participant_selection(value: str) -> tuple[bool, tuple[int, ...] | None]:
+    text = str(value or "all").strip().lower()
+    if text == "all":
+        return True, None
+    if text == "none":
+        return False, ()
+    try:
+        values = sorted(
+            {int(token.strip()) for token in text.split(",") if token.strip()}
+        )
+    except ValueError as exc:
+        raise ValueError("Molecule Instance 选择必须是 all、none 或 1,2 等序号") from exc
+    if not values or any(value <= 0 for value in values):
+        raise ValueError("Molecule Instance 序号从 1 开始")
+    return True, tuple(value - 1 for value in values)
+
+
+def _dft_electronic_states(values: Iterable[str]) -> dict[str, tuple[int, int]]:
+    states: dict[str, tuple[int, int]] = {}
+    for raw in values:
+        stem, separator, state = str(raw or "").partition("=")
+        parts = [value.strip() for value in state.split(",")]
+        if not separator or not stem.strip() or len(parts) != 2:
+            raise ValueError(
+                "--state 格式必须是 geometry=charge,multiplicity"
+            )
+        try:
+            charge, multiplicity = int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            raise ValueError("--state 的电荷和多重度必须是整数") from exc
+        if multiplicity <= 0:
+            raise ValueError("--state 的自旋多重度必须为正整数")
+        normalized_stem = stem.strip()
+        if normalized_stem in states:
+            raise ValueError(f"--state 重复指定了 {normalized_stem}")
+        states[normalized_stem] = (charge, multiplicity)
+    return states
+
+
+def cmd_export_dft_geometry(args: argparse.Namespace) -> int:
+    """Export one matched occurrence as DFT initial geometries."""
+    from reacnet_scope import services as svc
+    from reacnet_scope.event_index import (
+        EVENT_EVIDENCE_STORE,
+        EventNotFoundError,
+    )
+    from reacnet_scope.indexes import (
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+    )
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.trajectory import (
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+    )
+
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        reactionevent = dataset["reactionevent"]
+        molecules = (
+            dataset["molecules"]
+            if Path(dataset["molecules"]).is_file()
+            else ""
+        )
+        event = EVENT_EVIDENCE_STORE.get_event(
+            reactionevent,
+            molecules,
+            args.event_id,
+        )
+        include_reactants, reactant_indices = _dft_participant_selection(
+            args.reactants
+        )
+        include_products, product_indices = _dft_participant_selection(
+            args.products
+        )
+        explicit_mapping = svc.parse_event_type_element_map(args.type_map)
+        request = svc.DftGeometryRequest(
+            include_reactants=include_reactants,
+            include_products=include_products,
+            reactant_indices=reactant_indices,
+            product_indices=product_indices,
+            layout=args.layout,
+            electronic_states=_dft_electronic_states(args.state),
+            atom_type_map=(
+                explicit_mapping if str(args.type_map or "").strip() else None
+            ),
+            source_length_unit=(
+                "angstrom"
+                if args.save_unit_confirmation
+                else (args.source_unit or None)
+            ),
+            warning_atom_count=args.warning_atoms,
+            max_atom_count=args.max_atoms,
+        )
+        bundle = svc.build_dft_geometry_bundle(dataset, event, request)
+        if args.save_unit_confirmation:
+            svc.save_coordinate_length_unit(dataset["trajectory"], "angstrom")
+        package = bundle.to_zip()
+        target = _write_bytes_atomic(args.out, package, force=args.force)
+    except (
+        EventNotFoundError,
+        FileExistsError,
+        FileNotFoundError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        RuntimeError,
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+        svc.DftGeometryError,
+        svc.ServiceError,
+        ValueError,
+    ) as exc:
+        message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+        print(f"[ERROR] {message}", file=sys.stderr)
+        return 2
+    print(
+        f"[OK] wrote DFT initial geometry package: {target} "
+        f"({len(package)} bytes)"
+    )
     return 0
 
 
@@ -1289,6 +1414,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="原子替换已有输出文件",
     )
     sp_export_event.set_defaults(func=cmd_export_event)
+
+    sp_export_dft = sub.add_parser(
+        "export-dft-geometry",
+        help="把一个 matched RNG 事件导出为 DFT 初始几何 ZIP",
+    )
+    sp_export_dft.add_argument(
+        "--case",
+        required=True,
+        help="数据集目录或公共前缀",
+    )
+    sp_export_dft.add_argument(
+        "--base",
+        default="",
+        help="目录包含多个数据集时指定公共前缀",
+    )
+    sp_export_dft.add_argument(
+        "--event-id",
+        required=True,
+        help="事件索引中的 matched event_id",
+    )
+    sp_export_dft.add_argument(
+        "--reactants",
+        default="all",
+        help="反应物 Molecule Instance：all、none 或从 1 开始的序号，如 1,2",
+    )
+    sp_export_dft.add_argument(
+        "--products",
+        default="all",
+        help="产物 Molecule Instance：all、none 或从 1 开始的序号，如 1,2",
+    )
+    sp_export_dft.add_argument(
+        "--layout",
+        choices=["combined", "separate", "both"],
+        default="combined",
+        help="所选分子合并、分别或同时导出",
+    )
+    sp_export_dft.add_argument(
+        "--type-map",
+        default="",
+        help="本次导出的 Type→Element 覆盖，例如 1=C,2=H；不会保存",
+    )
+    sp_export_dft.add_argument(
+        "--source-unit",
+        choices=["angstrom"],
+        default="",
+        help="本次显式确认源轨迹坐标为 Å；省略时读取数据集设置",
+    )
+    sp_export_dft.add_argument(
+        "--save-unit-confirmation",
+        action="store_true",
+        help="把源轨迹为 Å 的确认保存到 Dataset Workspace",
+    )
+    sp_export_dft.add_argument(
+        "--state",
+        action="append",
+        default=[],
+        metavar="GEOMETRY=CHARGE,MULTIPLICITY",
+        help="可重复指定输出几何的电荷/多重度，例如 reactants=0,1",
+    )
+    sp_export_dft.add_argument(
+        "--warning-atoms",
+        type=_bounded_int("warning_atoms", 1),
+        default=200,
+        help="超过该原子数时写入大体系警告",
+    )
+    sp_export_dft.add_argument(
+        "--max-atoms",
+        type=_bounded_int("max_atoms", 1),
+        default=5000,
+        help="单个输出几何的硬上限；不会截断分子",
+    )
+    sp_export_dft.add_argument("--out", required=True, help="输出 ZIP 路径")
+    sp_export_dft.add_argument(
+        "--force",
+        action="store_true",
+        help="原子替换已有输出文件",
+    )
+    sp_export_dft.set_defaults(func=cmd_export_dft_geometry)
 
     sp_plot = sub.add_parser(
         "species-evolution",

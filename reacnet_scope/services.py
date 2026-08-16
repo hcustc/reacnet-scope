@@ -10,11 +10,23 @@ import subprocess
 from typing import Any
 
 from reacnet_scope import analysis_services as _analysis
+from reacnet_scope.dft_geometry import (
+    DFT_GEOMETRY_SCHEMA_VERSION,
+    DftGeometryBundle,
+    DftGeometryError,
+    DftGeometryRequest,
+    build_dft_geometry_bundle,
+)
 from reacnet_scope.event_package import build_event_package
 from reacnet_scope.event_paths import verify_event_path
 from reacnet_scope.queries import build_dataset_status_payload
 from reacnet_scope.service_types import ServiceError
-from reacnet_scope.trajectory import load_timestep_ps, save_timestep_ps
+from reacnet_scope.trajectory import (
+    load_coordinate_length_unit,
+    load_timestep_ps,
+    save_coordinate_length_unit,
+    save_timestep_ps,
+)
 from reacnet_scope.workspace_services import (
     ALLOWED_ROOTS,
     artifacts_from_status,
@@ -113,8 +125,15 @@ def verify_event_path_for_dash(*args: Any, **kwargs: Any) -> dict[str, Any]:
 __all__ = [
     "ALLOWED_ROOTS",
     "ServiceError",
+    "DFT_GEOMETRY_SCHEMA_VERSION",
+    "DftGeometryBundle",
+    "DftGeometryError",
+    "DftGeometryRequest",
+    "build_dft_geometry_bundle",
     "build_dataset_status_payload",
+    "load_coordinate_length_unit",
     "load_timestep_ps",
+    "save_coordinate_length_unit",
     "save_timestep_ps",
     "browse_dataset_location",
     "list_directory",
