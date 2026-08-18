@@ -9,6 +9,7 @@ import pytest
 from reacnet_scope.event_package import (
     EVENT_PACKAGE_SCHEMA_VERSION,
     build_event_package,
+    event_changed_bond_distances_csv,
 )
 
 ase_read = pytest.importorskip("ase.io").read
@@ -98,6 +99,8 @@ def _viewer(*, complete_mapping: bool = True) -> dict:
         "meta": {
             "reaction_smiles": "[C]+[O] -> [C][O]",
             "verification_status": "matched",
+            "timestep_ps": 0.002,
+            "coordinate_length_unit": "angstrom",
             "type_element_map": {"1": "C", **({"2": "O"} if complete_mapping else {})},
             "extraction": {
                 "before_frames": 2,
@@ -128,6 +131,8 @@ def test_event_package_is_deterministic_and_contains_auditable_members() -> None
     with ZipFile(io.BytesIO(first)) as archive:
         assert archive.namelist() == [
             "event.json",
+            "frames.csv",
+            "changed_bond_distances.csv",
             "trajectory.lammpstrj",
             "trajectory.extxyz",
             "bonds.csv",
@@ -153,7 +158,23 @@ def test_event_package_is_deterministic_and_contains_auditable_members() -> None
             "2": "O",
         }
         assert document["extxyz_included"] is True
+        assert document["time_axis"] == {"timestep_ps": 0.002, "unit": "ps"}
+        assert document["coordinate_length_unit"] == "angstrom"
+        assert document["frames"][1]["time_ps"] == 0.02
         assert document["source_signatures"]["trajectory"]["size"] == 123
+        frames = archive.read("frames.csv").decode()
+        assert "frame,source_timestep,time_ps,atom_id" in frames
+        assert '0,0,0.0,1,1,C' in frames
+        assert '"[true,true,true]",angstrom' in frames
+        measurements = archive.read("changed_bond_distances.csv").decode()
+        assert (
+            "source_timestep,time_ps,atom1,atom2,distance,distance_unit,"
+            "change,bond_order_before,bond_order_after,bond_state,coordinate_basis"
+        ) in measurements
+        assert (
+            "0,0.0,1,2,0.4,angstrom,bond_order_changed,1,2,before,"
+            "minimum_image_reaction_core_centered"
+        ) in measurements
         lammps = archive.read("trajectory.lammpstrj").decode()
         assert lammps.count("ITEM: TIMESTEP") == 2
         assert "ITEM: NUMBER OF ATOMS\n2" in lammps
@@ -179,6 +200,8 @@ def test_partial_mapping_omits_only_extxyz_and_keeps_lammps() -> None:
     with ZipFile(io.BytesIO(payload)) as archive:
         assert archive.namelist() == [
             "event.json",
+            "frames.csv",
+            "changed_bond_distances.csv",
             "trajectory.lammpstrj",
             "bonds.csv",
             "README.txt",
@@ -189,6 +212,24 @@ def test_partial_mapping_omits_only_extxyz_and_keeps_lammps() -> None:
             "trajectory.lammpstrj"
         ).decode()
         assert "omitted" in archive.read("README.txt").decode()
+
+
+def test_changed_bond_distances_leave_unconfirmed_units_and_time_blank() -> None:
+    viewer = _viewer()
+    viewer["meta"].pop("timestep_ps")
+    viewer["meta"].pop("coordinate_length_unit")
+
+    rows = event_changed_bond_distances_csv(viewer).splitlines()
+
+    assert rows[1].split(",")[:7] == [
+        "0",
+        "",
+        "1",
+        "2",
+        "0.4",
+        "",
+        "bond_order_changed",
+    ]
 
 
 def test_environment_scope_includes_context_atoms() -> None:

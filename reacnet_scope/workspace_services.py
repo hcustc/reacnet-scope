@@ -266,7 +266,7 @@ def _breadcrumbs_within_allowed_root(current: Path) -> list[dict[str, str]]:
     return crumbs
 
 
-def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
+def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, Any]:
     """Return prepared-index states without scanning a dataset or its manifest."""
     artifact_paths = dict(candidate.get("artifact_paths") or {})
 
@@ -313,9 +313,10 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
     else:
         event_status = {"state": "missing"}
     return {
-        "event": str(
-            event_status.get("state") or "missing"
-        ),
+        "event": {
+            **event_status,
+            "state": str(event_status.get("state") or "missing"),
+        },
         "trajectory": str(
             status_for(
                 TRAJECTORY_INDEX_STORE,
@@ -337,7 +338,7 @@ def _candidate_index_states(candidate: dict[str, Any]) -> dict[str, str]:
 
 def _candidate_capability_states(
     candidate: dict[str, Any],
-    indexes: Mapping[str, str],
+    indexes: Mapping[str, Any],
 ) -> dict[str, str]:
     """Describe independently usable analysis evidence for one candidate.
 
@@ -351,10 +352,13 @@ def _candidate_capability_states(
     def prepared(kind: str, available: bool) -> str:
         if not available:
             return "missing_source"
+        raw_state = indexes.get(kind)
+        if isinstance(raw_state, Mapping):
+            raw_state = raw_state.get("state")
         return {
             "missing": "needs_preparation",
             "building": "preparing",
-        }.get(str(indexes.get(kind) or "missing"), str(indexes.get(kind)))
+        }.get(str(raw_state or "missing"), str(raw_state or "missing"))
 
     species_source = bool(artifact_paths.get("species"))
     event_source = bool(
@@ -387,10 +391,17 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
 
     datasets: list[dict[str, Any]] = []
     for candidate in candidates:
-        index_states = _candidate_index_states(candidate)
+        index_evidence = _candidate_index_states(candidate)
+        index_states = {
+            key: str(
+                (value.get("state") if isinstance(value, Mapping) else value)
+                or "missing"
+            )
+            for key, value in index_evidence.items()
+        }
         capability_states = _candidate_capability_states(
             candidate,
-            index_states,
+            index_evidence,
         )
         datasets.append(
             {
@@ -400,7 +411,7 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
                 "capability_states": capability_states,
                 "analysis_capabilities": analysis_capability_evidence(
                     candidate.get("artifact_paths") or {},
-                    index_statuses=index_states,
+                    index_statuses=index_evidence,
                 ),
             }
         )
@@ -705,6 +716,7 @@ def list_preparation_tasks(
     """
 
     found: dict[tuple[str, str], dict[str, Any]] = {}
+    visited_targets: set[tuple[str, str]] = set()
     for raw in targets or ():
         if not isinstance(raw, Mapping):
             continue
@@ -712,6 +724,10 @@ def list_preparation_tasks(
         base = str(raw.get("base") or "").strip()
         if not folder or not base:
             continue
+        target_key = (folder, base)
+        if target_key in visited_targets:
+            continue
+        visited_targets.add(target_key)
         try:
             folder_path = validate_browse_path(folder)
             base_path = validate_browse_path(base)

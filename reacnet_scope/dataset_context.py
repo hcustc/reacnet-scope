@@ -330,6 +330,7 @@ def _revision_changed_context(
     readiness_sources = {
         "basic_analysis": {"reaction", "species"},
         "event_search": {"timeline", "reactionevent", "molecules"},
+        "species_fate": {"timeline", "reactionevent", "molecules"},
         "trajectory_evidence": {"trajectory"},
     }
     capabilities = dict(current.get("capabilities") or {})
@@ -344,6 +345,7 @@ def _revision_changed_context(
         "reaction_search": {"reaction"},
         "species_abundance": {"species"},
         "event_search": {"timeline", "reactionevent", "molecules"},
+        "species_fate": {"timeline", "reactionevent", "molecules"},
         "trajectory_evidence": {"trajectory"},
         "element_distribution": {"species"},
     }

@@ -317,7 +317,7 @@ def test_return_to_index_management_supersedes_browser_request() -> None:
     assert transaction["reason"] == "returned_to_index_management"
 
 
-def test_successful_switch_commits_context_resets_results_and_stays_in_workspace(
+def test_successful_switch_commits_context_resets_results_and_resumes_origin(
     monkeypatch,
 ) -> None:
     validation = {
@@ -368,7 +368,7 @@ def test_successful_switch_commits_context_resets_results_and_stays_in_workspace
     assert result["app-store"]["data"]["selected_smiles"] == ""
     assert result["app-store"]["data"]["inputs_pending"] is True
     assert result["recent-datasets"]["data"][0]["base"] == "/data/new"
-    assert result["dataset-switch-navigation"]["data"]["page"] == "data-management"
+    assert result["dataset-switch-navigation"]["data"]["page"] == "reactions"
     assert result["dataset-context-commit"]["data"]["request_id"] == "request-1"
     assert "当前数据集已切换为" in json.dumps(
         result["data-load-feedback"]["children"],
@@ -384,7 +384,7 @@ def test_successful_switch_commits_context_resets_results_and_stays_in_workspace
     assert result["event-path-store"]["data"] is None
 
 
-def test_direct_workspace_switch_stays_in_workspace(monkeypatch) -> None:
+def test_direct_workspace_switch_starts_default_analysis(monkeypatch) -> None:
     validation = {
         "folder": "/data",
         "base": "/data/new",
@@ -420,7 +420,7 @@ def test_direct_workspace_switch_stays_in_workspace(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.get_json()["response"]["dataset-switch-navigation"]["data"][
         "page"
-    ] == "data-management"
+    ] == "species"
 
 
 def test_same_identity_and_revision_commit_is_a_visible_noop(monkeypatch) -> None:
@@ -509,6 +509,51 @@ def test_session_restore_failure_clears_only_current_context(monkeypatch) -> Non
         result["global-dataset-notice"]["children"], ensure_ascii=False
     )
     assert "recent-datasets" not in result
+
+
+def test_missing_restored_dataset_routes_analysis_page_to_data_workspace() -> None:
+    client = create_app().server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "dataset-switch-navigation.data" in str(item.get("output") or "")
+        and any(
+            input_item.get("id") == "dataset-restore-result"
+            for input_item in item.get("inputs") or []
+        )
+    )
+
+    response = client.post(
+        "/_dash-update-component",
+        json={
+            "output": dependency["output"],
+            "outputs": {
+                "id": "dataset-switch-navigation",
+                "property": "data",
+            },
+            "changedPropIds": ["dataset-restore-result.data"],
+            "inputs": [
+                {
+                    "id": "dataset-restore-result",
+                    "property": "data",
+                    "value": {"state": "none"},
+                }
+            ],
+            "state": [
+                {
+                    "id": "page-store",
+                    "property": "data",
+                    "value": {"page": "species"},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    navigation = response.get_json()["response"]["dataset-switch-navigation"][
+        "data"
+    ]
+    assert navigation["page"] == "data-management"
 
 
 def test_revision_changed_without_candidate_has_one_primary_update_action() -> None:

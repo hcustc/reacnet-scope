@@ -118,3 +118,36 @@ def test_multi_dataset_evolution_csv_keeps_each_source_coordinates(
     assert "first,,C,1,10,2.0" in exported
     assert "second,,C,0,5,3.0" in exported
     assert "second,,C,1,20,4.0" in exported
+
+
+def test_species_evolution_catalog_merges_formulas_across_imported_files(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    first = tmp_path / "first.species"
+    second = tmp_path / "second.species"
+    first.write_text(
+        "Timestep 0: [H][O][H] 2 [O]=[O] 4\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "Timestep 0: [H][O]([H]) 3 [C]=[O] 1\n",
+        encoding="utf-8",
+    )
+    for source in (first, second):
+        SPECIES_COMPOSITION_STORE.build(str(source))
+
+    catalog = svc.species_evolution_catalog(
+        {},
+        species_files=f"first::{first}\nsecond::{second}",
+    )
+
+    options = {row["value"]: row for row in catalog["options"]}
+    assert catalog["meta"]["n_sources"] == 2
+    assert catalog["meta"]["n_formulas"] == 3
+    assert "formula:H2O" in options
+    assert "2 SMILES" in options["formula:H2O"]["label"]
+    assert "2/2 文件" in options["formula:H2O"]["label"]
+    assert "formula:O2" in options
+    assert "formula:CO" in options

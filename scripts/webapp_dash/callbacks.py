@@ -23,6 +23,7 @@ from dash import (
     Output,
     State,
     ctx,
+    dash_table,
     dcc,
     html,
     no_update,
@@ -47,6 +48,7 @@ PAGE_DATA_REQUIREMENTS = {
     "evolution": ("species", ".species + Species Abundance Index"),
     "element-distribution": ("species", ".species"),
     "events": ("timeline", ".timeline.h5 或 .reactionevent.csv + .molecules.csv"),
+    "species-fate": ("timeline", ".timeline.h5 或 .reactionevent.csv + .molecules.csv"),
     "trajectory": ("trajectory", "轨迹文件与帧索引"),
 }
 
@@ -57,6 +59,7 @@ PAGE_CAPABILITY_REQUIREMENTS = {
     "evolution": "species_abundance",
     "element-distribution": "element_distribution",
     "events": "event_search",
+    "species-fate": "species_fate",
     "trajectory": "trajectory_evidence",
 }
 
@@ -64,6 +67,7 @@ _CAPABILITY_LABELS = {
     "reaction_search": "反应检索",
     "species_abundance": "物种丰度",
     "event_search": "事件检索",
+    "species_fate": "物种命运分析",
     "trajectory_evidence": "轨迹证据",
     "element_distribution": "元素分布",
 }
@@ -472,6 +476,9 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("event-path-occurrence-selector", "value", None),
         reset("evolution-species-file", "value", ""),
         reset("evolution-species-files", "value", ""),
+        reset("evolution-species-picker", "options", []),
+        reset("evolution-species-picker", "value", []),
+        reset("evolution-catalog-alert", "children", ""),
     )
 
 
@@ -642,6 +649,7 @@ def _capabilities_from_store(store: dict[str, Any] | None) -> dict[str, Any]:
     }
     for key, readiness_key, source in (
         ("event_search", "event_search", "事件源证据"),
+        ("species_fate", "species_fate", "Molecular Continuity Substrate"),
         ("trajectory_evidence", "trajectory_evidence", "轨迹源文件"),
     ):
         item = dict(readiness.get(readiness_key) or {})
@@ -677,18 +685,18 @@ def _preparation_state_text(item: dict[str, Any]) -> tuple[str, str]:
     task = dict(item.get("task") or {})
     trusted_progress = task.get("progress") if task.get("progress_trusted") else None
     preparing_text = (
-        f"preparing · {float(trusted_progress) * 100:.0f}%"
+        f"准备中 · {float(trusted_progress) * 100:.0f}%"
         if isinstance(trusted_progress, (int, float))
-        else "preparing · 准备中"
+        else "准备中"
     )
     labels = {
-        "ready": ("ready · 可用", "success"),
+        "ready": ("可用", "success"),
         "building": (preparing_text, "warning"),
-        "stale": ("stale · 已失效", "warning"),
-        "invalid": ("invalid · 无效", "danger"),
-        "needs_preparation": ("needs-preparation · 需准备", "secondary"),
-        "missing_source": ("missing-source · 缺少源文件", "secondary"),
-        "missing": ("needs-preparation · 需准备", "secondary"),
+        "stale": ("需要重建", "warning"),
+        "invalid": ("索引无效", "danger"),
+        "needs_preparation": ("尚未建立", "secondary"),
+        "missing_source": ("缺少源文件", "secondary"),
+        "missing": ("尚未建立", "secondary"),
     }
     return labels.get(state, (state, "secondary"))
 
@@ -828,7 +836,7 @@ def _render_next_preparation_action(
             html.Div(title, className="rs-next-action-title"),
             html.Div(copy, className="rs-next-action-copy"),
             html.Div(
-                "展开下方“启用更多分析功能”后执行 ↓",
+                "可在下方对应卡片中准备；物种检索可立即开始。",
                 className="rs-next-action-direction",
             ),
         ]
@@ -949,10 +957,7 @@ def _render_preparation_status(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _render_preparation_tasks(tasks: list[dict[str, Any]]) -> Any:
     if not tasks:
-        return html.Div(
-            "尚无索引任务。需要时可在这里显式启动。",
-            className="rs-preparation-task-empty",
-        )
+        return None
     capability_labels = {
         "event": "事件检索",
         "trajectory": "轨迹证据",
@@ -1069,14 +1074,6 @@ def _render_preparation_tasks(tasks: list[dict[str, Any]]) -> Any:
     return html.Div(
         [
             *active_cards,
-            (
-                html.Div(
-                    "当前没有运行中的任务。",
-                    className="rs-preparation-task-empty",
-                )
-                if not active_cards
-                else None
-            ),
             history,
         ],
         className="rs-preparation-task-groups",
@@ -1525,6 +1522,7 @@ def register_callbacks(app: Any) -> None:
             )
             preparation_target = {
                 "event_search": "data-prep-event-btn",
+                "species_fate": "data-prep-event-btn",
                 "trajectory_evidence": "data-prep-trajectory-btn",
                 "element_distribution": "data-prep-composition-btn",
                 "species_abundance": "data-prep-composition-btn",
@@ -1685,7 +1683,7 @@ def register_callbacks(app: Any) -> None:
                 "page" if pid == page_id else "false"
                 for pid in TOP_NAV_PAGE_IDS
             ),
-            (
+            *(
                 "page" if page_id == "data-management" else "false",
                 "page" if page_id == "batch-compare" else "false",
             ),
@@ -1789,6 +1787,261 @@ def register_callbacks(app: Any) -> None:
             no_reaction_events,
             no_trajectory,
         )
+
+    @app.callback(
+        Output("fate-target-species", "options"),
+        Output("fate-endpoints-table", "dropdown"),
+        Input("app-store", "data"),
+    )
+    def _load_species_fate_catalog(app_store):
+        capabilities = _capabilities_from_store(app_store)
+        if str((capabilities.get("species_fate") or {}).get("state")) != "ready":
+            return [], {"species": {"options": []}}
+        try:
+            catalog = svc.species_fate_catalog_for_dataset(
+                (app_store or {}).get("artifacts", {}) or {}
+            )
+        except svc.ServiceError:
+            return [], {"species": {"options": []}}
+        options = [
+            {
+                "label": f"{row['species']} · {row['species_id']}",
+                "value": row["species"],
+            }
+            for row in catalog
+        ]
+        return options, {"species": {"options": options}}
+
+    @app.callback(
+        Output("fate-endpoints-table", "data"),
+        Input("fate-add-endpoint-btn", "n_clicks"),
+        State("fate-endpoints-table", "data"),
+        prevent_initial_call=True,
+    )
+    def _add_species_fate_endpoint(_n_clicks, rows):
+        return [*(rows or []), {"category": "", "species": ""}]
+
+    @app.callback(
+        Output("fate-run-btn", "disabled"),
+        Input("app-store", "data"),
+    )
+    def _disable_species_fate_run(app_store):
+        capability = (
+            _capabilities_from_store(app_store).get("species_fate") or {}
+        )
+        return str(capability.get("state") or "") != "ready"
+
+    @app.callback(
+        Output("fate-result-store", "data"),
+        Output("fate-error", "children"),
+        Output("fate-error", "is_open"),
+        Input("fate-run-btn", "n_clicks"),
+        State("app-store", "data"),
+        State("fate-target-species", "value"),
+        State("fate-endpoints-table", "data"),
+        State("fate-anchor-mode", "value"),
+        State("fate-atom-elements", "value"),
+        State("fate-anchor-values", "value"),
+        State("fate-formation-start", "value"),
+        State("fate-formation-end", "value"),
+        State("fate-followup-end", "value"),
+        State("fate-min-followup", "value"),
+        State("fate-max-events", "value"),
+        State("fate-max-branches", "value"),
+        State("fate-detail-limit", "value"),
+        State("fate-global-episode-limit", "value"),
+        prevent_initial_call=True,
+    )
+    def _run_species_fate(
+        _n_clicks,
+        app_store,
+        target,
+        endpoint_rows,
+        anchor_mode,
+        atom_element_text,
+        anchor_values,
+        formation_start,
+        formation_end,
+        followup_end,
+        minimum_followup,
+        max_events,
+        max_branches,
+        detail_limit,
+        global_episode_limit,
+    ):
+        endpoint_categories: dict[str, list[str]] = {}
+        for row in endpoint_rows or []:
+            category = str(row.get("category") or "").strip()
+            species = str(row.get("species") or "").strip()
+            if category and species:
+                endpoint_categories.setdefault(category, []).append(species)
+        atom_elements: dict[int, str] = {}
+        try:
+            for line in str(atom_element_text or "").replace(",", "\n").splitlines():
+                if not line.strip():
+                    continue
+                atom_id, element = line.split("=", 1)
+                atom_elements[int(atom_id.strip())] = element.strip()
+            values = [
+                value.strip()
+                for value in str(anchor_values or "").split(",")
+                if value.strip()
+            ]
+            result = svc.build_species_fate_analysis(
+                (app_store or {}).get("artifacts", {}) or {},
+                target_species=str(target or ""),
+                endpoint_categories=endpoint_categories,
+                atom_elements=atom_elements,
+                anchor_mode=str(anchor_mode or "heavy_atoms"),
+                anchor_elements=(values if anchor_mode == "elements" else ()),
+                anchor_atom_ids=(
+                    [int(value) for value in values]
+                    if anchor_mode == "atom_ids"
+                    else ()
+                ),
+                formation_start_frame=int(formation_start or 0),
+                formation_end_frame=(
+                    int(formation_end) if formation_end is not None else None
+                ),
+                followup_end_frame=(
+                    int(followup_end) if followup_end is not None else None
+                ),
+                minimum_followup_frames=int(minimum_followup or 0),
+                max_events_per_episode=int(max_events or 10_000),
+                max_active_branches=int(max_branches or 1_000),
+                detail_retention_limit=int(detail_limit or 0),
+                global_episode_limit=(
+                    int(global_episode_limit)
+                    if global_episode_limit is not None
+                    else None
+                ),
+            )
+        except (svc.ServiceError, TypeError, ValueError) as exc:
+            message = getattr(exc, "message", str(exc))
+            return no_update, message, True
+        return result, "", False
+
+    @app.callback(
+        Output("fate-summary", "children"),
+        Output("fate-signatures", "children"),
+        Output("fate-marginals", "children"),
+        Output("fate-pathways", "children"),
+        Output("fate-times", "children"),
+        Output("fate-episodes", "children"),
+        Input("fate-result-store", "data"),
+    )
+    def _render_species_fate(result):
+        if not result:
+            empty = html.P("运行后显示结果。", className="rs-step-note")
+            return empty, empty, empty, empty, empty, empty
+
+        def table(rows: list[dict[str, Any]], fields: list[str]) -> Any:
+            visible = [
+                {field: row.get(field) for field in fields}
+                for row in rows
+            ]
+            return dash_table.DataTable(
+                data=visible,
+                columns=[{"name": field, "id": field} for field in fields],
+                page_size=12,
+                style_table={"overflowX": "auto"},
+                style_cell={"textAlign": "left", "maxWidth": "360px", "overflow": "hidden", "textOverflow": "ellipsis"},
+            )
+
+        result_status = str(result.get("status") or "failed")
+        if result_status != "complete":
+            detail = dict(
+                result.get("failure")
+                or result.get("global_incompleteness")
+                or {}
+            )
+            message = str(detail.get("message") or "主统计不可发布。")
+            notice = dbc.Alert(
+                f"Result={result_status}: {message}",
+                color="danger" if result_status == "failed" else "warning",
+            )
+            unavailable = html.P(
+                "计算未覆盖可信的完整 cohort；主 branching statistics 为 NA。",
+                className="rs-step-note",
+            )
+            episode_table = table(
+                list(result.get("episodes") or []),
+                [
+                    "formation_episode_id",
+                    "status",
+                    "anchor_atom_ids",
+                    "topology",
+                    "censoring_reasons",
+                    "event_ids",
+                ],
+            )
+            return (
+                notice,
+                unavailable,
+                unavailable,
+                unavailable,
+                unavailable,
+                episode_table,
+            )
+
+        summary = dict(result.get("summary") or {})
+        cards = html.Div(
+            [
+                dbc.Badge(f"Formations {summary.get('formation_count', 0)}", color="secondary"),
+                dbc.Badge(f"Main cohort {summary.get('main_cohort_size', 0)}", color="secondary"),
+                dbc.Badge(f"Resolved {summary.get('fully_resolved_count', 0)}", color="success"),
+                dbc.Badge(f"Censored {summary.get('censored_count', 0)}", color="warning"),
+                dbc.Badge(f"Resolution {summary.get('resolution_fraction') if summary.get('resolution_fraction') is not None else 'NA'}", color="info"),
+            ],
+            className="d-flex flex-wrap gap-2",
+        )
+        signatures = table(
+            list(summary.get("fate_signatures") or []),
+            ["fate_signature_id", "label", "episode_count", "resolved_episode_conditional_probability"],
+        )
+        marginals = table(
+            list(summary.get("endpoint_marginals") or []),
+            ["endpoint_category", "episode_occurrence_count", "terminal_instance_count", "marginal_occurrence_probability", "unconditional_mean_multiplicity", "conditional_mean_multiplicity"],
+        )
+        pathways = table(
+            [*list(summary.get("first_exit_channels") or []), *list(summary.get("linear_paths") or [])],
+            ["reaction_type", "linear_reaction_type_sequence", "episode_count", "first_exit_channel_conditional_probability", "linear_path_conditional_probability"],
+        )
+        time_rows = [
+            {"metric": metric, **dict(values)}
+            for metric, values in dict(summary.get("time_distributions") or {}).items()
+        ]
+        times = table(time_rows, ["metric", "count", "min", "median", "mean", "max"])
+        episodes = table(
+            list(result.get("episodes") or []),
+            ["formation_episode_id", "status", "anchor_atom_ids", "topology", "censoring_reasons", "event_ids"],
+        )
+        return cards, signatures, marginals, pathways, times, episodes
+
+    @app.callback(
+        Output("fate-download-json", "data"),
+        Input("fate-download-json-btn", "n_clicks"),
+        State("fate-result-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_species_fate_json(_n_clicks, result):
+        if not result:
+            raise PreventUpdate
+        return dcc.send_string(
+            svc.species_fate_to_json(result), "fate-result.json"
+        )
+
+    @app.callback(
+        Output("fate-download-tables", "data"),
+        Input("fate-download-tables-btn", "n_clicks"),
+        State("fate-result-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_species_fate_tables(_n_clicks, result):
+        if not result:
+            raise PreventUpdate
+        payload = svc.species_fate_tables_zip(result)
+        return dcc.send_bytes(lambda buffer: buffer.write(payload), "fate-tables.zip")
 
     @app.callback(
         Output("app-store", "data", allow_duplicate=True),
@@ -2329,7 +2582,7 @@ def register_callbacks(app: Any) -> None:
                 "", "", "", "", "", error, "", "状态不可用",
                 "rs-index-global-state is-partial", "状态读取失败",
                 "", "", "", "", "", "",
-                True, True, True, False,
+                True, True, True, True,
                 "rs-index-action", "rs-index-action", "rs-index-action",
                 "准备索引", "准备索引", "准备索引",
             )
@@ -2339,7 +2592,7 @@ def register_callbacks(app: Any) -> None:
                 "", "", "", "", "", error, "", "状态不可用",
                 "rs-index-global-state is-partial", "状态读取失败",
                 "", "", "", "", "", "",
-                True, True, True, False,
+                True, True, True, True,
                 "rs-index-action", "rs-index-action", "rs-index-action",
                 "准备索引", "准备索引", "准备索引",
             )
@@ -2369,6 +2622,13 @@ def register_callbacks(app: Any) -> None:
         recommended_kind = rendered["recommended_kind"]
 
         def action_class(kind: str) -> str:
+            item = {
+                "event": events,
+                "trajectory": trajectory,
+                "composition": composition,
+            }.get(kind, {})
+            if str(item.get("state") or "") == "ready":
+                return "rs-index-action is-ready"
             return (
                 "rs-index-action is-recommended"
                 if kind == recommended_kind
@@ -2380,10 +2640,22 @@ def register_callbacks(app: Any) -> None:
             if task_state in {"interrupted", "canceled", "failed", "superseded"}:
                 return "续建索引"
             if str(item.get("state") or "") in {"ready", "stale", "invalid"}:
-                return "重建索引"
+                return "重新构建"
             if task_state in {"running", "cancel_requested"}:
                 return "任务运行中"
             return "准备索引"
+
+        refresh_active = any(
+            str(item.get("state") or "") == "building"
+            or str((item.get("task") or {}).get("state") or "")
+            in {"running", "cancel_requested"}
+            for item in (events, trajectory, composition)
+        )
+        refresh_label = (
+            rendered["refresh_label"]
+            if refresh_active
+            else str(rendered["refresh_label"]).replace("状态自动刷新", "状态已更新")
+        )
 
         return (
             rendered["basic"],
@@ -2395,7 +2667,7 @@ def register_callbacks(app: Any) -> None:
             rendered["next_action"],
             rendered["global_status"],
             rendered["global_class"],
-            rendered["refresh_label"],
+            refresh_label,
             payload.get("event_command") or "",
             payload.get("trajectory_command") or "",
             payload.get("composition_command") or "",
@@ -2405,7 +2677,7 @@ def register_callbacks(app: Any) -> None:
             clear_disabled(events),
             clear_disabled(trajectory),
             clear_disabled(composition),
-            False,
+            not refresh_active,
             action_class("event"),
             action_class("trajectory"),
             action_class("composition"),
@@ -2482,6 +2754,33 @@ def register_callbacks(app: Any) -> None:
                     className="mb-0",
                 )
         return _render_preparation_tasks(tasks), tasks, notice
+
+    @app.callback(
+        Output("preparation-task-refresh", "disabled"),
+        Input("preparation-task-snapshot", "data"),
+        Input("data-prep-event-btn", "n_clicks"),
+        Input("data-prep-trajectory-btn", "n_clicks"),
+        Input("data-prep-composition-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _toggle_preparation_task_refresh(
+        task_snapshot,
+        _event_clicks,
+        _trajectory_clicks,
+        _composition_clicks,
+    ):
+        if ctx.triggered_id in {
+            "data-prep-event-btn",
+            "data-prep-trajectory-btn",
+            "data-prep-composition-btn",
+        }:
+            return False
+        tasks = task_snapshot if isinstance(task_snapshot, list) else []
+        return not any(
+            isinstance(item, dict)
+            and str(item.get("state") or "") in {"running", "cancel_requested"}
+            for item in tasks
+        )
 
     @app.callback(
         Output("app-store", "data", allow_duplicate=True),
@@ -3316,12 +3615,17 @@ def register_callbacks(app: Any) -> None:
         if request.get("state") != "succeeded":
             raise PreventUpdate
         validation = request.get("validation") or {}
+        origin_page = str((request.get("origin") or {}).get("page") or "")
+        destination_page = (
+            origin_page
+            if origin_page in PAGE_IDS and origin_page != "data-management"
+            else DEFAULT_PAGE
+        )
         navigation = {
             "request_id": str(request.get("request_id") or ""),
-            # Applying a Current Dataset is a data-management action. Keep the
-            # resulting capability and preparation state visible; moving into
-            # an analysis tool is an explicit user action.
-            "page": "data-management",
+            # Resume the analysis that opened the picker. A direct load starts
+            # at the default analysis page instead of ending in index upkeep.
+            "page": destination_page,
         }
         label = str(validation.get("label") or "未命名数据集")
         if svc.is_same_dataset_revision(current_store, validation):
@@ -3494,6 +3798,25 @@ def register_callbacks(app: Any) -> None:
             ),
             *_dataset_bound_reset_values(),
         )
+
+    @app.callback(
+        Output("dataset-switch-navigation", "data", allow_duplicate=True),
+        Input("dataset-restore-result", "data"),
+        State("page-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _route_unusable_restored_context(restore_result, page_store):
+        """Never leave a restored tab on an analysis page without a dataset."""
+        state = str((restore_result or {}).get("state") or "")
+        current_page = str((page_store or {}).get("page") or "")
+        if state not in {"none", "unavailable"}:
+            raise PreventUpdate
+        if current_page == "data-management":
+            raise PreventUpdate
+        return {
+            "request_id": f"restore-route-{time.time_ns()}",
+            "page": "data-management",
+        }
 
     @app.callback(
         Output("app-store", "data", allow_duplicate=True),
@@ -5055,10 +5378,65 @@ def register_callbacks(app: Any) -> None:
     # ── Evolution ───────────────────────────────────────────────────
 
     @app.callback(
+        Output("evolution-species-picker", "options"),
+        Output("evolution-species-picker", "value"),
+        Output("evolution-catalog-alert", "children"),
+        Input("evolution-load-species-btn", "n_clicks"),
+        State("evolution-species-file", "value"),
+        State("evolution-species-files", "value"),
+        State("evolution-species-picker", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[
+            (Output("evolution-load-species-btn", "disabled"), True, False),
+        ],
+    )
+    def _load_evolution_species_catalog(
+        n_clicks,
+        species_file,
+        species_files,
+        selected_values,
+        store,
+    ):
+        if n_clicks is None:
+            raise PreventUpdate
+        artifacts = ((store or {}).get("artifacts") or {})
+        try:
+            catalog = svc.species_evolution_catalog(
+                artifacts,
+                species_file=species_file or "",
+                species_files=species_files or "",
+            )
+        except svc.ServiceError as exc:
+            return [], [], str(exc.message)
+
+        options = catalog.get("options") or []
+        valid_values = {str(option.get("value")) for option in options}
+        kept_values = [
+            str(value)
+            for value in (selected_values or [])
+            if str(value) in valid_values
+        ]
+        meta = catalog.get("meta") or {}
+        message = (
+            f"已从 {int(meta.get('n_sources') or 0)} 个文件读取 "
+            f"{int(meta.get('n_formulas') or 0)} 种分子式"
+        )
+        warnings = [
+            str(item)
+            for item in (meta.get("warnings") or [])
+            if str(item).strip()
+        ]
+        if warnings:
+            message = f"{message}；{'；'.join(warnings)}"
+        return options, kept_values, message
+
+    @app.callback(
         Output("evolution-graph", "figure"),
         Output("evolution-alert", "children"),
         Output("evolution-payload-store", "data"),
         Input("evolution-search-btn", "n_clicks"),
+        State("evolution-species-picker", "value"),
         State("evolution-targets", "value"),
         State("evolution-xaxis", "value"),
         State("evolution-smooth", "value"),
@@ -5094,6 +5472,7 @@ def register_callbacks(app: Any) -> None:
     )
     def _build_evolution(
         n_clicks,
+        selected_species,
         targets_text,
         x_axis,
         smooth,
@@ -5113,7 +5492,17 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         store = store or {}
         artifacts = store.get("artifacts", {}) or {}
-        targets = [t.strip() for t in re.split(r"[,;\n]+", targets_text or "") if t.strip()]
+        picked_targets = [
+            str(item).strip()
+            for item in (selected_species or [])
+            if str(item).strip()
+        ]
+        manual_targets = [
+            t.strip()
+            for t in re.split(r"[,;\n]+", targets_text or "")
+            if t.strip()
+        ]
+        targets = list(dict.fromkeys([*picked_targets, *manual_targets]))
         if not targets:
             targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
             targets = [targets_text_default] if targets_text_default else []
@@ -6577,6 +6966,22 @@ def register_callbacks(app: Any) -> None:
         return {
             "content": svc.event_viewer_frames_csv(viewer),
             "filename": f"{event_id}_frames.csv",
+            "type": "text/csv",
+        }
+
+    @app.callback(
+        Output("event-distances-csv-download", "data"),
+        Input("event-distances-csv-btn", "n_clicks"),
+        State("event-viewer-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_event_changed_bond_distances(n_clicks, viewer):
+        if n_clicks is None or not viewer:
+            raise PreventUpdate
+        event_id = str(viewer.get("event_id") or "event")
+        return {
+            "content": svc.event_viewer_changed_bond_distances_csv(viewer),
+            "filename": f"{event_id}_changed_bond_distances.csv",
             "type": "text/csv",
         }
 
@@ -8278,7 +8683,6 @@ def _render_selected_candidate_details(
             ),
         ],
         className="rs-browser-candidate-details",
-        open=True,
     )
 
 
@@ -8922,42 +9326,39 @@ def _fmt_num(value: Any) -> str:
 
 
 def _render_artifacts(artifacts: dict[str, str]) -> Any:
-    labels = {
-        "reaction": "Reaction",
-        "species": "Species",
-        "trajectory": "Trajectory",
-        "timeline": "Timeline",
-        "reactionevent": "Reaction Occurrence CSV",
-        "molecules": "Molecular Evidence CSV",
-    }
+    labels = [
+        ("reaction", "Reaction"),
+        ("species", "Species"),
+        ("trajectory", "Trajectory"),
+    ]
+    if artifacts.get("timeline"):
+        labels.append(("timeline", "Timeline"))
+    else:
+        labels.extend(
+            [
+                ("reactionevent", "Legacy Reaction Occurrence CSV"),
+                ("molecules", "Legacy Molecular Evidence CSV"),
+            ]
+        )
     rows: list[Any] = []
-    for key, label in labels.items():
+    for key, label in labels:
         path = artifacts.get(key)
-        if path:
-            rows.append(
-                html.Div(
-                    [
-                        html.Span(label, className="rs-artifact-label"),
-                        html.Span(Path(path).name, className="rs-artifact-name"),
-                        html.Code(path, className="rs-artifact-path"),
-                        dcc.Clipboard(content=path, title=f"复制 {label} 路径"),
-                    ],
-                    className="rs-artifact-row",
-                )
+        if not path:
+            continue
+        rows.append(
+            html.Div(
+                [
+                    html.Span(label, className="rs-artifact-label"),
+                    html.Span(Path(path).name, className="rs-artifact-name"),
+                    html.Code(path, className="rs-artifact-path"),
+                    dcc.Clipboard(content=path, title=f"复制 {label} 路径"),
+                ],
+                className="rs-artifact-row",
             )
-        else:
-            rows.append(
-                html.Div(
-                    [
-                        html.Span(label, className="rs-artifact-label"),
-                        html.Span("缺失", className="rs-artifact-name is-missing"),
-                    ],
-                    className="rs-artifact-row",
-                )
-            )
+        )
     return html.Details(
         [
-            html.Summary("展开源工件与绝对路径"),
+            html.Summary("源文件与路径"),
             html.Div(rows, className="rs-artifact-list"),
         ],
         className="rs-artifact-details",

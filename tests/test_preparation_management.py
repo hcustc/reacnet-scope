@@ -464,21 +464,27 @@ def test_cancellation_does_not_signal_pid_with_different_start_token(
     assert json.loads(task_path.read_text(encoding="utf-8"))["state"] == "interrupted"
 
 
-def test_index_management_is_expanded_without_global_path_overrides() -> None:
+def test_index_management_keeps_primary_actions_separate_from_maintenance() -> None:
     app = create_app()
     layout = app.server.test_client().get("/_dash-layout").get_json()
     cache_card = _layout_node_by_id(layout, "data-cache-management")
     details = _layout_node_by_id(layout, "data-advanced-tools")
+    maintenance = _layout_node_by_id(layout, "data-index-advanced")
     workspace_meta = _layout_node_by_id(layout, "data-prep-cache-meta")
+    task_refresh = _layout_node_by_id(layout, "preparation-task-refresh")
 
     assert cache_card is not None
-    assert cache_card["type"] == "Details"
-    assert (cache_card.get("props") or {}).get("open") is True
+    assert cache_card["type"] == "Section"
     assert details is None
+    assert maintenance["type"] == "Details"
+    assert (maintenance.get("props") or {}).get("open") is not True
     assert workspace_meta is not None
+    assert (task_refresh.get("props") or {}).get("disabled") is True
     cache_text = json.dumps(cache_card, ensure_ascii=False)
-    assert "索引构建与状态" in cache_text
-    assert "按需准备分析能力" in cache_text
+    assert "当前数据集的分析索引" in cache_text
+    assert "高级维护" in cache_text
+    assert "Workspace 与诊断" in cache_text
+    assert "基础检索无需等待" not in cache_text
     assert "data-preparation-tasks" in cache_text
     assert "清理派生索引" in cache_text
     for component_id in (
@@ -501,10 +507,50 @@ def test_index_management_is_expanded_without_global_path_overrides() -> None:
     assert "路径覆盖与高级设置" not in cache_text
     assert "data-global-min-tp" not in cache_text
     assert "data-overrides-apply-btn" not in cache_text
-    assert "位置 · 占用 · CLI 命令" in cache_text
+    assert "任务记录 · Workspace · CLI · 清理索引" in cache_text
     assert "data-rng-event-command" not in cache_text
     assert "元素分布索引" in cache_text
     assert "C/O/Cl 组成索引" not in cache_text
+
+
+def test_artifact_details_show_only_the_active_timed_evidence_source() -> None:
+    rendered = cb._render_artifacts(
+        {
+            "reaction": "/data/run.reactionabcd",
+            "species": "/data/run.species",
+            "trajectory": "/data/run.lammpstrj",
+            "timeline": "/data/run.timeline.h5",
+        }
+    )
+    payload = json.dumps(
+        rendered,
+        default=lambda value: value.to_plotly_json(),
+        ensure_ascii=False,
+    )
+
+    assert "Timeline" in payload
+    assert "Reaction Occurrence CSV" not in payload
+    assert "Molecular Evidence CSV" not in payload
+    assert "缺失" not in payload
+
+
+def test_artifact_details_keep_legacy_fallback_when_it_is_the_active_source() -> None:
+    rendered = cb._render_artifacts(
+        {
+            "reactionevent": "/data/run.reactionevent.csv",
+            "molecules": "/data/run.molecules.csv",
+        }
+    )
+    payload = json.dumps(
+        rendered,
+        default=lambda value: value.to_plotly_json(),
+        ensure_ascii=False,
+    )
+
+    assert "Legacy Reaction Occurrence CSV" in payload
+    assert "Legacy Molecular Evidence CSV" in payload
+    assert "Timeline" not in payload
+    assert "缺失" not in payload
 
 
 def test_completed_preparation_tasks_are_collapsed_as_history() -> None:
@@ -558,7 +604,7 @@ def test_failed_preparation_tasks_are_collapsed_and_removable() -> None:
         ensure_ascii=False,
     )
 
-    assert "当前没有运行中的任务" in payload
+    assert "当前没有运行中的任务" not in payload
     assert "历史任务（1）" in payload
     assert "failed · 已中断，可续建" in payload
     assert "preparation-task-dismiss" in payload
@@ -582,6 +628,71 @@ def test_cache_build_controls_use_a_cancellable_background_callback() -> None:
     assert dependency.get("background") == {"interval": 1000}
     assert dependency["running"]["running"]["data-prep-cancel-btn.disabled"] is False
     assert dependency["running"]["runningOff"]["data-prep-cancel-btn.disabled"] is True
+
+
+def test_task_polling_runs_only_while_a_preparation_task_is_active() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if item.get("output") == "preparation-task-refresh.disabled"
+    )
+
+    def refresh_disabled(
+        *,
+        changed_id: str,
+        tasks: list[dict[str, str]],
+        event_clicks: int = 0,
+    ) -> bool:
+        values = {
+            "preparation-task-snapshot": tasks,
+            "data-prep-event-btn": event_clicks,
+            "data-prep-trajectory-btn": 0,
+            "data-prep-composition-btn": 0,
+        }
+        response = client.post(
+            "/_dash-update-component",
+            json={
+                "output": dependency["output"],
+                "outputs": {
+                    "id": "preparation-task-refresh",
+                    "property": "disabled",
+                },
+                "changedPropIds": [changed_id],
+                "inputs": [
+                    {
+                        "id": item["id"],
+                        "property": item["property"],
+                        "value": values[item["id"]],
+                    }
+                    for item in dependency["inputs"]
+                ],
+                "state": [],
+            },
+        )
+        assert response.status_code == 200
+        return response.get_json()["response"]["preparation-task-refresh"][
+            "disabled"
+        ]
+
+    assert refresh_disabled(
+        changed_id="preparation-task-snapshot.data",
+        tasks=[],
+    ) is True
+    assert refresh_disabled(
+        changed_id="data-prep-event-btn.n_clicks",
+        tasks=[],
+        event_clicks=1,
+    ) is False
+    assert refresh_disabled(
+        changed_id="preparation-task-snapshot.data",
+        tasks=[{"state": "running"}],
+    ) is False
+    assert refresh_disabled(
+        changed_id="preparation-task-snapshot.data",
+        tasks=[{"state": "completed"}],
+    ) is True
 
 
 def test_cache_build_background_callback_dispatches_and_returns(

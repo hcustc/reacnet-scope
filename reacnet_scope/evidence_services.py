@@ -33,7 +33,13 @@ from collections import Counter
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
-from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
+from reacnet_scope.network import (  # noqa: E402
+    ReactionNetwork,
+    count_atoms_fast,
+    formula_from_counts,
+    parse_reactionabcd,
+    smiles_to_formula_fast,
+)
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -56,6 +62,8 @@ from reacnet_scope.event_index import (  # noqa: E402
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
+    event_changed_bond_distances_csv,
+    event_frames_csv,
     event_trajectory_text,
 )
 from reacnet_scope.event_paths import (  # noqa: E402
@@ -67,6 +75,14 @@ from reacnet_scope.molecule_lineage import (  # noqa: E402
     MoleculeLineageError,
     build_molecule_lineage,
     molecule_lineage_to_csv,
+)
+from reacnet_scope.species_fate import (  # noqa: E402
+    SpeciesFateError,
+    SpeciesFateQueryError,
+    analyze_species_fate,
+    species_fate_catalog,
+    species_fate_tables_zip,
+    species_fate_to_json,
 )
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
@@ -80,6 +96,7 @@ from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
     TrajectoryFrameError,
     dataset_settings_path,
+    load_coordinate_length_unit,
     load_type_element_map,
     load_timestep_ps,
     normalize_type_element_map,
@@ -128,6 +145,143 @@ from reacnet_scope.workspace_services import _event_artifact_paths
 # ---------------------------------------------------------------------------
 # Time evolution
 # ---------------------------------------------------------------------------
+
+
+def species_evolution_catalog(
+    artifacts: dict[str, str],
+    *,
+    species_file: str = "",
+    species_files: str = "",
+    max_options: int = 5000,
+) -> dict[str, Any]:
+    """Return searchable formula choices across one or more Species sources.
+
+    Catalog reads stay on the prepared Species Abundance Index.  Raw
+    ``.species`` files are never rescanned in an interactive Dash callback.
+    """
+    reac_path = (artifacts.get("reaction") or "").strip()
+    single_source = (species_file or artifacts.get("species") or "").strip()
+    if not single_source and reac_path:
+        single_source = derive_species_path(reac_path)
+
+    multi_source_text = (species_files or "").strip()
+    try:
+        source_specs = (
+            parse_species_file_specs([multi_source_text])
+            if multi_source_text
+            else []
+        )
+    except ValueError as exc:
+        raise ServiceError(str(exc), reason="bad_species_sources") from exc
+
+    if source_specs:
+        sources = [
+            {
+                "path": str(Path(str(spec["path"])).expanduser().resolve()),
+                "label": str(spec.get("system") or Path(str(spec["path"])).name),
+            }
+            for spec in source_specs
+        ]
+    elif single_source:
+        raw_path = (
+            derive_species_path(single_source)
+            if single_source.lower().endswith(".reactionabcd")
+            else single_source
+        )
+        resolved = str(Path(raw_path).expanduser().resolve())
+        sources = [{"path": resolved, "label": Path(resolved).name}]
+    else:
+        raise ServiceError("缺少 .species 数据文件", reason="missing_species_file")
+
+    # Keep the first user-facing label when the same source is listed twice.
+    unique_sources: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for source in sources:
+        if source["path"] in seen_paths:
+            continue
+        seen_paths.add(source["path"])
+        unique_sources.append(source)
+    sources = unique_sources
+
+    formulas: dict[str, dict[str, Any]] = {}
+    try:
+        for source in sources:
+            path = source["path"]
+            if not Path(path).is_file():
+                raise FileNotFoundError(f"species file not found: {path}")
+            totals = collect_species_totals(path)
+            formulas_in_source: set[str] = set()
+            for smiles, total_count in totals.items():
+                formula = smiles_to_formula_fast(str(smiles))
+                if not formula:
+                    continue
+                entry = formulas.setdefault(
+                    formula,
+                    {
+                        "formula": formula,
+                        "total_count": 0,
+                        "smiles": set(),
+                        "sources": set(),
+                    },
+                )
+                entry["total_count"] += int(total_count)
+                entry["smiles"].add(str(smiles))
+                formulas_in_source.add(formula)
+            for formula in formulas_in_source:
+                formulas[formula]["sources"].add(path)
+    except (
+        IndexNotReadyError,
+        IndexBuildInProgressError,
+        IndexStaleError,
+        IndexInvalidError,
+    ) as exc:
+        raise ServiceError(
+            f"Species Abundance Index 未就绪: {exc}",
+            reason="species_index_not_ready",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ServiceError(str(exc), reason="missing_file") from exc
+    except Exception as exc:
+        raise ServiceError(f"读取物种目录失败: {exc}") from exc
+
+    rows = sorted(
+        formulas.values(),
+        key=lambda row: (
+            -len(row["sources"]),
+            -int(row["total_count"]),
+            str(row["formula"]),
+        ),
+    )
+    option_limit = max(1, int(max_options))
+    truncated = len(rows) > option_limit
+    rows = rows[:option_limit]
+    n_sources = len(sources)
+    options = [
+        {
+            "label": (
+                f"{row['formula']} · {len(row['smiles'])} SMILES · "
+                f"{len(row['sources'])}/{n_sources} 文件"
+            ),
+            "value": f"formula:{row['formula']}",
+            "search": f"{row['formula']} {' '.join(sorted(row['smiles']))}",
+        }
+        for row in rows
+    ]
+    warnings = []
+    if truncated:
+        warnings.append(
+            f"物种目录超过 {option_limit} 项，仅显示跨文件覆盖率和总丰度最高的条目"
+        )
+    return {
+        "options": options,
+        "meta": {
+            "n_sources": n_sources,
+            "n_formulas": len(formulas),
+            "n_options": len(options),
+            "warnings": warnings,
+            "sources": sources,
+        },
+    }
 
 
 def build_species_evolution(
@@ -850,6 +1004,88 @@ def build_molecule_lineage_analysis(
     return report
 
 
+def species_fate_catalog_for_dataset(
+    artifacts: dict[str, str],
+) -> list[dict[str, str]]:
+    """Return exact Species identities available to a Fate Query."""
+
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        raise ServiceError(
+            "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
+            reason="missing_reactionevent",
+        )
+    try:
+        return species_fate_catalog(reactionevent_file, molecules_file)
+    except (
+        SpeciesFateError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        raise ServiceError(str(exc), reason="species_fate_not_ready") from exc
+
+
+def build_species_fate_analysis(
+    artifacts: dict[str, str],
+    *,
+    target_species: str,
+    endpoint_categories: Mapping[str, Iterable[str]],
+    atom_elements: Mapping[int, str] | None = None,
+    anchor_mode: str = "heavy_atoms",
+    anchor_elements: Iterable[str] = (),
+    anchor_atom_ids: Iterable[int] = (),
+    formation_start_frame: int = 0,
+    formation_end_frame: int | None = None,
+    followup_end_frame: int | None = None,
+    minimum_followup_frames: int = 0,
+    max_events_per_episode: int = 10_000,
+    max_active_branches: int = 1_000,
+    detail_retention_limit: int = 1_000,
+    global_episode_limit: int | None = None,
+) -> dict[str, Any]:
+    """Run one bounded, single-replicate Species Fate Analysis."""
+
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        raise ServiceError(
+            "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
+            reason="missing_reactionevent",
+        )
+    try:
+        return analyze_species_fate(
+            reactionevent_file,
+            molecules_file,
+            target_species=target_species,
+            endpoint_categories=endpoint_categories,
+            atom_elements=atom_elements,
+            anchor_mode=anchor_mode,
+            anchor_elements=anchor_elements,
+            anchor_atom_ids=anchor_atom_ids,
+            formation_start_frame=formation_start_frame,
+            formation_end_frame=formation_end_frame,
+            followup_end_frame=followup_end_frame,
+            minimum_followup_frames=minimum_followup_frames,
+            max_events_per_episode=max_events_per_episode,
+            max_active_branches=max_active_branches,
+            detail_retention_limit=detail_retention_limit,
+            global_episode_limit=global_episode_limit,
+        )
+    except SpeciesFateQueryError as exc:
+        raise ServiceError(str(exc), reason="species_fate_query") from exc
+    except (
+        SpeciesFateError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        raise ServiceError(str(exc), reason="species_fate") from exc
+
+
 def validate_pathway_step_occurrences(
     artifacts: dict[str, str],
     step: Mapping[str, Any],
@@ -1037,6 +1273,8 @@ def build_rng_event_visualization(
             type_map_path = dataset_settings_path(trajectory_file)
             if not type_map_path.is_file():
                 type_map_path = None
+        timestep_ps = load_timestep_ps(trajectory_file)
+        coordinate_length_unit = load_coordinate_length_unit(trajectory_file)
 
         parsed_frames: dict[int, dict[str, Any]] = {}
         with open(trajectory_file, "rb") as source:
@@ -1137,6 +1375,7 @@ def build_rng_event_visualization(
             frames.append(
                 {
                     "frame": int(frame),
+                    "source_timestep": int(frame),
                     "box": parsed.get("box") or [],
                     "box_header": parsed.get("box_header") or "",
                     "box_lines": parsed.get("box_lines") or [],
@@ -1250,6 +1489,8 @@ def build_rng_event_visualization(
             },
             "environment": environment,
             "type_element_map": resolved_type_map,
+            "timestep_ps": timestep_ps,
+            "coordinate_length_unit": coordinate_length_unit,
             "native_element_column": "element"
             in {
                 str(value).strip().lower()
@@ -1269,45 +1510,14 @@ def build_rng_event_visualization(
 
 def event_viewer_frames_csv(viewer: Mapping[str, Any] | None) -> str:
     """Serialize the currently extracted event window for audit/download."""
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "frame",
-            "atom_id",
-            "type",
-            "element",
-            "x",
-            "y",
-            "z",
-            "group",
-            "bond_state",
-            "label",
-            "display_x",
-            "display_y",
-            "display_z",
-        ]
-    )
-    for frame in (viewer or {}).get("frames") or []:
-        for atom in frame.get("atoms") or []:
-            writer.writerow(
-                [
-                    frame.get("frame"),
-                    atom.get("id"),
-                    atom.get("type"),
-                    atom.get("element"),
-                    atom.get("x"),
-                    atom.get("y"),
-                    atom.get("z"),
-                    atom.get("group"),
-                    frame.get("bond_state"),
-                    atom.get("label"),
-                    atom.get("display_x"),
-                    atom.get("display_y"),
-                    atom.get("display_z"),
-                ]
-            )
-    return output.getvalue()
+    return event_frames_csv(viewer or {})
+
+
+def event_viewer_changed_bond_distances_csv(
+    viewer: Mapping[str, Any] | None,
+) -> str:
+    """Serialize plot-ready distances for RNG evidence-backed changed pairs."""
+    return event_changed_bond_distances_csv(viewer or {})
 
 
 def event_viewer_trajectory_text(viewer: Mapping[str, Any] | None) -> str:

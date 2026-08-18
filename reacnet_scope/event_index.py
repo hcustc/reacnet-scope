@@ -11,7 +11,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import closing
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable
+from typing import Any, BinaryIO, Iterable, Mapping
 
 import numpy as np
 
@@ -47,7 +47,10 @@ from .timed_evidence import (
 
 EVENT_EVIDENCE_SCHEMA_VERSION = 4
 EVENT_ASSOCIATION_ALGORITHM_VERSION = 3
+EVENT_CONTINUITY_SCHEMA_VERSION = 1
+EVENT_CONTINUITY_ALGORITHM_VERSION = 2
 _MEMBERSHIP_MATERIALIZATION_RESERVE_BYTES = 4 * 1024**3
+_EVENT_BUILD_CHECKPOINT_INTERVALS = 100
 
 
 def _available_memory_bytes() -> int:
@@ -112,6 +115,47 @@ _REQUIRED_TABLE_COLUMNS = {
         "total_events",
         "matched_events",
         "distinct_intervals",
+    },
+}
+
+_CONTINUITY_REQUIRED_TABLE_COLUMNS = {
+    "continuity_species": {"species_id", "species_smiles"},
+    "molecule_instances": {
+        "instance_id",
+        "replicate_id",
+        "analyzed_frame",
+        "source_timestep",
+        "species_id",
+        "species_smiles",
+        "atom_ids_json",
+        "bonds_json",
+        "structure_key",
+    },
+    "event_participants": {
+        "event_id",
+        "side",
+        "participant_index",
+        "instance_id",
+        "timestep_index",
+        "species_id",
+        "species_smiles",
+        "structure_key",
+    },
+    "continuity_links": {
+        "from_instance_id",
+        "status",
+        "next_timestep_index",
+        "next_event_ids_json",
+        "to_reactant_instance_id",
+        "reason",
+    },
+    "continuity_diagnostics": {
+        "diagnostic_id",
+        "timestep_index",
+        "species_id",
+        "structure_key",
+        "reason",
+        "event_ids_json",
     },
 }
 
@@ -235,7 +279,7 @@ def _event_payload_from_record(
 ) -> dict[str, Any]:
     (
         event_id,
-        _stored_key,
+        stored_key,
         source_row,
         timestep_index,
         before_timestep,
@@ -291,6 +335,7 @@ def _event_payload_from_record(
     return {
         "event_index": event_index,
         "event_id": str(event_id),
+        "reaction_key": str(stored_key),
         "source_row": int(source_row),
         "timestep_index": int(timestep_index),
         "before_timestep": int(before_timestep),
@@ -377,6 +422,111 @@ def _event_species_rows(
                 )
             )
     return rows
+
+
+def _continuity_species_id(species: str) -> str:
+    digest = hashlib.sha1(str(species).encode("utf-8")).hexdigest()[:20]
+    return f"rngsp_{digest}"
+
+
+def _continuity_bonds(
+    raw_bonds: Any,
+    atom_ids: Iterable[int],
+) -> tuple[str, ...]:
+    selected = {int(value) for value in atom_ids}
+    values = (
+        raw_bonds
+        if isinstance(raw_bonds, (list, tuple))
+        else str(raw_bonds or "").split(";")
+    )
+    bonds: set[str] = set()
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        parts = text.split("-", 2)
+        if len(parts) != 3:
+            raise IndexInvalidError(
+                f"Event evidence continuity bond is invalid: {text!r}"
+            )
+        try:
+            first, second = int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            raise IndexInvalidError(
+                f"Event evidence continuity bond is invalid: {text!r}"
+            ) from exc
+        if first not in selected or second not in selected:
+            continue
+        left, right = sorted((first, second))
+        bonds.add(f"{left}-{right}-{parts[2]}")
+    return tuple(sorted(bonds))
+
+
+def _continuity_structure_key(
+    species_id: str,
+    atom_ids: Iterable[int],
+    bonds: Iterable[str],
+) -> str:
+    payload = json.dumps(
+        [
+            str(species_id),
+            sorted({int(value) for value in atom_ids}),
+            sorted({str(value) for value in bonds}),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _continuity_instance_id(
+    replicate_id: str,
+    analyzed_frame: int,
+    structure_key: str,
+) -> str:
+    digest = hashlib.sha1(
+        f"{replicate_id}\0{int(analyzed_frame)}\0{structure_key}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    return f"rngmol_{digest}"
+
+
+def _continuity_tables_available(
+    connection: sqlite3.Connection,
+    meta: Mapping[str, str],
+) -> bool:
+    try:
+        if _strict_int(
+            meta.get("continuity_schema_version", 0),
+            "continuity_schema_version",
+            minimum=0,
+        ) != EVENT_CONTINUITY_SCHEMA_VERSION:
+            return False
+        if _strict_int(
+            meta.get("continuity_algorithm_version", 0),
+            "continuity_algorithm_version",
+            minimum=0,
+        ) != EVENT_CONTINUITY_ALGORITHM_VERSION:
+            return False
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not _CONTINUITY_REQUIRED_TABLE_COLUMNS.keys() <= tables:
+            return False
+        for table, required in _CONTINUITY_REQUIRED_TABLE_COLUMNS.items():
+            columns = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if not required <= columns:
+                return False
+    except (IndexInvalidError, sqlite3.Error):
+        return False
+    return True
 
 
 def _read_csv_header(
@@ -645,6 +795,624 @@ class EventEvidenceStore:
         return connection
 
     @staticmethod
+    def _materialize_continuity(
+        connection: sqlite3.Connection,
+        *,
+        replicate_id: str,
+    ) -> dict[str, int]:
+        """Build query-independent molecule continuity from indexed events."""
+
+        for table in (
+            "continuity_diagnostics",
+            "continuity_links",
+            "event_participants",
+            "molecule_instances",
+            "continuity_species",
+        ):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.execute(
+            """
+            CREATE TABLE continuity_species(
+                species_id TEXT PRIMARY KEY,
+                species_smiles TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE molecule_instances(
+                instance_id TEXT PRIMARY KEY,
+                replicate_id TEXT NOT NULL,
+                analyzed_frame INTEGER NOT NULL,
+                source_timestep INTEGER NOT NULL,
+                species_id TEXT NOT NULL,
+                species_smiles TEXT NOT NULL,
+                atom_ids_json TEXT NOT NULL,
+                bonds_json TEXT NOT NULL,
+                structure_key TEXT NOT NULL,
+                FOREIGN KEY(species_id) REFERENCES continuity_species(species_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX molecule_instances_by_structure
+            ON molecule_instances(species_id,structure_key,analyzed_frame)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE event_participants(
+                event_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                participant_index INTEGER NOT NULL,
+                instance_id TEXT NOT NULL,
+                timestep_index INTEGER NOT NULL,
+                species_id TEXT NOT NULL,
+                species_smiles TEXT NOT NULL,
+                structure_key TEXT NOT NULL,
+                PRIMARY KEY(event_id,side,participant_index),
+                FOREIGN KEY(event_id) REFERENCES events(event_id),
+                FOREIGN KEY(instance_id) REFERENCES molecule_instances(instance_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX event_participants_lookup
+            ON event_participants(
+                side,species_id,timestep_index,event_id,participant_index
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX event_participants_by_instance
+            ON event_participants(instance_id,event_id,side)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE continuity_links(
+                from_instance_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                next_timestep_index INTEGER NOT NULL,
+                next_event_ids_json TEXT NOT NULL,
+                to_reactant_instance_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                FOREIGN KEY(from_instance_id)
+                    REFERENCES molecule_instances(instance_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE continuity_diagnostics(
+                diagnostic_id TEXT PRIMARY KEY,
+                timestep_index INTEGER NOT NULL,
+                species_id TEXT NOT NULL,
+                structure_key TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                event_ids_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX continuity_diagnostics_formation_filter
+            ON continuity_diagnostics(
+                species_id,timestep_index,reason
+            )
+            """
+        )
+        connection.execute("DROP TABLE IF EXISTS temp.continuity_active")
+        connection.execute(
+            """
+            CREATE TEMP TABLE continuity_active(
+                species_id TEXT NOT NULL,
+                atom_key TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                structure_key TEXT NOT NULL,
+                PRIMARY KEY(species_id,atom_key)
+            ) WITHOUT ROWID
+            """
+        )
+
+        instance_count = 0
+        participant_count = 0
+        link_count = 0
+        diagnostic_count = 0
+        known_species_ids: set[str] = set()
+        known_instance_ids: set[str] = set()
+
+        def add_diagnostic(
+            timestep_index: int,
+            species_id: str,
+            structure_key: str,
+            reason: str,
+            event_ids: Iterable[str],
+        ) -> None:
+            nonlocal diagnostic_count
+            normalized_events = sorted({str(value) for value in event_ids})
+            identity = json.dumps(
+                [
+                    int(timestep_index),
+                    str(species_id),
+                    str(structure_key),
+                    str(reason),
+                    normalized_events,
+                ],
+                separators=(",", ":"),
+            )
+            diagnostic_id = (
+                "rngcontdiag_"
+                + hashlib.sha1(identity.encode("utf-8")).hexdigest()[:20]
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO continuity_diagnostics(
+                    diagnostic_id,timestep_index,species_id,structure_key,
+                    reason,event_ids_json
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    diagnostic_id,
+                    int(timestep_index),
+                    str(species_id),
+                    str(structure_key),
+                    str(reason),
+                    json.dumps(normalized_events, separators=(",", ":")),
+                ),
+            )
+            diagnostic_count += 1
+
+        def participant_rows(
+            event: Mapping[str, Any],
+            side: str,
+            *,
+            species_rows: dict[str, tuple[str, str]],
+            instance_rows: dict[str, tuple[Any, ...]],
+            participant_inserts: list[tuple[Any, ...]],
+        ) -> list[dict[str, Any]]:
+            nonlocal participant_count
+            output: list[dict[str, Any]] = []
+            analyzed_frame = int(event["timestep_index"]) + (
+                1 if side == "product" else 0
+            )
+            source_timestep = int(
+                event["after_timestep"]
+                if side == "product"
+                else event["before_timestep"]
+            )
+            for index, participant in enumerate(
+                event.get(f"{side}_participants") or []
+            ):
+                species = str(participant.get("species") or "").strip()
+                atom_ids = tuple(
+                    sorted(
+                        {
+                            int(value)
+                            for value in participant.get("atom_ids") or []
+                        }
+                    )
+                )
+                if not species or not atom_ids:
+                    continue
+                species_id = _continuity_species_id(species)
+                bonds = _continuity_bonds(
+                    event.get(f"{side}_bonds"), atom_ids
+                )
+                structure_key = _continuity_structure_key(
+                    species_id, atom_ids, bonds
+                )
+                instance_id = _continuity_instance_id(
+                    replicate_id, analyzed_frame, structure_key
+                )
+                species_rows[species_id] = (species_id, species)
+                instance_rows[instance_id] = (
+                    instance_id,
+                    replicate_id,
+                    analyzed_frame,
+                    source_timestep,
+                    species_id,
+                    species,
+                    json.dumps(atom_ids, separators=(",", ":")),
+                    json.dumps(bonds, separators=(",", ":")),
+                    structure_key,
+                )
+                participant_inserts.append(
+                    (
+                        str(event["event_id"]),
+                        side,
+                        index,
+                        instance_id,
+                        int(event["timestep_index"]),
+                        species_id,
+                        species,
+                        structure_key,
+                    )
+                )
+                participant_count += 1
+                output.append(
+                    {
+                        "event_id": str(event["event_id"]),
+                        "participant_index": index,
+                        "instance_id": instance_id,
+                        "species_id": species_id,
+                        "species_smiles": species,
+                        "atom_ids": atom_ids,
+                        "atom_key": json.dumps(
+                            atom_ids, separators=(",", ":")
+                        ),
+                        "structure_key": structure_key,
+                    }
+                )
+            return output
+
+        def process_interval(events: list[dict[str, Any]]) -> None:
+            nonlocal instance_count, link_count
+            if not events:
+                return
+            timestep_index = int(events[0]["timestep_index"])
+            participants_by_event: dict[
+                str, dict[str, list[dict[str, Any]]]
+            ] = {}
+            species_rows: dict[str, tuple[str, str]] = {}
+            instance_rows: dict[str, tuple[Any, ...]] = {}
+            participant_inserts: list[tuple[Any, ...]] = []
+            unresolved_species: set[str] = set()
+            for event in events:
+                participants_by_event[str(event["event_id"])] = {
+                    "reactant": participant_rows(
+                        event,
+                        "reactant",
+                        species_rows=species_rows,
+                        instance_rows=instance_rows,
+                        participant_inserts=participant_inserts,
+                    ),
+                    "product": participant_rows(
+                        event,
+                        "product",
+                        species_rows=species_rows,
+                        instance_rows=instance_rows,
+                        participant_inserts=participant_inserts,
+                    ),
+                }
+                if event.get("association_status") != "matched":
+                    terms = reaction_key(
+                        str(event.get("reactant") or ""),
+                        str(event.get("product") or ""),
+                    )
+                    unresolved_species.update((*terms[0], *terms[1]))
+
+            new_species_ids = species_rows.keys() - known_species_ids
+            connection.executemany(
+                """
+                INSERT INTO continuity_species(species_id,species_smiles)
+                VALUES(?,?)
+                """,
+                [species_rows[species_id] for species_id in new_species_ids],
+            )
+            known_species_ids.update(new_species_ids)
+            new_instance_ids = instance_rows.keys() - known_instance_ids
+            connection.executemany(
+                """
+                INSERT INTO molecule_instances(
+                    instance_id,replicate_id,analyzed_frame,
+                    source_timestep,species_id,species_smiles,
+                    atom_ids_json,bonds_json,structure_key
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                [instance_rows[instance_id] for instance_id in new_instance_ids],
+            )
+            known_instance_ids.update(new_instance_ids)
+            instance_count += len(new_instance_ids)
+            connection.executemany(
+                """
+                INSERT INTO event_participants(
+                    event_id,side,participant_index,instance_id,
+                    timestep_index,species_id,species_smiles,structure_key
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                participant_inserts,
+            )
+
+            for species in sorted(unresolved_species):
+                species_id = _continuity_species_id(species)
+                active = connection.execute(
+                    """
+                    SELECT atom_key,instance_id,structure_key
+                    FROM continuity_active WHERE species_id=?
+                    """,
+                    (species_id,),
+                ).fetchall()
+                unresolved_event_ids = [
+                    str(event["event_id"])
+                    for event in events
+                    if event.get("association_status") != "matched"
+                    and species
+                    in {
+                        *reaction_key(
+                            str(event.get("reactant") or ""),
+                            str(event.get("product") or ""),
+                        )[0],
+                        *reaction_key(
+                            str(event.get("reactant") or ""),
+                            str(event.get("product") or ""),
+                        )[1],
+                    }
+                ]
+                for atom_key, instance_id, structure_key in active:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO continuity_links(
+                            from_instance_id,status,next_timestep_index,
+                            next_event_ids_json,to_reactant_instance_id,reason
+                        ) VALUES(?,?,?,?,?,?)
+                        """,
+                        (
+                            instance_id,
+                            "unresolved_barrier",
+                            timestep_index,
+                            json.dumps(
+                                sorted(unresolved_event_ids),
+                                separators=(",", ":"),
+                            ),
+                            "",
+                            "unresolved_species_barrier",
+                        ),
+                    )
+                    link_count += 1
+                    add_diagnostic(
+                        timestep_index,
+                        species_id,
+                        str(structure_key),
+                        "unresolved_species_barrier",
+                        unresolved_event_ids,
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM continuity_active
+                        WHERE species_id=? AND atom_key=?
+                        """,
+                        (species_id, atom_key),
+                    )
+
+            consumers: dict[
+                tuple[str, str], list[dict[str, Any]]
+            ] = defaultdict(list)
+            producers: dict[
+                tuple[str, str], list[dict[str, Any]]
+            ] = defaultdict(list)
+            for event in events:
+                if event.get("association_status") != "matched":
+                    continue
+                rows = participants_by_event[str(event["event_id"])]
+                for row in rows["reactant"]:
+                    consumers[(row["species_id"], row["atom_key"])].append(row)
+                for row in rows["product"]:
+                    producers[(row["species_id"], row["atom_key"])].append(row)
+
+            ambiguous_keys: dict[tuple[str, str], str] = {}
+            for key, rows in producers.items():
+                event_ids = {str(row["event_id"]) for row in rows}
+                if len(rows) != 1 or len(event_ids) != 1:
+                    ambiguous_keys[key] = "multiple_producers_same_transition"
+            for key in consumers.keys() & producers.keys():
+                consumer_rows = consumers[key]
+                producer_rows = producers[key]
+                if (
+                    len(consumer_rows) != 1
+                    or len(producer_rows) != 1
+                    or str(consumer_rows[0]["event_id"])
+                    != str(producer_rows[0]["event_id"])
+                ):
+                    ambiguous_keys[key] = (
+                        "same_transition_event_dependency_ambiguous"
+                    )
+
+            for (species_id, atom_key), reason in sorted(
+                ambiguous_keys.items()
+            ):
+                rows = [
+                    *consumers.get((species_id, atom_key), []),
+                    *producers.get((species_id, atom_key), []),
+                ]
+                event_ids = sorted({str(row["event_id"]) for row in rows})
+                previous = connection.execute(
+                    """
+                    SELECT instance_id,structure_key FROM continuity_active
+                    WHERE species_id=? AND atom_key=?
+                    """,
+                    (species_id, atom_key),
+                ).fetchone()
+                structure_key = str(
+                    previous[1]
+                    if previous is not None
+                    else rows[0]["structure_key"]
+                )
+                if previous is not None:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO continuity_links(
+                            from_instance_id,status,next_timestep_index,
+                            next_event_ids_json,to_reactant_instance_id,reason
+                        ) VALUES(?,?,?,?,?,?)
+                        """,
+                        (
+                            str(previous[0]),
+                            "ambiguous",
+                            timestep_index,
+                            json.dumps(event_ids, separators=(",", ":")),
+                            "",
+                            reason,
+                        ),
+                    )
+                    link_count += 1
+                    connection.execute(
+                        """
+                        DELETE FROM continuity_active
+                        WHERE species_id=? AND atom_key=?
+                        """,
+                        (species_id, atom_key),
+                    )
+                add_diagnostic(
+                    timestep_index,
+                    species_id,
+                    structure_key,
+                    reason,
+                    event_ids,
+                )
+
+            for (species_id, atom_key), rows in sorted(consumers.items()):
+                if (species_id, atom_key) in ambiguous_keys:
+                    continue
+                previous = connection.execute(
+                    """
+                    SELECT instance_id,structure_key FROM continuity_active
+                    WHERE species_id=? AND atom_key=?
+                    """,
+                    (species_id, atom_key),
+                ).fetchone()
+                connection.execute(
+                    """
+                    DELETE FROM continuity_active
+                    WHERE species_id=? AND atom_key=?
+                    """,
+                    (species_id, atom_key),
+                )
+                if previous is None:
+                    continue
+                event_ids = sorted({str(row["event_id"]) for row in rows})
+                if len(rows) == 1 and len(event_ids) == 1:
+                    status = "matched"
+                    to_instance = str(rows[0]["instance_id"])
+                    reason = ""
+                else:
+                    status = "ambiguous"
+                    to_instance = ""
+                    reason = "multiple_consumers_same_transition"
+                    add_diagnostic(
+                        timestep_index,
+                        species_id,
+                        str(previous[1]),
+                        reason,
+                        event_ids,
+                    )
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO continuity_links(
+                        from_instance_id,status,next_timestep_index,
+                        next_event_ids_json,to_reactant_instance_id,reason
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        str(previous[0]),
+                        status,
+                        timestep_index,
+                        json.dumps(event_ids, separators=(",", ":")),
+                        to_instance,
+                        reason,
+                    ),
+                )
+                link_count += 1
+
+            for (species_id, atom_key), rows in sorted(producers.items()):
+                if (species_id, atom_key) in ambiguous_keys:
+                    continue
+                event_ids = sorted({str(row["event_id"]) for row in rows})
+                row = rows[0]
+                previous = connection.execute(
+                    """
+                    SELECT instance_id,structure_key FROM continuity_active
+                    WHERE species_id=? AND atom_key=?
+                    """,
+                    (species_id, atom_key),
+                ).fetchone()
+                if previous is not None:
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO continuity_links(
+                            from_instance_id,status,next_timestep_index,
+                            next_event_ids_json,to_reactant_instance_id,reason
+                        ) VALUES(?,?,?,?,?,?)
+                        """,
+                        (
+                            str(previous[0]),
+                            "ambiguous",
+                            timestep_index,
+                            json.dumps(event_ids, separators=(",", ":")),
+                            "",
+                            "producer_replaced_without_unique_consumption",
+                        ),
+                    )
+                    link_count += 1
+                    add_diagnostic(
+                        timestep_index,
+                        species_id,
+                        str(previous[1]),
+                        "producer_replaced_without_unique_consumption",
+                        event_ids,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO continuity_active(
+                        species_id,atom_key,instance_id,structure_key
+                    ) VALUES(?,?,?,?)
+                    ON CONFLICT(species_id,atom_key) DO UPDATE SET
+                        instance_id=excluded.instance_id,
+                        structure_key=excluded.structure_key
+                    """,
+                    (
+                        species_id,
+                        atom_key,
+                        str(row["instance_id"]),
+                        str(row["structure_key"]),
+                    ),
+                )
+
+        cursor = connection.execute(
+            f"""
+            SELECT {_EVENT_SELECT_COLUMNS}
+            FROM events
+            ORDER BY timestep_index,source_row,event_id
+            """
+        )
+        interval_events: list[dict[str, Any]] = []
+        interval_index: int | None = None
+        event_index = 0
+        for record in cursor:
+            event_index += 1
+            event = _event_payload_from_record(record, event_index=event_index)
+            current = int(event["timestep_index"])
+            if interval_index is not None and current != interval_index:
+                process_interval(interval_events)
+                interval_events = []
+            interval_index = current
+            interval_events.append(event)
+        process_interval(interval_events)
+        connection.execute("DROP TABLE temp.continuity_active")
+        _write_meta(
+            connection,
+            {
+                "continuity_schema_version": EVENT_CONTINUITY_SCHEMA_VERSION,
+                "continuity_algorithm_version": (
+                    EVENT_CONTINUITY_ALGORITHM_VERSION
+                ),
+                "continuity_instance_count": instance_count,
+                "continuity_participant_count": participant_count,
+                "continuity_link_count": link_count,
+                "continuity_diagnostic_count": diagnostic_count,
+            },
+        )
+        return {
+            "instance_count": instance_count,
+            "participant_count": participant_count,
+            "link_count": link_count,
+            "diagnostic_count": diagnostic_count,
+        }
+
+    @staticmethod
     def _validate_meta(
         meta: dict[str, str],
         reaction_source: tuple[str, int, int],
@@ -740,6 +1508,9 @@ class EventEvidenceStore:
                 "available_intervals",
                 minimum=0,
             )
+            continuity_available = _continuity_tables_available(
+                connection, meta
+            )
             query_only = bool(connection.execute("PRAGMA query_only").fetchone()[0])
         except IndexNotReadyError:
             raise
@@ -763,6 +1534,17 @@ class EventEvidenceStore:
             "source_kind": meta.get("source_kind", "legacy_csv"),
             "source_schema_version": meta.get("source_schema_version", ""),
             "time_basis": meta.get("time_basis", "physical_timestep"),
+            "continuity_available": continuity_available,
+            "continuity_schema_version": (
+                EVENT_CONTINUITY_SCHEMA_VERSION
+                if continuity_available
+                else 0
+            ),
+            "continuity_algorithm_version": (
+                EVENT_CONTINUITY_ALGORITHM_VERSION
+                if continuity_available
+                else 0
+            ),
             "query_only": query_only,
         }
 
@@ -912,6 +1694,20 @@ class EventEvidenceStore:
                     == "1",
                 )
             ),
+            "continuity_available": bool(
+                details.get(
+                    "continuity_available",
+                    _safe_meta_int(meta, "continuity_schema_version")
+                    == EVENT_CONTINUITY_SCHEMA_VERSION,
+                )
+            ),
+            "continuity_schema_version": int(
+                details.get(
+                    "continuity_schema_version",
+                    _safe_meta_int(meta, "continuity_schema_version"),
+                )
+                or 0
+            ),
             "time_basis": str(
                 details.get(
                     "time_basis",
@@ -969,6 +1765,25 @@ class EventEvidenceStore:
         return self._open_validated(
             index_path, reaction_source, molecule_source
         )
+
+    def open_continuity_required(
+        self,
+        reactionevent_file: str,
+        molecules_file: str = "",
+    ) -> dict[str, Any]:
+        """Open event evidence that includes the Species Fate substrate."""
+
+        opened = self.open_required(reactionevent_file, molecules_file)
+        if not opened.get("association_available"):
+            raise IndexInvalidError(
+                "Species Fate requires exact molecule/atom association"
+            )
+        if not opened.get("continuity_available"):
+            raise IndexInvalidError(
+                "Species Fate continuity schema is missing; run "
+                f"reacnet-scope prepare rebuild event {reactionevent_file}"
+            )
+        return opened
 
     def _build_reactionevent_only_unlocked(
         self,
@@ -1200,6 +2015,7 @@ class EventEvidenceStore:
     ) -> dict[str, Any]:
         """Stream one native timeline into the storage-independent index."""
 
+        dataset_id = dataset_id_for_source(reaction_source[0])
         index_path = event_evidence_index_path(reaction_source[0])
         if index_path.is_file():
             try:
@@ -1363,9 +2179,7 @@ class EventEvidenceStore:
                             {
                                 "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
                                 "build_state": "building",
-                                "dataset_id": dataset_id_for_source(
-                                    reaction_source[0]
-                                ),
+                                "dataset_id": dataset_id,
                                 "source_kind": "native_hdf5",
                                 "source_schema_version": selection.schema_version,
                                 "association_source": association_source,
@@ -1533,9 +2347,7 @@ class EventEvidenceStore:
                         {
                             "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
                             "build_state": "building",
-                            "dataset_id": dataset_id_for_source(
-                                reaction_source[0]
-                            ),
+                            "dataset_id": dataset_id,
                             "source_kind": "native_hdf5",
                             "source_schema_version": selection.schema_version,
                             "association_source": association_source,
@@ -1805,12 +2617,26 @@ class EventEvidenceStore:
                     raise IndexInvalidError(
                         "Native event evidence checkpoint counts are inconsistent"
                     )
+                if association_available:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "progress": 0.98,
+                                "phase": "building_molecular_continuity",
+                                "message": "Building molecular continuity substrate",
+                                "resumed": resumed,
+                            }
+                        )
+                    self._materialize_continuity(
+                        connection,
+                        replicate_id=dataset_id,
+                    )
                 _write_meta(
                     connection,
                     {
                         "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
                         "build_state": "ready",
-                        "dataset_id": dataset_id_for_source(reaction_source[0]),
+                        "dataset_id": dataset_id,
                         "source_kind": "native_hdf5",
                         "source_schema_version": selection.schema_version,
                         "association_source": association_source,
@@ -1961,6 +2787,7 @@ class EventEvidenceStore:
                     required={"Timestep", "Species", "AtomIDs", "BondIDs"},
                     label="molecules",
                 )
+                dataset_id = dataset_id_for_source(reaction_source[0])
 
                 if compatible:
                     event_offset = int(
@@ -2007,9 +2834,7 @@ class EventEvidenceStore:
                         {
                             "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
                             "build_state": "building",
-                            "dataset_id": dataset_id_for_source(
-                                reaction_source[0]
-                            ),
+                            "dataset_id": dataset_id,
                             "reactionevent_file": reaction_source[0],
                             "reactionevent_size": reaction_source[1],
                             "reactionevent_mtime_ns": reaction_source[2],
@@ -2048,6 +2873,45 @@ class EventEvidenceStore:
                     frame_index=molecule_frame_index,
                     previous_timestep=previous_molecule_timestep,
                 )
+
+                intervals_since_checkpoint = 0
+
+                def write_interval_checkpoint() -> None:
+                    if current_molecule is None:
+                        raise IndexInvalidError(
+                            "Event evidence checkpoint has no molecule frame"
+                        )
+                    _write_meta(
+                        connection,
+                        {
+                            "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
+                            "build_state": "building",
+                            "dataset_id": dataset_id,
+                            "reactionevent_file": reaction_source[0],
+                            "reactionevent_size": reaction_source[1],
+                            "reactionevent_mtime_ns": reaction_source[2],
+                            "molecules_file": molecule_source[0],
+                            "molecules_size": molecule_source[1],
+                            "molecules_mtime_ns": molecule_source[2],
+                            "association_available": 1,
+                            "association_algorithm_version": (
+                                EVENT_ASSOCIATION_ALGORITHM_VERSION
+                            ),
+                            "time_basis": "physical_timestep",
+                            "reactionevent_offset": event_offset,
+                            "molecules_offset": current_molecule[3],
+                            "completed_interval": completed_interval,
+                            "last_source_row": last_source_row,
+                            "molecule_frame_index": molecule_frame_index,
+                            "previous_molecule_timestep": (
+                                previous_molecule_timestep
+                            ),
+                            "event_count": event_count,
+                            "reaction_type_count": reaction_type_count,
+                            "updated_at_epoch": int(time.time()),
+                        },
+                    )
+                    connection.commit()
 
                 try:
                     while True:
@@ -2273,45 +3137,48 @@ class EventEvidenceStore:
                             )
 
                         event_count += len(events)
-                        _write_meta(
-                            connection,
-                            {
-                                "schema_version": (
-                                    EVENT_EVIDENCE_SCHEMA_VERSION
-                                ),
-                                "build_state": "building",
-                                "dataset_id": dataset_id_for_source(
-                                    reaction_source[0]
-                                ),
-                                "reactionevent_file": reaction_source[0],
-                                "reactionevent_size": reaction_source[1],
-                                "reactionevent_mtime_ns": reaction_source[2],
-                                "molecules_file": molecule_source[0],
-                                "molecules_size": molecule_source[1],
-                                "molecules_mtime_ns": molecule_source[2],
-                                "association_available": 1,
-                                "association_algorithm_version": (
-                                    EVENT_ASSOCIATION_ALGORITHM_VERSION
-                                ),
-                                "time_basis": "physical_timestep",
-                                "reactionevent_offset": next_event_offset,
-                                "molecules_offset": after_frame[3],
-                                "completed_interval": timestep_index,
-                                "last_source_row": next_source_row,
-                                "molecule_frame_index": after_frame[0],
-                                "previous_molecule_timestep": before_frame[1],
-                                "event_count": event_count,
-                                "reaction_type_count": reaction_type_count,
-                                "updated_at_epoch": int(time.time()),
-                            },
-                        )
-                        connection.commit()
                         event_offset = next_event_offset
                         completed_interval = timestep_index
                         last_source_row = next_source_row
                         current_molecule = after_frame
                         molecule_frame_index = after_frame[0]
                         previous_molecule_timestep = before_frame[1]
+                        intervals_since_checkpoint += 1
+                        should_checkpoint = (
+                            intervals_since_checkpoint
+                            >= _EVENT_BUILD_CHECKPOINT_INTERVALS
+                        )
+                        if should_checkpoint:
+                            write_interval_checkpoint()
+                            intervals_since_checkpoint = 0
+                        if progress_callback:
+                            progress_callback(
+                                {
+                                    "progress": min(
+                                        event_offset
+                                        / max(reaction_source[1], 1),
+                                        1.0,
+                                    ),
+                                    "phase": (
+                                        "checkpoint_event_index"
+                                        if should_checkpoint
+                                        else "indexing_event_evidence"
+                                    ),
+                                    "message": (
+                                        (
+                                            "Checkpointed event evidence "
+                                            if should_checkpoint
+                                            else "Indexed event evidence "
+                                        )
+                                        + f"interval {timestep_index}"
+                                    ),
+                                    "resumed": resumed,
+                                }
+                            )
+
+                    if intervals_since_checkpoint:
+                        write_interval_checkpoint()
+                        intervals_since_checkpoint = 0
                         if progress_callback:
                             progress_callback(
                                 {
@@ -2323,7 +3190,7 @@ class EventEvidenceStore:
                                     "phase": "checkpoint_event_index",
                                     "message": (
                                         "Checkpointed event evidence "
-                                        f"interval {timestep_index}"
+                                        f"interval {completed_interval}"
                                     ),
                                     "resumed": resumed,
                                 }
@@ -2363,14 +3230,25 @@ class EventEvidenceStore:
                         raise IndexInvalidError(
                             "Event evidence checkpoint counts are inconsistent"
                         )
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "progress": 0.98,
+                                "phase": "building_molecular_continuity",
+                                "message": "Building molecular continuity substrate",
+                                "resumed": resumed,
+                            }
+                        )
+                    self._materialize_continuity(
+                        connection,
+                        replicate_id=dataset_id,
+                    )
                     _write_meta(
                         connection,
                         {
                             "schema_version": EVENT_EVIDENCE_SCHEMA_VERSION,
                             "build_state": "ready",
-                            "dataset_id": dataset_id_for_source(
-                                reaction_source[0]
-                            ),
+                            "dataset_id": dataset_id,
                             "reactionevent_file": reaction_source[0],
                             "reactionevent_size": reaction_source[1],
                             "reactionevent_mtime_ns": reaction_source[2],

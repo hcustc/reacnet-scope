@@ -27,10 +27,58 @@ def test_capabilities_are_independent_and_always_explain_their_state() -> None:
         "reaction_search": "ready",
         "species_abundance": "needs-preparation",
         "event_search": "missing-source",
+        "species_fate": "missing-source",
         "trajectory_evidence": "missing-source",
         "element_distribution": "needs-preparation",
     }
     assert all(item["reason"] for item in evidence.values())
+
+
+def test_species_fate_requires_continuity_without_disabling_event_search() -> None:
+    evidence = analysis_capability_evidence(
+        {
+            "reactionevent": "/data/run.reactionevent.csv",
+            "molecules": "/data/run.molecules.csv",
+        },
+        index_statuses={
+            "event": {"state": "ready", "continuity_available": False}
+        },
+    )
+
+    assert evidence["event_search"]["state"] == "ready"
+    assert evidence["species_fate"]["state"] == "stale"
+    assert "continuity schema" in evidence["species_fate"]["reason"]
+
+
+def test_species_fate_does_not_treat_missing_status_detail_as_rebuild() -> None:
+    evidence = analysis_capability_evidence(
+        {
+            "reactionevent": "/data/run.reactionevent.csv",
+            "molecules": "/data/run.molecules.csv",
+        },
+        index_statuses={"event": "ready"},
+    )
+
+    assert evidence["event_search"]["state"] == "ready"
+    assert evidence["species_fate"]["state"] == "ready"
+
+
+def test_species_fate_reports_source_insufficient_without_molecular_evidence() -> None:
+    evidence = analysis_capability_evidence(
+        {"timeline": "/data/run.timeline.h5"},
+        index_statuses={
+            "event": {
+                "state": "ready",
+                "association_available": False,
+                "continuity_available": False,
+            }
+        },
+    )
+
+    assert evidence["event_search"]["state"] == "ready"
+    assert evidence["species_fate"]["state"] == "missing-source"
+    assert "Molecular Evidence" in evidence["species_fate"]["reason"]
+    assert "仅重建事件索引无法补足" in evidence["species_fate"]["reason"]
 
 
 @pytest.mark.parametrize(

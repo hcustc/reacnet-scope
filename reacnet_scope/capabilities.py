@@ -38,6 +38,14 @@ CAPABILITY_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "missing_reason": "需要 .timeline.h5，或兼容的 .reactionevent.csv 与 .molecules.csv。",
     },
     {
+        "key": "species_fate",
+        "label": "物种命运分析",
+        "source_kinds": ("timeline", "reactionevent", "molecules"),
+        "preparation_kind": "event",
+        "ready_reason": "Molecular Continuity Substrate 已就绪，可运行物种命运分析。",
+        "missing_reason": "需要 .timeline.h5，或兼容的 .reactionevent.csv 与 .molecules.csv。",
+    },
+    {
         "key": "trajectory_evidence",
         "label": "轨迹证据",
         "source_kinds": ("trajectory",),
@@ -87,7 +95,7 @@ def normalize_capability_state(value: Any) -> str:
 
 
 def _source_available(key: str, artifacts: Mapping[str, Any]) -> bool:
-    if key == "event_search":
+    if key in {"event_search", "species_fate"}:
         return bool(
             artifacts.get("timeline")
             or (artifacts.get("reactionevent") and artifacts.get("molecules"))
@@ -105,6 +113,9 @@ def _reason_for_state(
     if state == "ready":
         return str(definition["ready_reason"])
     if state == "missing-source":
+        message = str(status.get("message") or "").strip()
+        if message:
+            return message
         return str(definition["missing_reason"])
     if state == "needs-preparation":
         return "源证据可用；请在数据管理中显式准备对应索引。"
@@ -112,6 +123,9 @@ def _reason_for_state(
         phase = str(task.get("phase") or status.get("phase") or "正在准备索引")
         return f"Preparation Task 正在运行：{phase}。"
     if state == "stale":
+        message = str(status.get("message") or "").strip()
+        if message:
+            return message
         return "已发布索引属于较早的源修订；请在数据管理中续建或重建。"
     message = str(task.get("message") or status.get("message") or "").strip()
     return message or "索引证据无法验证；请在数据管理中检查并重建。"
@@ -155,6 +169,25 @@ def analysis_capability_evidence(
             state = "preparing"
         else:
             state = normalize_capability_state(status.get("state"))
+        if key == "species_fate" and state == "ready":
+            if status.get("association_available") is False:
+                state = "missing-source"
+                status = {
+                    **status,
+                    "message": (
+                        "Timed Evidence Source 不含 Species Fate 所需的 Molecular "
+                        "Evidence；仅重建事件索引无法补足该来源。"
+                    ),
+                }
+            elif status.get("continuity_available") is False:
+                state = "stale"
+                status = {
+                    **status,
+                    "message": (
+                        "现有事件索引缺少 Species Fate 所需的 continuity schema；"
+                        "请重建事件索引。"
+                    ),
+                }
         evidence[key] = {
             "key": key,
             "label": str(definition["label"]),

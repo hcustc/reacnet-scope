@@ -32,12 +32,12 @@ if str(_TOOL_ROOT) not in sys.path:
 from scripts.webapp_dash import callbacks as cb  # noqa: E402
 from reacnet_scope import services as svc  # noqa: E402
 from scripts.webapp_dash.navigation import (  # noqa: E402
-    DEFAULT_PAGE,
     NAV_GROUPS,
     PAGE_DESCRIPTIONS,
     PAGE_ICONS,
     PAGE_LABELS,
     PAGE_SECTIONS,
+    START_PAGE,
 )
 
 
@@ -82,12 +82,12 @@ def _top_nav_group(label: str, page_ids: tuple[str, ...]) -> html.Div:
                     n_clicks=0,
                     **{
                         "aria-current": (
-                            "page" if page_id == DEFAULT_PAGE else "false"
+                            "page" if page_id == START_PAGE else "false"
                         )
                     },
                     className=(
                         "rs-top-nav-item active"
-                        if page_id == DEFAULT_PAGE
+                        if page_id == START_PAGE
                         else "rs-top-nav-item"
                     ),
                 )
@@ -103,7 +103,7 @@ def _topbar() -> dbc.Container:
     return dbc.Container(
         [
             html.Div(
-                PAGE_LABELS[DEFAULT_PAGE],
+                PAGE_LABELS[START_PAGE],
                 id="topbar-page-context",
                 className="rs-topbar-page-context",
             ),
@@ -241,8 +241,8 @@ def _sidebar() -> html.Aside:
                         type="button",
                         title=PAGE_LABELS["data-management"],
                         n_clicks=0,
-                        **{"aria-current": "false"},
-                        className="rs-top-nav-item rs-nav-utility",
+                        **{"aria-current": "page"},
+                        className="rs-top-nav-item rs-nav-utility active",
                     ),
                     html.Button(
                         [
@@ -289,15 +289,15 @@ def _page_header() -> html.Div:
                             html.Span("分析工作台"),
                             html.Span("/", className="rs-page-eyebrow-separator"),
                             html.Span(
-                                PAGE_SECTIONS[DEFAULT_PAGE],
+                                PAGE_SECTIONS[START_PAGE],
                                 id="page-eyebrow-section",
                             ),
                         ],
                         className="rs-page-eyebrow",
                     ),
-                    html.H1(PAGE_LABELS[DEFAULT_PAGE], id="page-title"),
+                    html.H1(PAGE_LABELS[START_PAGE], id="page-title"),
                     html.P(
-                        PAGE_DESCRIPTIONS[DEFAULT_PAGE],
+                        PAGE_DESCRIPTIONS[START_PAGE],
                         id="page-description",
                     ),
                 ],
@@ -704,7 +704,7 @@ def _species_page() -> html.Div:
         className="rs-card",
     )
 
-    return html.Div([query_card, grid_card], className="rs-page active", id="page-species")
+    return html.Div([query_card, grid_card], className="rs-page", id="page-species")
 
 
 def _reactions_page() -> html.Div:
@@ -942,11 +942,11 @@ def _evolution_page() -> html.Div:
                         [
                             html.Div(
                                 [
-                                    dbc.Label("目标物种/分子式", className="mb-0"),
+                                    dbc.Label("手动目标物种/分子式", className="mb-0"),
                                     dcc.Textarea(
                                         id="evolution-targets",
                                         value="",
-                                        placeholder="从物种检索自动继承；每行一个目标，支持 label::query",
+                                        placeholder="可选；每行一个目标，支持 label::query",
                                         className="rs-multiline-input",
                                         style={"minHeight": 66, "height": 66},
                                     ),
@@ -990,6 +990,43 @@ def _evolution_page() -> html.Div:
                             dcc.Download(id="evolution-csv-download"),
                         ],
                         className="rs-query-row rs-evolution-primary",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    dbc.Label("从已导入文件选择物种", className="mb-0"),
+                                    dcc.Dropdown(
+                                        id="evolution-species-picker",
+                                        options=[],
+                                        value=[],
+                                        multi=True,
+                                        searchable=True,
+                                        placeholder="先读取物种目录，再选择一个或多个分子式",
+                                        optionHeight=42,
+                                    ),
+                                ],
+                                className="rs-form-field rs-form-field-grow",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Button(
+                                        "读取物种目录",
+                                        id="evolution-load-species-btn",
+                                        color="secondary",
+                                        size="sm",
+                                        outline=True,
+                                    ),
+                                    html.Div(
+                                        id="evolution-catalog-alert",
+                                        className="rs-inline-status",
+                                        **{"aria-live": "polite"},
+                                    ),
+                                ],
+                                className="rs-form-actions rs-evolution-catalog-actions",
+                            ),
+                        ],
+                        className="rs-query-row rs-evolution-picker-row",
                     ),
                     dbc.Accordion(
                         [
@@ -2129,6 +2166,13 @@ def _trajectory_page() -> html.Div:
                                                     size="sm",
                                                 ),
                                                 dbc.Button("下载帧 CSV", id="event-frames-csv-btn", color="secondary", size="sm", outline=True),
+                                                dbc.Button(
+                                                    "下载键变距离 CSV",
+                                                    id="event-distances-csv-btn",
+                                                    color="secondary",
+                                                    size="sm",
+                                                    outline=True,
+                                                ),
                                                 dbc.Button("下载子轨迹", id="event-trajectory-btn", color="secondary", size="sm", outline=True),
                                                 dbc.Button(
                                                     "在 OVITO 中打开",
@@ -2149,6 +2193,7 @@ def _trajectory_page() -> html.Div:
                                                 dbc.Button("下载 VMD 脚本", id="event-vmd-btn", color="secondary", size="sm", outline=True),
                                                 dcc.Download(id="event-package-download"),
                                                 dcc.Download(id="event-frames-csv-download"),
+                                                dcc.Download(id="event-distances-csv-download"),
                                                 dcc.Download(id="event-trajectory-download"),
                                                 dcc.Download(id="event-ovito-download"),
                                                 dcc.Download(id="event-vmd-download"),
@@ -2289,6 +2334,121 @@ def _trajectory_page() -> html.Div:
         [source_card, viewer_card, _dft_geometry_card(), _molecule_lineage_card()],
         className="rs-page",
         id="page-trajectory",
+    )
+
+
+def _species_fate_page() -> html.Div:
+    """Four-step query surface for bounded descendant evidence traversal."""
+
+    endpoint_table = dash_table.DataTable(
+        id="fate-endpoints-table",
+        columns=[
+            {"name": "Endpoint category", "id": "category", "editable": True},
+            {
+                "name": "Exact Species",
+                "id": "species",
+                "presentation": "dropdown",
+                "editable": True,
+            },
+        ],
+        data=[{"category": "", "species": ""}],
+        editable=True,
+        row_deletable=True,
+        dropdown={"species": {"options": []}},
+        style_table={"overflowX": "auto"},
+    )
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div([html.Span("1"), html.Strong("Dataset & Target")], className="rs-event-path-step is-active"),
+                    html.Div([html.Span("2"), html.Strong("Fate Definition")], className="rs-event-path-step"),
+                    html.Div([html.Span("3"), html.Strong("Observation & Limits")], className="rs-event-path-step"),
+                    html.Div([html.Span("4"), html.Strong("Run & Results")], className="rs-event-path-step"),
+                ],
+                className="rs-event-path-stepper",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(dbc.CardBody([
+                            html.H5("1. Dataset & Target"),
+                            html.P("分析仅作用于当前 Dataset/Replicate。", className="rs-step-note"),
+                            dbc.Label("Target Species"),
+                            dcc.Dropdown(id="fate-target-species", options=[], placeholder="从 continuity catalog 选择"),
+                        ]), className="rs-card h-100"),
+                        md=6,
+                    ),
+                    dbc.Col(
+                        dbc.Card(dbc.CardBody([
+                            html.H5("2. Fate Definition"),
+                            html.P("类别必须互斥；每行选择一个精确 Species，同名类别可占多行。", className="rs-step-note"),
+                            endpoint_table,
+                            dbc.Button("添加终点 Species", id="fate-add-endpoint-btn", color="secondary", outline=True, size="sm", className="mt-2"),
+                        ]), className="rs-card h-100"),
+                        md=6,
+                    ),
+                ],
+                className="g-3",
+            ),
+            dbc.Card(
+                dbc.CardBody([
+                    html.H5("3. Observation & Limits"),
+                    dbc.Row([
+                        dbc.Col([dbc.Label("Anchor policy"), dcc.Dropdown(
+                            id="fate-anchor-mode",
+                            value="heavy_atoms",
+                            clearable=False,
+                            options=[
+                                {"label": "全部非氢原子（默认）", "value": "heavy_atoms"},
+                                {"label": "全部原子", "value": "all_atoms"},
+                                {"label": "指定元素", "value": "elements"},
+                                {"label": "指定 Atom IDs", "value": "atom_ids"},
+                            ],
+                        )], md=3),
+                        dbc.Col([dbc.Label("Atom ID→Element"), dbc.Textarea(id="fate-atom-elements", placeholder="每行：12=C", rows=2)], md=3),
+                        dbc.Col([dbc.Label("Anchor elements / Atom IDs"), dbc.Input(id="fate-anchor-values", placeholder="C,O 或 12,18")], md=3),
+                        dbc.Col([dbc.Label("Minimum follow-up (frames)"), dbc.Input(id="fate-min-followup", type="number", min=0, step=1, value=0)], md=3),
+                    ], className="g-2"),
+                    dbc.Row([
+                        dbc.Col([dbc.Label("Formation start"), dbc.Input(id="fate-formation-start", type="number", min=0, step=1, value=0)], md=2),
+                        dbc.Col([dbc.Label("Formation end"), dbc.Input(id="fate-formation-end", type="number", min=0, step=1, placeholder="数据末端")], md=2),
+                        dbc.Col([dbc.Label("Follow-up end"), dbc.Input(id="fate-followup-end", type="number", min=0, step=1, placeholder="数据末端")], md=2),
+                        dbc.Col([dbc.Label("Events / episode"), dbc.Input(id="fate-max-events", type="number", min=1, step=1, value=10000)], md=2),
+                        dbc.Col([dbc.Label("Active branches"), dbc.Input(id="fate-max-branches", type="number", min=1, step=1, value=1000)], md=2),
+                        dbc.Col([dbc.Label("Retained details"), dbc.Input(id="fate-detail-limit", type="number", min=0, step=1, value=1000)], md=2),
+                        dbc.Col([dbc.Label("Global episode limit"), dbc.Input(id="fate-global-episode-limit", type="number", min=1, step=1, placeholder="不限制")], md=2),
+                    ], className="g-2 mt-1"),
+                ]),
+                className="rs-card mt-3",
+            ),
+            dbc.Card(
+                dbc.CardBody([
+                    html.Div([
+                        html.Div([html.H5("4. Run & Results", className="mb-1"), html.P("统计始终基于完整扫描；episode 级资源边界转为明确删失。", className="rs-step-note mb-0")]),
+                        dbc.Button("运行 Species Fate Analysis", id="fate-run-btn", color="primary"),
+                    ], className="d-flex justify-content-between align-items-center gap-3"),
+                    dbc.Alert(id="fate-error", color="danger", is_open=False, className="mt-3"),
+                    dcc.Loading(html.Div(id="fate-summary", className="mt-3"), type="circle"),
+                    dcc.Tabs(id="fate-results-tabs", value="signatures", children=[
+                        dcc.Tab(label="Fate Signatures", value="signatures", children=[html.Div(id="fate-signatures", className="pt-3")]),
+                        dcc.Tab(label="Endpoint Marginals", value="marginals", children=[html.Div(id="fate-marginals", className="pt-3")]),
+                        dcc.Tab(label="Pathways", value="pathways", children=[html.Div(id="fate-pathways", className="pt-3")]),
+                        dcc.Tab(label="Time Distributions", value="times", children=[html.Div(id="fate-times", className="pt-3")]),
+                        dcc.Tab(label="Episodes / Raw Evidence", value="episodes", children=[html.Div(id="fate-episodes", className="pt-3")]),
+                    ], className="mt-3"),
+                    html.Div([
+                        dbc.Button("下载 fate-result.json", id="fate-download-json-btn", color="secondary", outline=True),
+                        dbc.Button("下载 fate-tables.zip", id="fate-download-tables-btn", color="secondary", outline=True),
+                    ], className="d-flex gap-2 mt-3"),
+                    dcc.Download(id="fate-download-json"),
+                    dcc.Download(id="fate-download-tables"),
+                ]),
+                className="rs-card mt-3",
+            ),
+        ],
+        className="rs-page",
+        id="page-species-fate",
     )
 
 
@@ -2918,7 +3078,6 @@ def _channel_grid(grid_id: str) -> dash_table.DataTable:
 def _data_index_readiness_row(
     kind: str,
     label: str,
-    purpose: str,
 ) -> html.Div:
     return html.Div(
         [
@@ -2927,7 +3086,6 @@ def _data_index_readiness_row(
                     html.Div(label, className="rs-index-name"),
                 ]
             ),
-            html.Div(purpose, className="rs-index-purpose"),
             html.Div(
                 "正在检查…",
                 id=f"data-prep-{kind}-status",
@@ -2967,119 +3125,82 @@ def _data_cache_management_card() -> Any:
             "复制元素分布索引 CLI 命令",
         ),
     )
-    return html.Details(
+    return html.Section(
         [
-            html.Summary(
+            dcc.Store(id="data-prep-cancel-result", storage_type="memory"),
+            html.Div(
                 [
                     html.Div(
-                        "索引构建与状态",
-                        className="rs-data-section-title",
+                        [
+                            html.Div(
+                                "当前数据集的分析索引",
+                                className="rs-data-section-title",
+                            ),
+                            html.Div(
+                                "索引只加速或启用分析，不修改原始数据。",
+                                className="rs-card-subtitle",
+                            ),
+                        ]
                     ),
-                    html.Small(
-                        "事件检索 · 轨迹证据 · 元素分布",
+                    html.Div(
+                        "空闲时停止自动刷新",
+                        id="data-prep-refresh-label",
+                        className="rs-index-refresh-label",
                     ),
-                ]
+                ],
+                className="rs-index-management-header",
+            ),
+            html.Div(id="data-prep-status-alert"),
+            html.Div(
+                [
+                    _data_index_readiness_row("event", "事件检索"),
+                    _data_index_readiness_row("trajectory", "轨迹证据"),
+                    _data_index_readiness_row(
+                        "composition",
+                        "物种丰度 / 元素分布",
+                    ),
+                ],
+                id="data-prep-status",
             ),
             html.Div(
                 [
-                    dcc.Store(id="data-prep-cancel-result", storage_type="memory"),
-                    html.Section(
+                    html.Div(
+                        id="data-prep-action-progress",
+                        className="rs-index-task-progress",
+                    ),
+                    dbc.Button(
+                        "取消后台任务",
+                        id="data-prep-cancel-btn",
+                        color="secondary",
+                        size="sm",
+                        outline=True,
+                        disabled=True,
+                    ),
+                ],
+                className="rs-index-background-task",
+            ),
+            html.Div(
+                id="data-prep-action-alert",
+                className="rs-index-action-alert",
+            ),
+            html.Details(
+                [
+                    html.Summary(
+                        [
+                            html.Span("高级维护"),
+                            html.Small("任务记录 · Workspace · CLI · 清理索引"),
+                        ]
+                    ),
+                    html.Div(
                         [
                             html.Div(
-                                [
-                                    html.Div(
-                                        [
-                                            html.Div(
-                                                "按需准备分析能力",
-                                                className="rs-data-section-title",
-                                            ),
-                                            html.Div(
-                                                "基础检索无需等待；只启用你接下来要使用的功能。",
-                                                className="rs-card-subtitle",
-                                            ),
-                                        ]
-                                    ),
-                                    html.Div(
-                                        "状态自动刷新",
-                                        id="data-prep-refresh-label",
-                                        className="rs-index-refresh-label",
-                                    ),
-                                ],
-                                className="rs-index-section-heading",
-                            ),
-                            html.Div(id="data-prep-status-alert"),
-                            html.Div(
-                                [
-                                    _data_index_readiness_row(
-                                        "event",
-                                        "事件检索",
-                                        "反应事件、路径证据与事件跳转",
-                                    ),
-                                    _data_index_readiness_row(
-                                        "trajectory",
-                                        "轨迹证据",
-                                        "按时间步定位帧并提取局部反应轨迹",
-                                    ),
-                                    _data_index_readiness_row(
-                                        "composition",
-                                        "物种丰度 / 元素分布",
-                                        "物种时间演化、元素分布演化与代表物种下钻",
-                                    ),
-                                ],
-                                id="data-prep-status",
-                            ),
-                            html.Div(
-                                [
-                                    html.Div(
-                                        id="data-prep-action-progress",
-                                        className="rs-index-task-progress",
-                                    ),
-                                    dbc.Button(
-                                        "取消后台任务",
-                                        id="data-prep-cancel-btn",
-                                        color="secondary",
-                                        size="sm",
-                                        outline=True,
-                                        disabled=True,
-                                    ),
-                                ],
-                                className="rs-index-background-task",
-                            ),
-                            html.Div(
-                                id="data-prep-action-alert",
-                                className="rs-index-action-alert",
+                                id="data-preparation-tasks",
+                                className="rs-preparation-task-list",
+                                **{"aria-live": "polite"},
                             ),
                             html.Section(
                                 [
-                                    html.Div(
-                                        "后台任务",
-                                        className="rs-data-section-title",
-                                    ),
-                                    html.Div(
-                                        "运行中的任务显示在这里；已结束记录默认收起，可单独移除。",
-                                        className="rs-card-subtitle",
-                                    ),
-                                    html.Div(
-                                        id="data-preparation-tasks",
-                                        className="rs-preparation-task-list",
-                                        **{"aria-live": "polite"},
-                                    ),
-                                ],
-                                className="rs-preparation-task-section",
-                            ),
-                        ],
-                        className="rs-data-section rs-index-readiness-section",
-                    ),
-                    html.Details(
-                        [
-                            html.Summary(
-                                [
-                                    html.Span("Workspace 详情"),
-                                    html.Small("位置 · 占用 · CLI 命令"),
-                                ]
-                            ),
-                            html.Div(
-                                [
+                                    html.H4("Workspace 与诊断"),
                                     html.Div(
                                         id="data-prep-cache-meta",
                                         className="rs-cache-meta",
@@ -3110,21 +3231,11 @@ def _data_cache_management_card() -> Any:
                                         for label, command_id, copy_id, copy_title in command_rows
                                     ],
                                 ],
-                                className="rs-maintenance-body",
+                                className="rs-maintenance-group",
                             ),
-                        ],
-                        className="rs-data-collapsible rs-maintenance-section",
-                    ),
-                    html.Details(
-                        [
-                            html.Summary(
+                            html.Section(
                                 [
-                                    html.Span("清理派生索引"),
-                                    html.Small("高级操作"),
-                                ]
-                            ),
-                            html.Div(
-                                [
+                                    html.H4("清理派生索引"),
                                     html.Div(
                                         id="data-prep-clear-alert",
                                         className="rs-index-clear-alert",
@@ -3175,18 +3286,18 @@ def _data_cache_management_card() -> Any:
                                         className="rs-danger-actions",
                                     ),
                                 ],
-                                className="rs-danger-body",
+                                className="rs-maintenance-group rs-danger-body",
                             ),
                         ],
-                        className="rs-data-collapsible rs-cache-danger-zone",
+                        className="rs-index-advanced-body",
                     ),
                 ],
-                className="rs-data-capability-body",
+                id="data-index-advanced",
+                className="rs-index-advanced",
             ),
         ],
         id="data-cache-management",
-        className="rs-data-cache-workspace rs-data-capability-tools",
-        open=True,
+        className="rs-data-cache-workspace rs-index-management",
     )
 
 
@@ -3228,44 +3339,11 @@ def _data_management_page() -> html.Div:
                                                 className="rs-data-summary-heading",
                                             ),
                                             html.Div(
-                                                [
-                                                    html.Div(
-                                                        "可用分析功能",
-                                                        className="rs-summary-metric-label",
-                                                    ),
-                                                    html.Div(
-                                                        "正在检查…",
-                                                        id="data-prep-basic-status",
-                                                        className="rs-summary-capability-list",
-                                                    ),
-                                                ],
-                                                className="rs-data-summary-capabilities",
-                                            ),
-                                            html.Div(
                                                 id="data-artifacts",
                                                 className="rs-data-artifacts",
                                             ),
                                             html.Div(
                                                 [
-                                                    html.Span(
-                                                        "最近使用",
-                                                        className="rs-recent-label",
-                                                    ),
-                                                    html.Div(
-                                                        id="data-recent-datasets",
-                                                        className="rs-browser-recent",
-                                                    ),
-                                                ],
-                                                className="rs-data-recent-row",
-                                            ),
-                                            html.Div(
-                                                [
-                                                    dbc.Button(
-                                                        "开始物种检索",
-                                                        id="data-open-species-btn",
-                                                        color="primary",
-                                                        className="rs-data-primary-analysis-action",
-                                                    ),
                                                     dbc.Button(
                                                         "选择数据集",
                                                         id="data-empty-pick-btn",
@@ -3282,25 +3360,44 @@ def _data_management_page() -> html.Div:
                                                     dbc.Button(
                                                         "更换数据集",
                                                         id="data-change-pick-btn",
-                                                        color="secondary",
-                                                        outline=True,
+                                                        color="primary",
                                                         className="rs-change-dataset-action",
                                                     ),
                                                 ],
                                                 className="rs-data-summary-actions",
                                             ),
+                                            html.Div(
+                                                [
+                                                    html.Div(
+                                                        id="data-prep-basic-status",
+                                                    ),
+                                                    html.Div(
+                                                        id="data-recent-datasets",
+                                                    ),
+                                                ],
+                                                hidden=True,
+                                            ),
                                         ],
                                         className="rs-data-summary-main",
                                     ),
-                                    html.Aside(
-                                        html.Div(
-                                            "正在确定建议操作…",
-                                            id="data-next-action",
-                                        ),
-                                        className="rs-data-next-action",
-                                    ),
                                 ],
                                 className="rs-data-summary-panel",
+                            ),
+                            html.Section(
+                                [
+                                    html.Div(
+                                        id="data-next-action",
+                                        className="rs-data-next-action",
+                                    ),
+                                    dbc.Button(
+                                        "开始物种检索",
+                                        id="data-open-species-btn",
+                                        color="primary",
+                                        className="rs-data-primary-analysis-action",
+                                    ),
+                                ],
+                                className="rs-data-next-step-panel",
+                                **{"aria-label": "下一步"},
                             ),
                             _data_cache_management_card(),
                         ],
@@ -3486,7 +3583,7 @@ def _data_management_page() -> html.Div:
             ),
         ],
         id="page-data-management",
-        className="rs-page rs-data-page",
+        className="rs-page rs-data-page active",
     )
 
 
@@ -3533,6 +3630,7 @@ _DATASET_BOUND_CONTROL_IDS = {
     "event-path-occurrence-selector",
     "evolution-species-file",
     "evolution-species-files",
+    "evolution-species-picker",
     "evolution-timestep",
     "element-distribution-timestep",
     "batch-condition-selector",
@@ -3574,6 +3672,7 @@ def build_layout() -> html.Div:
                             _evolution_page(),
                             _element_distribution_page(),
                             _events_page(),
+                            _species_fate_page(),
                             _trajectory_page(),
                             _data_management_page(),
                             _batch_compare_page(),
@@ -3611,7 +3710,7 @@ def build_layout() -> html.Div:
                 storage_type="session",
                 data=cb.initial_store(),
             ),
-            dcc.Store(id="page-store", storage_type="session", data={"page": DEFAULT_PAGE}),
+            dcc.Store(id="page-store", storage_type="session", data={"page": START_PAGE}),
             dcc.Store(id="dataset-switch-transaction", storage_type="memory", data={}),
             dcc.Store(id="dataset-switch-navigation", storage_type="memory", data={}),
             dcc.Store(id="dataset-context-commit", storage_type="memory", data={}),
@@ -3633,6 +3732,7 @@ def build_layout() -> html.Div:
                         "evolution",
                         "element-distribution",
                         "events",
+                        "species-fate",
                         "trajectory",
                         "molecule-lineage",
                         "path-verification",
@@ -3657,13 +3757,14 @@ def build_layout() -> html.Div:
             dcc.Store(id="evolution-payload-store", storage_type="memory", data=None),
             dcc.Store(id="element-distribution-payload-store", storage_type="memory", data=None),
             dcc.Store(id="event-grid-store", storage_type="memory", data={"rows": []}),
+            dcc.Store(id="fate-result-store", storage_type="memory", data=None),
             dcc.Store(id="data-clear-kind-store", storage_type="memory", data={}),
             dcc.Interval(id="data-prep-refresh", interval=2000, n_intervals=0, disabled=True),
             dcc.Interval(
                 id="preparation-task-refresh",
                 interval=2000,
                 n_intervals=0,
-                disabled=False,
+                disabled=True,
             ),
             dcc.Store(id="event-selected-store", storage_type="memory", data=None),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),

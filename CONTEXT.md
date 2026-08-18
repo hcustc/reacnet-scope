@@ -76,6 +76,58 @@ _Avoid_: Mechanism network, automatic pathway discovery, Species evolution
 A sequence in which the same anchor atom set returns within a configured number of analyzed frames to the exact same Species, atom-ID set, and intramolecular bond set. A persistent view may fold the sequence, but the raw Reaction Occurrences remain available.
 _Avoid_: Reversible reaction type, equilibrium proof
 
+**Species Fate Analysis**:
+A bounded evidence analysis that follows the fixed anchor atoms of every eligible formation of one exact Species to user-defined absorbing endpoints or explicit censoring. It reports observed descendant outcomes and timing, not a final product, causal mechanism, or chemical rate.
+_Avoid_: Automatic mechanism discovery, final-product prediction, kinetic analysis
+
+**Formation Episode**:
+The evidence record that begins when one matched product-side Molecule Instance newly forms the target Species with a fixed anchor set and ends after all anchor descendants are terminal or censored. A return with the same fixed anchor set remains inside the active episode.
+_Avoid_: Reaction occurrence, independent experiment, abundance peak
+
+**Active Descendant**:
+A currently traceable Molecule Instance carrying a non-empty subset of one Formation Episode's fixed anchor set and not yet terminal or censored.
+_Avoid_: Product Species, pathway node
+
+**Endpoint Category**:
+A user-named, mutually exclusive set of exact Species identities that acts as an absorbing outcome for matching Active Descendants.
+_Avoid_: Formula group, SMARTS class, predicted product class
+
+**Terminal Instance**:
+The first Molecule Instance on one anchor-descendant branch that matches an Endpoint Category, together with its inherited anchors and first-passage evidence.
+_Avoid_: Final product, terminal Species
+
+**Descendant-complete Fate**:
+The unordered multiset of Terminal Instances whose disjoint inherited anchor subsets exactly cover a Formation Episode's fixed anchor set.
+_Avoid_: First hit, final mechanism, single product
+
+**Fate Signature**:
+The canonical cross-episode identity of a Descendant-complete Fate, derived from Endpoint Categories and their multiplicities rather than replicate-local Atom IDs.
+_Avoid_: Event path, reaction mechanism
+
+**Partial Fate**:
+The observed Terminal Instances and unresolved anchor subsets of a Formation Episode that is not fully resolved.
+_Avoid_: Completed fate, inferred fate
+
+**Evidence Censoring**:
+The explicit termination of an anchor-descendant trace because the available evidence, observation window, or declared analysis limit cannot support further continuity.
+_Avoid_: No reaction, terminal product, negative result
+
+**First-hit Fate**:
+The Endpoint Categories first reached by any descendants of a Formation Episode in the earliest matching Transition; it is an auxiliary first-exit observation rather than the episode's Descendant-complete Fate.
+_Avoid_: Episode fate, fastest mechanism
+
+**Observed Fate Path**:
+An atom-continuous route through recorded Reaction Occurrences from a Formation Episode toward a Terminal Instance or censoring point. It is observed evidence and does not establish causality, uniqueness, or an unobserved mechanism.
+_Avoid_: Mechanistic pathway, predicted pathway
+
+**Fate Query**:
+A normalized Species Fate Analysis question consisting of a target, anchor policy, endpoint definition, observation window, and declared limits.
+_Avoid_: Fate result, dataset revision
+
+**Fate Result**:
+A revision- and algorithm-bound report produced for one Fate Query, including complete statistics when available and explicit partial evidence otherwise.
+_Avoid_: Fate query, timeless conclusion
+
 **Current Dataset**:
 The one ReacNetGenerator dataset whose evidence is available to the ordinary analysis tools at a time. Selecting datasets for a cross-condition comparison does not make them current.
 _Avoid_: Loaded dataset, managed dataset

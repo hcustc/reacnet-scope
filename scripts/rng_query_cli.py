@@ -263,6 +263,123 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fate_endpoint(value: str) -> tuple[str, str]:
+    try:
+        category, species = value.split("=", 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "endpoint must use CATEGORY=EXACT_SPECIES"
+        ) from exc
+    category = category.strip()
+    species = species.strip()
+    if not category or not species:
+        raise argparse.ArgumentTypeError(
+            "endpoint category and exact Species must not be empty"
+        )
+    return category, species
+
+
+def _atom_element(value: str) -> tuple[int, str]:
+    try:
+        atom_id_text, element = value.split("=", 1)
+        atom_id = int(atom_id_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "atom element must use ATOM_ID=ELEMENT"
+        ) from exc
+    element = element.strip()
+    if atom_id < 0 or not re.fullmatch(r"[A-Z][a-z]?", element):
+        raise argparse.ArgumentTypeError(
+            "atom element must use a non-negative Atom ID and element symbol"
+        )
+    return atom_id, element
+
+
+def cmd_species_fate(args: argparse.Namespace) -> int:
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.services import (
+        ServiceError,
+        build_species_fate_analysis,
+        species_fate_tables_zip,
+        species_fate_to_json,
+    )
+
+    endpoint_categories: dict[str, list[str]] = {}
+    for category, species in args.endpoint:
+        endpoint_categories.setdefault(category, []).append(species)
+    atom_elements = dict(args.atom_element)
+    try:
+        json_target = (
+            Path(args.out_json).expanduser().resolve()
+            if args.out_json
+            else None
+        )
+        tables_target = (
+            Path(args.out_tables).expanduser().resolve()
+            if args.out_tables
+            else None
+        )
+        if json_target is not None and json_target == tables_target:
+            raise ValueError("--out-json and --out-tables must be different files")
+        if tables_target is not None and tables_target.exists() and not args.force:
+            raise FileExistsError(
+                f"output already exists: {tables_target}; pass --force to replace it"
+            )
+        dataset = discover_dataset(args.case, args.base)
+        result = build_species_fate_analysis(
+            dataset,
+            target_species=str(args.target),
+            endpoint_categories=endpoint_categories,
+            atom_elements=atom_elements,
+            anchor_mode=str(args.anchor_mode),
+            anchor_elements=args.anchor_element,
+            anchor_atom_ids=args.anchor_atom_id,
+            formation_start_frame=int(args.formation_start_frame),
+            formation_end_frame=args.formation_end_frame,
+            followup_end_frame=args.followup_end_frame,
+            minimum_followup_frames=int(args.minimum_followup_frames),
+            max_events_per_episode=int(args.max_events_per_episode),
+            max_active_branches=int(args.max_active_branches),
+            detail_retention_limit=int(args.detail_retention_limit),
+            global_episode_limit=getattr(args, "global_episode_limit", None),
+        )
+        json_payload = species_fate_to_json(result)
+        tables_payload = (
+            species_fate_tables_zip(result) if args.out_tables else b""
+        )
+        if args.out_json:
+            _write_text_atomic(args.out_json, json_payload)
+        if args.out_tables:
+            _write_bytes_atomic(
+                args.out_tables,
+                tables_payload,
+                force=bool(args.force),
+            )
+    except (FileNotFoundError, FileExistsError, RuntimeError, ServiceError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
+    summary = dict(result.get("summary") or {})
+    print(
+        json.dumps(
+            {
+                "fate_result_id": result.get("fate_result_id"),
+                "status": result.get("status"),
+                "formation_count": summary.get("formation_count"),
+                "main_cohort_size": summary.get("main_cohort_size"),
+                "fully_resolved_count": summary.get("fully_resolved_count"),
+                "censored_count": summary.get("censored_count"),
+                "resolution_fraction": summary.get("resolution_fraction"),
+                "out_json": str(args.out_json or ""),
+                "out_tables": str(args.out_tables or ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def cmd_batch_compare(args: argparse.Namespace) -> int:
     from reacnet_scope.services import run_grouped_batch_comparison
 
@@ -310,6 +427,20 @@ def _write_json_atomic(path: str, document: dict) -> None:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(document, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+        os.replace(str(temporary), str(target))
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_text_atomic(path: str, payload: str) -> None:
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(f"{target}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
         os.replace(str(temporary), str(target))
     finally:
         try:
@@ -1278,6 +1409,90 @@ def build_parser() -> argparse.ArgumentParser:
     sp_events.add_argument("--limit", type=_bounded_int("limit", 1, 10000), default=100)
     sp_events.add_argument("--offset", type=_bounded_int("offset", 0), default=0)
     sp_events.set_defaults(func=cmd_events)
+
+    sp_fate = sub.add_parser(
+        "species-fate",
+        help="对一个精确 Species 运行 descendant-complete first-passage 命运分析",
+    )
+    sp_fate.add_argument("case", help="数据集目录或公共前缀")
+    sp_fate.add_argument("--base", default="")
+    sp_fate.add_argument("--target", required=True, help="目标精确 RNG SMILES")
+    sp_fate.add_argument(
+        "--endpoint",
+        action="append",
+        required=True,
+        type=_fate_endpoint,
+        metavar="CATEGORY=EXACT_SPECIES",
+        help="命名终点类别及一个精确 Species；同类别可重复",
+    )
+    sp_fate.add_argument(
+        "--anchor-mode",
+        choices=["heavy_atoms", "all_atoms", "elements", "atom_ids"],
+        default="heavy_atoms",
+    )
+    sp_fate.add_argument(
+        "--atom-element",
+        action="append",
+        type=_atom_element,
+        default=[],
+        metavar="ATOM_ID=ELEMENT",
+        help="heavy_atoms/elements 策略所需的可靠 Atom ID→Element 映射",
+    )
+    sp_fate.add_argument(
+        "--anchor-element", action="append", default=[], metavar="ELEMENT"
+    )
+    sp_fate.add_argument(
+        "--anchor-atom-id", action="append", type=int, default=[], metavar="ATOM_ID"
+    )
+    sp_fate.add_argument(
+        "--formation-start-frame",
+        type=_bounded_int("formation-start-frame", 0),
+        default=0,
+    )
+    sp_fate.add_argument(
+        "--formation-end-frame",
+        type=_bounded_int("formation-end-frame", 0),
+        default=None,
+    )
+    sp_fate.add_argument(
+        "--followup-end-frame",
+        type=_bounded_int("followup-end-frame", 0),
+        default=None,
+    )
+    sp_fate.add_argument(
+        "--minimum-followup-frames",
+        type=_bounded_int("minimum-followup-frames", 0),
+        default=0,
+    )
+    sp_fate.add_argument(
+        "--max-events-per-episode",
+        type=_bounded_int("max-events-per-episode", 1, 10_000_000),
+        default=10_000,
+    )
+    sp_fate.add_argument(
+        "--max-active-branches",
+        type=_bounded_int("max-active-branches", 1, 1_000_000),
+        default=1_000,
+    )
+    sp_fate.add_argument(
+        "--detail-retention-limit",
+        type=_bounded_int("detail-retention-limit", 0, 1_000_000),
+        default=1_000,
+    )
+    sp_fate.add_argument(
+        "--global-episode-limit",
+        type=_bounded_int("global-episode-limit", 1, 10_000_000),
+        default=None,
+        help=(
+            "可选全局停止边界；触发时 Result=incomplete，主统计为 NA"
+        ),
+    )
+    sp_fate.add_argument("--out-json", default="", help="输出 fate-result.json")
+    sp_fate.add_argument("--out-tables", default="", help="输出 fate-tables.zip")
+    sp_fate.add_argument(
+        "--force", action="store_true", help="允许覆盖已有 fate-tables.zip"
+    )
+    sp_fate.set_defaults(func=cmd_species_fate)
 
     sp_batch = sub.add_parser("batch-compare", help="按 Simulation Condition 对比 Replicate")
     sp_batch.add_argument(

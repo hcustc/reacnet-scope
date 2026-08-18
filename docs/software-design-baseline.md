@@ -49,6 +49,7 @@ Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Even
 
 - Species 时间演化。
 - Element Distribution Evolution。
+- Species Fate Analysis。
 - 跨 Simulation Condition 与 Replicate 的批量对比。
 
 每项能力必须定义输入、输出、失败行为、来源限制和验收测试。页面能够打开不等于功能已实现。
@@ -57,7 +58,9 @@ Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Even
 
 当前版本明确不包括：
 
-- 机理网络、自动路径发现/评分、自动确认机理或因果推断。
+- 机理网络、通用自动路径发现/评分、自动确认机理或因果推断。Species Fate Analysis
+  仅允许按严格原子连续性遍历已观测 descendant evidence 的有界例外；它不发现、
+  补全或评价未观测路径。
 - 基于丰度曲线、寿命或通量自动筛选中间体候选；现有规则未经充分验证，不作为产品功能或公共 API 提供。
 - 从轨迹重新检测反应或根据坐标覆盖 RNG 键变化。
 - `.route` 事件回退、Route 索引或 Route 原子迁移分析。
@@ -113,7 +116,7 @@ Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Even
 
 - 普通分析工具一次只使用一个 Current Dataset。
 - 检查 Dataset Candidate 不改变当前上下文；只有用户明确加载后才切换。
-- 数据集没有单一“全部就绪”状态。Species、Reaction、Event、Trajectory、Element Distribution 等 Analysis Capability 分别可用。
+- 数据集没有单一“全部就绪”状态。Species、Reaction、Event、Trajectory、Species Fate、Element Distribution 等 Analysis Capability 分别可用。
 - 批量对比选择多个数据集，但不会把它们逐个设为 Current Dataset。
 
 ### 8.2 Dataset 选择器
@@ -148,7 +151,7 @@ Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Even
 侧栏采用始终可见的工具箱：
 
 - 检索与趋势：物种检索、反应式检索、时间演化、元素分布演化。
-- 事件证据：反应事件、轨迹查看、路径验证。
+- 事件证据：反应事件、轨迹查看、路径验证、物种命运分析。
 - 数据工作区：管理数据、批量对比。
 
 工具可以独立进入。跨工具按钮只交接稳定身份和必要上下文，目标工具仍调用统一核心实现。
@@ -219,17 +222,54 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 - 事件只使用中性结构变化标签；增长/降解仅作重原子规模汇总，不输出机理、因果或唯一历史断言。
 - JSON/CSV 必须包含参数、来源签名、分子节点、事件、连接、键变化、回穿段和截断原因，并能按稳定 `event_id` 下钻局部轨迹。
 
+#### 11.5.2 Species Fate Analysis
+
+- 输入是一个精确 target Species、固定 anchor policy、互斥的精确 Species endpoint
+  categories、formation window、follow-up endpoint 和显式 limits；MVP 每次只分析一个
+  Current Dataset/Replicate。
+- 默认统计单位是 Formation Episode。同一固定 anchor set 在 ACTIVE episode 内返回
+  target 不重新计数；仅部分重叠的 target formation 创建新 episode 并记录相关性。
+- 默认 anchors 是 birth instance 的全部非氢原子，并在 episode 生命周期内固定；缺少
+  可靠 atom ID→element 映射时失败关闭，不按 SMILES 顺序猜测。
+- 每个 Active Descendant 只连接到最近的、能以精确 Species 和完整 Atom-ID 集合唯一
+  匹配的后续 Reaction Occurrence；歧义、anchor 丢失或重复分配产生 Evidence
+  Censoring，不能跳过证据断点。
+- 拆分后的所有 anchor descendants 分别 first-passage 并冻结。只有 Terminal Instances
+  的 anchor subsets 两两不重叠且恰好覆盖初始 anchor set 时，Formation Episode 才
+  fully resolved；默认 fate 是 endpoint category 与 multiplicity 构成的无序多重集合。
+- 默认 branching probability 是 eligible、fully resolved episodes 中的条件分布，必须
+  明确标为 `resolved_episode_conditional_probability`，并同时报告主 cohort、resolution、
+  按原因 censoring 和 follow-up 分布；零分母返回 `NA`。
+- 时间分别报告 initial residence、terminal first passage、first hit、descendant
+  completion 和 cumulative target branch-time，始终保留 Frame、source timestep 与
+  Transition 边界，不能推断区间内部反应时刻或化学速率常数。
+- Raw trace 保留全部 Reaction Occurrences。MVP 只跨 episode 聚合 Fate Signature、
+  first-exit channel 和无复杂拓扑的线性 Reaction Type sequence，不规范化完整
+  branching/recombination event graph。
+- Fate 统计依赖新版 Event Evidence Index 中离线准备的 molecular continuity substrate；
+  trajectory 只用于按 `event_id` 下钻局部坐标。旧索引不影响现有事件工具，但该能力
+  显示 `REBUILD_REQUIRED`。
+- 正式导出是 canonical `fate-result.json` 与包含 manifest 和版本化关系表的确定性
+  `fate-tables.zip`。完整契约见 [`species-fate-analysis.md`](species-fate-analysis.md)。
+
 ### 11.6 可复核事件包
 
 事件包是确定性 ZIP，固定包含：
 
 - `event.json`
+- `frames.csv`
+- `changed_bond_distances.csv`
 - `trajectory.lammpstrj`
 - 映射完整时的 `trajectory.extxyz`
 - `bonds.csv`
 - `README.txt`
 
-内容记录事件身份、来源签名、原子范围、键变化、帧、坐标处理、元素映射和提取参数。映射不完整时仍导出 ZIP 和 LAMMPS 轨迹，只省略 ExtXYZ 并说明原因。CLI 默认不覆盖目标，覆盖必须显式指定。
+内容记录事件身份、来源签名、原子范围、键变化、帧、坐标处理、元素映射和提取参数。
+`frames.csv` 保留 source timestep、可选的已确认 ps、原始/显示坐标、晶胞/PBC 与
+确认单位；`changed_bond_distances.csv` 只计算 RNG 证据中发生变化的原子对逐帧
+距离，不从距离推断中间帧键级。未确认时间换算或长度单位时相应字段留空。映射
+不完整时仍导出 ZIP 和 LAMMPS 轨迹，只省略 ExtXYZ 并说明原因。CLI 默认不覆盖
+目标，覆盖必须显式指定。
 
 #### 11.6.1 DFT Initial Geometry
 
@@ -274,6 +314,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 - `events`
 - `species-evolution`
 - `verify-path`
+- `species-fate`
 - `export-event`
 - `element-distribution`
 - `batch-compare`
@@ -339,5 +380,8 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知�
 - 输入发现仍包含 `.route`、`.moname` 等非正式能力来源。
 - 跨平台路径、后台进程和 OVITO 启动尚未按 macOS/Windows/Linux 完整验收。
 - 真实数据和结构性能验收有计划文档，但尚未形成完整发布门槛。
+- Species Fate Analysis 已有 continuity substrate、查询核心、正式导出和 Dash/CLI
+  纵向切片；仍需补齐从 Species/Molecule Lineage 的稳定身份跳转、Raw Evidence 到局部
+  轨迹查看器的点击交接，以及覆盖全帧 Molecular Evidence 的 initial left-censor 检测。
 
 这些偏差是后续 `/code-review` 的审查对象，不应通过修改本基准去迁就现状。

@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -17,10 +18,12 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from .trajectory import TrajectoryDependencyError, normalize_type_element_map
 
 
-EVENT_PACKAGE_SCHEMA_VERSION = "reacnet-scope/event-package/v1"
+EVENT_PACKAGE_SCHEMA_VERSION = "reacnet-scope/event-package/v2"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _MEMBER_ORDER = (
     "event.json",
+    "frames.csv",
+    "changed_bond_distances.csv",
     "trajectory.lammpstrj",
     "trajectory.extxyz",
     "bonds.csv",
@@ -250,6 +253,203 @@ def _parse_bond(value: Any) -> tuple[int, int, str]:
     return min(atom1, atom2), max(atom1, atom2), "-".join(parts[2:])
 
 
+def _time_ps(view: Mapping[str, Any], source_timestep: int) -> float | None:
+    value = (view.get("meta") or {}).get("timestep_ps")
+    try:
+        conversion = float(value)
+    except (TypeError, ValueError):
+        return None
+    if conversion <= 0:
+        return None
+    return float(source_timestep) * conversion
+
+
+def _coordinate_length_unit(view: Mapping[str, Any]) -> str:
+    value = str(
+        (view.get("meta") or {}).get("coordinate_length_unit") or ""
+    ).strip().lower()
+    return "angstrom" if value in {"angstrom", "å"} else ""
+
+
+def _csv_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def event_frames_csv(
+    view: Mapping[str, Any],
+    *,
+    atom_ids: set[int] | None = None,
+) -> str:
+    """Serialize plot-ready frame coordinates and their audit metadata."""
+    selected = None if atom_ids is None else {int(value) for value in atom_ids}
+    unit = _coordinate_length_unit(view)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(
+        [
+            "frame",
+            "source_timestep",
+            "time_ps",
+            "atom_id",
+            "type",
+            "element",
+            "x",
+            "y",
+            "z",
+            "group",
+            "bond_state",
+            "label",
+            "display_x",
+            "display_y",
+            "display_z",
+            "cell",
+            "pbc",
+            "coordinate_length_unit",
+        ]
+    )
+    for frame in view.get("frames") or []:
+        source_timestep = int(
+            frame.get("source_timestep", frame.get("frame") or 0)
+        )
+        physical_time = _time_ps(view, source_timestep)
+        cell = _csv_json(frame.get("cell") or [])
+        pbc = _csv_json(frame.get("pbc") or [])
+        for atom in frame.get("atoms") or []:
+            atom_id = int(atom.get("id") or 0)
+            if selected is not None and atom_id not in selected:
+                continue
+            writer.writerow(
+                [
+                    frame.get("frame"),
+                    source_timestep,
+                    physical_time if physical_time is not None else "",
+                    atom_id,
+                    atom.get("type"),
+                    atom.get("element"),
+                    atom.get("x"),
+                    atom.get("y"),
+                    atom.get("z"),
+                    atom.get("group"),
+                    frame.get("bond_state"),
+                    atom.get("label"),
+                    atom.get("display_x"),
+                    atom.get("display_y"),
+                    atom.get("display_z"),
+                    cell,
+                    pbc,
+                    unit,
+                ]
+            )
+    return output.getvalue()
+
+
+def _bond_orders(values: Any) -> dict[tuple[int, int], str]:
+    orders: dict[tuple[int, int], str] = {}
+    for value in values or []:
+        atom1, atom2, order = _parse_bond(value)
+        orders[(atom1, atom2)] = order
+    return orders
+
+
+def event_changed_bond_distances_csv(
+    view: Mapping[str, Any],
+    *,
+    atom_ids: set[int] | None = None,
+) -> str:
+    """Serialize per-frame distances only for evidence-backed changed pairs.
+
+    Coordinates determine the distance, never the bond state.  Intermediate
+    frames therefore retain their real geometry while the before/after bond
+    orders continue to come exclusively from RNG Molecular Evidence.
+    """
+    selected = None if atom_ids is None else {int(value) for value in atom_ids}
+    evidence = view.get("bond_evidence") or {}
+    before_orders = _bond_orders(evidence.get("reactant") or [])
+    after_orders = _bond_orders(evidence.get("product") or [])
+    changed_pairs = sorted(
+        pair
+        for pair in set(before_orders) | set(after_orders)
+        if before_orders.get(pair) != after_orders.get(pair)
+        and (selected is None or set(pair).issubset(selected))
+    )
+    unit = _coordinate_length_unit(view)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(
+        [
+            "source_timestep",
+            "time_ps",
+            "atom1",
+            "atom2",
+            "distance",
+            "distance_unit",
+            "change",
+            "bond_order_before",
+            "bond_order_after",
+            "bond_state",
+            "coordinate_basis",
+        ]
+    )
+    for frame in view.get("frames") or []:
+        source_timestep = int(
+            frame.get("source_timestep", frame.get("frame") or 0)
+        )
+        physical_time = _time_ps(view, source_timestep)
+        atoms = {
+            int(atom.get("id") or 0): atom for atom in frame.get("atoms") or []
+        }
+        for atom1, atom2 in changed_pairs:
+            left = atoms.get(atom1)
+            right = atoms.get(atom2)
+            if left is None or right is None:
+                continue
+            use_display = all(
+                atom.get(f"display_{axis}") is not None
+                for atom in (left, right)
+                for axis in ("x", "y", "z")
+            )
+            prefix = "display_" if use_display else ""
+            distance = math.sqrt(
+                sum(
+                    (
+                        float(right.get(f"{prefix}{axis}") or 0.0)
+                        - float(left.get(f"{prefix}{axis}") or 0.0)
+                    )
+                    ** 2
+                    for axis in ("x", "y", "z")
+                )
+            )
+            before = before_orders.get((atom1, atom2), "")
+            after = after_orders.get((atom1, atom2), "")
+            change = (
+                "formed"
+                if not before
+                else "broken"
+                if not after
+                else "bond_order_changed"
+            )
+            writer.writerow(
+                [
+                    source_timestep,
+                    physical_time if physical_time is not None else "",
+                    atom1,
+                    atom2,
+                    round(distance, 10),
+                    unit,
+                    change,
+                    before,
+                    after,
+                    frame.get("bond_state"),
+                    (
+                        "minimum_image_reaction_core_centered"
+                        if use_display
+                        else "source_cartesian"
+                    ),
+                ]
+            )
+    return output.getvalue()
+
+
 def _bonds_csv(view: Mapping[str, Any]) -> str:
     evidence = view.get("bond_evidence") or {}
     broken = {str(value) for value in evidence.get("broken") or []}
@@ -293,6 +493,11 @@ def _readme_text(
         "===================================\n\n"
         f"Event: {event_id}\n"
         f"Scope: {scope}\n\n"
+        "frames.csv contains source timesteps, optional confirmed ps values, "
+        "source/display coordinates, cell/PBC data, and confirmed length units.\n"
+        "changed_bond_distances.csv contains per-frame geometric distances for "
+        "RNG evidence-backed changed atom pairs. Blank units or ps values mean "
+        "that the corresponding dataset conversion has not been confirmed.\n"
         "trajectory.lammpstrj contains ASE-parsed Cartesian coordinates before "
         "viewer re-centering and retains the source cell bounds.\n"
         f"{extxyz_note}\n"
@@ -351,6 +556,15 @@ def build_event_package(
         else (view.get("source_signatures") or {})
     )
     meta = view.get("meta") or {}
+    selected_view = {**dict(view), "frames": frames}
+    timestep_ps = meta.get("timestep_ps")
+    try:
+        timestep_ps = float(timestep_ps)
+    except (TypeError, ValueError):
+        timestep_ps = None
+    if timestep_ps is not None and timestep_ps <= 0:
+        timestep_ps = None
+    coordinate_length_unit = _coordinate_length_unit(view)
     event = dict(view.get("event") or {})
     event.setdefault("event_id", event_id)
     event.setdefault("reaction_smiles", str(meta.get("reaction_smiles") or ""))
@@ -370,6 +584,13 @@ def build_event_package(
         "frames": [
             {
                 "timestep": int(frame.get("frame") or 0),
+                "source_timestep": int(
+                    frame.get("source_timestep", frame.get("frame") or 0)
+                ),
+                "time_ps": _time_ps(
+                    view,
+                    int(frame.get("source_timestep", frame.get("frame") or 0)),
+                ),
                 "atom_count": len(frame["atoms"]),
                 "bond_state": str(frame.get("bond_state") or ""),
             }
@@ -389,6 +610,11 @@ def build_event_package(
             "type_to_element": mapping,
         },
         "source_signatures": _json_safe(signatures),
+        "time_axis": {
+            "unit": "ps" if timestep_ps is not None else "source_timestep",
+            "timestep_ps": timestep_ps,
+        },
+        "coordinate_length_unit": coordinate_length_unit or None,
         "coordinate_treatment": {
             "trajectory_lammpstrj": (
                 "ASE-parsed Cartesian source positions before viewer re-centering"
@@ -408,6 +634,10 @@ def build_event_package(
             + "\n"
         ).encode("utf-8"),
         "trajectory.lammpstrj": lammps.encode("utf-8"),
+        "frames.csv": event_frames_csv(selected_view).encode("utf-8"),
+        "changed_bond_distances.csv": event_changed_bond_distances_csv(
+            selected_view
+        ).encode("utf-8"),
         "bonds.csv": _bonds_csv(view).encode("utf-8"),
         "README.txt": _readme_text(
             event_id=event_id,
@@ -432,5 +662,7 @@ __all__ = [
     "EVENT_PACKAGE_SCHEMA_VERSION",
     "EventPackageError",
     "build_event_package",
+    "event_changed_bond_distances_csv",
+    "event_frames_csv",
     "event_trajectory_text",
 ]

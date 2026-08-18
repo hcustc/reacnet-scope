@@ -194,7 +194,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "nav-home" not in layout_ids
     assert "page-description" in layout_ids
     assert "page-eyebrow-section" in layout_ids
-    assert "按分子式、SMILES" in str(
+    assert "选择当前数据集" in str(
         ((_layout_node_by_id(layout, "page-description") or {}).get("props") or {}).get(
             "children"
         )
@@ -239,8 +239,19 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         ((_layout_node_by_id(layout, "page-store") or {}).get("props") or {}).get(
             "data"
         )
-        == {"page": "species"}
+        == {"page": "data-management"}
     )
+    assert (_layout_node_by_id(layout, "page-species") or {})["props"][
+        "className"
+    ] == "rs-page"
+    assert (_layout_node_by_id(layout, "page-data-management") or {})["props"][
+        "className"
+    ] == "rs-page rs-data-page active"
+    assert "active" in str(
+        ((_layout_node_by_id(layout, "nav-data-management") or {}).get("props") or {}).get(
+            "className"
+        )
+    ).split()
     assert (_layout_node_by_id(layout, "app-store") or {})["props"][
         "storage_type"
     ] == "memory"
@@ -315,6 +326,8 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         assert removed_advanced_id not in layout_ids
     for event_tool_id in {
         "event-frames-csv-download",
+        "event-distances-csv-btn",
+        "event-distances-csv-download",
         "event-package-btn",
         "event-package-download",
         "event-trajectory-download",
@@ -457,9 +470,13 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "直接定位" not in layout_text
     assert "返回上级目录" not in layout_text
     cache_management = _layout_node_by_id(layout, "data-cache-management") or {}
-    assert cache_management.get("type") == "Details"
-    assert (cache_management.get("props") or {}).get("open") is True
-    assert "索引构建与状态" in layout_text
+    assert cache_management.get("type") == "Section"
+    assert "当前数据集的分析索引" in layout_text
+    overview_text = json.dumps(overview, ensure_ascii=False)
+    assert "开始物种检索" in overview_text
+    assert "rs-data-next-step-panel" in overview_text
+    assert "可用分析功能" not in overview_text
+    assert "最近使用" not in overview_text
     assert "确认加载" not in layout_text
 
 
@@ -470,7 +487,7 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         for page_id in page_ids
     ]
 
-    assert len(grouped_pages) == 7
+    assert len(grouped_pages) == 8
     assert len(set(grouped_pages)) == len(grouped_pages)
     assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
 
@@ -545,6 +562,118 @@ def _callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def test_evolution_catalog_callback_populates_searchable_formula_picker(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_catalog(artifacts, **kwargs):
+        captured["artifacts"] = artifacts
+        captured.update(kwargs)
+        return {
+            "options": [
+                {
+                    "label": "C6H5ClO · 2 SMILES · 2/2 文件",
+                    "value": "formula:C6H5ClO",
+                    "search": "C6H5ClO smiles-a smiles-b",
+                }
+            ],
+            "meta": {
+                "n_sources": 2,
+                "n_formulas": 1,
+                "warnings": [],
+            },
+        }
+
+    monkeypatch.setattr(svc, "species_evolution_catalog", fake_catalog)
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["evolution-load-species-btn"],
+            changed="evolution-load-species-btn.n_clicks",
+            input_values={"evolution-load-species-btn": 1},
+            state_values={
+                "evolution-species-file": "",
+                "evolution-species-files": "a::/tmp/a.species\nb::/tmp/b.species",
+                "evolution-species-picker": ["formula:C6H5ClO"],
+                "app-store": {"artifacts": {}},
+            },
+            output_id="evolution-species-picker",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert (
+        body["evolution-species-picker"]["options"][0]["value"]
+        == "formula:C6H5ClO"
+    )
+    assert body["evolution-species-picker"]["value"] == ["formula:C6H5ClO"]
+    assert body["evolution-catalog-alert"]["children"] == "已从 2 个文件读取 1 种分子式"
+    assert captured["species_files"].startswith("a::")
+
+
+def test_evolution_picker_targets_are_forwarded_to_plot_service(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_evolution(artifacts, targets, **kwargs):
+        captured["artifacts"] = artifacts
+        captured["targets"] = targets
+        captured.update(kwargs)
+        return {
+            "x_name": "timestep",
+            "x_values": [0, 1],
+            "curves": [
+                {
+                    "name": "2500K | C6H5ClO",
+                    "query": "formula:C6H5ClO",
+                    "values": [100, 80],
+                }
+            ],
+            "meta": {"warnings": []},
+        }
+
+    monkeypatch.setattr(svc, "build_species_evolution", fake_evolution)
+    app = create_app()
+    client = app.server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["evolution-search-btn"],
+            changed="evolution-search-btn.n_clicks",
+            input_values={"evolution-search-btn": 1},
+            state_values={
+                "evolution-species-picker": ["formula:C6H5ClO"],
+                "evolution-targets": "formula:O2\nformula:C6H5ClO",
+                "evolution-xaxis": "step",
+                "evolution-smooth": 1,
+                "evolution-species-file": "",
+                "evolution-species-files": "2500K::/tmp/2500K.species",
+                "evolution-formula-mode": "sum",
+                "evolution-max-smiles": 0,
+                "evolution-normalize": "none",
+                "evolution-time-align": "raw",
+                "evolution-timestep": None,
+                "evolution-downsample": 0,
+                "evolution-max-curves": 30,
+                "evolution-curve-filter": "",
+                "app-store": {"artifacts": {}},
+            },
+            output_id="evolution-payload-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured["targets"] == ["formula:C6H5ClO", "formula:O2"]
+    assert captured["species_files"] == "2500K::/tmp/2500K.species"
+    payload = response.get_json()["response"]["evolution-payload-store"]["data"]
+    assert payload["visible_curve_names"] == ["2500K | C6H5ClO"]
 
 
 def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> None:
@@ -887,7 +1016,7 @@ def test_direct_data_workspace_navigation_has_no_false_return_source() -> None:
     }
 
 
-def test_data_workspace_opens_species_search_only_after_explicit_action() -> None:
+def test_data_workspace_next_step_opens_species_search() -> None:
     app = create_app()
     client = app.server.test_client()
     dependency = next(
@@ -915,6 +1044,70 @@ def test_data_workspace_opens_species_search_only_after_explicit_action() -> Non
     body = response.get_json()["response"]
     assert body["page-store"]["data"] == {"page": "species"}
     assert body["page-species"]["className"] == "rs-page active"
+
+
+def test_data_workspace_next_step_syncs_restored_page_chrome() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    navigation_dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in navigation_dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in navigation_dependency["inputs"]}
+    input_values["data-open-species-btn"] = 1
+
+    navigation_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="data-open-species-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "data-management"}},
+            output_id="page-species",
+        ),
+    )
+    assert navigation_response.status_code == 200
+    page_store = navigation_response.get_json()["response"]["page-store"]["data"]
+
+    sync_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["page-store"],
+            changed="page-store.data",
+            input_values={"page-store": page_store},
+            state_values={},
+            output_id="page-title",
+        ),
+    )
+
+    assert sync_response.status_code == 200
+    body = sync_response.get_json()["response"]
+    assert body["page-species"]["className"] == "rs-page active"
+    assert body["nav-species"]["aria-current"] == "page"
+    assert body["nav-data-management"]["aria-current"] == "false"
+    assert body["data-open-batch-compare-btn"]["aria-current"] == "false"
+    assert body["page-title"]["children"] == "物种检索"
+
+
+def test_selected_candidate_evidence_is_collapsed_by_default() -> None:
+    selected = {
+        "label": "run",
+        "base": "/data/run.lammpstrj",
+        "artifact_paths": {"reaction": "/data/run.lammpstrj.reaction"},
+        "analysis_capabilities": {},
+    }
+
+    details = cb._render_selected_candidate_details(
+        {"datasets": [selected]},
+        selected["base"],
+    )
+
+    assert details is not None
+    assert not getattr(details, "open", False)
 
 
 def test_cancelling_dataset_selection_returns_to_source_page() -> None:
@@ -2793,8 +2986,8 @@ def test_dataset_picker_keeps_index_management_reachable() -> None:
     assert "d-none" not in result["data-overview-view"]["className"]
     assert "d-none" in result["data-browser-view"]["className"]
     index_management = _layout_node_by_id(layout, "data-cache-management") or {}
-    assert (index_management.get("props") or {}).get("open") is True
-    assert "索引构建与状态" in json.dumps(
+    assert index_management.get("type") == "Section"
+    assert "当前数据集的分析索引" in json.dumps(
         index_management,
         ensure_ascii=False,
     )
@@ -3295,6 +3488,11 @@ def test_preparation_refresh_keeps_discovered_app_store_fallback_usable(
     assert preparation_calls == [(candidate["folder"], candidate["base"])]
     result = response.get_json()["response"]
     assert result["data-clear-trajectory-btn"]["disabled"] is False
+    assert result["data-prep-refresh"]["disabled"] is True
+    assert result["data-prep-trajectory-btn"]["className"] == (
+        "rs-index-action is-ready"
+    )
+    assert result["data-prep-trajectory-btn"]["children"] == "重新构建"
     workspace_meta = json.dumps(
         result["data-prep-cache-meta"]["children"],
         ensure_ascii=False,
@@ -3355,6 +3553,7 @@ def test_running_index_task_keeps_clear_action_clickable_and_explains_next_step(
     assert status_response.status_code == 200
     status = status_response.get_json()["response"]
     assert status["data-clear-event-btn"]["disabled"] is False
+    assert status["data-prep-refresh"]["disabled"] is False
 
     click_response = client.post(
         "/_dash-update-component",
@@ -5134,6 +5333,39 @@ def test_event_package_download_uses_current_view_scope(monkeypatch) -> None:
     assert download["filename"] == "event-42_evidence.zip"
     assert download["type"] == "application/zip"
     assert base64.b64decode(download["content"]) == b"event-package-bytes"
+
+
+def test_changed_bond_distance_download_uses_current_viewer(monkeypatch) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_distances(viewer):
+        captured.append(viewer)
+        return "source_timestep,distance\n10,1.5\n"
+
+    monkeypatch.setattr(
+        svc,
+        "event_viewer_changed_bond_distances_csv",
+        fake_distances,
+    )
+    client = create_app().server.test_client()
+    viewer = {"event_id": "event-42", "frames": [{"frame": 10}]}
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-distances-csv-btn"],
+            changed="event-distances-csv-btn.n_clicks",
+            input_values={"event-distances-csv-btn": 1},
+            state_values={"event-viewer-store": viewer},
+            output_id="event-distances-csv-download",
+        ),
+    )
+
+    assert response.status_code == 200
+    download = response.get_json()["response"]["event-distances-csv-download"]["data"]
+    assert captured == [viewer]
+    assert download["filename"] == "event-42_changed_bond_distances.csv"
+    assert download["content"] == "source_timestep,distance\n10,1.5\n"
 
 
 def test_legacy_core_queries_are_available_through_dash_services(tmp_path) -> None:

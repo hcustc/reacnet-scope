@@ -170,10 +170,17 @@ Type → Element，或显式选择全部原子/指定 Atom IDs。详细边界见
 点击“下载事件包 ZIP”可得到一个确定性、可复核的最小证据包：
 
 - `event.json`：事件内容、来源签名、原子分组/映射和轨迹提取参数；
+- `frames.csv`：逐帧 source timestep、可选 ps、原始/显示坐标、晶胞/PBC 和确认单位；
+- `changed_bond_distances.csv`：RNG 证据中发生键变化的原子对在每帧的几何距离；
 - `trajectory.lammpstrj`：当前原子范围的局部轨迹；
 - `trajectory.extxyz`：元素映射完整时提供，保留晶胞/PBC 和原子 ID；
 - `bonds.csv`：来自 RNG 事件证据的成键、断键与未变键；
 - `README.txt`：来源、坐标处理、限制和 ASE/OVITO 打开命令。
+
+轨迹页还可单独下载帧 CSV 和键变距离 CSV。只有数据集已经确认
+`timestep → ps` 换算时才写入 `time_ps`；只有坐标长度单位已经确认为 Å 时，距离
+单位才写为 `angstrom`，否则相应单位字段保持空白。距离只针对 RNG 证据中发生
+形成、断裂或键级变化的原子对计算，不据此推断中间帧键级。
 
 元素映射不完整时仍可下载 ZIP 和 LAMMPS 轨迹，仅省略
 `trajectory.extxyz`。也可从终端导出同一格式：
@@ -372,6 +379,16 @@ uv run reacnet-scope element-distribution /data/case \
   - `system@replicate::/abs/path/file.species`
   - `system@replicate::/abs/path/file.reactionabcd`（自动转 `.species`）
 - 示例清单见 [`examples/multi_species_sources.example.txt`](examples/multi_species_sources.example.txt)。
+
+在“Species 时间演化”页重绘多温度物种消耗曲线：
+
+1. 展开“数据源”，将不同温度/重复实验的文件逐行粘贴到“多文件列表”；
+2. 点击“读取物种目录”，应用会从已准备的 Species Abundance Index 合并分子式目录；
+3. 在可搜索的多选框中选择一个或多个分子式，再点击“绘制”；
+4. 每个来源文件会保留独立曲线，图例使用清单中的 `system@replicate` 标签。
+
+物种目录和曲线查询只读取预建索引，不在交互请求中扫描完整 `.species` 文件。
+如果页面提示索引未就绪，先在数据管理页为相应文件构建 Species Abundance Index。
 
 通用元素分布也可读取 tidy CSV/Excel；至少包含 `time`、`species`、`count`，
 可选 `dataset` 或 `system` 列用于多数据集对比。分组元素、元素过滤、原子数分箱、

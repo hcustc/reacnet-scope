@@ -154,6 +154,8 @@ def test_representative_event_ranking_and_viewer_expose_bond_evidence(tmp_path: 
         artifacts["reactionevent"], artifacts["molecules"]
     )
     TRAJECTORY_INDEX_STORE.build(artifacts["trajectory"])
+    svc.save_timestep_ps(artifacts["trajectory"], 0.002)
+    svc.save_coordinate_length_unit(artifacts["trajectory"], "angstrom")
 
     ranked = svc.rank_representative_events(
         artifacts,
@@ -167,6 +169,9 @@ def test_representative_event_ranking_and_viewer_expose_bond_evidence(tmp_path: 
     viewer = svc.build_rng_event_visualization(artifacts, event, before_frames=0, after_frames=0)
     assert viewer["atom_groups"]["core"] == [1, 2]
     assert viewer["bond_evidence"]["formed"] == ["1-2-1"]
+    assert viewer["meta"]["timestep_ps"] == 0.002
+    assert viewer["meta"]["coordinate_length_unit"] == "angstrom"
+    assert viewer["frames"][1]["source_timestep"] == 10
     assert viewer["frames"][0]["bond_state"] == "before"
     assert viewer["frames"][1]["bond_state"] == "after"
 
@@ -319,10 +324,16 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers(
 ) -> None:
     viewer = {
         "event_id": "event-1",
+        "meta": {
+            "timestep_ps": 0.5,
+            "coordinate_length_unit": "angstrom",
+        },
         "frames": [
             {
                 "frame": 10,
                 "box": [(0, 10), (0, 10), (0, 10)],
+                "cell": [[10, 0, 0], [0, 10, 0], [0, 0, 10]],
+                "pbc": [True, True, True],
                 "bond_state": "before",
                 "atoms": [
                     {
@@ -332,6 +343,9 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers(
                         "x": 2.0,
                         "y": 2.0,
                         "z": 2.0,
+                        "display_x": 0.0,
+                        "display_y": 0.0,
+                        "display_z": 0.0,
                         "group": "core",
                     },
                     {
@@ -341,15 +355,25 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers(
                         "x": 1.0,
                         "y": 1.0,
                         "z": 1.0,
+                        "display_x": 1.0,
+                        "display_y": 0.0,
+                        "display_z": 0.0,
                         "group": "core",
                     },
                 ],
             }
         ],
         "atom_groups": {"core": [1, 2], "context": [2, 1]},
+        "bond_evidence": {
+            "reactant": [],
+            "product": ["1-2-1"],
+            "broken": [],
+            "formed": ["1-2-1"],
+        },
     }
 
     frames_csv = svc.event_viewer_frames_csv(viewer)
+    distances_csv = svc.event_viewer_changed_bond_distances_csv(viewer)
     trajectory = svc.event_viewer_trajectory_text(viewer)
     expression = svc.event_viewer_ovito_expression(viewer)
     ovito = svc.event_viewer_ovito_script(
@@ -361,8 +385,9 @@ def test_event_viewer_exports_frames_trajectory_and_viewer_helpers(
         trajectory_name="event-1_subset.lammpstrj",
     )
 
-    assert "frame,atom_id,type,element" in frames_csv
-    assert "10,2,2,O,2.0,2.0,2.0,core,before" in frames_csv
+    assert "frame,source_timestep,time_ps,atom_id" in frames_csv
+    assert "10,10,5.0,2,2,O,2.0,2.0,2.0" in frames_csv
+    assert "10,5.0,1,2,1.0,angstrom,formed" in distances_csv
     assert "ITEM: NUMBER OF ATOMS\n2" in trajectory
     assert "ITEM: ATOMS id type element x y z" in trajectory
     assert "ParticleIdentifier == 1 || ParticleIdentifier == 2" == expression

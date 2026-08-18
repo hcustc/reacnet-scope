@@ -10,6 +10,7 @@ PAGE_IDS: Final[tuple[str, ...]] = (
     "reactions",
     "evolution",
     "events",
+    "species-fate",
     "trajectory",
     "pathway",
     "element-distribution",
@@ -22,6 +23,7 @@ PAGE_LABELS: Final[dict[str, str]] = {
     "reactions": "反应式检索",
     "evolution": "时间演化",
     "events": "反应事件",
+    "species-fate": "物种命运分析",
     "trajectory": "轨迹查看",
     "pathway": "路径验证",
     "element-distribution": "元素分布演化",
@@ -34,6 +36,7 @@ PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
     "reactions": "检索反应式、比较净通量，并把可信通道交给路径或事件工作流。",
     "evolution": "绘制单个或多组物种的时间演化曲线，比较生成与消耗趋势。",
     "events": "从反应通道定位 RNG 事件，建立可复核的轨迹证据入口。",
+    "species-fate": "从目标 Species 的形成事件出发，追踪锚点后代直至用户定义终点或证据删失。",
     "trajectory": "检查局部反应轨迹、关键帧和原子环境，并导出外部分析脚本。",
     "pathway": "输入明确的 Reaction Type 序列，用时间、分子实例和原子 ID 核查完整事件链。",
     "element-distribution": "按数据集中发现的元素分组和筛选物种，追踪分布随时间的变化。",
@@ -46,6 +49,7 @@ PAGE_SECTIONS: Final[dict[str, str]] = {
     "reactions": "检索与趋势",
     "evolution": "检索与趋势",
     "events": "事件证据",
+    "species-fate": "事件证据",
     "trajectory": "事件证据",
     "pathway": "事件证据",
     "element-distribution": "检索与趋势",
@@ -63,6 +67,7 @@ PAGE_ICONS: Final[dict[str, str]] = {
     "reactions": "/assets/icons/reactions.svg",
     "evolution": "/assets/icons/evolution.svg",
     "events": "/assets/icons/events.svg",
+    "species-fate": "/assets/icons/events.svg",
     "trajectory": "/assets/icons/trajectory.svg",
     "pathway": "/assets/icons/pathway.svg",
     "element-distribution": "/assets/icons/element-distribution.svg",
@@ -90,6 +95,7 @@ NAV_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
         "事件证据",
         (
             "events",
+            "species-fate",
             "trajectory",
             "pathway",
         ),
@@ -103,3 +109,7 @@ TOP_NAV_PAGE_IDS: Final[tuple[str, ...]] = tuple(
 )
 
 DEFAULT_PAGE: Final[str] = "species"
+
+# A fresh session has no Current Dataset, so it starts where that prerequisite
+# can be satisfied. DEFAULT_PAGE remains the first analysis page after loading.
+START_PAGE: Final[str] = "data-management"
