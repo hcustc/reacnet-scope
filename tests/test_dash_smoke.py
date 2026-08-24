@@ -480,6 +480,21 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "确认加载" not in layout_text
 
 
+def test_dataset_switch_resets_species_fate_selections_and_results() -> None:
+    reset_values = {
+        (output.component_id, output.component_property): value
+        for output, value in cb._dataset_bound_resets()
+    }
+
+    assert reset_values[("fate-target-species", "value")] is None
+    assert reset_values[("fate-endpoints-table", "data")] == [
+        {"category": "", "species": ""}
+    ]
+    assert reset_values[("fate-result-store", "data")] is None
+    assert reset_values[("fate-error", "children")] == ""
+    assert reset_values[("fate-error", "is_open")] is False
+
+
 def test_navigation_groups_cover_each_tool_once() -> None:
     grouped_pages = [
         page_id
@@ -562,6 +577,70 @@ def _callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+def test_species_fate_catalog_is_bounded_when_dataset_changes(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_catalog(artifacts, **kwargs):
+        calls.append({"artifacts": artifacts, **kwargs})
+        limit = kwargs.get("limit")
+        count = 24_639 if limit is None else min(24_639, int(limit))
+        return [
+            {
+                "species": f"C{'C' * 80}{index}",
+                "species_id": f"species-{index}",
+            }
+            for index in range(count)
+        ]
+
+    monkeypatch.setattr(svc, "species_fate_catalog_for_dataset", fake_catalog)
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "fate-target-species.options" in item["output"]
+        and "fate-endpoints-table.dropdown" in item["output"]
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="app-store.data",
+            input_values={
+                "app-store": {
+                    "analysis_capabilities": {
+                        "species_fate": {"state": "ready"}
+                    },
+                    "artifacts": {"timeline": "/tmp/example.timeline.h5"},
+                },
+                "fate-target-species.search_value": "",
+                "fate-endpoint-species-search.value": "",
+            },
+            state_values={
+                "fate-target-species.value": None,
+                "fate-endpoints-table.data": [
+                    {"category": "products", "species": ""}
+                ],
+            },
+            output_id="fate-target-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    target_options = body["fate-target-species"]["options"]
+    endpoint_options = body["fate-endpoints-table"]["dropdown"]["species"][
+        "options"
+    ]
+    assert 0 < len(target_options) <= 100
+    assert 0 < len(endpoint_options) <= 100
+    assert len(response.data) < 100_000
+    assert calls
+    assert all(int(call["limit"]) <= 100 for call in calls)
 
 
 def test_evolution_catalog_callback_populates_searchable_formula_picker(
@@ -2839,6 +2918,115 @@ def test_structure_endpoint_honors_selected_channel_preview_dimensions(monkeypat
         "height": 116,
         "show_h": True,
     }
+
+
+def test_reaction_endpoint_honors_hover_card_dimensions_and_hydrogen_toggle(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_render(reaction_smiles, *, width, height, show_h):
+        captured.update(
+            {
+                "reaction_smiles": reaction_smiles,
+                "width": width,
+                "height": height,
+                "show_h": show_h,
+            }
+        )
+        return {"ok": True, "svg": "<svg></svg>", "message": ""}
+
+    monkeypatch.setattr(svc, "render_reaction_svg", fake_render)
+    client = create_app().server.test_client()
+    response = client.get(
+        "/api/reaction.svg?reaction_smiles=%5BH%5D%20%2B%20%5BCl%5D%20-%3E%20%5BH%5D%5BCl%5D"
+        "&width=720&height=220&show_h=0"
+    )
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/svg+xml"
+    assert captured == {
+        "reaction_smiles": "[H] + [Cl] -> [H][Cl]",
+        "width": 720,
+        "height": 220,
+        "show_h": False,
+    }
+
+
+def test_reaction_channel_rows_build_lazy_complete_structure_hover_cards() -> None:
+    client = create_app().server.test_client()
+    production = {
+        "reaction_formulas": "H + Cl -> HCl",
+        "reaction_smiles": "[H] + [Cl] -> [H][Cl]",
+    }
+    consumption = {
+        "reaction_formulas": "HCl -> H + Cl",
+        "reaction_smiles": "[H][Cl] -> [H] + [Cl]",
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=[
+                "rxn-production-grid",
+                "rxn-consumption-grid",
+                "rxn-channel-show-h",
+            ],
+            changed="rxn-production-grid.data",
+            input_values={
+                "rxn-production-grid.data": [production],
+                "rxn-consumption-grid.data": [consumption],
+                "rxn-channel-show-h.value": False,
+            },
+            state_values={},
+            output_id="rxn-production-grid",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    production_tooltip = body["rxn-production-grid"]["tooltip_data"][0]
+    assert production_tooltip["reaction_formulas"]["type"] == "markdown"
+    assert "完整结构反应式" in production_tooltip["reaction_formulas"]["value"]
+    assert "/api/reaction.svg?reaction_smiles=" in production_tooltip[
+        "reaction_formulas"
+    ]["value"]
+    assert "show_h=0" in production_tooltip["reaction_formulas"]["value"]
+    assert body["rxn-consumption-grid"]["tooltip_data"][0]
+
+
+def test_reaction_search_hover_preview_uses_row_fields_without_channel_detail(
+    monkeypatch,
+) -> None:
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("hover previews must not build selected-channel detail")
+
+    monkeypatch.setattr(svc, "build_channel_structure_detail", fail_if_called)
+    client = create_app().server.test_client()
+    row = {
+        "reaction_formulas": "H2 + O -> H + HO",
+        "reaction_smiles": "[H][H] + [O] -> [H] + [H][O]",
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["rxn-grid", "rxn-structure-show-h"],
+            changed="rxn-grid.data",
+            input_values={
+                "rxn-grid.data": [row],
+                "rxn-structure-show-h.value": True,
+            },
+            state_values={},
+            output_id="rxn-grid",
+        ),
+    )
+
+    assert response.status_code == 200
+    tooltip = response.get_json()["response"]["rxn-grid"]["tooltip_data"][0]
+    assert tooltip["reaction_formulas"]["type"] == "markdown"
+    assert "show_h=1" in tooltip["reaction_formulas"]["value"]
+    assert "%5BH%5D%5BH%5D" in tooltip["reaction_formulas"]["value"]
 
 
 def _browser_callback_payload(

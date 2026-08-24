@@ -2041,7 +2041,7 @@ html, body {
 .rs-flow-choice { min-width: 0; color: #344054; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .rs-channel-lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-.rs-channel-lane { min-width: 0; overflow: hidden; border: 1px solid #dce2ea; border-radius: 7px; }
+.rs-channel-lane { min-width: 0; overflow: visible; border: 1px solid #dce2ea; border-radius: 7px; }
 .rs-channel-lane .dash-cell { cursor: pointer; }
 .rs-lane-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px 10px 14px; background: #fbfcfe; border-bottom: 1px solid #dce2ea; }
 .rs-lane-heading { display: flex; align-items: baseline; min-width: 0; gap: 10px; }
@@ -4097,6 +4097,30 @@ textarea,
     color: #667085;
     font-size: 10px;
     white-space: normal;
+}
+
+/* Reaction hover cards use one composed SVG so the complete expression stays
+   readable while the tables keep their dense row layout. */
+#rxn-results-content .dash-table-tooltip,
+.rs-channel-lane .dash-table-tooltip {
+    width: 740px !important;
+    max-width: min(740px, calc(100vw - 24px)) !important;
+}
+
+.rs-channel-lane:first-child .dash-tooltip {
+    left: 0 !important;
+}
+
+.rs-channel-lane:last-child .dash-tooltip {
+    right: 0 !important;
+    left: auto !important;
+}
+
+#rxn-results-content .dash-table-tooltip img,
+.rs-channel-lane .dash-table-tooltip img {
+    width: 720px;
+    height: auto;
+    max-height: 220px;
 }
 
 @media (max-width: 720px) {

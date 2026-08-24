@@ -344,6 +344,47 @@ class _ContinuityReader:
             )
         }
 
+    def search_species_catalog(
+        self,
+        query: str,
+        *,
+        limit: int,
+    ) -> list[tuple[str, str]]:
+        """Return a bounded exact-Species catalog for interactive selectors."""
+
+        search = str(query or "").strip()
+        bounded_limit = max(1, min(int(limit), 500))
+        return [
+            (str(species), str(species_id))
+            for species_id, species in self.connection.execute(
+                """
+                SELECT species_id, species_smiles
+                FROM continuity_species
+                WHERE ? = ''
+                   OR instr(species_smiles, ?) > 0
+                   OR instr(species_id, ?) > 0
+                ORDER BY
+                    CASE
+                        WHEN species_smiles = ? THEN 0
+                        WHEN species_id = ? THEN 1
+                        ELSE 2
+                    END,
+                    length(species_smiles),
+                    species_smiles,
+                    species_id
+                LIMIT ?
+                """,
+                (
+                    search,
+                    search,
+                    search,
+                    search,
+                    search,
+                    bounded_limit,
+                ),
+            )
+        ]
+
     def formation_candidates(
         self,
         target_species_id: str,
@@ -1628,11 +1669,23 @@ def analyze_species_fate(
 def species_fate_catalog(
     reactionevent_file: str,
     molecules_file: str,
+    *,
+    query: str = "",
+    limit: int | None = None,
 ) -> list[dict[str, str]]:
     """Return stable exact-Species choices from prepared continuity evidence."""
 
     reader = _ContinuityReader(reactionevent_file, molecules_file)
     try:
+        if query or limit is not None:
+            rows = reader.search_species_catalog(
+                query,
+                limit=100 if limit is None else limit,
+            )
+            return [
+                {"species_id": species_id, "species": species}
+                for species, species_id in rows
+            ]
         return [
             {"species_id": species_id, "species": species}
             for species, species_id in sorted(reader.species_catalog().items())

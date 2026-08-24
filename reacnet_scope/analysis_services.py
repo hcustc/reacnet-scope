@@ -99,6 +99,7 @@ from reacnet_scope.queries import (  # noqa: E402
     reaction_formula_str,
     reaction_mass_fields,
     reaction_smiles_str,
+    reaction_smiles_to_svg,
     resolve_start_smiles,
     smiles_formula_cached,
     smiles_to_svg,
@@ -1040,6 +1041,29 @@ def render_species_svg(
         return {"ok": False, "svg": "", "message": "未选择物种"}
     try:
         svg = smiles_to_svg(smi, width=width, height=height, show_h=show_h)
+        return {"ok": True, "svg": svg, "message": ""}
+    except Exception as exc:
+        return {"ok": False, "svg": "", "message": str(exc) or "RDKit 渲染失败"}
+
+
+def render_reaction_svg(
+    reaction_smiles: str,
+    *,
+    width: int = 720,
+    height: int = 220,
+    show_h: bool = True,
+) -> dict[str, Any]:
+    """Render a complete reaction expression as one SVG preview."""
+    text = str(reaction_smiles or "").strip()
+    if not text:
+        return {"ok": False, "svg": "", "message": "未选择反应式"}
+    try:
+        svg = reaction_smiles_to_svg(
+            text,
+            width=width,
+            height=height,
+            show_h=show_h,
+        )
         return {"ok": True, "svg": svg, "message": ""}
     except Exception as exc:
         return {"ok": False, "svg": "", "message": str(exc) or "RDKit 渲染失败"}

@@ -147,6 +147,31 @@ def test_selected_channel_structure_detail_falls_back_to_spaced_reaction_text() 
     assert [item["smiles"] for item in detail["products"]] == ["[NH3]", "[OH]"]
 
 
+def test_complete_reaction_preview_renders_charged_and_repeated_species() -> None:
+    result = svc.render_reaction_svg(
+        "[NH4+] + [O-] + [O-] -> [NH3] + [OH] + [O-]",
+        width=720,
+        height=220,
+        show_h=True,
+    )
+
+    assert result["ok"] is True
+    assert result["svg"].lstrip().startswith("<?xml")
+    assert "<svg" in result["svg"]
+
+
+def test_complete_reaction_preview_has_finite_coordinates_for_hydrogen() -> None:
+    result = svc.render_reaction_svg(
+        "[H][H] + [O] -> [H] + [H][O]",
+        width=720,
+        height=220,
+        show_h=True,
+    )
+
+    assert result["ok"] is True
+    assert "nan" not in result["svg"].lower()
+
+
 def test_representative_event_ranking_and_viewer_expose_bond_evidence(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     artifacts = _analysis_artifacts(tmp_path)

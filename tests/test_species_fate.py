@@ -111,6 +111,37 @@ def _materialize_synthetic_continuity(
     return connection
 
 
+def test_continuity_species_catalog_search_is_filtered_and_bounded() -> None:
+    reader = object.__new__(species_fate_module._ContinuityReader)
+    reader.connection = sqlite3.connect(":memory:")
+    reader.connection.execute(
+        "CREATE TABLE continuity_species (species_id TEXT, species_smiles TEXT)"
+    )
+    reader.connection.executemany(
+        "INSERT INTO continuity_species VALUES (?, ?)",
+        [
+            ("species-co2", "O=C=O"),
+            ("species-co", "[C-]#[O+]"),
+            ("species-methane", "C"),
+            ("species-ethanol", "CCO"),
+        ],
+    )
+
+    assert reader.search_species_catalog("", limit=2) == [
+        ("C", "species-methane"),
+        ("CCO", "species-ethanol"),
+    ]
+    assert reader.search_species_catalog("O", limit=2) == [
+        ("CCO", "species-ethanol"),
+        ("O=C=O", "species-co2"),
+    ]
+    assert reader.search_species_catalog("species-co2", limit=100) == [
+        ("O=C=O", "species-co2")
+    ]
+
+    reader.close()
+
+
 def test_fate_tracks_one_resolved_first_passage(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     reactionevent, molecules = _write_source(

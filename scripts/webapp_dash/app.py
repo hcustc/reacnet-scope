@@ -2375,7 +2375,11 @@ def _species_fate_page() -> html.Div:
                             html.H5("1. Dataset & Target"),
                             html.P("分析仅作用于当前 Dataset/Replicate。", className="rs-step-note"),
                             dbc.Label("Target Species"),
-                            dcc.Dropdown(id="fate-target-species", options=[], placeholder="从 continuity catalog 选择"),
+                            dcc.Dropdown(
+                                id="fate-target-species",
+                                options=[],
+                                placeholder="输入 SMILES 或 Species ID 搜索",
+                            ),
                         ]), className="rs-card h-100"),
                         md=6,
                     ),
@@ -2383,6 +2387,13 @@ def _species_fate_page() -> html.Div:
                         dbc.Card(dbc.CardBody([
                             html.H5("2. Fate Definition"),
                             html.P("类别必须互斥；每行选择一个精确 Species，同名类别可占多行。", className="rs-step-note"),
+                            dbc.Input(
+                                id="fate-endpoint-species-search",
+                                type="search",
+                                debounce=True,
+                                placeholder="筛选终点 SMILES 或 Species ID",
+                                className="mb-2",
+                            ),
                             endpoint_table,
                             dbc.Button("添加终点 Species", id="fate-add-endpoint-btn", color="secondary", outline=True, size="sm", className="mt-2"),
                         ]), className="rs-card h-100"),
@@ -3072,6 +3083,9 @@ def _channel_grid(grid_id: str) -> dash_table.DataTable:
             {"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfe"},
             {"if": {"column_id": "structure"}, "width": "90px", "minWidth": "90px", "maxWidth": "90px", "padding": "1px 5px", "textAlign": "center"},
         ],
+        tooltip_data=[],
+        tooltip_delay=300,
+        tooltip_duration=None,
     )
 
 
@@ -3831,6 +3845,40 @@ def create_app() -> dash.Dash:
         )
         if not result.get("ok") or not result.get("svg"):
             return Response("structure unavailable", status=422, mimetype="text/plain")
+        return Response(
+            str(result["svg"]),
+            mimetype="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @app.server.get("/api/reaction.svg")
+    def _reaction_svg():
+        reaction_smiles = (request.args.get("reaction_smiles") or "").strip()
+        if not reaction_smiles or len(reaction_smiles) > 8192:
+            return Response(
+                "invalid reaction SMILES",
+                status=400,
+                mimetype="text/plain",
+            )
+        try:
+            width = max(320, min(1200, int(request.args.get("width") or 720)))
+            height = max(120, min(400, int(request.args.get("height") or 220)))
+        except (TypeError, ValueError):
+            return Response("invalid dimensions", status=400, mimetype="text/plain")
+        show_h = str(request.args.get("show_h") or "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        result = svc.render_reaction_svg(
+            reaction_smiles,
+            width=width,
+            height=height,
+            show_h=show_h,
+        )
+        if not result.get("ok") or not result.get("svg"):
+            return Response("reaction unavailable", status=422, mimetype="text/plain")
         return Response(
             str(result["svg"]),
             mimetype="image/svg+xml",

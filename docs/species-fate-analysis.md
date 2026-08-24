@@ -323,6 +323,9 @@ Species Fate Analysis 是侧栏“事件证据”下的独立页面，并允许�
    limits；
 4. **Run & Results**：执行并查看结果。
 
+Target 与 endpoint Species 选择器按输入内容查询 continuity catalog，每次只返回有界的
+候选集合；切换 Current Dataset 时不得把完整 Species catalog 注入浏览器状态。
+
 结果区按 Summary、Fate Signatures、Endpoint Marginals、Pathways、Time
 Distributions 和 Episodes/Raw Evidence 组织。通过稳定 `event_id`、
 `molecule_instance_id` 和 `formation_episode_id` 在工具之间交接。

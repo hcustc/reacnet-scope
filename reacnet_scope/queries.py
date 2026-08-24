@@ -56,10 +56,11 @@ from reacnet_scope.indexes import (  # noqa: E402
 
 try:
     from rdkit import Chem
-    from rdkit.Chem import rdDepictor
+    from rdkit.Chem import rdChemReactions, rdDepictor
     from rdkit.Chem.Draw import rdMolDraw2D
 except Exception:  # pragma: no cover
     Chem = None
+    rdChemReactions = None
     rdDepictor = None
     rdMolDraw2D = None
 
@@ -2114,6 +2115,61 @@ def smiles_to_svg(smiles: str, width: int = 360, height: int = 240, show_h: bool
     opts.clearBackground = False
     opts.padding = 0.08
     drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText()
+
+
+def reaction_smiles_to_svg(
+    reaction_smiles: str,
+    width: int = 720,
+    height: int = 220,
+    show_h: bool = True,
+) -> str:
+    """Render a complete reaction, including separators and arrow, as SVG."""
+    if Chem is None or rdChemReactions is None or rdMolDraw2D is None:
+        raise RuntimeError("RDKit is not available")
+    text = str(reaction_smiles or "").strip()
+    sides: tuple[str, str] | None = None
+    for arrow in (">>", " -> ", " → ", "->", "→"):
+        if arrow in text:
+            sides = tuple(text.split(arrow, 1))
+            break
+    if sides is None:
+        raise ValueError("invalid reaction smiles")
+
+    parser = Chem.SmilesParserParams()
+    parser.removeHs = not show_h
+
+    def parse_molecule(smiles: str):
+        molecule = Chem.MolFromSmiles(smiles, parser)
+        if molecule is None:
+            fallback = Chem.SmilesParserParams()
+            fallback.removeHs = not show_h
+            fallback.sanitize = False
+            molecule = Chem.MolFromSmiles(smiles, fallback)
+            if molecule is not None:
+                molecule.UpdatePropertyCache(strict=False)
+        if molecule is None:
+            raise ValueError(f"invalid smiles: {smiles}")
+        return molecule
+
+    reactants = [parse_molecule(term) for term in split_terms(sides[0])]
+    products = [parse_molecule(term) for term in split_terms(sides[1])]
+    if not reactants or not products:
+        raise ValueError("reaction must contain reactants and products")
+
+    reaction = rdChemReactions.ChemicalReaction()
+    for molecule in reactants:
+        reaction.AddReactantTemplate(molecule)
+    for molecule in products:
+        reaction.AddProductTemplate(molecule)
+
+    drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+    options = drawer.drawOptions()
+    options.addStereoAnnotation = False
+    options.clearBackground = False
+    options.padding = 0.06
+    drawer.DrawReaction(reaction)
     drawer.FinishDrawing()
     return drawer.GetDrawingText()
 

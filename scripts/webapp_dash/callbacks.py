@@ -83,6 +83,8 @@ _CAPABILITY_STATE_LABELS = {
     "missing_source": "缺少源数据",
 }
 
+_FATE_SPECIES_OPTION_LIMIT = 100
+
 _ELEMENT_SYMBOLS = (
     "H",
     "C",
@@ -428,6 +430,15 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("event-path-store", "data", None),
         reset("event-path-context-store", "data", None),
         reset("event-path-wizard-step", "data", 1),
+        reset("fate-result-store", "data", None),
+        reset("fate-target-species", "value", None),
+        reset(
+            "fate-endpoints-table",
+            "data",
+            [{"category": "", "species": ""}],
+        ),
+        reset("fate-error", "children", ""),
+        reset("fate-error", "is_open", False),
         reset("species-grid", "data", []),
         reset("species-grid", "selected_rows", []),
         reset("species-grid", "active_cell", None),
@@ -1792,25 +1803,70 @@ def register_callbacks(app: Any) -> None:
         Output("fate-target-species", "options"),
         Output("fate-endpoints-table", "dropdown"),
         Input("app-store", "data"),
+        Input("fate-target-species", "search_value"),
+        Input("fate-endpoint-species-search", "value"),
+        State("fate-target-species", "value"),
+        State("fate-endpoints-table", "data"),
     )
-    def _load_species_fate_catalog(app_store):
+    def _load_species_fate_catalog(
+        app_store,
+        target_search,
+        endpoint_search,
+        target_value,
+        endpoint_rows,
+    ):
         capabilities = _capabilities_from_store(app_store)
         if str((capabilities.get("species_fate") or {}).get("state")) != "ready":
             return [], {"species": {"options": []}}
+        artifacts = (app_store or {}).get("artifacts", {}) or {}
+        target_query = str(target_search or "").strip()
+        endpoint_query = str(endpoint_search or "").strip()
         try:
-            catalog = svc.species_fate_catalog_for_dataset(
-                (app_store or {}).get("artifacts", {}) or {}
+            target_catalog = svc.species_fate_catalog_for_dataset(
+                artifacts,
+                query=target_query,
+                limit=_FATE_SPECIES_OPTION_LIMIT,
+            )
+            endpoint_catalog = (
+                target_catalog
+                if endpoint_query == target_query
+                else svc.species_fate_catalog_for_dataset(
+                    artifacts,
+                    query=endpoint_query,
+                    limit=_FATE_SPECIES_OPTION_LIMIT,
+                )
             )
         except svc.ServiceError:
             return [], {"species": {"options": []}}
-        options = [
-            {
-                "label": f"{row['species']} · {row['species_id']}",
-                "value": row["species"],
-            }
-            for row in catalog
-        ]
-        return options, {"species": {"options": options}}
+
+        def options_for(catalog, selected=()):
+            options = [
+                {
+                    "label": f"{row['species']} · {row['species_id']}",
+                    "value": row["species"],
+                }
+                for row in catalog
+            ]
+            known = {str(option["value"]) for option in options}
+            for value in selected:
+                species = str(value or "").strip()
+                if species and species not in known:
+                    options.append({"label": species, "value": species})
+                    known.add(species)
+            return options
+
+        preserve_selection = ctx.triggered_id != "app-store"
+        selected_endpoints = (
+            [row.get("species") for row in (endpoint_rows or [])]
+            if preserve_selection
+            else []
+        )
+        target_options = options_for(
+            target_catalog,
+            [target_value] if preserve_selection else [],
+        )
+        endpoint_options = options_for(endpoint_catalog, selected_endpoints)
+        return target_options, {"species": {"options": endpoint_options}}
 
     @app.callback(
         Output("fate-endpoints-table", "data"),
@@ -3932,6 +3988,65 @@ def register_callbacks(app: Any) -> None:
         return tooltips
 
     # ── Species search ──────────────────────────────────────────────
+
+    def _reaction_preview_tooltips(
+        rows: list[dict[str, Any]] | None,
+        *,
+        show_h: bool,
+    ) -> list[dict[str, Any]]:
+        """Build lazy full-reaction hover cards for reaction-expression cells."""
+        tooltips: list[dict[str, Any]] = []
+        for row in rows or []:
+            reaction_smiles = str(row.get("reaction_smiles") or "").strip()
+            if not reaction_smiles:
+                tooltips.append({})
+                continue
+            reaction_formulas = str(
+                row.get("reaction_formulas") or reaction_smiles
+            ).strip()
+            preview_url = (
+                "/api/reaction.svg?"
+                f"reaction_smiles={quote(reaction_smiles, safe='')}"
+                "&width=720&height=220"
+                f"&show_h={1 if show_h else 0}"
+            )
+            preview = {
+                "value": (
+                    "**完整结构反应式**\n\n"
+                    f"![完整结构反应式]({preview_url})\n\n"
+                    f"**分子式**  `{reaction_formulas}`\n\n"
+                    f"**SMILES**  `{reaction_smiles}`"
+                ),
+                "type": "markdown",
+            }
+            tooltips.append(
+                {
+                    "reaction_formulas": preview,
+                    "reaction_smiles": preview,
+                }
+            )
+        return tooltips
+
+    @app.callback(
+        Output("rxn-grid", "tooltip_data"),
+        Input("rxn-grid", "data"),
+        Input("rxn-structure-show-h", "value"),
+    )
+    def _preview_searched_reactions(rows, show_h):
+        return _reaction_preview_tooltips(rows, show_h=bool(show_h))
+
+    @app.callback(
+        Output("rxn-production-grid", "tooltip_data"),
+        Output("rxn-consumption-grid", "tooltip_data"),
+        Input("rxn-production-grid", "data"),
+        Input("rxn-consumption-grid", "data"),
+        Input("rxn-channel-show-h", "value"),
+    )
+    def _preview_species_channels(production_rows, consumption_rows, show_h):
+        return (
+            _reaction_preview_tooltips(production_rows, show_h=bool(show_h)),
+            _reaction_preview_tooltips(consumption_rows, show_h=bool(show_h)),
+        )
 
     @app.callback(
         Output("species-grid", "data"),

@@ -1006,6 +1006,9 @@ def build_molecule_lineage_analysis(
 
 def species_fate_catalog_for_dataset(
     artifacts: dict[str, str],
+    *,
+    query: str = "",
+    limit: int | None = None,
 ) -> list[dict[str, str]]:
     """Return exact Species identities available to a Fate Query."""
 
@@ -1016,7 +1019,12 @@ def species_fate_catalog_for_dataset(
             reason="missing_reactionevent",
         )
     try:
-        return species_fate_catalog(reactionevent_file, molecules_file)
+        return species_fate_catalog(
+            reactionevent_file,
+            molecules_file,
+            query=query,
+            limit=limit,
+        )
     except (
         SpeciesFateError,
         IndexInvalidError,
