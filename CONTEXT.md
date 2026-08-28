@@ -28,6 +28,10 @@ _Avoid_: Reaction event, event row
 A reaction type viewed relative to one focal species and classified as a production channel when that species is on the product side or a consumption channel when it is on the reactant side; it is a one-step query and does not recursively expand a path.
 _Avoid_: Path Verification, Event Path
 
+**Apparent Rate Constant Estimate**:
+A dataset- and window-bound estimate for one directed Reaction Type under an explicitly reported stoichiometric mass-action model, calculated from exact Reaction Occurrence count divided by physical-time reactant exposure and, for second-order models, confirmed cell volume. It is an auditable model-dependent estimate, not an intrinsic rate constant inferred from TP or net flux.
+_Avoid_: TP rate constant, intrinsic rate constant, net-TP rate
+
 **Aggregated Reaction Record**:
 The count of one reaction type detected within one transition.
 _Avoid_: Reaction occurrence, event

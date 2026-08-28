@@ -1291,6 +1291,84 @@ def _reaction_structure_detail_children(
     role_label: str = "",
     action_scope: str = "",
 ) -> list[Any]:
+    kinetics = detail.get("kinetics") or {}
+    kinetics_lines: list[Any] = []
+    if kinetics.get("k_app_display"):
+        interval = ""
+        if (
+            kinetics.get("k_app_ci95_low") is not None
+            and kinetics.get("k_app_ci95_high") is not None
+        ):
+            interval = (
+                f"{float(kinetics['k_app_ci95_low']):.4g}–"
+                f"{float(kinetics['k_app_ci95_high']):.4g} "
+                f"{kinetics.get('k_app_unit') or ''}"
+            ).strip()
+        kinetics_lines.extend(
+            [
+                html.Div(
+                    [
+                        html.Span("表观 k"),
+                        html.Code(str(kinetics["k_app_display"])),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+                html.Div(
+                    [
+                        html.Span("事件证据"),
+                        html.Code(
+                            f"n={int(kinetics.get('event_count') or 0)}；"
+                            f"{float(kinetics.get('event_frequency_per_ps') or 0):.4g} ps⁻¹；"
+                            f"观察 {float(kinetics.get('observation_time_ps') or 0):.4g} ps"
+                        ),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+                html.Div(
+                    [html.Span("95% CI"), html.Code(interval)],
+                    className="rs-channel-detail-line",
+                )
+                if interval
+                else None,
+                html.Div(
+                    [
+                        html.Span("暴露量"),
+                        html.Code(
+                            f"{float(kinetics.get('kinetic_exposure') or 0):.6g} "
+                            f"{kinetics.get('kinetic_exposure_unit') or ''}"
+                        ),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+                html.Div(
+                    [
+                        html.Span("模型"),
+                        html.Code("化学计量质量作用（表观估计）"),
+                    ],
+                    className="rs-channel-detail-line",
+                ),
+            ]
+        )
+        if kinetics.get("reverse_k_app_display"):
+            kinetics_lines.append(
+                html.Div(
+                    [
+                        html.Span("逆向表观 k"),
+                        html.Code(str(kinetics["reverse_k_app_display"])),
+                    ],
+                    className="rs-channel-detail-line",
+                )
+            )
+    elif kinetics.get("kinetics_reason"):
+        kinetics_lines.append(
+            html.Div(
+                [
+                    html.Span("表观 k"),
+                    html.Code(str(kinetics["kinetics_reason"])),
+                ],
+                className="rs-channel-detail-line",
+            )
+        )
     return [
         html.Div(
             [
@@ -1316,6 +1394,7 @@ def _reaction_structure_detail_children(
                     ],
                     className="rs-channel-detail-line",
                 ),
+                *kinetics_lines,
             ],
             className="rs-channel-detail-header",
         ),
@@ -4939,6 +5018,9 @@ def register_callbacks(app: Any) -> None:
                 ("reverse_tp", "逆向", 72),
                 ("net_tp", "净频次", 76),
                 ("ratio_pct", "占比%", 68),
+                ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
+                ("k_app_display", "表观 k", 150),
+                ("reverse_k_app_display", "逆向表观 k", 150),
             ]
         )
         try:
@@ -4961,7 +5043,7 @@ def register_callbacks(app: Any) -> None:
         )
         production_rows = result.get("production_rows") or []
         consumption_rows = result.get("consumption_rows") or []
-        message = ""
+        message = str((result.get("kinetics") or {}).get("message") or "")
         return (
             production_rows,
             columns,
@@ -5028,6 +5110,26 @@ def register_callbacks(app: Any) -> None:
                 "reverse_tp": row.get("reverse_tp"),
                 "net_tp": row.get("net_tp"),
                 "share_pct": row.get("ratio_pct"),
+                "event_count": row.get("event_count"),
+                "event_frequency_per_ps": row.get("event_frequency_per_ps"),
+                "observation_time_ps": row.get("observation_time_ps"),
+                "k_app": row.get("k_app"),
+                "k_app_unit": row.get("k_app_unit"),
+                "k_app_ci95_low": row.get("k_app_ci95_low"),
+                "k_app_ci95_high": row.get("k_app_ci95_high"),
+                "kinetic_exposure": row.get("kinetic_exposure"),
+                "kinetic_exposure_unit": row.get("kinetic_exposure_unit"),
+                "kinetic_model": row.get("kinetic_model"),
+                "kinetics_status": row.get("kinetics_status"),
+                "kinetics_reason": row.get("kinetics_reason"),
+                "reverse_event_count": row.get("reverse_event_count"),
+                "reverse_event_frequency_per_ps": row.get(
+                    "reverse_event_frequency_per_ps"
+                ),
+                "reverse_k_app": row.get("reverse_k_app"),
+                "reverse_k_app_unit": row.get("reverse_k_app_unit"),
+                "reverse_k_app_ci95_low": row.get("reverse_k_app_ci95_low"),
+                "reverse_k_app_ci95_high": row.get("reverse_k_app_ci95_high"),
             }
             for row in rows
         ]
@@ -5165,6 +5267,9 @@ def register_callbacks(app: Any) -> None:
                 ("reverse_tp", "逆向", 72),
                 ("net_tp", "净频次", 76),
                 ("ratio_pct", "占比%", 68),
+                ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
+                ("k_app_display", "表观 k", 150),
+                ("reverse_k_app_display", "逆向表观 k", 150),
             ]
         )
         try:
@@ -5175,7 +5280,7 @@ def register_callbacks(app: Any) -> None:
             )
             production_rows = result.get("production_rows") or []
             consumption_rows = result.get("consumption_rows") or []
-            message = ""
+            message = str((result.get("kinetics") or {}).get("message") or "")
         except svc.ServiceError as exc:
             production_rows = []
             consumption_rows = []
