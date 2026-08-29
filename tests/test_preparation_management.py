@@ -822,6 +822,44 @@ def test_dataset_preparation_status_and_safe_clear(tmp_path, monkeypatch) -> Non
     assert TRAJECTORY_INDEX_STORE.status(str(trajectory))["state"] == "missing"
 
 
+def test_prepare_workspace_builds_index_for_linked_cross_directory_trajectory(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    species_dir = tmp_path / "rng_data"
+    trajectory_dir = tmp_path / "raw_data"
+    species_dir.mkdir()
+    trajectory_dir.mkdir()
+    base = species_dir / "run.lammpstrj"
+    species = Path(f"{base}.species")
+    trajectory = trajectory_dir / "run.lammpstrj"
+    species.write_text("Timestep 0: [H] 1\n", encoding="utf-8")
+    trajectory.write_text(
+        "ITEM: TIMESTEP\n0\n"
+        "ITEM: NUMBER OF ATOMS\n1\n"
+        "ITEM: BOX BOUNDS pp pp pp\n0 10\n0 10\n0 10\n"
+        "ITEM: ATOMS id type x y z\n1 1 1 1 1\n",
+        encoding="utf-8",
+    )
+    svc.configure_channel_volume_source(
+        {"species": str(species)},
+        str(trajectory),
+        confirm_angstrom=True,
+    )
+
+    result = svc.prepare_dataset_workspace(
+        str(species_dir),
+        base=str(base),
+        kind="trajectory",
+    )
+
+    assert result["status"]["state"] == "ready"
+    assert result["status"]["frames"] == 1
+    assert TRAJECTORY_INDEX_STORE.status(str(trajectory))["state"] == "ready"
+
+
 def test_dash_equivalent_prepare_command_runs_through_the_installed_cli(
     tmp_path,
     monkeypatch,

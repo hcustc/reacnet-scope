@@ -173,10 +173,15 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 - TP、净 TP、事件频率和 Apparent Rate Constant Estimate 是不同量，不得混称。
 - 事件频率只在已确认 `timestep → ps` 且具有完整观察窗时给出，单位明确为每 ps。
 - Apparent Rate Constant Estimate 的分子必须来自观察窗内的精确 Reaction Occurrence，正向与逆向分别计算，不使用净 TP。
-- 分母使用 Species Abundance Evidence 的左端点反应物丰度暴露量；二阶模型还要求轨迹长度单位确认为 Å，并使用离线轨迹索引准备的逐帧晶胞体积。
+- 分母使用 Species Abundance Evidence 的左端点反应物丰度暴露量；二阶模型还要求轨迹长度单位确认为 Å，并使用离线轨迹索引准备的逐帧模拟盒体积。
 - MVP 只支持按反应物化学计量显式声明的一阶和二阶质量作用模型；`2 A` 使用下降阶乘 `n_A(n_A-1)`，不静默加入对称因子。
 - 每个估计同时报告模型、事件数、观察时长、暴露量、单位和 Poisson 95% 置信区间，并明确称为“表观 k”。
 - 任一时间、丰度、事件或体积证据缺失时保留通道 TP，但不得输出表观 k；页面必须显示具体缺失原因。
+- Direct Reaction Channel 页面必须允许用户就地确认 Dataset Workspace 的 `timestep → ps` 换算，并在保存后原地重新计算当前通道，不要求跳转到其他工具。
+- Direct Reaction Channel 页面必须允许将当前数据集显式关联到其他目录中的 `.lammpstrj`、确认 Å 并启动后台轨迹索引；关联保存在 Dataset Workspace，显式关联优先于同目录自动发现，且不得修改或复制原始轨迹。
+- 正向和逆向表观 k 必须分别保存缺失原因；汇总提示按缺少轨迹、单位未确认、索引未就绪/过期/无效、模拟盒时间点不对齐、零暴露量和不支持的高阶反应分别计数，不使用笼统的“晶胞证据不足”。
+- 一个通道查询涉及的全部 Species Abundance 必须在一次对齐的索引读取中取得，不得按 Species 重复解码同一批时间点；暴露量积分应使用对齐数组批量计算。
+- 在线计算期间页面必须显示明确的运行中状态，并保留已有通道内容，避免把服务器等待表现为无响应。
 - 在线查询只读取 Event Evidence、Species Abundance 和 Trajectory 索引，不扫描原始大型来源。
 
 ### 11.2 Species 时间演化

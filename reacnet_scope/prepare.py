@@ -29,6 +29,7 @@ from .timed_evidence import (
     native_membership_bytes,
     select_timed_evidence,
 )
+from .trajectory import load_linked_trajectory
 
 
 def discover_dataset(case: str, base: str = "") -> dict[str, str]:
@@ -85,12 +86,13 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
         stem = stem[: -len(".molecules.csv")]
     if stem.endswith(".timeline.h5"):
         stem = stem[: -len(".timeline.h5")]
+    linked_trajectory = load_linked_trajectory(stem)
     return {
         "base": stem,
         "reaction": f"{stem}.reactionabcd",
         "species": f"{stem}.species",
         "table": f"{stem}.table",
-        "trajectory": stem,
+        "trajectory": linked_trajectory or stem,
         "reactionevent": f"{stem}.reactionevent.csv",
         "molecules": f"{stem}.molecules.csv",
         "timeline": f"{stem}.timeline.h5",
