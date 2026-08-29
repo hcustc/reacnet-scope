@@ -1789,6 +1789,9 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "id": "reaction_formulas",
         "name": "反应式",
     }
+    assert {
+        column["id"] for column in body["rxn-production-grid"]["columns"]
+    } >= {"event_frequency_per_ps", "k_app_display", "reverse_k_app_display"}
     assert body["rxn-channel-alert"]["children"] == ""
     assert body["rxn-production-grid"]["selected_rows"] == []
     assert body["rxn-consumption-grid"]["selected_rows"] == []
@@ -1805,6 +1808,17 @@ def test_species_channel_tables_export_loaded_rows_as_csv() -> None:
         "reverse_tp": 2,
         "net_tp": 8,
         "ratio_pct": 80.0,
+        "event_count": 9,
+        "event_frequency_per_ps": 4.5,
+        "observation_time_ps": 2.0,
+        "k_app": 0.5,
+        "k_app_unit": "ps⁻¹",
+        "k_app_ci95_low": 0.2,
+        "k_app_ci95_high": 0.9,
+        "kinetic_exposure": 18.0,
+        "kinetic_exposure_unit": "molecule·ps",
+        "kinetic_model": "stoichiometric_mass_action",
+        "kinetics_status": "estimated",
     }
     consumption = {
         "reaction_formulas": "CO -> C + O",
@@ -1849,6 +1863,8 @@ def test_species_channel_tables_export_loaded_rows_as_csv() -> None:
     assert production_rows[0]["channel_role"] == "production"
     assert production_rows[0]["reaction_formula"] == "C + O -> CO"
     assert production_rows[0]["net_tp"] == "8"
+    assert production_rows[0]["k_app"] == "0.5"
+    assert production_rows[0]["kinetic_model"] == "stoichiometric_mass_action"
 
     consumption_response = client.post(
         "/_dash-update-component",
@@ -1919,7 +1935,17 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
     monkeypatch.setattr(
         svc,
         "build_channel_structure_detail",
-        lambda *_args, **_kwargs: {"ok": False},
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "reaction_formulas": "CO -> C + O",
+            "reaction_smiles": "[C][O] -> [C] + [O]",
+            "reactants": [],
+            "products": [],
+            "kinetics": {
+                "k_app_display": "0.5 ps⁻¹",
+                "event_frequency_per_ps": 4.5,
+            },
+        },
     )
     render_response = client.post(
         "/_dash-update-component",
@@ -1942,6 +1968,8 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
     rendered = render_response.get_json()["response"]
     assert rendered["rxn-channel-to-event-btn"]["disabled"] is False
     assert "已选消耗通道" in rendered["rxn-channel-choice"]["children"]
+    assert "表观 k" in str(rendered["rxn-channel-detail"]["children"])
+    assert "0.5 ps⁻¹" in str(rendered["rxn-channel-detail"]["children"])
 
     event_response = client.post(
         "/_dash-update-component",

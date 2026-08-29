@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -74,6 +75,7 @@ from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryFrameError,
     dataset_settings_path,
     load_type_element_map,
+    load_coordinate_length_unit,
     load_timestep_ps,
     normalize_type_element_map,
     read_lammps_frame_block,
@@ -81,6 +83,10 @@ from reacnet_scope.trajectory import (  # noqa: E402
     save_type_element_map,
     save_timestep_ps,
     select_local_environment,
+)
+from reacnet_scope.kinetics import (  # noqa: E402
+    KineticsInputError,
+    estimate_mass_action_rate,
 )
 from reacnet_scope.queries import (  # noqa: E402
     STORE,
@@ -1106,6 +1112,269 @@ def _collect_reaction_channels(
     }
 
 
+def _rate_display(value: Any, unit: str) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(numeric):
+        return ""
+    return f"{numeric:.4g} {unit}".strip()
+
+
+def _channel_reaction_key(row: Mapping[str, Any], *, reverse: bool = False) -> str:
+    reactants = tuple(str(value) for value in row.get("reactant_smiles") or [])
+    products = tuple(str(value) for value in row.get("product_smiles") or [])
+    if reverse:
+        reactants, products = products, reactants
+    return canonical_reaction_key(reactants, products)
+
+
+def _unavailable_kinetics(
+    rows: Iterable[dict[str, Any]],
+    *,
+    reason: str,
+    message: str,
+) -> dict[str, Any]:
+    for row in rows:
+        row.update(
+            kinetics_status="unavailable",
+            kinetics_reason=reason,
+            k_app=None,
+            k_app_unit="",
+            k_app_display="",
+            event_frequency_per_ps=None,
+        )
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "message": message,
+        "model": "stoichiometric_mass_action",
+    }
+
+
+def _enrich_channel_kinetics(
+    artifacts: Mapping[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach physical event frequency and auditable apparent k estimates."""
+    if not rows:
+        return {"status": "not_applicable", "message": ""}
+    species_file = str(artifacts.get("species") or "").strip()
+    if not species_file or not Path(species_file).is_file():
+        return _unavailable_kinetics(
+            rows,
+            reason="missing_species_abundance",
+            message="表观速率不可用：缺少 .species 丰度证据。",
+        )
+    trajectory_file = str(artifacts.get("trajectory") or "").strip()
+    timestep_ps = load_timestep_ps(species_file)
+    if timestep_ps is None and trajectory_file:
+        timestep_ps = load_timestep_ps(trajectory_file)
+    if timestep_ps is None:
+        return _unavailable_kinetics(
+            rows,
+            reason="missing_physical_time",
+            message="表观速率不可用：请先确认并保存 timestep → ps 换算。",
+        )
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        return _unavailable_kinetics(
+            rows,
+            reason="missing_reaction_occurrences",
+            message="表观速率不可用：缺少 Timeline 或 Reaction Occurrence 证据。",
+        )
+
+    try:
+        composition = SPECIES_COMPOSITION_STORE.open_required(species_file)
+        timesteps = SPECIES_COMPOSITION_STORE.timesteps(species_file)
+        opened_events = EVENT_EVIDENCE_STORE.open_required(
+            reactionevent_file,
+            molecules_file,
+        )
+    except IndexNotReadyError as exc:
+        return _unavailable_kinetics(
+            rows,
+            reason="index_not_ready",
+            message=f"表观速率不可用：所需索引未就绪（{exc}）。",
+        )
+    if opened_events.get("time_basis") != "physical_timestep":
+        return _unavailable_kinetics(
+            rows,
+            reason="event_time_basis",
+            message="表观速率不可用：事件索引没有物理 source timestep。",
+        )
+    if len(timesteps) < 2:
+        return _unavailable_kinetics(
+            rows,
+            reason="insufficient_timepoints",
+            message="表观速率不可用：至少需要两个 Species Abundance 时间点。",
+        )
+
+    reaction_keys = {
+        key
+        for row in rows
+        for key in (
+            _channel_reaction_key(row),
+            _channel_reaction_key(row, reverse=True),
+        )
+    }
+    try:
+        event_counts = EVENT_EVIDENCE_STORE.reaction_counts(
+            reactionevent_file,
+            molecules_file,
+            reaction_keys,
+            before_timestep=timesteps[0],
+            after_timestep=timesteps[-1],
+        )
+    except (IndexNotReadyError, OSError, ValueError) as exc:
+        return _unavailable_kinetics(
+            rows,
+            reason="event_count_unavailable",
+            message=f"表观速率不可用：无法读取 Reaction Occurrence 计数（{exc}）。",
+        )
+
+    required_species = {
+        str(species)
+        for row in rows
+        for side in ("reactant_smiles", "product_smiles")
+        for species in row.get(side) or []
+        if str(species)
+    }
+    try:
+        count_series = {
+            species: SPECIES_COMPOSITION_STORE.species_count_series(
+                species_file,
+                timesteps,
+                species,
+            )
+            for species in required_species
+        }
+    except (IndexNotReadyError, ValueError, OSError) as exc:
+        return _unavailable_kinetics(
+            rows,
+            reason="abundance_exposure_unavailable",
+            message=f"表观速率不可用：无法读取反应物丰度暴露量（{exc}）。",
+        )
+
+    needs_volume = any(
+        len(row.get(side) or []) == 2
+        for row in rows
+        for side in ("reactant_smiles", "product_smiles")
+    )
+    volumes: dict[int, float] | None = None
+    volume_reason = ""
+    if needs_volume:
+        if not trajectory_file or not Path(trajectory_file).is_file():
+            volume_reason = "缺少轨迹晶胞"
+        else:
+            try:
+                if load_coordinate_length_unit(trajectory_file) != "angstrom":
+                    volume_reason = "轨迹长度单位尚未确认为 Å"
+                else:
+                    trajectory_index = TRAJECTORY_INDEX_STORE.open_required(
+                        trajectory_file
+                    )
+                    volumes = trajectory_index.volumes_for(timesteps)
+                    if len(volumes) < len(timesteps) - 1:
+                        volume_reason = "轨迹索引缺少与丰度时间点对齐的晶胞体积"
+            except (IndexNotReadyError, TrajectoryFrameError, OSError) as exc:
+                volume_reason = str(exc)
+
+    estimated = 0
+    unsupported = 0
+    observation_time_ps = (timesteps[-1] - timesteps[0]) * float(timestep_ps)
+    for row in rows:
+        forward_key = _channel_reaction_key(row)
+        reverse_key = _channel_reaction_key(row, reverse=True)
+        directions = (
+            (
+                "",
+                row.get("reactant_smiles") or [],
+                int(event_counts.get(forward_key, 0)),
+            ),
+            (
+                "reverse_",
+                row.get("product_smiles") or [],
+                int(event_counts.get(reverse_key, 0)),
+            ),
+        )
+        row_status = "estimated"
+        row_reason = ""
+        for prefix, reactants, occurrence_count in directions:
+            if len(reactants) == 2 and volume_reason:
+                estimate = None
+                row_status = "partial"
+                row_reason = volume_reason
+            else:
+                try:
+                    estimate = estimate_mass_action_rate(
+                        event_count=occurrence_count,
+                        timesteps=timesteps,
+                        timestep_ps=float(timestep_ps),
+                        reactants=reactants,
+                        species_counts=count_series,
+                        volumes_angstrom3=volumes,
+                    )
+                except KineticsInputError as exc:
+                    estimate = None
+                    row_status = "unsupported"
+                    row_reason = str(exc)
+            if estimate is None:
+                row[f"{prefix}event_count"] = occurrence_count
+                row[f"{prefix}event_frequency_per_ps"] = (
+                    occurrence_count / observation_time_ps
+                )
+                row[f"{prefix}k_app"] = None
+                row[f"{prefix}k_app_unit"] = ""
+                row[f"{prefix}k_app_display"] = ""
+                row["observation_time_ps"] = observation_time_ps
+                continue
+            if estimate.get("status") != "estimated":
+                row_status = "partial"
+                row_reason = "观察窗内反应物暴露量为零"
+            unit = str(estimate["k_app_unit"])
+            row[f"{prefix}event_count"] = occurrence_count
+            row[f"{prefix}event_frequency_per_ps"] = estimate[
+                "event_frequency_per_ps"
+            ]
+            row[f"{prefix}k_app"] = estimate["k_app"]
+            row[f"{prefix}k_app_unit"] = unit
+            row[f"{prefix}k_app_display"] = _rate_display(
+                estimate["k_app"], unit
+            )
+            row[f"{prefix}k_app_ci95_low"] = estimate["ci95_low"]
+            row[f"{prefix}k_app_ci95_high"] = estimate["ci95_high"]
+            row[f"{prefix}kinetic_exposure"] = estimate["exposure"]
+            row[f"{prefix}kinetic_exposure_unit"] = estimate[
+                "exposure_unit"
+            ]
+            row["observation_time_ps"] = estimate["observation_time_ps"]
+            row["kinetic_model"] = estimate["model"]
+        row["kinetics_status"] = row_status
+        row["kinetics_reason"] = row_reason
+        if row.get("k_app") is not None:
+            estimated += 1
+        else:
+            unsupported += 1
+
+    message = (
+        "表观 k 已按 Reaction Occurrence、左端点丰度暴露量和化学计量质量作用假设计算；"
+        "它不是无模型的本征速率常数。"
+    )
+    if unsupported:
+        message += f" {unsupported} 条通道因阶数或晶胞证据不足未给出 k。"
+    return {
+        "status": "estimated" if estimated else "unavailable",
+        "estimated_rows": estimated,
+        "unavailable_rows": unsupported,
+        "message": message,
+        "model": "stoichiometric_mass_action",
+        "timestep_ps": float(timestep_ps),
+        "timepoint_count": int(composition["timepoints"]),
+    }
+
+
 def collect_species_channels(
     artifacts: dict[str, str],
     smiles: str,
@@ -1137,11 +1406,18 @@ def collect_species_channels(
             row["rank"] = rank
         return prepared[: max(1, int(top or 20))]
 
+    production_rows = decorate(production, "produce")
+    consumption_rows = decorate(consumption, "consume")
+    kinetics = _enrich_channel_kinetics(
+        artifacts,
+        [*production_rows, *consumption_rows],
+    )
     return {
         "ok": True,
         "smiles": smiles,
-        "production_rows": decorate(production, "produce"),
-        "consumption_rows": decorate(consumption, "consume"),
+        "production_rows": production_rows,
+        "consumption_rows": consumption_rows,
+        "kinetics": kinetics,
     }
 
 
@@ -1797,4 +2073,30 @@ def build_channel_structure_detail(
         "reaction_formulas": reaction_formulas,
         "reactants": reactants,
         "products": products,
+        "kinetics": {
+            key: selected.get(key)
+            for key in (
+                "kinetics_status",
+                "kinetics_reason",
+                "event_count",
+                "event_frequency_per_ps",
+                "observation_time_ps",
+                "k_app",
+                "k_app_unit",
+                "k_app_display",
+                "k_app_ci95_low",
+                "k_app_ci95_high",
+                "kinetic_exposure",
+                "kinetic_exposure_unit",
+                "kinetic_model",
+                "reverse_event_count",
+                "reverse_event_frequency_per_ps",
+                "reverse_k_app",
+                "reverse_k_app_unit",
+                "reverse_k_app_display",
+                "reverse_k_app_ci95_low",
+                "reverse_k_app_ci95_high",
+            )
+            if key in selected
+        },
     }

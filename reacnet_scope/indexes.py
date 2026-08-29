@@ -38,10 +38,10 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 
-TRAJECTORY_INDEX_SCHEMA_VERSION = 3
+TRAJECTORY_INDEX_SCHEMA_VERSION = 4
 _TRAJECTORY_REQUIRED_TABLE_COLUMNS = {
     "meta": {"key", "value"},
-    "frames": {"timestep", "byte_start", "byte_end"},
+    "frames": {"timestep", "byte_start", "byte_end", "volume"},
 }
 DATASET_SUFFIXES = (
     ".timeline.h5",
@@ -68,6 +68,48 @@ class IndexInvalidError(IndexNotReadyError):
 
 class IndexBuildInProgressError(RuntimeError):
     """A requested index is locked by a live offline preparation process."""
+
+
+def _lammps_box_volume(header: bytes, rows: list[bytes]) -> float | None:
+    """Return a LAMMPS dump cell volume without reading atom coordinates."""
+    if len(rows) != 3:
+        return None
+    try:
+        values = [
+            [float(value) for value in row.decode("ascii").split()]
+            for row in rows
+        ]
+    except (UnicodeDecodeError, ValueError):
+        return None
+    label = header.decode("ascii", errors="ignore").lower()
+    try:
+        if " abc " in f" {label} ":
+            if any(len(row) < 3 for row in values):
+                return None
+            a, b, c = (row[:3] for row in values)
+            determinant = (
+                a[0] * (b[1] * c[2] - b[2] * c[1])
+                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0])
+            )
+            return abs(determinant) if determinant else None
+        if any(len(row) < 2 for row in values):
+            return None
+        if all(len(row) >= 3 for row in values):
+            xlo_bound, xhi_bound, xy = values[0][:3]
+            ylo_bound, yhi_bound, xz = values[1][:3]
+            zlo, zhi, yz = values[2][:3]
+            xlo = xlo_bound - min(0.0, xy, xz, xy + xz)
+            xhi = xhi_bound - max(0.0, xy, xz, xy + xz)
+            ylo = ylo_bound - min(0.0, yz)
+            yhi = yhi_bound - max(0.0, yz)
+            lengths = (xhi - xlo, yhi - ylo, zhi - zlo)
+        else:
+            lengths = tuple(row[1] - row[0] for row in values)
+        volume = lengths[0] * lengths[1] * lengths[2]
+        return volume if volume > 0 else None
+    except (IndexError, TypeError):
+        return None
 
 
 _REMOTE_OR_SHARED_FILESYSTEMS = frozenset(
@@ -882,6 +924,25 @@ class TrajectoryFrameIndex:
         finally:
             connection.close()
 
+    def volumes_for(self, frames: Iterable[int]) -> dict[int, float]:
+        """Return prepared cell volumes in the trajectory's length unit cubed."""
+        selected = sorted({int(frame) for frame in frames})
+        if not selected:
+            return {}
+        placeholders = ",".join("?" for _ in selected)
+        connection = _readonly_connection(Path(self.index_path))
+        try:
+            return {
+                int(frame): float(volume)
+                for frame, volume in connection.execute(
+                    f"SELECT timestep,volume FROM frames WHERE timestep IN ({placeholders})",
+                    selected,
+                )
+                if volume is not None and float(volume) > 0
+            }
+        finally:
+            connection.close()
+
 
 class TrajectoryIndexStore:
     """SQLite trajectory-offset index with no online scan fallback."""
@@ -1062,7 +1123,11 @@ class TrajectoryIndexStore:
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         connection.execute(
-            "CREATE TABLE IF NOT EXISTS frames(timestep INTEGER PRIMARY KEY,byte_start INTEGER NOT NULL,byte_end INTEGER NOT NULL CHECK(byte_end>byte_start))"
+            "CREATE TABLE IF NOT EXISTS frames("
+            "timestep INTEGER PRIMARY KEY,"
+            "byte_start INTEGER NOT NULL,"
+            "byte_end INTEGER NOT NULL CHECK(byte_end>byte_start),"
+            "volume REAL CHECK(volume IS NULL OR volume>0))"
         )
         return connection
 
@@ -1110,7 +1175,7 @@ class TrajectoryIndexStore:
         connection = self._connect_for_build(target)
         try:
             connection.executemany(
-                "INSERT OR REPLACE INTO frames(timestep,byte_start,byte_end) VALUES(?,?,?)",
+                "INSERT OR REPLACE INTO frames(timestep,byte_start,byte_end,volume) VALUES(?,?,?,NULL)",
                 [(int(frame), int(frame_offsets[frame][0]), int(frame_offsets[frame][1])) for frame in frames],
             )
             self._write_checkpoint(
@@ -1164,6 +1229,7 @@ class TrajectoryIndexStore:
         )
         current_frame: int | None = None
         current_start: int | None = None
+        current_volume: float | None = None
         last_checkpoint = offset
         last_emit = 0.0
         try:
@@ -1175,14 +1241,22 @@ class TrajectoryIndexStore:
                     if not line:
                         break
                     if not line.startswith(b"ITEM: TIMESTEP"):
+                        if line.startswith(b"ITEM: BOX BOUNDS"):
+                            box_rows = [source.readline() for _ in range(3)]
+                            current_volume = _lammps_box_volume(line, box_rows)
                         continue
                     timestep_line = source.readline()
                     if not timestep_line:
                         break
                     if current_frame is not None and current_start is not None and block_start > current_start:
                         connection.execute(
-                            "INSERT OR REPLACE INTO frames VALUES(?,?,?)",
-                            (current_frame, current_start, block_start),
+                            "INSERT OR REPLACE INTO frames VALUES(?,?,?,?)",
+                            (
+                                current_frame,
+                                current_start,
+                                block_start,
+                                current_volume,
+                            ),
                         )
                         frame_count += 1
                     try:
@@ -1190,6 +1264,7 @@ class TrajectoryIndexStore:
                     except (ValueError, IndexError):
                         current_frame = None
                     current_start = block_start
+                    current_volume = None
                     position = source.tell()
                     if block_start - last_checkpoint >= 1024 * 1024 * 1024:
                         self._write_checkpoint(
@@ -1211,7 +1286,10 @@ class TrajectoryIndexStore:
                         })
                         last_emit = now
             if current_frame is not None and current_start is not None and size > current_start:
-                connection.execute("INSERT OR REPLACE INTO frames VALUES(?,?,?)", (current_frame, current_start, size))
+                connection.execute(
+                    "INSERT OR REPLACE INTO frames VALUES(?,?,?,?)",
+                    (current_frame, current_start, size, current_volume),
+                )
             frame_count = int(connection.execute("SELECT COUNT(*) FROM frames").fetchone()[0])
             self._write_checkpoint(
                 connection,

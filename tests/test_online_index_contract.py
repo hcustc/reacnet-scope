@@ -97,6 +97,14 @@ class OnlineIndexContractTests(unittest.TestCase):
         self.assertEqual(list(self.cache.rglob("*.building")), [])
         self.assertEqual(list(self.cache.rglob("*-wal")), [])
 
+    def test_trajectory_index_prepares_cell_volumes_for_online_kinetics(self) -> None:
+        trajectory = self.root / "run.lammpstrj"
+        trajectory.write_bytes(b"".join(_frame(frame) for frame in (0, 10)))
+
+        index = TrajectoryIndexStore().build(str(trajectory))
+
+        self.assertEqual(index.volumes_for([0, 10]), {0: 1000.0, 10: 1000.0})
+
     def test_event_query_never_opens_event_source_csvs(self) -> None:
         reactionevent = self.root / "run.lammpstrj.reactionevent.csv"
         molecules = self.root / "run.lammpstrj.molecules.csv"

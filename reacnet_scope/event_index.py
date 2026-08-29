@@ -3417,6 +3417,50 @@ class EventEvidenceStore:
             "source_signatures": source_signatures,
         }
 
+    def reaction_counts(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_keys: Iterable[str],
+        *,
+        before_timestep: int,
+        after_timestep: int,
+    ) -> dict[str, int]:
+        """Count exact Reaction Occurrences inside one closed evidence window."""
+        opened = self.open_required(reactionevent_file, molecules_file)
+        selected = sorted({str(key) for key in reaction_keys if str(key)})
+        if not selected:
+            return {}
+        start = int(before_timestep)
+        end = int(after_timestep)
+        if end <= start:
+            raise ValueError("reaction count window must have positive duration")
+        output = {key: 0 for key in selected}
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            for offset in range(0, len(selected), 500):
+                chunk = selected[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                for key, total in connection.execute(
+                    f"""
+                    SELECT reaction_key,COUNT(*)
+                    FROM events
+                    WHERE reaction_key IN ({placeholders})
+                      AND before_timestep>=?
+                      AND after_timestep<=?
+                    GROUP BY reaction_key
+                    """,
+                    [*chunk, start, end],
+                ):
+                    output[str(key)] = int(total)
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Event evidence index is corrupt: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+        return output
+
     def query_adjacent_events(
         self,
         reactionevent_file: str,
