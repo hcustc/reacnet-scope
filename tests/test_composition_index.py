@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from reacnet_scope import composition
 from reacnet_scope.composition import (
     SPECIES_COMPOSITION_STORE,
     build_element_distribution_model,
@@ -116,6 +117,38 @@ def test_element_distribution_index_streams_and_queries_selected_groups(tmp_path
     assert by_smiles["[O]=[C]=[O]"]["peak_count"] == 4
     assert by_smiles["[O]=[C]=[O]"]["peak_timestep"] == 200
     assert by_smiles["[C][O]"]["current_count"] == 3
+
+
+def test_species_count_matrix_parses_each_timepoint_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    species = _species_file(tmp_path)
+    SPECIES_COMPOSITION_STORE.build(str(species))
+    original_loads = composition.json.loads
+    parsed_timepoints = 0
+
+    def counting_loads(value, *args, **kwargs):
+        nonlocal parsed_timepoints
+        result = original_loads(value, *args, **kwargs)
+        if isinstance(result, dict) and (
+            PARENT in result or "[C][O]" in result
+        ):
+            parsed_timepoints += 1
+        return result
+
+    monkeypatch.setattr(composition.json, "loads", counting_loads)
+    matrix = SPECIES_COMPOSITION_STORE.species_count_matrix(
+        str(species),
+        [0, 100, 200],
+        [PARENT, "[C][O]", "[Xe]"],
+    )
+
+    assert matrix[PARENT].tolist() == [8, 6, 0]
+    assert matrix["[C][O]"].tolist() == [0, 2, 3]
+    assert matrix["[Xe]"].tolist() == [0, 0, 0]
+    assert parsed_timepoints == 3
 
 
 def test_element_distribution_index_discovers_and_groups_arbitrary_elements(

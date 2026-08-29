@@ -2061,6 +2061,125 @@ html, body {
 .rs-channel-view-actions { justify-content: flex-end; }
 .rs-flow-alert:empty { display: none; }
 
+.rs-kinetics-setup {
+    display: grid;
+    grid-template-columns: minmax(250px, 1fr) auto;
+    align-items: center;
+    gap: 8px 18px;
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    border: 1px solid #d8e2f1;
+    border-radius: 7px;
+    background: #f8faff;
+}
+.rs-kinetics-setup-copy { min-width: 0; }
+.rs-kinetics-setup-copy strong {
+    display: block;
+    color: #233148;
+    font-size: 13px;
+}
+.rs-kinetics-setup-copy span {
+    display: block;
+    margin-top: 2px;
+    color: #667085;
+    font-size: 11px;
+}
+.rs-kinetics-setup-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.rs-kinetics-setup-actions label {
+    color: #344054;
+    font-size: 12px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+.rs-kinetics-setup-actions input {
+    width: 132px;
+    min-height: 31px;
+}
+.rs-kinetics-setup-divider {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 4px 0;
+    border-color: #d8e2f1;
+    opacity: 1;
+}
+.rs-kinetics-volume-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.rs-kinetics-volume-actions .rs-kinetics-trajectory-path {
+    width: min(420px, 38vw);
+    min-width: 240px;
+}
+.rs-kinetics-volume-actions .rs-kinetics-unit-confirm {
+    display: flex;
+    align-items: center;
+    margin: 0;
+}
+.rs-kinetics-volume-actions .rs-kinetics-unit-confirm input {
+    width: 1em;
+    min-height: 1em;
+}
+.rs-kinetics-volume-status-alert > div {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+}
+.rs-kinetics-source-path {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.rs-kinetics-setup-status {
+    grid-column: 1 / -1;
+    min-height: 0;
+    color: #48617f;
+    font-size: 11px;
+}
+.rs-kinetics-setup-status:empty { display: none; }
+.rs-kinetics-progress {
+    display: none;
+    grid-column: 1 / -1;
+    color: #2459c4;
+    font-size: 11px;
+    font-weight: 650;
+}
+.rs-kinetics-progress.is-running {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+.rs-kinetics-progress.is-running::before {
+    width: 9px;
+    height: 9px;
+    border: 2px solid #b9c9e8;
+    border-top-color: #2459c4;
+    border-radius: 50%;
+    content: "";
+    animation: rs-kinetics-spin .8s linear infinite;
+}
+@keyframes rs-kinetics-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+    .rs-kinetics-setup { grid-template-columns: 1fr; }
+    .rs-kinetics-setup-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+    .rs-kinetics-setup-actions input,
+    .rs-kinetics-setup-actions .btn { width: 100%; }
+    .rs-kinetics-volume-actions .rs-kinetics-trajectory-path {
+        width: 100%;
+        min-width: 0;
+    }
+    .rs-kinetics-volume-actions .rs-kinetics-unit-confirm input {
+        width: 1em;
+    }
+}
+
 /* Reaction search is intentionally task-first: one title, then controls. */
 .rs-tool-shell .rs-page-header.is-title-only {
     min-height: 38px;

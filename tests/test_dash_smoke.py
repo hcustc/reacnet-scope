@@ -1488,8 +1488,15 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
         "reaction_smiles": "[C][O] -> [C] + [O]",
     }
 
-    def fake_collect(artifacts, smiles, *, top):
-        captured.update({"artifacts": artifacts, "smiles": smiles, "top": top})
+    def fake_collect(artifacts, smiles, *, top, include_kinetics=True):
+        captured.update(
+            {
+                "artifacts": artifacts,
+                "smiles": smiles,
+                "top": top,
+                "include_kinetics": include_kinetics,
+            }
+        )
         return {
             "production_rows": [production],
             "consumption_rows": [consumption],
@@ -1555,6 +1562,7 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
         "artifacts": {"reaction": "/tmp/example.reaction"},
         "smiles": "[C]",
         "top": 7,
+        "include_kinetics": False,
     }
     assert result["rxn-production-grid"]["data"] == [production]
     assert result["rxn-consumption-grid"]["data"] == [consumption]
@@ -1702,8 +1710,15 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_collect(artifacts, smiles, *, top):
-        captured.update({"artifacts": artifacts, "smiles": smiles, "top": top})
+    def fake_collect(artifacts, smiles, *, top, include_kinetics=True):
+        captured.update(
+            {
+                "artifacts": artifacts,
+                "smiles": smiles,
+                "top": top,
+                "include_kinetics": include_kinetics,
+            }
+        )
         base = {
             "rank": 1,
             "reaction_formulas": "C + O -> CO",
@@ -1782,6 +1797,7 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "artifacts": {"reaction": "run.reactionabcd"},
         "smiles": "[C][O]",
         "top": 12,
+        "include_kinetics": False,
     }
     assert body["rxn-production-grid"]["data"][0]["role_label"] == "生成"
     assert body["rxn-consumption-grid"]["data"][0]["role_label"] == "消耗"
@@ -1797,6 +1813,213 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
     assert body["rxn-consumption-grid"]["selected_rows"] == []
     assert body["rxn-production-grid"]["active_cell"] is None
     assert body["rxn-consumption-grid"]["active_cell"] is None
+
+
+def test_reaction_channel_view_exposes_inline_time_conversion() -> None:
+    layout = create_app().server.test_client().get("/_dash-layout").get_json()
+    input_node = _layout_node_by_id(layout, "rxn-channel-timestep-ps") or {}
+    save_node = (
+        _layout_node_by_id(layout, "rxn-channel-timestep-save-btn") or {}
+    )
+    progress_node = (
+        _layout_node_by_id(layout, "rxn-channel-timestep-progress") or {}
+    )
+    trajectory_node = (
+        _layout_node_by_id(layout, "rxn-channel-trajectory-path") or {}
+    )
+    unit_node = (
+        _layout_node_by_id(layout, "rxn-channel-coordinate-unit-confirm")
+        or {}
+    )
+    volume_save_node = (
+        _layout_node_by_id(layout, "rxn-channel-volume-save-btn") or {}
+    )
+    volume_status_node = (
+        _layout_node_by_id(layout, "rxn-channel-volume-status") or {}
+    )
+    channel_view = str(_layout_node_by_id(layout, "rxn-channel-view"))
+
+    assert (input_node.get("props") or {}).get("type") == "number"
+    assert (input_node.get("props") or {}).get("min") > 0
+    assert (save_node.get("props") or {}).get("children") == "保存并重新计算"
+    assert (progress_node.get("props") or {}).get("aria-live") == "polite"
+    assert (trajectory_node.get("props") or {}).get("type") == "text"
+    assert (unit_node.get("props") or {}).get("value") is False
+    assert (volume_save_node.get("props") or {}).get("children") == (
+        "关联、准备并重新计算"
+    )
+    assert (volume_status_node.get("props") or {}).get("aria-live") == "polite"
+    assert "source timestep 每增加 1" in channel_view
+    assert "0.25 fs" in channel_view
+    assert "模拟盒体积" in channel_view
+    assert ".lammpstrj" in channel_view
+
+    dependency = next(
+        item
+        for item in create_app().server.test_client().get(
+            "/_dash-dependencies"
+        ).get_json()
+        if [input_item["id"] for input_item in item.get("inputs") or []]
+        == ["rxn-channel-timestep-save-btn"]
+    )
+    assert dependency["running"]["running"] == {
+        "rxn-channel-timestep-save-btn.disabled": True,
+        "rxn-channel-timestep-save-btn.children": "正在计算…",
+        "rxn-channel-timestep-progress.children": "正在读取索引并计算表观速率…",
+        "rxn-channel-timestep-progress.className": "rs-kinetics-progress is-running",
+    }
+
+    volume_dependency = next(
+        item
+        for item in create_app().server.test_client().get(
+            "/_dash-dependencies"
+        ).get_json()
+        if [input_item["id"] for input_item in item.get("inputs") or []]
+        == ["rxn-channel-volume-save-btn"]
+    )
+    assert volume_dependency["background"] is not None
+    assert volume_dependency["running"]["running"] == {
+        "rxn-channel-volume-save-btn.disabled": True,
+        "rxn-channel-volume-save-btn.children": "正在准备…",
+        "rxn-channel-volume-progress.children": "正在关联轨迹并检查索引…",
+        "rxn-channel-volume-progress.className": "rs-kinetics-progress is-running",
+    }
+
+
+def test_channel_time_conversion_prefills_from_current_dataset(monkeypatch) -> None:
+    captured: list[dict[str, str]] = []
+
+    def fake_load(artifacts):
+        captured.append(artifacts)
+        return 0.002
+
+    monkeypatch.setattr(svc, "channel_timestep_ps", fake_load)
+    client = create_app().server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store"],
+            changed="app-store.data",
+            input_values={
+                "app-store": {
+                    "artifacts": {"species": "/data/run.species"},
+                }
+            },
+            state_values={},
+            output_id="rxn-channel-timestep-ps",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == [{"species": "/data/run.species"}]
+    assert response.get_json()["response"]["rxn-channel-timestep-ps"][
+        "value"
+    ] == 0.002
+
+
+def test_channel_volume_source_prefills_from_current_dataset(monkeypatch) -> None:
+    captured: list[dict[str, str]] = []
+
+    def fake_evidence(artifacts):
+        captured.append(artifacts)
+        return {
+            "ready": False,
+            "trajectory": "/raw/run.lammpstrj",
+            "source": "workspace_link",
+            "coordinate_length_unit": "angstrom",
+            "index_state": "missing",
+            "reason": "trajectory_index_not_ready",
+            "message": "轨迹已关联；请建立轨迹帧索引。",
+        }
+
+    monkeypatch.setattr(svc, "channel_volume_evidence", fake_evidence)
+    client = create_app().server.test_client()
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["app-store"],
+            changed="app-store.data",
+            input_values={
+                "app-store": {
+                    "artifacts": {"species": "/data/run.species"},
+                }
+            },
+            state_values={},
+            output_id="rxn-channel-trajectory-path",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == [{"species": "/data/run.species"}]
+    result = response.get_json()["response"]
+    assert result["rxn-channel-trajectory-path"]["value"] == (
+        "/raw/run.lammpstrj"
+    )
+    assert result["rxn-channel-coordinate-unit-confirm"]["value"] is True
+    rendered = json.dumps(
+        result["rxn-channel-volume-status"]["children"],
+        ensure_ascii=False,
+    )
+    assert "Dataset Workspace 显式关联" in rendered
+    assert "轨迹已关联" in rendered
+
+
+def test_channel_time_conversion_saves_and_refreshes_tables(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_confirm(artifacts, value):
+        captured["confirmation"] = (artifacts, value)
+        return float(value)
+
+    def fake_collect(artifacts, smiles, *, top):
+        captured["query"] = (artifacts, smiles, top)
+        return {
+            "production_rows": [{"reaction_formulas": "H + OH -> H2O"}],
+            "consumption_rows": [{"reaction_formulas": "H2O -> H + OH"}],
+            "kinetics": {"message": "表观 k 已重新计算。"},
+        }
+
+    monkeypatch.setattr(svc, "confirm_channel_timestep_ps", fake_confirm)
+    monkeypatch.setattr(svc, "collect_species_channels", fake_collect)
+    client = create_app().server.test_client()
+    artifacts = {"species": "/data/run.species"}
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["rxn-channel-timestep-save-btn"],
+            changed="rxn-channel-timestep-save-btn.n_clicks",
+            input_values={"rxn-channel-timestep-save-btn": 1},
+            state_values={
+                "rxn-channel-timestep-ps": 0.00025,
+                "rxn-top": 12,
+                "app-store": {
+                    "artifacts": artifacts,
+                    "selected_smiles": "O",
+                },
+            },
+            output_id="rxn-channel-timestep-status",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "confirmation": (artifacts, 0.00025),
+        "query": (artifacts, "O", 12),
+    }
+    result = response.get_json()["response"]
+    assert result["rxn-production-grid"]["data"] == [
+        {"reaction_formulas": "H + OH -> H2O"}
+    ]
+    assert result["rxn-consumption-grid"]["data"] == [
+        {"reaction_formulas": "H2O -> H + OH"}
+    ]
+    assert result["rxn-channel-alert"]["children"] == "表观 k 已重新计算。"
+    assert "0.00025 ps" in str(
+        result["rxn-channel-timestep-status"]["children"]
+    )
 
 
 def test_species_channel_tables_export_loaded_rows_as_csv() -> None:

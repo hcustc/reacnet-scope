@@ -189,6 +189,32 @@ def load_coordinate_length_unit(source_file: str) -> str | None:
     raise TrajectoryFrameError(f"数据集坐标单位确认无效: {path}")
 
 
+def load_linked_trajectory(source_file: str) -> str | None:
+    """Load an explicitly associated LAMMPS trajectory for one dataset."""
+    path = dataset_settings_path(source_file)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        setting = (payload.get("trajectory") or {}).get("source_path")
+    except (AttributeError, OSError, json.JSONDecodeError) as exc:
+        raise TrajectoryFrameError(f"数据集设置文件无效: {path}") from exc
+    if setting is None:
+        return None
+    if isinstance(setting, str):
+        value = setting
+        confirmed = True
+    elif isinstance(setting, dict):
+        value = setting.get("value")
+        confirmed = setting.get("confirmed") is True
+    else:
+        raise TrajectoryFrameError(f"数据集轨迹关联格式无效: {path}")
+    linked = str(value or "").strip()
+    if not confirmed or not linked:
+        raise TrajectoryFrameError(f"数据集轨迹关联无效: {path}")
+    return str(Path(linked).expanduser().resolve())
+
+
 @_serialized_settings_write
 def save_coordinate_length_unit(
     source_file: str,
@@ -213,6 +239,39 @@ def save_coordinate_length_unit(
         trajectory = {}
     trajectory["coordinate_length_unit"] = {
         "value": "angstrom",
+        "confirmed": True,
+    }
+    payload["trajectory"] = trajectory
+    _write_dataset_settings(path, payload)
+    return path
+
+
+@_serialized_settings_write
+def save_linked_trajectory(
+    source_file: str,
+    trajectory_file: str,
+) -> Path:
+    """Persist an explicit cross-directory trajectory association."""
+    trajectory_path = Path(str(trajectory_file or "").strip()).expanduser().resolve()
+    if trajectory_path.suffix.lower() != ".lammpstrj":
+        raise TrajectoryFrameError("请选择 .lammpstrj 轨迹文件")
+    if not trajectory_path.is_file():
+        raise TrajectoryFrameError(f"轨迹文件不存在: {trajectory_path}")
+    path = dataset_settings_path(source_file, persist_identity=True)
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrajectoryFrameError(f"数据集设置文件无效: {path}") from exc
+        if not isinstance(existing, dict):
+            raise TrajectoryFrameError(f"数据集设置格式无效: {path}")
+        payload.update(existing)
+    trajectory = payload.get("trajectory")
+    if not isinstance(trajectory, dict):
+        trajectory = {}
+    trajectory["source_path"] = {
+        "value": str(trajectory_path),
         "confirmed": True,
     }
     payload["trajectory"] = trajectory

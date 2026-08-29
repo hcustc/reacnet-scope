@@ -817,79 +817,188 @@ def _reactions_page() -> html.Div:
                 ],
                 className="rs-channel-view-header rs-channel-view-actions",
             ),
-            html.Div(id="rxn-channel-alert", className="rs-flow-alert"),
             html.Div(
                 [
                     html.Div(
                         [
-                            html.Div(
-                                [
-                                    html.Div(
-                                        [
-                                            html.H3("生成通道"),
-                                            html.Span("目标物种位于产物侧"),
-                                        ],
-                                        className="rs-lane-heading",
-                                    ),
-                                    html.Div(
-                                        [
-                                            dbc.Button(
-                                                "导出 CSV",
-                                                id="rxn-production-csv-btn",
-                                                color="secondary",
-                                                size="sm",
-                                                outline=True,
-                                                disabled=True,
-                                            ),
-                                            dcc.Download(
-                                                id="rxn-production-csv-download"
-                                            ),
-                                        ],
-                                        className="rs-lane-actions",
-                                    ),
-                                ],
-                                className="rs-lane-title",
+                            html.Strong("表观速率设置"),
+                            html.Span(
+                                "填写 source timestep 每增加 1 对应的物理时间；"
+                                "例如 0.25 fs 填 0.00025 ps。",
                             ),
-                            _channel_grid("rxn-production-grid"),
                         ],
-                        className="rs-channel-lane",
+                        className="rs-kinetics-setup-copy",
                     ),
                     html.Div(
                         [
-                            html.Div(
-                                [
-                                    html.Div(
-                                        [
-                                            html.H3("消耗通道"),
-                                            html.Span("目标物种位于反应物侧"),
-                                        ],
-                                        className="rs-lane-heading",
-                                    ),
-                                    html.Div(
-                                        [
-                                            dbc.Button(
-                                                "导出 CSV",
-                                                id="rxn-consumption-csv-btn",
-                                                color="secondary",
-                                                size="sm",
-                                                outline=True,
-                                                disabled=True,
-                                            ),
-                                            dcc.Download(
-                                                id="rxn-consumption-csv-download"
-                                            ),
-                                        ],
-                                        className="rs-lane-actions",
-                                    ),
-                                ],
-                                className="rs-lane-title",
+                            dbc.Label(
+                                "timestep → ps",
+                                html_for="rxn-channel-timestep-ps",
+                                className="mb-0",
                             ),
-                            _channel_grid("rxn-consumption-grid"),
+                            dcc.Input(
+                                id="rxn-channel-timestep-ps",
+                                type="number",
+                                min=1e-12,
+                                step="any",
+                                value=None,
+                                placeholder="例如 0.00025",
+                            ),
+                            dbc.Button(
+                                "保存并重新计算",
+                                id="rxn-channel-timestep-save-btn",
+                                color="primary",
+                                size="sm",
+                            ),
                         ],
-                        className="rs-channel-lane",
+                        className="rs-kinetics-setup-actions",
+                    ),
+                    html.Div(
+                        id="rxn-channel-timestep-status",
+                        className="rs-kinetics-setup-status",
+                        role="status",
+                        **{"aria-live": "polite"},
+                    ),
+                    html.Div(
+                        id="rxn-channel-timestep-progress",
+                        className="rs-kinetics-progress",
+                        role="status",
+                        **{"aria-live": "polite"},
+                    ),
+                    html.Hr(className="rs-kinetics-setup-divider"),
+                    html.Div(
+                        [
+                            html.Strong("二阶表观 k 的模拟盒体积"),
+                            html.Span(
+                                "关联包含逐帧 BOX BOUNDS 的 .lammpstrj；"
+                                "轨迹可与 RNG 输出位于不同目录。",
+                            ),
+                        ],
+                        className="rs-kinetics-setup-copy",
+                    ),
+                    html.Div(
+                        [
+                            dbc.Label(
+                                "LAMMPS 轨迹",
+                                html_for="rxn-channel-trajectory-path",
+                                className="mb-0",
+                            ),
+                            dcc.Input(
+                                id="rxn-channel-trajectory-path",
+                                type="text",
+                                value="",
+                                placeholder="/path/to/run.lammpstrj",
+                                className="rs-kinetics-trajectory-path",
+                            ),
+                            dbc.Checkbox(
+                                id="rxn-channel-coordinate-unit-confirm",
+                                value=False,
+                                label="我确认轨迹坐标长度单位为 Å",
+                                className="rs-kinetics-unit-confirm",
+                            ),
+                            dbc.Button(
+                                "关联、准备并重新计算",
+                                id="rxn-channel-volume-save-btn",
+                                color="primary",
+                                size="sm",
+                            ),
+                        ],
+                        className=(
+                            "rs-kinetics-setup-actions "
+                            "rs-kinetics-volume-actions"
+                        ),
+                    ),
+                    html.Div(
+                        id="rxn-channel-volume-status",
+                        className="rs-kinetics-setup-status",
+                        role="status",
+                        **{"aria-live": "polite"},
+                    ),
+                    html.Div(
+                        id="rxn-channel-volume-progress",
+                        className="rs-kinetics-progress",
+                        role="status",
+                        **{"aria-live": "polite"},
                     ),
                 ],
-                className="rs-channel-lanes",
+                className="rs-kinetics-setup",
+            ),
+            html.Div(id="rxn-channel-alert", className="rs-flow-alert"),
+            dcc.Loading(
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            [
+                                                html.H3("生成通道"),
+                                                html.Span("目标物种位于产物侧"),
+                                            ],
+                                            className="rs-lane-heading",
+                                        ),
+                                        html.Div(
+                                            [
+                                                dbc.Button(
+                                                    "导出 CSV",
+                                                    id="rxn-production-csv-btn",
+                                                    color="secondary",
+                                                    size="sm",
+                                                    outline=True,
+                                                    disabled=True,
+                                                ),
+                                                dcc.Download(
+                                                    id="rxn-production-csv-download"
+                                                ),
+                                            ],
+                                            className="rs-lane-actions",
+                                        ),
+                                    ],
+                                    className="rs-lane-title",
+                                ),
+                                _channel_grid("rxn-production-grid"),
+                            ],
+                            className="rs-channel-lane",
+                        ),
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            [
+                                                html.H3("消耗通道"),
+                                                html.Span("目标物种位于反应物侧"),
+                                            ],
+                                            className="rs-lane-heading",
+                                        ),
+                                        html.Div(
+                                            [
+                                                dbc.Button(
+                                                    "导出 CSV",
+                                                    id="rxn-consumption-csv-btn",
+                                                    color="secondary",
+                                                    size="sm",
+                                                    outline=True,
+                                                    disabled=True,
+                                                ),
+                                                dcc.Download(
+                                                    id="rxn-consumption-csv-download"
+                                                ),
+                                            ],
+                                            className="rs-lane-actions",
+                                        ),
+                                    ],
+                                    className="rs-lane-title",
+                                ),
+                                _channel_grid("rxn-consumption-grid"),
+                            ],
+                            className="rs-channel-lane",
+                        ),
+                    ],
+                    className="rs-channel-lanes",
+                ),
+                type="circle",
             ),
             dbc.Checkbox(
                 id="rxn-channel-show-h",

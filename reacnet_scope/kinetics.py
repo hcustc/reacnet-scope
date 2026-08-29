@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import numpy as np
 from scipy.stats import chi2
 
 
@@ -55,6 +56,53 @@ def _validated_timesteps(values: Sequence[int]) -> list[int]:
     if any(current <= previous for previous, current in zip(timesteps, timesteps[1:])):
         raise KineticsInputError("timesteps must be strictly increasing")
     return timesteps
+
+
+def _rate_result(
+    *,
+    event_count: int,
+    observation_time_ps: float,
+    exposure: float,
+    order: int,
+    stoichiometry: Mapping[str, int],
+    n_intervals: int,
+) -> dict[str, Any]:
+    event_frequency = event_count / observation_time_ps
+    exposure_unit = (
+        "molecule·ps" if order == 1 else "molecule²·ps·Å⁻³"
+    )
+    k_app_unit = "ps⁻¹" if order == 1 else "L·mol⁻¹·ps⁻¹"
+    common = {
+        "event_count": event_count,
+        "observation_time_ps": observation_time_ps,
+        "event_frequency_per_ps": event_frequency,
+        "reaction_order": order,
+        "reactant_stoichiometry": dict(stoichiometry),
+        "exposure": exposure,
+        "exposure_unit": exposure_unit,
+        "k_app_unit": k_app_unit,
+        "n_intervals": n_intervals,
+        "model": "stoichiometric_mass_action",
+    }
+    if exposure <= 0:
+        return {
+            "status": "insufficient_exposure",
+            **common,
+            "k_app": None,
+            "ci95_low": None,
+            "ci95_high": None,
+        }
+
+    unit_scale = 1.0 if order == 1 else AVOGADRO_ANGSTROM3_TO_LITRE
+    estimate = event_count / exposure * unit_scale
+    count_lower, count_upper = _poisson_count_interval(event_count)
+    return {
+        "status": "estimated",
+        **common,
+        "k_app": estimate,
+        "ci95_low": count_lower / exposure * unit_scale,
+        "ci95_high": count_upper / exposure * unit_scale,
+    }
 
 
 def estimate_mass_action_rate(
@@ -135,45 +183,116 @@ def estimate_mass_action_rate(
             )
         exposure += population_factor * duration_ps / volume
 
-    event_frequency = count / observation_time_ps
-    if exposure <= 0:
-        return {
-            "status": "insufficient_exposure",
-            "event_count": count,
-            "observation_time_ps": observation_time_ps,
-            "event_frequency_per_ps": event_frequency,
-            "reaction_order": order,
-            "reactant_stoichiometry": dict(stoichiometry),
-            "exposure": exposure,
-            "exposure_unit": (
-                "molecule·ps" if order == 1 else "molecule²·ps·Å⁻³"
-            ),
-            "k_app": None,
-            "k_app_unit": "ps⁻¹" if order == 1 else "L·mol⁻¹·ps⁻¹",
-            "ci95_low": None,
-            "ci95_high": None,
-            "n_intervals": len(timeline) - 1,
-            "model": "stoichiometric_mass_action",
-        }
+    return _rate_result(
+        event_count=count,
+        observation_time_ps=observation_time_ps,
+        exposure=exposure,
+        order=order,
+        stoichiometry=stoichiometry,
+        n_intervals=len(timeline) - 1,
+    )
 
-    unit_scale = 1.0 if order == 1 else AVOGADRO_ANGSTROM3_TO_LITRE
-    estimate = count / exposure * unit_scale
-    count_lower, count_upper = _poisson_count_interval(count)
-    return {
-        "status": "estimated",
-        "event_count": count,
-        "observation_time_ps": observation_time_ps,
-        "event_frequency_per_ps": event_frequency,
-        "reaction_order": order,
-        "reactant_stoichiometry": dict(stoichiometry),
-        "exposure": exposure,
-        "exposure_unit": (
-            "molecule·ps" if order == 1 else "molecule²·ps·Å⁻³"
-        ),
-        "k_app": estimate,
-        "k_app_unit": "ps⁻¹" if order == 1 else "L·mol⁻¹·ps⁻¹",
-        "ci95_low": count_lower / exposure * unit_scale,
-        "ci95_high": count_upper / exposure * unit_scale,
-        "n_intervals": len(timeline) - 1,
-        "model": "stoichiometric_mass_action",
-    }
+
+def estimate_mass_action_rate_aligned(
+    *,
+    event_count: int,
+    timesteps: Sequence[int],
+    timestep_ps: float,
+    reactants: Sequence[str],
+    species_counts: Mapping[str, Sequence[int]],
+    volumes_angstrom3: Mapping[int, float] | None = None,
+) -> dict[str, Any]:
+    """Vectorized apparent-rate estimate for aligned population arrays."""
+    count = int(event_count)
+    if count < 0:
+        raise KineticsInputError("event count must be non-negative")
+    try:
+        conversion = float(timestep_ps)
+    except (TypeError, ValueError) as exc:
+        raise KineticsInputError(
+            "timestep-to-ps conversion must be positive"
+        ) from exc
+    if not math.isfinite(conversion) or conversion <= 0:
+        raise KineticsInputError(
+            "timestep-to-ps conversion must be positive"
+        )
+
+    timeline = _validated_timesteps(timesteps)
+    stoichiometry = Counter(str(value) for value in reactants if str(value))
+    order = sum(stoichiometry.values())
+    if order not in {1, 2}:
+        raise KineticsInputError(
+            "only first- and second-order mass-action estimates are supported"
+        )
+    if order == 2 and volumes_angstrom3 is None:
+        raise KineticsInputError(
+            "second-order mass-action estimates require cell volume"
+        )
+
+    durations = np.diff(np.asarray(timeline, dtype=np.int64)).astype(
+        np.float64
+    ) * conversion
+    population_factor = np.ones(len(durations), dtype=np.float64)
+    for species, multiplicity in stoichiometry.items():
+        raw_counts = species_counts.get(species)
+        if raw_counts is None:
+            raise KineticsInputError(
+                f"reactant population is missing: {species}"
+            )
+        try:
+            populations = np.asarray(raw_counts, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise KineticsInputError(
+                f"reactant population is invalid: {species}"
+            ) from exc
+        if populations.ndim != 1 or len(populations) != len(timeline):
+            raise KineticsInputError(
+                f"reactant population is not aligned to timesteps: {species}"
+            )
+        if (
+            not np.all(np.isfinite(populations))
+            or np.any(populations < 0)
+            or np.any(populations != np.floor(populations))
+        ):
+            raise KineticsInputError(
+                f"reactant population is invalid: {species}"
+            )
+        left = populations[:-1]
+        if multiplicity == 1:
+            population_factor *= left
+        else:
+            population_factor *= np.where(
+                left >= multiplicity,
+                left * (left - 1),
+                0,
+            )
+
+    if order == 1:
+        exposure = float(np.dot(population_factor, durations))
+    else:
+        assert volumes_angstrom3 is not None
+        try:
+            volumes = np.asarray(
+                [volumes_angstrom3[timestep] for timestep in timeline[:-1]],
+                dtype=np.float64,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise KineticsInputError(
+                "cell volume is missing at an aligned timestep"
+            ) from exc
+        if not np.all(np.isfinite(volumes)) or np.any(volumes <= 0):
+            raise KineticsInputError(
+                "cell volume must be positive at every aligned timestep"
+            )
+        exposure = float(
+            np.sum(population_factor * durations / volumes)
+        )
+
+    return _rate_result(
+        event_count=count,
+        observation_time_ps=float(np.sum(durations)),
+        exposure=exposure,
+        order=order,
+        stoichiometry=stoichiometry,
+        n_intervals=len(timeline) - 1,
+    )

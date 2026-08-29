@@ -7,6 +7,7 @@ import pytest
 
 from reacnet_scope.datasets import discover_dataset_candidates, choose_dataset_candidate
 from reacnet_scope.prepare import discover_dataset
+from reacnet_scope.trajectory import save_linked_trajectory
 
 
 def test_discovery_groups_artifacts_without_opening_sources(tmp_path, monkeypatch):
@@ -153,3 +154,24 @@ def test_prepare_discovery_accepts_timeline_path_and_directory(tmp_path):
     discovered = discover_dataset(str(tmp_path))
     assert discovered["base"] == str(base)
     assert discovered["timeline"] == str(timeline)
+
+
+def test_prepare_discovery_uses_workspace_linked_trajectory(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    species_dir = tmp_path / "rng_data"
+    trajectory_dir = tmp_path / "raw_data"
+    species_dir.mkdir()
+    trajectory_dir.mkdir()
+    base = species_dir / "run.lammpstrj"
+    species = Path(f"{base}.species")
+    trajectory = trajectory_dir / "run.lammpstrj"
+    species.touch()
+    trajectory.touch()
+    save_linked_trajectory(str(species), str(trajectory))
+
+    discovered = discover_dataset(str(species_dir), base.name)
+
+    assert discovered["base"] == str(base)
+    assert discovered["trajectory"] == str(trajectory.resolve())

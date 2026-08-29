@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from reacnet_scope.network import count_atoms_fast, formula_from_counts
@@ -908,6 +909,81 @@ class SpeciesCompositionStore:
                 str(smiles),
             )
         )
+
+    def species_count_matrix(
+        self,
+        species_file: str,
+        timesteps: Sequence[int],
+        smiles_values: Sequence[str],
+    ) -> dict[str, np.ndarray]:
+        """Read many aligned exact-Species series in one index scan.
+
+        Every returned array follows the sorted unique requested timesteps.
+        Missing Species occurrences are represented as zero.  Unlike repeated
+        ``species_count_series`` calls, each encoded timepoint is decoded at
+        most once regardless of how many Species are requested.
+        """
+        requested = tuple(sorted({int(value) for value in timesteps}))
+        selected_species = tuple(
+            sorted({str(value) for value in smiles_values if str(value)})
+        )
+        if not selected_species:
+            return {}
+        matrix = np.zeros(
+            (len(selected_species), len(requested)),
+            dtype=np.int64,
+        )
+        if not requested:
+            return {
+                smiles: matrix[index]
+                for index, smiles in enumerate(selected_species)
+            }
+
+        meta = self.open_required(species_file)
+        species_positions = {
+            smiles: index for index, smiles in enumerate(selected_species)
+        }
+        timestep_positions = {
+            timestep: index for index, timestep in enumerate(requested)
+        }
+        connection = _readonly_connection(Path(meta["index_path"]))
+
+        def consume(rows: Any) -> None:
+            for timestep, encoded in rows:
+                column = timestep_positions.get(int(timestep))
+                if column is None:
+                    continue
+                counts = json.loads(str(encoded))
+                for smiles, count in counts.items():
+                    row = species_positions.get(str(smiles))
+                    if row is not None:
+                        matrix[row, column] = int(count)
+
+        try:
+            if len(requested) == int(meta.get("timepoints") or 0):
+                consume(
+                    connection.execute(
+                        "SELECT timestep,species_counts_json "
+                        "FROM timepoints ORDER BY timestep"
+                    )
+                )
+            else:
+                for start in range(0, len(requested), 500):
+                    selected = requested[start : start + 500]
+                    placeholders = ",".join("?" for _ in selected)
+                    consume(
+                        connection.execute(
+                            "SELECT timestep,species_counts_json FROM timepoints "
+                            f"WHERE timestep IN ({placeholders})",
+                            selected,
+                        )
+                    )
+        finally:
+            connection.close()
+        return {
+            smiles: matrix[index]
+            for index, smiles in enumerate(selected_species)
+        }
 
     @lru_cache(maxsize=32)
     def _cached_species_count_series(

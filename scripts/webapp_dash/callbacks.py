@@ -460,6 +460,12 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("rxn-consumption-grid", "active_cell", None),
         reset("rxn-channel-selection-store", "data", None),
         reset("rxn-channel-alert", "children", ""),
+        reset("rxn-channel-timestep-ps", "value", None),
+        reset("rxn-channel-timestep-status", "children", ""),
+        reset("rxn-channel-trajectory-path", "value", ""),
+        reset("rxn-channel-coordinate-unit-confirm", "value", False),
+        reset("rxn-channel-volume-status", "children", ""),
+        reset("rxn-channel-volume-progress", "children", ""),
         reset("rxn-channel-view", "style", {"display": "none"}),
         reset("rxn-channel-history-store", "data", []),
         reset("event-grid", "data", []),
@@ -511,6 +517,36 @@ def _current_dataset_id(store: dict[str, Any] | None) -> str:
     if folder and base:
         return _dataset_id_from_selection(folder, base)
     return str(base or value.get("label") or "")
+
+
+def _render_channel_volume_status(evidence: dict[str, Any]) -> Any:
+    """Render simulation-box readiness without exposing internal exceptions."""
+    value = evidence if isinstance(evidence, dict) else {}
+    reason = str(value.get("reason") or "")
+    color = (
+        "success"
+        if value.get("ready")
+        else "secondary"
+        if reason == "missing_trajectory"
+        else "warning"
+    )
+    source_label = {
+        "workspace_link": "Dataset Workspace 显式关联",
+        "dataset_artifact": "当前数据集自动识别",
+    }.get(str(value.get("source") or ""), "未关联")
+    trajectory = str(value.get("trajectory") or "")
+    details = [
+        html.Span(str(value.get("message") or "")),
+        html.Span(f"来源：{source_label}"),
+        html.Code(trajectory, className="rs-kinetics-source-path")
+        if trajectory
+        else None,
+    ]
+    return dbc.Alert(
+        [item for item in details if item is not None],
+        color=color,
+        className="mb-0 py-1 px-2 rs-kinetics-volume-status-alert",
+    )
 
 
 def _dataset_id_from_selection(folder: str, base: str) -> str:
@@ -1359,12 +1395,19 @@ def _reaction_structure_detail_children(
                     className="rs-channel-detail-line",
                 )
             )
-    elif kinetics.get("kinetics_reason"):
+    elif kinetics.get("kinetics_reason_message") or kinetics.get(
+        "kinetics_reason"
+    ):
         kinetics_lines.append(
             html.Div(
                 [
                     html.Span("表观 k"),
-                    html.Code(str(kinetics["kinetics_reason"])),
+                    html.Code(
+                        str(
+                            kinetics.get("kinetics_reason_message")
+                            or kinetics.get("kinetics_reason")
+                        )
+                    ),
                 ],
                 className="rs-channel-detail-line",
             )
@@ -2368,6 +2411,29 @@ def register_callbacks(app: Any) -> None:
         Input("dir-browser-filter-clear-btn", "n_clicks"),
         prevent_initial_call=True,
     )
+
+    @app.callback(
+        Output("rxn-channel-timestep-ps", "value"),
+        Input("app-store", "data"),
+    )
+    def _load_channel_timestep_ps(store):
+        artifacts = (store or {}).get("artifacts", {}) or {}
+        return svc.channel_timestep_ps(artifacts)
+
+    @app.callback(
+        Output("rxn-channel-trajectory-path", "value"),
+        Output("rxn-channel-coordinate-unit-confirm", "value"),
+        Output("rxn-channel-volume-status", "children"),
+        Input("app-store", "data"),
+    )
+    def _load_channel_volume_evidence(store):
+        artifacts = (store or {}).get("artifacts", {}) or {}
+        evidence = svc.channel_volume_evidence(artifacts)
+        return (
+            str(evidence.get("trajectory") or ""),
+            evidence.get("coordinate_length_unit") == "angstrom",
+            _render_channel_volume_status(evidence),
+        )
 
     @app.callback(
         Output("data-candidate-summary", "children"),
@@ -4037,6 +4103,20 @@ def register_callbacks(app: Any) -> None:
             for field, label, _width in items
         ]
 
+    def _direct_channel_columns() -> list[dict[str, Any]]:
+        return _channel_columns(
+            [
+                ("reaction_formulas", "反应式", 240),
+                ("forward_tp", "频次", 72),
+                ("reverse_tp", "逆向", 72),
+                ("net_tp", "净频次", 76),
+                ("ratio_pct", "占比%", 68),
+                ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
+                ("k_app_display", "表观 k", 150),
+                ("reverse_k_app_display", "逆向表观 k", 150),
+            ]
+        )
+
     def _species_preview_tooltips(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Build lazy same-origin structure previews for identity cells."""
         tooltips: list[dict[str, Any]] = []
@@ -5011,23 +5091,13 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         store = store or {}
         selected_smiles = str(store.get("selected_smiles") or "").strip()
-        columns = _channel_columns(
-            [
-                ("reaction_formulas", "反应式", 240),
-                ("forward_tp", "频次", 72),
-                ("reverse_tp", "逆向", 72),
-                ("net_tp", "净频次", 76),
-                ("ratio_pct", "占比%", 68),
-                ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
-                ("k_app_display", "表观 k", 150),
-                ("reverse_k_app_display", "逆向表观 k", 150),
-            ]
-        )
+        columns = _direct_channel_columns()
         try:
             result = svc.collect_species_channels(
                 store.get("artifacts", {}) or {},
                 selected_smiles,
                 top=max(1, int(top or 50)),
+                include_kinetics=False,
             )
         except svc.ServiceError as exc:
             return (
@@ -5052,6 +5122,248 @@ def register_callbacks(app: Any) -> None:
             message,
             [],
             [],
+            None,
+            None,
+        )
+
+    @app.callback(
+        Output("rxn-channel-timestep-status", "children", allow_duplicate=True),
+        Output("rxn-production-grid", "data", allow_duplicate=True),
+        Output("rxn-production-grid", "columns", allow_duplicate=True),
+        Output("rxn-consumption-grid", "data", allow_duplicate=True),
+        Output("rxn-consumption-grid", "columns", allow_duplicate=True),
+        Output("rxn-channel-alert", "children", allow_duplicate=True),
+        Output("rxn-production-grid", "selected_rows", allow_duplicate=True),
+        Output("rxn-consumption-grid", "selected_rows", allow_duplicate=True),
+        Output("rxn-production-grid", "active_cell", allow_duplicate=True),
+        Output("rxn-consumption-grid", "active_cell", allow_duplicate=True),
+        Output("rxn-channel-selection-store", "data", allow_duplicate=True),
+        Input("rxn-channel-timestep-save-btn", "n_clicks"),
+        State("rxn-channel-timestep-ps", "value"),
+        State("rxn-top", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[
+            (
+                Output("rxn-channel-timestep-save-btn", "disabled"),
+                True,
+                False,
+            ),
+            (
+                Output("rxn-channel-timestep-save-btn", "children"),
+                "正在计算…",
+                "保存并重新计算",
+            ),
+            (
+                Output("rxn-channel-timestep-progress", "children"),
+                "正在读取索引并计算表观速率…",
+                "",
+            ),
+            (
+                Output("rxn-channel-timestep-progress", "className"),
+                "rs-kinetics-progress is-running",
+                "rs-kinetics-progress",
+            ),
+        ],
+    )
+    def _save_channel_timestep_ps(n_clicks, timestep_ps, top, store):
+        if not n_clicks:
+            raise PreventUpdate
+        store = store or {}
+        artifacts = store.get("artifacts", {}) or {}
+        try:
+            confirmed = svc.confirm_channel_timestep_ps(artifacts, timestep_ps)
+        except svc.ServiceError as exc:
+            return (
+                dbc.Alert(
+                    str(exc.message),
+                    color="warning",
+                    className="mb-0 py-1 px-2",
+                ),
+                *(no_update for _ in range(10)),
+            )
+
+        try:
+            selected_smiles = str(store.get("selected_smiles") or "").strip()
+            result = svc.collect_species_channels(
+                artifacts,
+                selected_smiles,
+                top=max(1, int(top or 50)),
+            )
+        except svc.ServiceError as exc:
+            return (
+                dbc.Alert(
+                    f"已保存 1 timestep = {confirmed:g} ps，但重新计算失败。",
+                    color="warning",
+                    className="mb-0 py-1 px-2",
+                ),
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                str(exc.message),
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
+
+        columns = _direct_channel_columns()
+        kinetics_message = str(
+            (result.get("kinetics") or {}).get("message") or ""
+        )
+        return (
+            dbc.Alert(
+                f"已保存：1 timestep = {confirmed:g} ps，并已重新计算。",
+                color="success",
+                className="mb-0 py-1 px-2",
+            ),
+            result.get("production_rows") or [],
+            columns,
+            result.get("consumption_rows") or [],
+            columns,
+            kinetics_message,
+            [],
+            [],
+            None,
+            None,
+            None,
+        )
+
+    @app.callback(
+        Output("rxn-channel-volume-status", "children", allow_duplicate=True),
+        Output("rxn-production-grid", "data", allow_duplicate=True),
+        Output("rxn-production-grid", "columns", allow_duplicate=True),
+        Output("rxn-consumption-grid", "data", allow_duplicate=True),
+        Output("rxn-consumption-grid", "columns", allow_duplicate=True),
+        Output("rxn-channel-alert", "children", allow_duplicate=True),
+        Output("rxn-production-grid", "selected_rows", allow_duplicate=True),
+        Output("rxn-consumption-grid", "selected_rows", allow_duplicate=True),
+        Output("rxn-production-grid", "active_cell", allow_duplicate=True),
+        Output("rxn-consumption-grid", "active_cell", allow_duplicate=True),
+        Output("rxn-channel-selection-store", "data", allow_duplicate=True),
+        Input("rxn-channel-volume-save-btn", "n_clicks"),
+        State("rxn-channel-trajectory-path", "value"),
+        State("rxn-channel-coordinate-unit-confirm", "value"),
+        State("rxn-top", "value"),
+        State("app-store", "data"),
+        background=True,
+        prevent_initial_call=True,
+        running=[
+            (
+                Output("rxn-channel-volume-save-btn", "disabled"),
+                True,
+                False,
+            ),
+            (
+                Output("rxn-channel-volume-save-btn", "children"),
+                "正在准备…",
+                "关联、准备并重新计算",
+            ),
+            (
+                Output("rxn-channel-volume-progress", "children"),
+                "正在关联轨迹并检查索引…",
+                "",
+            ),
+            (
+                Output("rxn-channel-volume-progress", "className"),
+                "rs-kinetics-progress is-running",
+                "rs-kinetics-progress",
+            ),
+        ],
+    )
+    def _configure_channel_volume(
+        n_clicks,
+        trajectory_path,
+        confirm_angstrom,
+        top,
+        store,
+    ):
+        if not n_clicks:
+            raise PreventUpdate
+        if not confirm_angstrom:
+            return (
+                dbc.Alert(
+                    "请先确认轨迹坐标长度单位为 Å。",
+                    color="warning",
+                    className="mb-0 py-1 px-2",
+                ),
+                *(no_update for _ in range(10)),
+            )
+        current = store if isinstance(store, dict) else {}
+        artifacts = current.get("artifacts", {}) or {}
+        try:
+            evidence = svc.configure_channel_volume_source(
+                artifacts,
+                trajectory_path,
+                confirm_angstrom=True,
+            )
+            if not evidence.get("ready"):
+                if evidence.get("reason") not in {
+                    "trajectory_index_not_ready",
+                    "trajectory_index_stale",
+                    "trajectory_index_invalid",
+                    "trajectory_index_building",
+                }:
+                    raise svc.ServiceError(
+                        str(evidence.get("message") or "模拟盒体积证据不可用"),
+                        reason=str(evidence.get("reason") or "volume_unavailable"),
+                    )
+                folder = str(current.get("folder") or "")
+                base = str(current.get("base") or "")
+                if not folder or not base:
+                    raise svc.ServiceError(
+                        "当前数据集上下文不完整，无法建立轨迹索引。",
+                        reason="missing_dataset_context",
+                    )
+                svc.prepare_dataset_workspace(
+                    folder,
+                    base=base,
+                    kind="trajectory",
+                )
+                evidence = svc.channel_volume_evidence(artifacts)
+            if not evidence.get("ready"):
+                raise svc.ServiceError(
+                    str(evidence.get("message") or "模拟盒体积证据仍未就绪"),
+                    reason=str(evidence.get("reason") or "volume_unavailable"),
+                )
+            selected_smiles = str(current.get("selected_smiles") or "").strip()
+            result = svc.collect_species_channels(
+                artifacts,
+                selected_smiles,
+                top=max(1, int(top or 50)),
+            )
+        except svc.ServiceError as exc:
+            return (
+                dbc.Alert(
+                    str(exc.message),
+                    color="warning",
+                    className="mb-0 py-1 px-2",
+                ),
+                *(no_update for _ in range(10)),
+            )
+        except Exception as exc:
+            return (
+                dbc.Alert(
+                    f"准备模拟盒体积失败：{exc}",
+                    color="danger",
+                    className="mb-0 py-1 px-2",
+                ),
+                *(no_update for _ in range(10)),
+            )
+
+        columns = _direct_channel_columns()
+        return (
+            _render_channel_volume_status(evidence),
+            result.get("production_rows") or [],
+            columns,
+            result.get("consumption_rows") or [],
+            columns,
+            str((result.get("kinetics") or {}).get("message") or ""),
+            [],
+            [],
+            None,
             None,
             None,
         )
@@ -5122,9 +5434,18 @@ def register_callbacks(app: Any) -> None:
                 "kinetic_model": row.get("kinetic_model"),
                 "kinetics_status": row.get("kinetics_status"),
                 "kinetics_reason": row.get("kinetics_reason"),
+                "kinetics_reason_message": row.get(
+                    "kinetics_reason_message"
+                ),
                 "reverse_event_count": row.get("reverse_event_count"),
                 "reverse_event_frequency_per_ps": row.get(
                     "reverse_event_frequency_per_ps"
+                ),
+                "reverse_kinetics_reason": row.get(
+                    "reverse_kinetics_reason"
+                ),
+                "reverse_kinetics_reason_message": row.get(
+                    "reverse_kinetics_reason_message"
                 ),
                 "reverse_k_app": row.get("reverse_k_app"),
                 "reverse_k_app_unit": row.get("reverse_k_app_unit"),
@@ -5260,23 +5581,13 @@ def register_callbacks(app: Any) -> None:
             "selected_formula": selected_formula,
             "selected_species_source": "reaction_structure",
         }
-        columns = _channel_columns(
-            [
-                ("reaction_formulas", "反应式", 240),
-                ("forward_tp", "频次", 72),
-                ("reverse_tp", "逆向", 72),
-                ("net_tp", "净频次", 76),
-                ("ratio_pct", "占比%", 68),
-                ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
-                ("k_app_display", "表观 k", 150),
-                ("reverse_k_app_display", "逆向表观 k", 150),
-            ]
-        )
+        columns = _direct_channel_columns()
         try:
             result = svc.collect_species_channels(
                 store.get("artifacts", {}) or {},
                 selected_smiles,
                 top=max(1, int(top or 50)),
+                include_kinetics=False,
             )
             production_rows = result.get("production_rows") or []
             consumption_rows = result.get("consumption_rows") or []

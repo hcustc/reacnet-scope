@@ -52,6 +52,9 @@ from reacnet_scope.indexes import (  # noqa: E402
     resolve_dataset_paths,
     trajectory_index_path as prepared_trajectory_index_path,
 )
+from reacnet_scope.trajectory import (  # noqa: E402
+    load_linked_trajectory,
+)
 
 
 try:
@@ -567,6 +570,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         folder_base, folder_files, candidates = _scan_rng_dataset_directory(folder, preferred_base=preferred_base)
     seed = next((value for value in explicit.values() if value), folder_base)
     base = _dataset_base_path(seed)
+    linked_trajectory = load_linked_trajectory(base) if base else None
     inferred = {
         "reaction": f"{base}.reactionabcd" if base else "",
         "species": f"{base}.species" if base else "",
@@ -584,8 +588,22 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "reactionevent",
         "molecules",
     ):
-        selected = explicit[key] or folder_files.get(key, "") or inferred[key]
-        source = "explicit" if explicit[key] else ("folder" if folder_files.get(key) else "derived")
+        workspace_link = linked_trajectory if key == "trajectory" else ""
+        selected = (
+            explicit[key]
+            or workspace_link
+            or folder_files.get(key, "")
+            or inferred[key]
+        )
+        source = (
+            "explicit"
+            if explicit[key]
+            else "workspace_link"
+            if workspace_link
+            else "folder"
+            if folder_files.get(key)
+            else "derived"
+        )
         artifacts[key] = _dataset_file_descriptor(selected, source=source)
 
     capabilities = {

@@ -74,19 +74,22 @@ from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
     TrajectoryFrameError,
     dataset_settings_path,
+    load_linked_trajectory,
     load_type_element_map,
     load_coordinate_length_unit,
     load_timestep_ps,
     normalize_type_element_map,
     read_lammps_frame_block,
     recentered_positions,
+    save_coordinate_length_unit,
+    save_linked_trajectory,
     save_type_element_map,
     save_timestep_ps,
     select_local_environment,
 )
 from reacnet_scope.kinetics import (  # noqa: E402
     KineticsInputError,
-    estimate_mass_action_rate,
+    estimate_mass_action_rate_aligned,
 )
 from reacnet_scope.queries import (  # noqa: E402
     STORE,
@@ -1122,6 +1125,204 @@ def _rate_display(value: Any, unit: str) -> str:
     return f"{numeric:.4g} {unit}".strip()
 
 
+def channel_timestep_ps(artifacts: Mapping[str, Any]) -> float | None:
+    """Return the confirmed physical-time conversion used by channel rates."""
+    for artifact in ("species", "trajectory"):
+        source_file = str(artifacts.get(artifact) or "").strip()
+        if source_file:
+            timestep_ps = load_timestep_ps(source_file)
+            if timestep_ps is not None:
+                return timestep_ps
+    return None
+
+
+def confirm_channel_timestep_ps(
+    artifacts: Mapping[str, Any],
+    value: Any,
+) -> float:
+    """Persist a user-confirmed conversion for the current channel dataset."""
+    species_file = str(artifacts.get("species") or "").strip()
+    if not species_file or not Path(species_file).is_file():
+        raise ServiceError(
+            "当前数据集缺少 .species 文件，无法保存表观速率时间换算。",
+            reason="missing_species_file",
+        )
+    try:
+        timestep_ps = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            "请输入大于 0 的 timestep → ps 换算值。",
+            reason="invalid_timestep",
+        ) from exc
+    if not math.isfinite(timestep_ps) or timestep_ps <= 0:
+        raise ServiceError(
+            "请输入大于 0 的 timestep → ps 换算值。",
+            reason="invalid_timestep",
+        )
+    try:
+        save_timestep_ps(species_file, timestep_ps)
+    except (TrajectoryFrameError, OSError) as exc:
+        raise ServiceError(
+            f"保存 timestep → ps 换算失败：{exc}",
+            reason="timestep_save_failed",
+        ) from exc
+    return timestep_ps
+
+
+def _channel_dataset_source(artifacts: Mapping[str, Any]) -> str:
+    for artifact in ("species", "reaction", "trajectory"):
+        source = str(artifacts.get(artifact) or "").strip()
+        if source:
+            return source
+    return ""
+
+
+def channel_volume_evidence(
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Describe the current dataset's simulation-box volume evidence."""
+    dataset_source = _channel_dataset_source(artifacts)
+    trajectory_file = str(artifacts.get("trajectory") or "").strip()
+    source = "dataset_artifact" if trajectory_file else ""
+    linked_trajectory = ""
+    if dataset_source:
+        try:
+            linked_trajectory = str(
+                load_linked_trajectory(dataset_source) or ""
+            ).strip()
+        except TrajectoryFrameError as exc:
+            return {
+                "ready": False,
+                "trajectory": "",
+                "source": "workspace_link",
+                "coordinate_length_unit": None,
+                "index_state": "invalid",
+                "reason": "invalid_trajectory_link",
+                "message": f"已保存的轨迹关联无效：{exc}",
+            }
+        if linked_trajectory and (
+            not trajectory_file
+            or Path(linked_trajectory).expanduser().resolve()
+            == Path(trajectory_file).expanduser().resolve()
+        ):
+            trajectory_file = linked_trajectory
+            source = "workspace_link"
+    if not trajectory_file:
+        return {
+            "ready": False,
+            "trajectory": "",
+            "source": "",
+            "coordinate_length_unit": None,
+            "index_state": "missing",
+            "reason": "missing_trajectory",
+            "message": "缺少用于双分子表观 k 的模拟盒轨迹；请关联 .lammpstrj。",
+        }
+    trajectory_path = Path(trajectory_file).expanduser().resolve()
+    if not trajectory_path.is_file():
+        return {
+            "ready": False,
+            "trajectory": str(trajectory_path),
+            "source": source,
+            "coordinate_length_unit": None,
+            "index_state": "missing_source",
+            "reason": "linked_trajectory_missing",
+            "message": f"已关联的轨迹文件不存在：{trajectory_path}",
+        }
+    try:
+        coordinate_unit = load_coordinate_length_unit(str(trajectory_path))
+    except TrajectoryFrameError as exc:
+        return {
+            "ready": False,
+            "trajectory": str(trajectory_path),
+            "source": source,
+            "coordinate_length_unit": None,
+            "index_state": "invalid",
+            "reason": "invalid_length_unit_confirmation",
+            "message": str(exc),
+        }
+    try:
+        index_status = TRAJECTORY_INDEX_STORE.status(str(trajectory_path))
+    except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+        index_status = {"state": "invalid", "message": str(exc)}
+    index_state = str(index_status.get("state") or "missing")
+    if coordinate_unit != "angstrom":
+        reason = "unconfirmed_length_unit"
+        message = "请确认已关联轨迹的坐标长度单位为 Å。"
+    elif index_state != "ready":
+        reason, message = {
+            "stale": (
+                "trajectory_index_stale",
+                "轨迹已变化；请重建轨迹帧索引。",
+            ),
+            "invalid": (
+                "trajectory_index_invalid",
+                "轨迹帧索引无效；请重建索引。",
+            ),
+            "building": (
+                "trajectory_index_building",
+                "轨迹帧索引正在后台建立。",
+            ),
+        }.get(
+            index_state,
+            (
+                "trajectory_index_not_ready",
+                "轨迹已关联；请建立轨迹帧索引以读取逐帧模拟盒体积。",
+            ),
+        )
+    else:
+        reason = ""
+        message = "模拟盒体积证据已就绪。"
+    return {
+        "ready": not reason,
+        "trajectory": str(trajectory_path),
+        "source": source,
+        "coordinate_length_unit": coordinate_unit,
+        "index_state": index_state,
+        "reason": reason,
+        "message": message,
+        "index": index_status,
+    }
+
+
+def configure_channel_volume_source(
+    artifacts: Mapping[str, Any],
+    trajectory_file: Any,
+    *,
+    confirm_angstrom: bool = False,
+) -> dict[str, Any]:
+    """Associate a trajectory with the current dataset and report readiness."""
+    dataset_source = _channel_dataset_source(artifacts)
+    if not dataset_source or not Path(dataset_source).is_file():
+        raise ServiceError(
+            "当前数据集缺少可保存关联的源证据。",
+            reason="missing_dataset_source",
+        )
+    try:
+        trajectory_path = validate_browse_path(str(trajectory_file or ""))
+    except Exception as exc:
+        raise ServiceError(str(exc), reason="invalid_trajectory_path") from exc
+    if trajectory_path.suffix.lower() != ".lammpstrj":
+        raise ServiceError(
+            "请选择 .lammpstrj 轨迹文件。",
+            reason="invalid_trajectory_file",
+        )
+    if not trajectory_path.is_file():
+        raise ServiceError(
+            f"轨迹文件不存在：{trajectory_path}",
+            reason="missing_trajectory_file",
+        )
+    try:
+        save_linked_trajectory(dataset_source, str(trajectory_path))
+        if confirm_angstrom:
+            save_coordinate_length_unit(str(trajectory_path), "angstrom")
+    except (TrajectoryFrameError, OSError) as exc:
+        raise ServiceError(
+            f"保存轨迹关联失败：{exc}",
+            reason="trajectory_link_save_failed",
+        ) from exc
+    return channel_volume_evidence(artifacts)
+
+
 def _channel_reaction_key(row: Mapping[str, Any], *, reverse: bool = False) -> str:
     reactants = tuple(str(value) for value in row.get("reactant_smiles") or [])
     products = tuple(str(value) for value in row.get("product_smiles") or [])
@@ -1140,6 +1341,9 @@ def _unavailable_kinetics(
         row.update(
             kinetics_status="unavailable",
             kinetics_reason=reason,
+            kinetics_reason_message=message,
+            reverse_kinetics_reason=reason,
+            reverse_kinetics_reason_message=message,
             k_app=None,
             k_app_unit="",
             k_app_display="",
@@ -1167,10 +1371,7 @@ def _enrich_channel_kinetics(
             reason="missing_species_abundance",
             message="表观速率不可用：缺少 .species 丰度证据。",
         )
-    trajectory_file = str(artifacts.get("trajectory") or "").strip()
-    timestep_ps = load_timestep_ps(species_file)
-    if timestep_ps is None and trajectory_file:
-        timestep_ps = load_timestep_ps(trajectory_file)
+    timestep_ps = channel_timestep_ps(artifacts)
     if timestep_ps is None:
         return _unavailable_kinetics(
             rows,
@@ -1242,14 +1443,11 @@ def _enrich_channel_kinetics(
         if str(species)
     }
     try:
-        count_series = {
-            species: SPECIES_COMPOSITION_STORE.species_count_series(
-                species_file,
-                timesteps,
-                species,
-            )
-            for species in required_species
-        }
+        count_series = SPECIES_COMPOSITION_STORE.species_count_matrix(
+            species_file,
+            timesteps,
+            sorted(required_species),
+        )
     except (IndexNotReadyError, ValueError, OSError) as exc:
         return _unavailable_kinetics(
             rows,
@@ -1263,26 +1461,32 @@ def _enrich_channel_kinetics(
         for side in ("reactant_smiles", "product_smiles")
     )
     volumes: dict[int, float] | None = None
+    volume_reason_code = ""
     volume_reason = ""
     if needs_volume:
-        if not trajectory_file or not Path(trajectory_file).is_file():
-            volume_reason = "缺少轨迹晶胞"
+        volume_evidence = channel_volume_evidence(artifacts)
+        trajectory_file = str(volume_evidence.get("trajectory") or "")
+        if not volume_evidence.get("ready"):
+            volume_reason_code = str(
+                volume_evidence.get("reason") or "volume_evidence_unavailable"
+            )
+            volume_reason = str(volume_evidence.get("message") or "")
         else:
             try:
-                if load_coordinate_length_unit(trajectory_file) != "angstrom":
-                    volume_reason = "轨迹长度单位尚未确认为 Å"
-                else:
-                    trajectory_index = TRAJECTORY_INDEX_STORE.open_required(
-                        trajectory_file
-                    )
-                    volumes = trajectory_index.volumes_for(timesteps)
-                    if len(volumes) < len(timesteps) - 1:
-                        volume_reason = "轨迹索引缺少与丰度时间点对齐的晶胞体积"
+                trajectory_index = TRAJECTORY_INDEX_STORE.open_required(
+                    trajectory_file
+                )
+                volumes = trajectory_index.volumes_for(timesteps)
+                if len(volumes) < len(timesteps) - 1:
+                    volume_reason_code = "misaligned_simulation_box_volume"
+                    volume_reason = "轨迹索引缺少与丰度时间点对齐的模拟盒体积"
             except (IndexNotReadyError, TrajectoryFrameError, OSError) as exc:
+                volume_reason_code = "volume_evidence_unavailable"
                 volume_reason = str(exc)
 
     estimated = 0
     unsupported = 0
+    reason_counts: Counter[str] = Counter()
     observation_time_ps = (timesteps[-1] - timesteps[0]) * float(timestep_ps)
     for row in rows:
         forward_key = _channel_reaction_key(row)
@@ -1299,16 +1503,17 @@ def _enrich_channel_kinetics(
                 int(event_counts.get(reverse_key, 0)),
             ),
         )
-        row_status = "estimated"
-        row_reason = ""
+        direction_statuses: list[str] = []
         for prefix, reactants, occurrence_count in directions:
+            direction_reason = ""
+            direction_reason_message = ""
             if len(reactants) == 2 and volume_reason:
                 estimate = None
-                row_status = "partial"
-                row_reason = volume_reason
+                direction_reason = volume_reason_code
+                direction_reason_message = volume_reason
             else:
                 try:
-                    estimate = estimate_mass_action_rate(
+                    estimate = estimate_mass_action_rate_aligned(
                         event_count=occurrence_count,
                         timesteps=timesteps,
                         timestep_ps=float(timestep_ps),
@@ -1318,8 +1523,12 @@ def _enrich_channel_kinetics(
                     )
                 except KineticsInputError as exc:
                     estimate = None
-                    row_status = "unsupported"
-                    row_reason = str(exc)
+                    direction_reason = (
+                        "unsupported_reaction_order"
+                        if len(reactants) not in {1, 2}
+                        else "kinetics_input_error"
+                    )
+                    direction_reason_message = str(exc)
             if estimate is None:
                 row[f"{prefix}event_count"] = occurrence_count
                 row[f"{prefix}event_frequency_per_ps"] = (
@@ -1328,11 +1537,16 @@ def _enrich_channel_kinetics(
                 row[f"{prefix}k_app"] = None
                 row[f"{prefix}k_app_unit"] = ""
                 row[f"{prefix}k_app_display"] = ""
+                row[f"{prefix}kinetics_reason"] = direction_reason
+                row[f"{prefix}kinetics_reason_message"] = (
+                    direction_reason_message
+                )
                 row["observation_time_ps"] = observation_time_ps
+                direction_statuses.append("unavailable")
                 continue
             if estimate.get("status") != "estimated":
-                row_status = "partial"
-                row_reason = "观察窗内反应物暴露量为零"
+                direction_reason = "zero_reactant_exposure"
+                direction_reason_message = "观察窗内反应物暴露量为零"
             unit = str(estimate["k_app_unit"])
             row[f"{prefix}event_count"] = occurrence_count
             row[f"{prefix}event_frequency_per_ps"] = estimate[
@@ -1349,25 +1563,75 @@ def _enrich_channel_kinetics(
             row[f"{prefix}kinetic_exposure_unit"] = estimate[
                 "exposure_unit"
             ]
+            row[f"{prefix}kinetics_reason"] = direction_reason
+            row[f"{prefix}kinetics_reason_message"] = (
+                direction_reason_message
+            )
             row["observation_time_ps"] = estimate["observation_time_ps"]
             row["kinetic_model"] = estimate["model"]
-        row["kinetics_status"] = row_status
-        row["kinetics_reason"] = row_reason
+            direction_statuses.append(
+                "estimated" if not direction_reason else "unavailable"
+            )
+        row["kinetics_status"] = (
+            "estimated"
+            if all(value == "estimated" for value in direction_statuses)
+            else "partial"
+            if any(value == "estimated" for value in direction_statuses)
+            else "unavailable"
+        )
         if row.get("k_app") is not None:
             estimated += 1
         else:
             unsupported += 1
+            reason_counts[str(row.get("kinetics_reason") or "unknown")] += 1
 
     message = (
         "表观 k 已按 Reaction Occurrence、左端点丰度暴露量和化学计量质量作用假设计算；"
         "它不是无模型的本征速率常数。"
     )
-    if unsupported:
-        message += f" {unsupported} 条通道因阶数或晶胞证据不足未给出 k。"
+    reason_messages = {
+        "missing_trajectory": (
+            "{count} 条双分子通道缺少关联的 .lammpstrj，未给出 k。"
+        ),
+        "linked_trajectory_missing": (
+            "{count} 条双分子通道关联的 .lammpstrj 已不存在，未给出 k。"
+        ),
+        "unconfirmed_length_unit": (
+            "{count} 条双分子通道尚未确认轨迹长度单位为 Å，未给出 k。"
+        ),
+        "trajectory_index_not_ready": (
+            "{count} 条双分子通道的轨迹索引未就绪，未给出 k。"
+        ),
+        "trajectory_index_stale": (
+            "{count} 条双分子通道的轨迹索引已过期，未给出 k。"
+        ),
+        "trajectory_index_invalid": (
+            "{count} 条双分子通道的轨迹索引无效，未给出 k。"
+        ),
+        "trajectory_index_building": (
+            "{count} 条双分子通道正在等待轨迹索引建立，暂未给出 k。"
+        ),
+        "misaligned_simulation_box_volume": (
+            "{count} 条双分子通道缺少与丰度时间点对齐的模拟盒体积，未给出 k。"
+        ),
+        "unsupported_reaction_order": (
+            "{count} 条高阶通道超出当前一阶/二阶模型，未给出 k。"
+        ),
+        "zero_reactant_exposure": (
+            "{count} 条通道在观察窗内反应物暴露量为零，未给出 k。"
+        ),
+    }
+    for reason, count in reason_counts.items():
+        template = reason_messages.get(
+            reason,
+            "{count} 条通道因表观速率输入不完整未给出 k。",
+        )
+        message += " " + template.format(count=count)
     return {
         "status": "estimated" if estimated else "unavailable",
         "estimated_rows": estimated,
         "unavailable_rows": unsupported,
+        "reason_counts": dict(reason_counts),
         "message": message,
         "model": "stoichiometric_mass_action",
         "timestep_ps": float(timestep_ps),
@@ -1380,8 +1644,13 @@ def collect_species_channels(
     smiles: str,
     *,
     top: int = 20,
+    include_kinetics: bool = True,
 ) -> dict[str, Any]:
-    """Split one target species' high-frequency pathways into two lanes."""
+    """Split one target species' direct channels into two lanes.
+
+    Callers that need an interactive first paint can defer the comparatively
+    expensive abundance/exposure calculation and request it explicitly later.
+    """
     production = _collect_reaction_channels(
         artifacts,
         smiles,
@@ -1408,10 +1677,21 @@ def collect_species_channels(
 
     production_rows = decorate(production, "produce")
     consumption_rows = decorate(consumption, "consume")
-    kinetics = _enrich_channel_kinetics(
-        artifacts,
-        [*production_rows, *consumption_rows],
-    )
+    if include_kinetics:
+        kinetics = _enrich_channel_kinetics(
+            artifacts,
+            [*production_rows, *consumption_rows],
+        )
+    else:
+        kinetics = _unavailable_kinetics(
+            [*production_rows, *consumption_rows],
+            reason="deferred",
+            message=(
+                "直接反应通道已加载；表观速率未阻塞本次查询。"
+                "如需速率，请使用“保存并重新计算”。"
+            ),
+        )
+        kinetics["status"] = "deferred"
     return {
         "ok": True,
         "smiles": smiles,
@@ -2078,6 +2358,7 @@ def build_channel_structure_detail(
             for key in (
                 "kinetics_status",
                 "kinetics_reason",
+                "kinetics_reason_message",
                 "event_count",
                 "event_frequency_per_ps",
                 "observation_time_ps",
@@ -2091,6 +2372,8 @@ def build_channel_structure_detail(
                 "kinetic_model",
                 "reverse_event_count",
                 "reverse_event_frequency_per_ps",
+                "reverse_kinetics_reason",
+                "reverse_kinetics_reason_message",
                 "reverse_k_app",
                 "reverse_k_app_unit",
                 "reverse_k_app_display",
