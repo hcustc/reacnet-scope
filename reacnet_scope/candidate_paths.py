@@ -16,6 +16,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Iterable, Mapping
 
+from .candidate_identity import CandidateIdentity, DirectedReactionKey, SpeciesKey
 from .network import Reaction, ReactionNetwork, count_atoms_fast
 from .rng_events import canonical_reaction_key, reaction_key
 
@@ -30,6 +31,41 @@ DEFAULT_SCORE_WEIGHTS = {
     "continuity": 0.20,
     "energy": 0.10,
 }
+
+
+def candidate_identity_from_route(route: Mapping[str, Any]) -> CandidateIdentity:
+    """Explicitly adapt a route with a declared anchor/carried chain.
+
+    Legacy signature IDs, ranking and evidence metadata are ignored, never
+    relabelled as canonical identity. A reaction tuple without a species chain
+    is insufficient: this adapter does not choose a carried output.
+    """
+    species = route.get("species")
+    keys = route.get("reaction_keys")
+    if not isinstance(species, (list, tuple)) or not isinstance(keys, (list, tuple)):
+        raise ValueError("explicit species and reaction_keys sequences are required")
+    if not keys or len(species) != len(keys) + 1:
+        raise ValueError("route requires an anchor and one carried Species per step")
+    reactions = []
+    for key in keys:
+        if not isinstance(key, str) or key.count("->") != 1:
+            raise ValueError("route requires directed RNG Reaction Type keys")
+        left, right = key.split("->")
+        reactants, products = reaction_key(left, right)
+        # The legacy parser drops empty terms. Do not silently import damaged
+        # keys such as A++B->C into a supposedly exact structural identity.
+        if any(
+            sum(term.count("+") for term in terms) + max(0, len(terms) - 1)
+            != text.count("+")
+            for text, terms in ((left, reactants), (right, products))
+        ):
+            raise ValueError("reaction keys cannot contain empty participant terms")
+        reactions.append(DirectedReactionKey.from_sides(reactants, products))
+    return CandidateIdentity(
+        SpeciesKey(species[0]),
+        tuple(SpeciesKey(value) for value in species[1:]),
+        tuple(reactions),
+    )
 
 
 def discover_network_candidate_routes(
@@ -619,6 +655,7 @@ def rank_candidate_paths(
 
 
 __all__ = [
+    "candidate_identity_from_route",
     "CANDIDATE_PATH_SCHEMA_VERSION",
     "SCORE_VERSION",
     "LEGACY_EVENT_PATH_SCORE_VERSION",

@@ -1,5 +1,7 @@
 # 有界候选路径发现
 
+版本化结构身份的独立 Python API 与显式旧格式适配见 [Candidate 结构身份](candidate-identity.md)。当前发现结果仍使用原有 v3 格式；生产索引与完整工作流迁移尚在后续工单中。
+
 “候选路径发现”接收一个或多个精确 RNG SMILES。系统在当前数据集观测到的有向 Reaction Type 网络上执行确定性的有界局部展开：
 
 - 第一个 Reaction Type 的反应物侧包含任一起始 Species；

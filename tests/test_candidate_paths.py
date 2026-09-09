@@ -271,3 +271,46 @@ def test_candidate_discovery_never_builds_the_global_event_graph(
     assert [tuple(path["reaction_keys"]) for path in result["paths"]] == [
         ("A->B", "B->C")
     ]
+
+
+def test_explicit_identity_adapter_ignores_legacy_ids_and_query_metadata():
+    from reacnet_scope.candidate_paths import candidate_identity_from_route
+
+    original = {
+        "species": ["[NH4+]", "N", "[NH2]"],
+        "reaction_keys": ["[NH4+]+[OH-]->N+O", "N->[NH2]+[H]"],
+        "signature_id": "legacy-row-1", "rank": 1, "score": 0.9,
+    }
+    altered = {
+        **original, "reaction_keys": ["[OH-]+[NH4+]->O+N", "N->[H]+[NH2]"],
+        "signature_id": "different", "rank": 4, "score": 0.2,
+        "dataset_revision": "other", "validation_execution": "complete",
+        "occurrence_id": "event-other", "atom_ids": [43], "target": "N",
+    }
+    assert candidate_identity_from_route(original) == candidate_identity_from_route(altered)
+    assert original["signature_id"] == "legacy-row-1"
+    assert "candidate_signature" not in original
+    for incomplete in (
+        {"signature_id": "legacy-only"},
+        {"reaction_keys": original["reaction_keys"]},
+        {**original, "species": "[NH4+]"},
+        {**original, "species": ["[NH4+]", "O", "[NH2]"]},
+        {**original, "reaction_keys": ["[NH4+]++[OH-]->N+O", "N->[NH2]+[H]"]},
+        {**original, "reaction_keys": ["[NH4+]+[OH-]->N+O", "N->[NH2]+[H]+"]},
+        {**original, "reaction_keys": ["[NH4+]+[OH-]=>N+O", "N->[NH2]+[H]"]},
+    ):
+        with pytest.raises(ValueError):
+            candidate_identity_from_route(incomplete)
+
+
+def test_discovery_routes_can_be_explicitly_identified_without_changing_legacy_schema():
+    network = ReactionNetwork([
+        Reaction(("A",), ("B", "C"), 2),
+        Reaction(("B", "C"), ("D",), 1),
+    ])
+    report = discover_network_candidate_routes(network, ["A"], maximum_path_length=2)
+    documents = [reacnet_scope.candidate_identity_from_route(route).as_dict() for route in report["paths"]]
+    assert {tuple(document["carried_species"]) for document in documents} == {("B", "D"), ("C", "D")}
+    assert len({document["candidate_signature"] for document in documents}) == 2
+    assert all("signature_id" in route and "candidate_signature" not in route for route in report["paths"])
+    assert reacnet_scope.CANDIDATE_IDENTITY_SCHEMA_VERSION == documents[0]["schema_version"]

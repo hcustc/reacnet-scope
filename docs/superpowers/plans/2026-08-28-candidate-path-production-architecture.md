@@ -1,8 +1,10 @@
 # Candidate Path Production Architecture Implementation Plan
 
-状态：Phase 0 设计基准；尚未开始实现
+状态：Phase 1 身份 API 与显式适配器已在 Issue #22 开发分支实现；Phase 2–11 尚未完成，现有 v3 默认查询没有迁移。
 
 日期：2026-08-28
+
+实现入口更新（2026-09-09）：[结构身份 API](../../candidate-identity.md)；GitHub [#22](https://github.com/hcustc/reacnet-scope/issues/22)–[#28](https://github.com/hcustc/reacnet-scope/issues/28) 记录分阶段开发和验收，数据集浏览器验收复用 [#17](https://github.com/hcustc/reacnet-scope/issues/17)。
 
 ## 目标与边界
 

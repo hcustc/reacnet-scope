@@ -19,8 +19,15 @@ from .candidate_paths import (
     CANDIDATE_PATH_SCHEMA_VERSION,
     SCORE_VERSION as CANDIDATE_PATH_SCORE_VERSION,
     EnergyEvidence,
+    candidate_identity_from_route,
     load_energy_evidence_csv,
     rank_candidate_paths,
+)
+from .candidate_identity import (
+    CANDIDATE_IDENTITY_SCHEMA_VERSION,
+    CandidateIdentity,
+    DirectedReactionKey,
+    SpeciesKey,
 )
 from .reaction_readiness import (
     REACTION_READINESS_SCHEMA_VERSION,
@@ -44,6 +51,11 @@ __all__ = [
     "CANDIDATE_PATH_SCHEMA_VERSION",
     "CANDIDATE_PATH_SCORE_VERSION",
     "EnergyEvidence",
+    "candidate_identity_from_route",
+    "CANDIDATE_IDENTITY_SCHEMA_VERSION",
+    "CandidateIdentity",
+    "DirectedReactionKey",
+    "SpeciesKey",
     "load_energy_evidence_csv",
     "rank_candidate_paths",
     "REACTION_READINESS_SCHEMA_VERSION",
