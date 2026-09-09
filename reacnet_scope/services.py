@@ -17,6 +17,12 @@ from reacnet_scope.dft_geometry import (
     DftGeometryRequest,
     build_dft_geometry_bundle,
 )
+from reacnet_scope.reaction_readiness import (
+    REACTION_READINESS_SCHEMA_VERSION,
+    ReactionReadinessRequest,
+    ReactionReadinessResult,
+    evaluate_reaction_readiness as _evaluate_reaction_readiness,
+)
 from reacnet_scope.event_package import build_event_package
 from reacnet_scope.event_paths import verify_event_path
 from reacnet_scope.queries import build_dataset_status_payload
@@ -46,6 +52,7 @@ from reacnet_scope.workspace_services import (
     normalise_recent_datasets,
     prepare_dataset_workspace,
     resolve_dataset_input,
+    resolve_dataset_folder_candidate,
     scan_dataset,
     validate_browse_path,
 )
@@ -59,6 +66,7 @@ from reacnet_scope.analysis_services import (
     confirm_channel_timestep_ps,
     compose_continuous_reaction_pair,
     detect_query_kind,
+    discover_candidate_paths_for_dash,
     event_path_occurrence_rows,
     event_path_occurrences_for_signature,
     event_path_signature_rows,
@@ -133,6 +141,16 @@ def verify_event_path_for_dash(*args: Any, **kwargs: Any) -> dict[str, Any]:
         _analysis.validate_browse_path = previous_validator
 
 
+def evaluate_reaction_readiness(*args: Any, **kwargs: Any) -> ReactionReadinessResult:
+    """Evaluate through the facade's patchable DFT geometry builder."""
+
+    return _evaluate_reaction_readiness(
+        *args,
+        geometry_builder=build_dft_geometry_bundle,
+        **kwargs,
+    )
+
+
 __all__ = [
     "ALLOWED_ROOTS",
     "ServiceError",
@@ -141,6 +159,10 @@ __all__ = [
     "DftGeometryError",
     "DftGeometryRequest",
     "build_dft_geometry_bundle",
+    "REACTION_READINESS_SCHEMA_VERSION",
+    "ReactionReadinessRequest",
+    "ReactionReadinessResult",
+    "evaluate_reaction_readiness",
     "build_dataset_status_payload",
     "load_coordinate_length_unit",
     "load_timestep_ps",
@@ -166,6 +188,7 @@ __all__ = [
     "clear_dataset_index",
     "candidates_from_status",
     "detect_query_kind",
+    "discover_candidate_paths_for_dash",
     "validate_event_path_sources_for_dash",
     "verify_event_path_for_dash",
     "event_path_signature_rows",

@@ -9,6 +9,7 @@ Common use cases:
 5) Export one indexed RNG event as a reproducible evidence ZIP
 6) Verify an explicit time-ordered, exact-molecule, atom-continuous event path
 7) Export one matched occurrence as auditable DFT initial geometries
+8) Discover bounded, Step-Evidence-backed candidate routes from start Species
 """
 
 from __future__ import annotations
@@ -597,6 +598,67 @@ def cmd_verify_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidate_paths(args: argparse.Namespace) -> int:
+    """Discover bounded network Candidates with indexed Step Evidence."""
+    from reacnet_scope import services as svc
+
+    try:
+        sources = [_event_path_source_from_spec(value) for value in args.source]
+        current = sources[0]
+        artifacts = {
+            "reaction": os.path.abspath(args.reac),
+            "timeline": (
+                current.reactionevent_file
+                if current.reactionevent_file.endswith(".timeline.h5")
+                else ""
+            ),
+            "reactionevent": (
+                ""
+                if current.reactionevent_file.endswith(".timeline.h5")
+                else current.reactionevent_file
+            ),
+            "molecules": current.molecules_file,
+        }
+        payload = svc.discover_candidate_paths_for_dash(
+            artifacts,
+            args.start,
+            current_replicate=current.replicate,
+            additional_sources="\n".join(args.source[1:]),
+            minimum_path_length=args.min_steps,
+            maximum_path_length=args.max_steps,
+            max_interval_gap=args.max_interval_gap,
+            max_timestep_gap=args.max_timestep_gap,
+            max_expansions=args.max_expansions,
+            max_paths=args.top,
+            minimum_occurrences=args.min_occurrences,
+            energy_csv=args.energy_csv,
+        )
+    except (svc.ServiceError, FileNotFoundError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        "# candidate_paths={count}, truncated={truncated}, "
+        "energy={energy}".format(
+            count=payload["path_count"],
+            truncated=payload["truncated"],
+            energy=payload["energy_status"],
+        )
+    )
+    print("rank,score,min_step_events,start,species,reaction_keys")
+    for path in payload["paths"]:
+        print(
+            f"{path['rank']},{path['score']},"
+            f"{path['minimum_step_occurrence_count']},"
+            f"{path['start_species']},{' -> '.join(path['species'])},"
+            f"{' | '.join(path['reaction_keys'])}"
+        )
+    if args.out_json:
+        _write_json_atomic(args.out_json, payload)
+        print(f"[OK] wrote: {args.out_json}")
+    return 0
+
+
 def cmd_export_event(args: argparse.Namespace) -> int:
     """Export one prepared RNG event as a reproducible evidence ZIP."""
     from reacnet_scope.event_index import (
@@ -721,6 +783,7 @@ def cmd_export_dft_geometry(args: argparse.Namespace) -> int:
         IndexInvalidError,
         IndexNotReadyError,
         IndexStaleError,
+        dataset_id_for_source,
     )
     from reacnet_scope.prepare import discover_dataset
     from reacnet_scope.trajectory import (
@@ -766,7 +829,47 @@ def cmd_export_dft_geometry(args: argparse.Namespace) -> int:
             warning_atom_count=args.warning_atoms,
             max_atom_count=args.max_atoms,
         )
-        bundle = svc.build_dft_geometry_bundle(dataset, event, request)
+        evaluation = svc.evaluate_reaction_readiness(
+            dataset,
+            event,
+            svc.ReactionReadinessRequest(
+                geometry=request,
+                isolated_cluster_confirmed=args.confirm_isolated_cluster,
+            ),
+            dataset_id=dataset_id_for_source(dataset["base"]),
+            replicate=(args.replicate or Path(dataset["base"]).name),
+        )
+        status = str(evaluation.report["qc_handoff"]["status"])
+        print(f"qc_handoff.status={status}")
+        if evaluation.bundle is None:
+            failures = [
+                item
+                for item in evaluation.report["qc_handoff"]["checks"]
+                if item.get("status") != "pass"
+            ]
+            for item in failures:
+                evidence_message = str(
+                    (item.get("evidence") or {}).get("message") or ""
+                )
+                guidance = str(
+                    item.get("remediation") or item.get("claim_limit") or ""
+                )
+                detail = "；".join(
+                    value for value in (evidence_message, guidance) if value
+                ) or "请查看检查报告"
+                print(
+                    f"[CHECK] {item.get('id')}: {item.get('status')} — {detail}",
+                    file=sys.stderr,
+                )
+            return 2
+        if status == "review_required" and not args.acknowledge_review:
+            print(
+                "[ERROR] readiness 为 review_required；逐项复核后使用 "
+                "--acknowledge-review 导出。",
+                file=sys.stderr,
+            )
+            return 2
+        bundle = evaluation.bundle
         if args.save_unit_confirmation:
             svc.save_coordinate_length_unit(dataset["trajectory"], "angstrom")
         package = bundle.to_zip()
@@ -1568,6 +1671,83 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_event_paths.set_defaults(func=cmd_verify_path)
 
+    sp_candidate_paths = sub.add_parser(
+        "candidate-paths",
+        help="从观测有向反应网络发现有界候选路径，并附加逐步事件证据",
+    )
+    sp_candidate_paths.add_argument(
+        "--source",
+        action="append",
+        required=True,
+        metavar="REPLICATE=COMMON_PREFIX",
+        help="一个重复实验及其 RNG 公共文件前缀；可重复传入",
+    )
+    sp_candidate_paths.add_argument(
+        "--reac",
+        required=True,
+        help="用于反应频次和方向性的 .reactionabcd 文件",
+    )
+    sp_candidate_paths.add_argument(
+        "--start",
+        action="append",
+        required=True,
+        metavar="EXACT_SMILES",
+        help="感兴趣的起始 Species（精确 RNG SMILES）；可重复传入",
+    )
+    sp_candidate_paths.add_argument(
+        "--min-steps",
+        type=_bounded_int("min_steps", 2, 8),
+        default=2,
+        help="最短路径步数",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-steps",
+        type=_bounded_int("max_steps", 2, 8),
+        default=4,
+        help="最长路径步数",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-interval-gap",
+        type=_bounded_int("max_interval_gap", 0),
+        default=None,
+        help="连续支持验证预留参数；当前不参与候选发现",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-timestep-gap",
+        type=_bounded_int("max_timestep_gap", 0),
+        default=None,
+        help="连续支持验证预留参数；当前不参与候选发现",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-expansions",
+        type=_bounded_int("max_expansions", 1),
+        default=5_000,
+        help="有向反应网络的非终止状态展开上限",
+    )
+    sp_candidate_paths.add_argument(
+        "--min-occurrences",
+        type=_bounded_int("min_occurrences", 1),
+        default=1,
+        help="候选路径每一步的最小 Reaction Occurrence 数",
+    )
+    sp_candidate_paths.add_argument(
+        "--energy-csv",
+        default="",
+        help="可选能量证据 CSV（reaction_key,score[,delta_energy,barrier,unit]）",
+    )
+    sp_candidate_paths.add_argument(
+        "--top",
+        type=_bounded_int("top", 1, 500),
+        default=20,
+        help="返回候选路径数量",
+    )
+    sp_candidate_paths.add_argument(
+        "--out-json",
+        default="",
+        help="可选：完整、可审计 JSON 报告输出路径",
+    )
+    sp_candidate_paths.set_defaults(func=cmd_candidate_paths)
+
     sp_export_event = sub.add_parser(
         "export-event",
         help="把一个已索引 RNG 事件导出为可复核 ZIP",
@@ -1687,6 +1867,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="GEOMETRY=CHARGE,MULTIPLICITY",
         help="可重复指定输出几何的电荷/多重度，例如 reactants=0,1",
+    )
+    sp_export_dft.add_argument(
+        "--confirm-isolated-cluster",
+        action="store_true",
+        help=(
+            "确认本次外部 TS 交接按非周期孤立簇处理；"
+            "不代表气相 TST/RRKM 适用"
+        ),
+    )
+    sp_export_dft.add_argument(
+        "--replicate",
+        default="",
+        help="写入检查报告的 Replicate 标签；默认使用数据集名称",
+    )
+    sp_export_dft.add_argument(
+        "--acknowledge-review",
+        action="store_true",
+        help="readiness=review_required 时确认已人工复核全部警告",
     )
     sp_export_dft.add_argument(
         "--warning-atoms",

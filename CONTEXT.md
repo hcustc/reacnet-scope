@@ -17,7 +17,7 @@ The interval from one analyzed frame to the next, within which reaction occurren
 _Avoid_: Timestep, frame
 
 **Species**:
-A molecular structure identified within a dataset by its exact ReacNetGenerator SMILES; molecular formula and mass are searchable attributes rather than identity.
+A molecular structure identified by an exact canonical structural identity represented in ReacNetGenerator evidence; molecular formula, mass, and broader structural class are searchable attributes rather than identity.
 _Avoid_: Molecular formula, formula group
 
 **Reaction Type**:
@@ -44,6 +44,10 @@ _Avoid_: Aggregated reaction, reaction type
 A non-periodic, atom-mapped cluster derived from the exact before or after frame of one matched Reaction Occurrence by reconstructing selected complete Molecule Instances through periodic boundaries. It is an auditable starting geometry, not an optimized structure, transition state, reaction path, or complete quantum-chemistry job.
 _Avoid_: DFT input, transition state, optimized geometry
 
+**QC Handoff Readiness**:
+A source-revision-bound preflight for handing one exact Reaction Occurrence and its paired DFT Initial Geometries to an external TS optimization, frequency, and IRC workflow. Its status is `blocked`, `needs_input`, `review_required`, or `ready`; `ready` does not establish an elementary step, a validated transition state, kinetics-model applicability, or rate-calculation completeness.
+_Avoid_: Reaction score, kinetics readiness, rate ready
+
 **Occurrence Identity**:
 A stable identity for a reaction occurrence derived from its transition, reaction type, and molecular participants rather than its source artifact layout.
 _Avoid_: Source row, HDF5 row ID
@@ -59,6 +63,50 @@ _Avoid_: Molecular evidence, species index
 **Event Path**:
 A temporally ordered sequence of reaction occurrences linked by continuity of a molecular instance and its atom lineage in the available evidence; it does not establish causality or a unique mechanism.
 _Avoid_: Confirmed mechanism, mechanistic proof
+
+**MD-observed Directed Reaction Hypergraph**:
+The network of exact Species and directed Reaction Types for which the current dataset contains concrete Reaction Evidence in the recorded direction. It does not include directions supplied only by aggregate connectivity or reverse inference.
+_Avoid_: Aggregate reaction network, occurrence graph, inferred mechanism network
+
+**Candidate Path Discovery**:
+A bounded network search from an exact anchor Species through directed Reaction Types observed in the current dataset, connecting adjacent steps by an exact carried Species. It proposes routes for investigation without requiring one concrete molecule lineage to realize the whole route.
+_Avoid_: Path Verification, mechanism prediction, occurrence-lineage replay
+
+**Candidate Path**:
+An ordered route from an anchor Species through observed directed Reaction Types and explicitly carried Species. Its structural identity is independent of query ranking, dataset revision, and whether Continuous MD Support has been evaluated.
+_Avoid_: Sampled Candidate Path, Event Path, confirmed mechanism
+
+**Carried Species**:
+The exact product Species of one Candidate Path step that is used as a reactant by the next step. Co-reactants and other products remain reaction context but do not connect the main route.
+_Avoid_: Focal Species, inferred intermediate, ranker-selected product
+
+**Cycle Closure Evidence**:
+An observed expansion that would revisit a Carried Species already present in an ordinary Candidate Path. It is retained for audit but is not itself an ordinary Candidate or a Fast Recrossing Episode.
+_Avoid_: Reaction Cycle Candidate, Fast Recrossing Episode
+
+**Step Evidence**:
+The Reaction Occurrences that establish why one directed Reaction Type is eligible for Candidate Path Discovery. Evidence for different steps is independent and does not imply that those occurrences form one continuous sampled chain.
+_Avoid_: Continuous Support Evidence, sampled pathway
+
+**Continuous MD Support**:
+A separate evidence validation of whether a concrete molecular provenance can realize a selected Candidate Path in order. It neither creates the Candidate nor contributes to the Candidate's structural identity.
+_Avoid_: Candidate Path Discovery, Step Evidence, implicit pass/fail score
+
+**Molecule Continuity Segment**:
+The maximal interval within one Replicate over consecutive Analyzed Frames in which a carrier retains the same Species, atom-ID set, and intramolecular bond set. Reappearance after an interruption begins a new segment even when all three are identical again.
+_Avoid_: Molecule Instance, Species lifetime, remotely joined occurrence
+
+**Carrier Chain**:
+The ordered Molecule Continuity Segments and compatible Reaction Occurrences that carry a selected Candidate Path through one Replicate. It cannot skip an earlier consumption, a continuity gap, or an unresolved evidence barrier.
+_Avoid_: Carried Species sequence, Step Evidence list
+
+**Anchor Provenance**:
+The history of selected atoms from the anchor Molecule Instance through a Carrier Chain, including where any selected atoms cease to remain continuous. Anchor selection and a retention judgment are separate decisions.
+_Avoid_: Carrier identity, inferred atom mapping
+
+**Continuous Support Evidence**:
+The concrete, auditable provenance records and factual retention summary produced by Continuous MD Support validation. Absence of an evaluation is distinct from evidence of non-support.
+_Avoid_: Step Evidence, Candidate rank, unsupported by default
 
 **Path Verification**:
 The evidence check of one user-supplied sequence of exact reaction types against strict Event Path continuity rules; it does not discover, complete, score, or rank paths.

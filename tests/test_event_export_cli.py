@@ -200,6 +200,9 @@ def test_export_dft_geometry_cli_writes_selected_initial_geometries(
             "reactants=0,1",
             "--state",
             "products=0,1",
+            "--confirm-isolated-cluster",
+            "--replicate",
+            "replicate-01",
             "--out",
             str(target),
         ]
@@ -215,6 +218,17 @@ def test_export_dft_geometry_cli_writes_selected_initial_geometries(
         assert manifest["cross_side_atom_ids_match"] is True
         assert manifest["source_signatures"]["trajectory_index"]["size"] > 0
         assert manifest["source_signatures"]["event_index"]["size"] > 0
+        assert manifest["qc_handoff"]["status"] == "ready"
+        readiness = json.loads(archive.read("reaction_readiness.json"))
+        assert readiness["qc_handoff"]["status"] == "ready"
+        assert readiness["kinetics_applicability"]["status"] == "insufficient_evidence"
+        assert readiness["subject"]["replicate"] == "replicate-01"
+        assert readiness["subject"]["atom_ids"] == {
+            "product": [1, 2],
+            "reactant": [1, 2],
+        }
+        occurrence = json.loads(archive.read("occurrence.json"))
+        assert occurrence["event_id"] == event_id
     assert "DFT initial geometry package" in capsys.readouterr().out
 
 
@@ -260,6 +274,11 @@ def test_export_dft_geometry_cli_saves_unit_only_after_geometry_succeeds(
             "--type-map",
             "1=C",
             "--save-unit-confirmation",
+            "--confirm-isolated-cluster",
+            "--state",
+            "reactants=0,1",
+            "--state",
+            "products=0,1",
             "--out",
             str(tmp_path / "failed.zip"),
         ]
@@ -280,6 +299,11 @@ def test_export_dft_geometry_cli_saves_unit_only_after_geometry_succeeds(
             "--type-map",
             "1=C,2=O",
             "--save-unit-confirmation",
+            "--confirm-isolated-cluster",
+            "--state",
+            "reactants=0,1",
+            "--state",
+            "products=0,1",
             "--out",
             str(tmp_path / "succeeded.zip"),
         ]
@@ -287,6 +311,46 @@ def test_export_dft_geometry_cli_saves_unit_only_after_geometry_succeeds(
 
     assert succeeded == 0
     assert load_coordinate_length_unit(str(trajectory)) == "angstrom"
+
+
+def test_export_dft_geometry_cli_requires_acknowledgement_for_review(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+    target = tmp_path / "review.zip"
+    args = [
+        "export-dft-geometry",
+        "--case",
+        str(tmp_path),
+        "--event-id",
+        event_id,
+        "--type-map",
+        "1=C,2=O",
+        "--source-unit",
+        "angstrom",
+        "--state",
+        "reactants=0,1",
+        "--state",
+        "products=0,1",
+        "--confirm-isolated-cluster",
+        "--warning-atoms",
+        "1",
+        "--out",
+        str(target),
+    ]
+
+    assert cli.main(args) == 2
+    assert not target.exists()
+    captured = capsys.readouterr()
+    assert "qc_handoff.status=review_required" in captured.out
+    assert "--acknowledge-review" in captured.err
+
+    assert cli.main([*args, "--acknowledge-review"]) == 0
+    with ZipFile(target) as archive:
+        report = json.loads(archive.read("reaction_readiness.json"))
+    assert report["qc_handoff"]["status"] == "review_required"
 
 
 @pytest.mark.parametrize(

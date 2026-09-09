@@ -84,6 +84,21 @@ def _layout_node_by_class(node: Any, class_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _loading_descendant_ids(node: Any) -> set[str]:
+    ids: set[str] = set()
+    if isinstance(node, dict):
+        if node.get("type") == "Loading":
+            ids.update(
+                _layout_string_ids((node.get("props") or {}).get("children"))
+            )
+        for value in node.values():
+            ids.update(_loading_descendant_ids(value))
+    elif isinstance(node, list):
+        for value in node:
+            ids.update(_loading_descendant_ids(value))
+    return ids
+
+
 def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -275,7 +290,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "dir-browser-path-input" in layout_ids
     assert "dir-browser-current" in layout_ids
     assert "dir-browser-body" in layout_ids
-    assert "dir-browser-select-btn" not in layout_ids
+    assert "dir-browser-select-btn" in layout_ids
     assert "dataset-browser-candidate" in layout_ids
     assert "recent-datasets" in layout_ids
     assert "data-recent-datasets" in layout_ids
@@ -412,12 +427,49 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     ):
         assert expected_text in layout_text
     for removed_text in (
-        "探索候选路径",
         "从所选反应继续探索",
         "搜索候选路径",
-        "候选路径网络",
     ):
         assert removed_text not in layout_text
+
+    for component_id in {
+        "page-candidate-paths",
+        "nav-candidate-paths",
+        "candidate-path-start-species",
+        "candidate-path-min-steps",
+        "candidate-path-max-steps",
+        "candidate-path-max-paths",
+        "candidate-path-min-occurrences",
+        "candidate-path-max-interval-gap",
+        "candidate-path-max-timestep-gap",
+        "candidate-path-max-expansions",
+        "candidate-path-energy-csv",
+        "candidate-path-search-btn",
+        "candidate-path-grid",
+        "candidate-path-cytoscape",
+        "candidate-path-json-download",
+        "candidate-path-store",
+    }:
+        assert component_id in layout_ids
+    assert "有界局部展开" in layout_text
+    assert "原子连续性属于选中候选后的独立验证" in layout_text
+    assert (
+        (_layout_node_by_id(layout, "candidate-path-max-interval-gap") or {})
+        .get("props", {})
+        .get("disabled")
+        is True
+    )
+    candidate_dependency = next(
+        dependency
+        for dependency in dependency_response.get_json()
+        if [item["id"] for item in dependency.get("inputs") or []]
+        == ["candidate-path-search-btn"]
+    )
+    assert candidate_dependency["running"]["running"] == {
+        '{"name":"pathways","type":"dataset-bound-operation"}.data': True,
+        "candidate-path-search-btn.disabled": True,
+        "candidate-path-search-btn.children": "检索中…",
+    }
 
     missing: list[str] = []
     for dependency in dependency_response.get_json():
@@ -457,15 +509,15 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "rs-advanced-menu" not in layout_text
     assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text
-    assert "加载并使用" in layout_text
+    assert "使用此数据集" in layout_text
     assert "data-empty-pick-btn" in layout_ids
     assert "data-change-pick-btn" in layout_ids
     assert "data-open-species-btn" in layout_ids
     recent_section = _layout_node_by_id(layout, "dir-browser-recent-section") or {}
     path_locator = _layout_node_by_id(layout, "dir-browser-expert-path") or {}
     assert recent_section.get("type") == "Section"
-    assert path_locator.get("type") == "Section"
-    assert "路径属于运行 ReacNet Scope 的计算机" in layout_text
+    assert path_locator.get("type") == "Div"
+    assert "路径属于运行 ReacNet Scope 的当前环境" in layout_text
     assert "上一级" in layout_text
     assert "直接定位" not in layout_text
     assert "返回上级目录" not in layout_text
@@ -473,9 +525,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert cache_management.get("type") == "Section"
     assert "当前数据集的分析索引" in layout_text
     overview_text = json.dumps(overview, ensure_ascii=False)
-    assert "开始物种检索" in overview_text
-    assert "rs-data-next-step-panel" in overview_text
-    assert "可用分析功能" not in overview_text
+    assert "data-overview-actions" in overview_text
+    assert "开始物种检索" not in overview_text
+    assert "rs-data-next-step-panel" not in overview_text
     assert "最近使用" not in overview_text
     assert "确认加载" not in layout_text
 
@@ -502,7 +554,7 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         for page_id in page_ids
     ]
 
-    assert len(grouped_pages) == 8
+    assert len(grouped_pages) == 9
     assert len(set(grouped_pages)) == len(grouped_pages)
     assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
 
@@ -1061,8 +1113,8 @@ def test_data_management_opens_as_workspace_page() -> None:
     assert body["nav-data-management"]["className"] == (
         "rs-top-nav-item rs-nav-utility active"
     )
-    assert body["page-title"]["children"] == "管理数据"
-    assert body["page-eyebrow-section"]["children"] == "数据工作区"
+    assert body["page-title"]["children"] == "数据集"
+    assert body["page-eyebrow-section"]["children"] == "数据集"
 
 
 def test_direct_data_workspace_navigation_has_no_false_return_source() -> None:
@@ -1125,6 +1177,44 @@ def test_data_workspace_next_step_opens_species_search() -> None:
     assert body["page-species"]["className"] == "rs-page active"
 
 
+def test_data_workspace_overview_card_opens_species_search() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    pattern_input_id = next(
+        item for item in input_ids if "data-overview-open-page" in item
+    )
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values[pattern_input_id] = [1]
+    triggered_component_id = json.dumps(
+        {"page": "species", "type": "data-overview-open-page"},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed=f"{triggered_component_id}.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "data-management"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "species"}
+    assert body["page-species"]["className"] == "rs-page active"
+
+
 def test_data_workspace_next_step_syncs_restored_page_chrome() -> None:
     app = create_app()
     client = app.server.test_client()
@@ -1172,20 +1262,11 @@ def test_data_workspace_next_step_syncs_restored_page_chrome() -> None:
     assert body["page-title"]["children"] == "物种检索"
 
 
-def test_selected_candidate_evidence_is_collapsed_by_default() -> None:
-    selected = {
-        "label": "run",
-        "base": "/data/run.lammpstrj",
-        "artifact_paths": {"reaction": "/data/run.lammpstrj.reaction"},
-        "analysis_capabilities": {},
-    }
-
-    details = cb._render_selected_candidate_details(
-        {"datasets": [selected]},
-        selected["base"],
+def test_review_source_files_are_collapsed_by_default() -> None:
+    details = cb._render_artifacts(
+        {"reaction": "/data/run.lammpstrj.reaction"},
     )
 
-    assert details is not None
     assert not getattr(details, "open", False)
 
 
@@ -1837,6 +1918,9 @@ def test_reaction_channel_view_exposes_inline_time_conversion() -> None:
     volume_status_node = (
         _layout_node_by_id(layout, "rxn-channel-volume-status") or {}
     )
+    volume_refresh_node = (
+        _layout_node_by_id(layout, "rxn-channel-volume-refresh") or {}
+    )
     channel_view = str(_layout_node_by_id(layout, "rxn-channel-view"))
 
     assert (input_node.get("props") or {}).get("type") == "number"
@@ -1849,6 +1933,12 @@ def test_reaction_channel_view_exposes_inline_time_conversion() -> None:
         "关联、准备并重新计算"
     )
     assert (volume_status_node.get("props") or {}).get("aria-live") == "polite"
+    assert (volume_refresh_node.get("props") or {}).get("interval") == 1000
+    assert (volume_refresh_node.get("props") or {}).get("disabled") is True
+    assert not {
+        "rxn-production-grid",
+        "rxn-consumption-grid",
+    } & _loading_descendant_ids(layout)
     assert "source timestep 每增加 1" in channel_view
     assert "0.25 fs" in channel_view
     assert "模拟盒体积" in channel_view
@@ -1883,7 +1973,53 @@ def test_reaction_channel_view_exposes_inline_time_conversion() -> None:
         "rxn-channel-volume-save-btn.children": "正在准备…",
         "rxn-channel-volume-progress.children": "正在关联轨迹并检查索引…",
         "rxn-channel-volume-progress.className": "rs-kinetics-progress is-running",
+        "rxn-channel-volume-refresh.disabled": False,
     }
+
+
+def test_channel_volume_progress_polls_workspace_task(monkeypatch) -> None:
+    captured: list[list[dict[str, Any]]] = []
+
+    def fake_tasks(targets):
+        captured.append(targets)
+        return [
+            {
+                "dataset_id": "dataset-1",
+                "capability": "trajectory",
+                "state": "running",
+                "phase": "indexing_trajectory",
+                "progress": 0.652,
+                "progress_trusted": True,
+                "source_artifact_revision": {"size": 162_000_000_000},
+            }
+        ]
+
+    monkeypatch.setattr(svc, "list_preparation_tasks", fake_tasks)
+    client = create_app().server.test_client()
+    current = {
+        "dataset_id": "dataset-1",
+        "folder": "/data/run",
+        "base": "/data/run/run.lammpstrj",
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["rxn-channel-volume-refresh"],
+            changed="rxn-channel-volume-refresh.n_intervals",
+            input_values={"rxn-channel-volume-refresh": 1},
+            state_values={"app-store": current},
+            output_id="rxn-channel-volume-progress",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert captured == [[current]]
+    result = response.get_json()["response"]["rxn-channel-volume-progress"]
+    assert "轨迹索引" in result["children"]
+    assert "65.2%" in result["children"]
+    assert "GiB" in result["children"]
+    assert result["className"] == "rs-kinetics-progress is-running"
 
 
 def test_channel_time_conversion_prefills_from_current_dataset(monkeypatch) -> None:
@@ -3409,7 +3545,7 @@ def test_dataset_picker_keeps_index_management_reachable() -> None:
     layout = client.get("/_dash-layout").get_json()
 
     index_button = _layout_node_by_id(layout, "data-browser-index-btn") or {}
-    assert (index_button.get("props") or {}).get("children") == "返回索引管理"
+    assert (index_button.get("props") or {}).get("children") == "返回数据集概览"
 
     response = client.post(
         "/_dash-update-component",
@@ -3505,11 +3641,11 @@ def test_recent_dataset_mount_does_not_reopen_browser() -> None:
     assert response.status_code == 204
 
 
-def test_empty_workspace_picker_initializes_and_selects_single_dataset(
+def test_empty_workspace_picker_initializes_without_selecting_dataset(
     tmp_path,
     monkeypatch,
 ) -> None:
-    candidate = _discovered_candidate(tmp_path)
+    _discovered_candidate(tmp_path)
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     client = create_app().server.test_client()
@@ -3533,8 +3669,8 @@ def test_empty_workspace_picker_initializes_and_selects_single_dataset(
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["dir-browser-path"]["data"] == str(tmp_path)
-    assert result["dataset-browser-candidate"]["data"] == candidate
-    assert result["data-apply-btn"]["disabled"] is False
+    assert result["dataset-browser-candidate"]["data"] is None
+    assert result["data-apply-btn"]["disabled"] is True
 
 
 def _load_dataset_callback_payload(
@@ -4344,12 +4480,11 @@ def test_browser_validation_commit_applies_selected_candidate_atomically(
     assert "d-none" in result["data-browser-view"]["className"]
 
 
-def test_browser_path_bar_resolves_exact_dataset_prefix(tmp_path, monkeypatch) -> None:
+def test_browser_path_bar_selects_single_dataset_folder(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    for name in ("rp3.lammpstrj", "rp4.lammpstrj"):
-        (tmp_path / f"{name}.reactionabcd").touch()
-        (tmp_path / f"{name}.species").touch()
+    (tmp_path / "rp4.lammpstrj.reactionabcd").touch()
+    (tmp_path / "rp4.lammpstrj.species").touch()
     app = create_app()
     client = app.server.test_client()
     response = client.post(
@@ -4357,7 +4492,7 @@ def test_browser_path_bar_resolves_exact_dataset_prefix(tmp_path, monkeypatch) -
         json=_browser_callback_payload(
             client,
             changed="dir-browser-path-input.n_submit",
-            values={"dir-browser-path-input": str(tmp_path / "rp4.lammpstrj")},
+            values={"dir-browser-path-input": str(tmp_path)},
             state_values={
                 "dir-browser-path": str(tmp_path),
                 "data-folder-input": "",
@@ -4372,7 +4507,7 @@ def test_browser_path_bar_resolves_exact_dataset_prefix(tmp_path, monkeypatch) -
     assert result["dataset-browser-candidate"]["data"] == {
         "folder": str(tmp_path),
         "base": str(tmp_path / "rp4.lammpstrj"),
-        "label": "rp4.lammpstrj",
+        "label": tmp_path.name,
     }
     assert result["dir-browser-path"]["data"] == str(tmp_path)
     assert result["data-apply-btn"]["disabled"] is False
@@ -4526,7 +4661,7 @@ def test_missing_recent_candidate_preserves_browser_draft(tmp_path, monkeypatch)
     assert "最近记录已失效" in rendered
 
 
-def test_directory_browser_open_selects_one_dataset_without_applying_it(tmp_path, monkeypatch) -> None:
+def test_directory_browser_open_does_not_select_dataset(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     dataset = tmp_path / "dataset"
@@ -4554,14 +4689,11 @@ def test_directory_browser_open_selects_one_dataset_without_applying_it(tmp_path
     result = response.get_json()["response"]
     assert result["dir-browser-path"]["data"] == str(dataset.resolve())
     assert result["dir-browser-back-btn"]["disabled"] is False
-    assert result["dataset-browser-candidate"]["data"] == {
-        "folder": str(dataset),
-        "base": str(dataset / "rp3.lammpstrj"),
-        "label": "rp3.lammpstrj",
-    }
-    assert result["data-apply-btn"]["disabled"] is False
+    assert result["dataset-browser-candidate"]["data"] is None
+    assert result["data-apply-btn"]["disabled"] is True
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "rs-browser-candidate-row is-selected" in rendered
+    assert "已识别到 ReacNetGenerator 数据" in rendered
+    assert "rp3.lammpstrj" not in rendered
 
 
 def test_directory_browser_reopens_at_applied_dataset_when_manual_path_blank(
@@ -4703,28 +4835,25 @@ def test_directory_browser_requires_explicit_choice_for_multiple_datasets(tmp_pa
     assert result["dataset-browser-candidate"]["data"] is None
     assert result["data-apply-btn"]["disabled"] is True
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert rendered.count("rs-browser-candidate-row") == 2
-    assert "is-selected" not in rendered
-    assert "项分析功能可直接使用" in rendered
-    assert "rs-browser-capability-list" not in rendered
+    assert "此文件夹包含多组数据" in rendered
+    assert "rp3.lammpstrj" not in rendered
+    assert "rp4.lammpstrj" not in rendered
 
-    selected = {"type": "dir-browser-dataset", "name": "rp4.lammpstrj"}
-    card_payload = _browser_callback_payload(
-        client,
-        changed=f"{json.dumps(selected, sort_keys=True, separators=(',', ':'))}.n_clicks",
-        values={'{"name":["ALL"],"type":"dir-browser-dataset"}': [1]},
-        state_values={**state, "dir-browser-path": str(tmp_path)},
+    response = client.post(
+        "/_dash-update-component",
+        json=_browser_callback_payload(
+            client,
+            changed="dir-browser-select-btn.n_clicks",
+            values={"dir-browser-select-btn": 1},
+            state_values={**state, "dir-browser-path": str(tmp_path)},
+        ),
     )
-    for item in card_payload["inputs"]:
-        if item["id"] == '{"name":["ALL"],"type":"dir-browser-dataset"}':
-            item["id"] = selected
-    response = client.post("/_dash-update-component", json=card_payload)
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"]["base"] == str(tmp_path / "rp4.lammpstrj")
-    assert result["data-apply-btn"]["disabled"] is False
+    assert result["dataset-browser-candidate"]["data"] is None
+    assert result["data-apply-btn"]["disabled"] is True
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "rs-browser-candidate-row is-selected" in rendered
+    assert "请为每组数据使用独立文件夹" in rendered
 
     response = client.post(
         "/_dash-update-component",
@@ -4740,7 +4869,7 @@ def test_directory_browser_requires_explicit_choice_for_multiple_datasets(tmp_pa
     assert result["dir-browser-path"]["data"] == str(tmp_path)
 
 
-def test_explicit_browser_selection_uses_one_directory_snapshot(
+def test_check_current_folder_selects_single_dataset(
     tmp_path, monkeypatch
 ) -> None:
     candidate = _discovered_candidate(tmp_path)
@@ -4756,11 +4885,10 @@ def test_explicit_browser_selection_uses_one_directory_snapshot(
     monkeypatch.setattr(svc, "browse_dataset_location", counted_browse)
     app = create_app()
     client = app.server.test_client()
-    selected = {"type": "dir-browser-dataset", "name": candidate["label"]}
     payload = _browser_callback_payload(
         client,
-        changed=f"{json.dumps(selected, sort_keys=True, separators=(',', ':'))}.n_clicks",
-        values={'{"name":["ALL"],"type":"dir-browser-dataset"}': [1]},
+        changed="dir-browser-select-btn.n_clicks",
+        values={"dir-browser-select-btn": 1},
         state_values={
             "dir-browser-path": str(tmp_path),
             "data-folder-input": "",
@@ -4768,15 +4896,12 @@ def test_explicit_browser_selection_uses_one_directory_snapshot(
             "dataset-browser-candidate": None,
         },
     )
-    for item in payload["inputs"]:
-        if item["id"] == '{"name":["ALL"],"type":"dir-browser-dataset"}':
-            item["id"] = selected
-
     response = client.post("/_dash-update-component", json=payload)
 
     assert response.status_code == 200
     assert browse_calls == [str(tmp_path)]
-    assert response.get_json()["response"]["dataset-browser-candidate"]["data"] == candidate
+    selected = response.get_json()["response"]["dataset-browser-candidate"]["data"]
+    assert selected == {**candidate, "label": tmp_path.name}
 
 
 def test_expert_path_navigates_only_on_submit_or_go() -> None:
@@ -4807,7 +4932,7 @@ def test_expert_path_navigates_only_on_submit_or_go() -> None:
     )
 
 
-def test_browser_restores_current_dataset_candidate_in_ambiguous_directory(
+def test_browser_opens_ambiguous_current_folder_without_internal_selection(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
@@ -4839,12 +4964,11 @@ def test_browser_restores_current_dataset_candidate_in_ambiguous_directory(
 
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] == current
+    assert result["dataset-browser-candidate"]["data"] is None
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert '"role": "radio"' in rendered
-    assert '"aria-checked": "true"' in rendered
-    assert "文件完整度" not in rendered
-    assert "反应检索" in rendered
+    assert '"role": "radio"' not in rendered
+    assert "此文件夹包含多组数据" in rendered
+    assert "beta.lammpstrj" not in rendered
 
 
 def test_invalid_expert_path_preserves_browser_candidate_and_hides_attempted_path(
@@ -4885,7 +5009,7 @@ def test_invalid_expert_path_preserves_browser_candidate_and_hides_attempted_pat
     rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
     assert "不可浏览" in rendered
     assert str(outside) not in rendered
-    assert "当前数据集" in rendered
+    assert "当前位置" in rendered
 
 
 def test_large_browser_rendering_is_bounded_counted_and_filterable(
@@ -4917,11 +5041,10 @@ def test_large_browser_rendering_is_bounded_counted_and_filterable(
     )
     assert opened.status_code == 200
     result = opened.get_json()["response"]
-    candidates = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
+    current = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
     directories = json.dumps(result["dir-browser-body"]["children"], ensure_ascii=False)
-    assert candidates.count("rs-browser-candidate-row") == 100
+    assert "candidate-000.lammpstrj" not in current
     assert directories.count("rs-browser-directory-entry") == 100
-    assert "显示 100 / 共 200" in candidates
     assert "显示 100 / 共 150" in directories
 
     filtered = client.post(
@@ -4929,24 +5052,23 @@ def test_large_browser_rendering_is_bounded_counted_and_filterable(
         json=_browser_callback_payload(
             client,
             changed="dir-browser-filter-input.value",
-            values={"dir-browser-filter-input": "candidate-199"},
+            values={"dir-browser-filter-input": "folder-149"},
             state_values=state,
         ),
     )
     assert filtered.status_code == 200
     result = filtered.get_json()["response"]
-    candidates = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
     directories = json.dumps(result["dir-browser-body"]["children"], ensure_ascii=False)
-    assert candidates.count("rs-browser-candidate-row") == 1
-    assert "显示 1 / 匹配 1 / 共 200" in candidates
-    assert "没有文件夹匹配当前筛选" in directories
+    assert directories.count("rs-browser-directory-entry") == 1
+    assert "folder-149" in directories
+    assert "显示 1 / 匹配 1 / 共 150" in directories
 
 
-def test_filter_keeps_one_visible_candidate_in_radio_tab_order(tmp_path, monkeypatch) -> None:
+def test_filter_keeps_one_visible_subfolder(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    alpha = _discovered_candidate(tmp_path, "alpha.lammpstrj")
-    _discovered_candidate(tmp_path, "beta.lammpstrj")
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta").mkdir()
     client = create_app().server.test_client()
 
     response = client.post(
@@ -4958,7 +5080,7 @@ def test_filter_keeps_one_visible_candidate_in_radio_tab_order(tmp_path, monkeyp
             state_values={
                 "dir-browser-path": str(tmp_path),
                 "data-folder-input": "",
-                "dataset-browser-candidate": alpha,
+                "dataset-browser-candidate": None,
                 "recent-datasets": [],
                 "app-store": {},
             },
@@ -4967,26 +5089,46 @@ def test_filter_keeps_one_visible_candidate_in_radio_tab_order(tmp_path, monkeyp
 
     assert response.status_code == 200
     rendered = json.dumps(
-        response.get_json()["response"]["dir-browser-current"]["children"],
+        response.get_json()["response"]["dir-browser-body"]["children"],
         ensure_ascii=False,
     )
-    assert "beta.lammpstrj" in rendered
-    assert '"tabIndex": 0' in rendered
+    assert "beta" in rendered
+    assert "alpha" not in rendered
+    assert rendered.count("rs-browser-directory-entry") == 1
 
 
-def test_browser_keyboard_model_asset_supports_radio_arrow_navigation() -> None:
+def test_dataset_browser_has_no_candidate_radio_asset() -> None:
     asset = (
         Path(__file__).parents[1]
         / "scripts"
         / "webapp_dash"
         / "assets"
         / "dataset_browser.js"
-    ).read_text(encoding="utf-8")
+    )
 
-    assert '[role="radiogroup"]' in asset
-    assert '[role="radio"]' in asset
-    for key in ("ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"):
-        assert key in asset
+    assert not asset.exists()
+
+
+def test_sidebar_navigation_has_an_immediate_browser_fallback() -> None:
+    """Primary page switches must not wait behind analysis HTTP requests."""
+    asset = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "navigation.js"
+    )
+
+    source = asset.read_text(encoding="utf-8")
+    assert 'document.addEventListener("click"' in source
+    assert 'closest("[id^=\\"nav-\\"]")' in source
+    assert "page-${pageId}" in source
+    assert "classList.add(\"active\")" in source
+    assert 'setAttribute("aria-current", "page")' in source
+
+    response = create_app().server.test_client().get("/assets/navigation.js")
+    assert response.status_code == 200
+    assert b"activatePage" in response.data
 
 
 def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
@@ -5467,6 +5609,15 @@ def test_dft_preview_turns_runtime_failures_into_alerts(
         "row": {
             "event_id": "rngevt-runtime",
             "association_status": "matched",
+            "reactant_bonds": "",
+            "product_bonds": "1-2-1",
+            "reactant_participants": [
+                {"species": "[C]", "atom_ids": [1]},
+                {"species": "[O]", "atom_ids": [2]},
+            ],
+            "product_participants": [
+                {"species": "[C][O]", "atom_ids": [1, 2]},
+            ],
         }
     }
     response = client.post(
@@ -5477,8 +5628,8 @@ def test_dft_preview_turns_runtime_failures_into_alerts(
             changed="event-dft-preview-btn.n_clicks",
             input_values={"event-dft-preview-btn": 1},
             state_values={
-                "event-dft-reactants": [0],
-                "event-dft-products": [],
+                "event-dft-reactants": [0, 1],
+                "event-dft-products": [0],
                 "event-dft-layout": "combined",
                 "event-dft-unit-confirmation": [],
                 f"{charge_pattern}.value": [],

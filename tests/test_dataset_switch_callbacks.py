@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import reacnet_scope.dir_browser as dir_browser
@@ -17,10 +18,23 @@ def _payload(
     inputs: dict[str, Any],
     states: dict[str, Any],
 ) -> dict[str, Any]:
-    dependency = next(
+    dependencies = [
         item
         for item in client.get("/_dash-dependencies").get_json()
         if output_contains in str(item.get("output") or "")
+    ]
+    dependency = next(
+        (
+            item
+            for item in dependencies
+            if changed
+            in {
+                f"{value['id']}.{value['property']}"
+                for value in item["inputs"]
+                if isinstance(value["id"], str)
+            }
+        ),
+        dependencies[0],
     )
     output_spec = dependency["output"]
     if output_spec.startswith(".."):
@@ -68,30 +82,89 @@ def _payload(
     }
 
 
-def test_explicit_apply_finishes_lightweight_validation_in_the_same_request(
-    monkeypatch,
-) -> None:
+def _dependency_outputs(dependency: dict[str, Any]) -> set[str]:
+    output_spec = str(dependency.get("output") or "")
+    tokens = (
+        output_spec.strip(".").split("...")
+        if output_spec.startswith("..")
+        else [output_spec]
+    )
+    return {token.split("@", 1)[0] for token in tokens}
+
+
+def test_validation_result_is_resolved_by_a_distinct_dash_callback() -> None:
+    """Dataset switching must form a one-way request-to-result graph."""
+    client = create_app().server.test_client()
+    dependencies = client.get("/_dash-dependencies").get_json()
+
+    transaction_writers = [
+        item
+        for item in dependencies
+        if "dataset-switch-transaction.data" in _dependency_outputs(item)
+    ]
+    click_writer = next(
+        item
+        for item in transaction_writers
+        if any(value["id"] == "data-apply-btn" for value in item["inputs"])
+    )
+    validation_writer = next(
+        item
+        for item in transaction_writers
+        if any(
+            value["id"] == "dataset-switch-validation"
+            for value in item["inputs"]
+        )
+    )
+
+    assert click_writer["output"] != validation_writer["output"]
+    assert "dataset-switch-request.data" in _dependency_outputs(click_writer)
+
+    validation_worker = next(
+        item
+        for item in dependencies
+        if _dependency_outputs(item) == {"dataset-switch-validation.data"}
+    )
+    worker_inputs = {value["id"] for value in validation_worker["inputs"]}
+    assert worker_inputs == {"dataset-switch-request"}
+    assert "dataset-switch-transaction" not in worker_inputs
+
+
+def test_explicit_apply_starts_visible_background_validation(monkeypatch) -> None:
     candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
-    validation = {
-        **candidate,
-        "dataset_id": "dataset-new",
-        "source_revision": {"fingerprint": "revision-new", "artifacts": []},
-        "artifacts": {},
-        "capabilities": {},
-        "readiness": {},
-        "analysis_capabilities": {},
+    expected = {
+        "state": "validating",
+        "request_id": "request-1",
+        "candidate": candidate,
+        "origin": {},
+        "started_ns": 1,
+        "deadline_ns": 2,
     }
-    monkeypatch.setattr(svc, "validate_dataset_candidate", lambda *_args: validation)
+    monkeypatch.setattr(svc, "begin_dataset_switch", lambda *_args, **_kwargs: expected)
+
+    def fail_if_called_inline(*_args):
+        raise AssertionError("validation must not run in the click request")
+
+    monkeypatch.setattr(svc, "validate_dataset_candidate", fail_if_called_inline)
     client = create_app().server.test_client()
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
-        if item.get("output") == "dataset-switch-transaction.data"
+        if "dataset-switch-transaction.data" in _dependency_outputs(item)
+        and any(value["id"] == "data-apply-btn" for value in item["inputs"])
     )
     assert dependency.get("background") is None
     assert "dataset-switch-validation" not in {
         item["id"] for item in dependency["inputs"]
     }
+    validation_dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if item.get("output") == "dataset-switch-validation.data"
+    )
+    assert validation_dependency.get("background") is not None
+    assert validation_dependency["inputs"] == [
+        {"id": "dataset-switch-request", "property": "data"}
+    ]
 
     response = client.post(
         "/_dash-update-component",
@@ -104,6 +177,7 @@ def test_explicit_apply_finishes_lightweight_validation_in_the_same_request(
                 "dir-browser-cancel-btn": 0,
                 "dataset-browser-candidate": candidate,
                 "page-store": {"page": "data-management"},
+                "dataset-switch-validation": {},
             },
             states={"dataset-switch-transaction": {}},
         ),
@@ -112,8 +186,81 @@ def test_explicit_apply_finishes_lightweight_validation_in_the_same_request(
     transaction = response.get_json()["response"]["dataset-switch-transaction"][
         "data"
     ]
-    assert transaction["state"] == "succeeded"
-    assert transaction["validation"] == validation
+    assert transaction == expected
+
+
+def test_background_validation_returns_a_request_bound_result(monkeypatch) -> None:
+    candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
+    validation = {
+        **candidate,
+        "label": "internal-name",
+        "dataset_id": "dataset-new",
+        "source_revision": {"fingerprint": "revision-new", "artifacts": []},
+        "artifacts": {},
+        "capabilities": {},
+        "readiness": {},
+        "analysis_capabilities": {},
+    }
+    monkeypatch.setattr(svc, "validate_dataset_candidate", lambda *_args: validation)
+    app = create_app()
+    worker = app.callback_map["dataset-switch-validation.data"]["callback"].__wrapped__
+
+    result = worker(
+        {
+            "state": "validating",
+            "request_id": "request-1",
+            "candidate": candidate,
+        }
+    )
+
+    assert result["request_id"] == "request-1"
+    assert result["ok"] is True
+    assert result["validation"]["dataset_id"] == "dataset-new"
+    assert result["validation"]["label"] == "new"
+
+
+def test_visible_loading_state_disables_apply_and_explains_progress() -> None:
+    candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
+    transaction = {
+        "state": "validating",
+        "request_id": "request-1",
+        "candidate": candidate,
+        "origin": {},
+    }
+    client = create_app().server.test_client()
+
+    actions = client.post(
+        "/_dash-update-component",
+        json=_payload(
+            client,
+            output_contains="data-current-refresh-btn.children",
+            changed="dataset-switch-transaction.data",
+            inputs={
+                "app-store": {},
+                "dataset-browser-candidate": candidate,
+                "dataset-switch-transaction": transaction,
+            },
+            states={},
+        ),
+    ).get_json()["response"]
+    reason = client.post(
+        "/_dash-update-component",
+        json=_payload(
+            client,
+            output_contains="data-apply-reason.children",
+            changed="dataset-switch-transaction.data",
+            inputs={
+                "app-store": {},
+                "dataset-browser-candidate": candidate,
+                "dataset-switch-transaction": transaction,
+            },
+            states={},
+        ),
+    ).get_json()["response"]
+
+    assert actions["data-apply-btn"]["children"] == "正在加载…"
+    assert actions["data-apply-btn"]["disabled"] is True
+    assert "正在验证候选数据集" in reason["data-apply-reason"]["children"]
 
 
 def test_empty_data_workspace_is_an_onboarding_state_not_an_error_report() -> None:
@@ -139,7 +286,7 @@ def test_empty_data_workspace_is_an_onboarding_state_not_an_error_report() -> No
     assert "缺少源数据" not in rendered
 
 
-def test_use_dataset_finishes_validation_and_commits_current_context(
+def test_use_dataset_finishes_two_phase_validation_and_commits_current_context(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -174,6 +321,36 @@ def test_use_dataset_finishes_validation_and_commits_current_context(
     transaction = started.get_json()["response"]["dataset-switch-transaction"][
         "data"
     ]
+    assert transaction["state"] == "validating"
+
+    validation = svc.validate_dataset_candidate(
+        str(candidate["folder"]),
+        str(candidate["base"]),
+    )
+    finished = client.post(
+        "/_dash-update-component",
+        json=_payload(
+            client,
+            output_contains="dataset-switch-transaction.data",
+            changed="dataset-switch-validation.data",
+            inputs={
+                "data-apply-btn": 1,
+                "dir-browser-cancel-btn": 0,
+                "dataset-browser-candidate": candidate,
+                "page-store": {"page": "data-management"},
+                "dataset-switch-validation": {
+                    "request_id": transaction["request_id"],
+                    "ok": True,
+                    "validation": validation,
+                    "completed_ns": time.time_ns(),
+                },
+            },
+            states={"dataset-switch-transaction": transaction},
+        ),
+    )
+    transaction = finished.get_json()["response"]["dataset-switch-transaction"][
+        "data"
+    ]
     assert transaction["state"] == "succeeded"
 
     committed = client.post(
@@ -191,13 +368,9 @@ def test_use_dataset_finishes_validation_and_commits_current_context(
     assert current["context_state"] == "active"
 
 
-def test_validation_failure_retains_candidate_and_old_current(monkeypatch) -> None:
+def test_validation_failure_retains_candidate_and_old_current() -> None:
     candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
-
-    def fail_validation(*_args):
-        raise svc.ServiceError("所选数据集已不存在。", reason="candidate_missing")
-
-    monkeypatch.setattr(svc, "validate_dataset_candidate", fail_validation)
+    transaction = svc.begin_dataset_switch(candidate)
     client = create_app().server.test_client()
 
     response = client.post(
@@ -205,14 +378,21 @@ def test_validation_failure_retains_candidate_and_old_current(monkeypatch) -> No
         json=_payload(
             client,
             output_contains="dataset-switch-transaction.data",
-            changed="data-apply-btn.n_clicks",
+            changed="dataset-switch-validation.data",
             inputs={
                 "data-apply-btn": 1,
                 "dir-browser-cancel-btn": 0,
                 "dataset-browser-candidate": candidate,
                 "page-store": {"page": "data-management"},
+                "dataset-switch-validation": {
+                    "request_id": transaction["request_id"],
+                    "ok": False,
+                    "reason": "candidate_missing",
+                    "message": "所选数据集已不存在。当前数据集未改变；请重新选择。",
+                    "completed_ns": time.time_ns(),
+                },
             },
-            states={"dataset-switch-transaction": {}},
+            states={"dataset-switch-transaction": transaction},
         ),
     )
 
@@ -253,7 +433,7 @@ def test_repeat_submit_is_blocked_while_validation_is_active() -> None:
     assert response.status_code == 204
 
 
-def test_cancel_supersedes_an_active_request() -> None:
+def test_cancel_supersedes_an_active_request_and_ignores_its_late_result() -> None:
     candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
     transaction = {
         "state": "validating",
@@ -282,6 +462,29 @@ def test_cancel_supersedes_an_active_request() -> None:
         "dataset-switch-transaction"
     ]["data"]
     assert cancelled["state"] == "superseded"
+
+    late_response = client.post(
+        "/_dash-update-component",
+        json=_payload(
+            client,
+            output_contains="dataset-switch-transaction.data",
+            changed="dataset-switch-validation.data",
+            inputs={
+                "data-apply-btn": 1,
+                "dir-browser-cancel-btn": 1,
+                "dataset-browser-candidate": candidate,
+                "page-store": {"page": "data-management"},
+                "dataset-switch-validation": {
+                    "request_id": "request-1",
+                    "ok": True,
+                    "validation": {"dataset_id": "dataset-new"},
+                    "completed_ns": time.time_ns(),
+                },
+            },
+            states={"dataset-switch-transaction": cancelled},
+        ),
+    )
+    assert late_response.status_code == 204
 
 
 def test_return_to_index_management_supersedes_browser_request() -> None:
@@ -317,7 +520,7 @@ def test_return_to_index_management_supersedes_browser_request() -> None:
     assert transaction["reason"] == "returned_to_index_management"
 
 
-def test_successful_switch_commits_context_resets_results_and_resumes_origin(
+def test_successful_switch_commits_context_resets_results_and_opens_overview(
     monkeypatch,
 ) -> None:
     validation = {
@@ -368,7 +571,7 @@ def test_successful_switch_commits_context_resets_results_and_resumes_origin(
     assert result["app-store"]["data"]["selected_smiles"] == ""
     assert result["app-store"]["data"]["inputs_pending"] is True
     assert result["recent-datasets"]["data"][0]["base"] == "/data/new"
-    assert result["dataset-switch-navigation"]["data"]["page"] == "reactions"
+    assert result["dataset-switch-navigation"]["data"]["page"] == "data-management"
     assert result["dataset-context-commit"]["data"]["request_id"] == "request-1"
     assert "当前数据集已切换为" in json.dumps(
         result["data-load-feedback"]["children"],
@@ -384,7 +587,7 @@ def test_successful_switch_commits_context_resets_results_and_resumes_origin(
     assert result["event-path-store"]["data"] is None
 
 
-def test_direct_workspace_switch_starts_default_analysis(monkeypatch) -> None:
+def test_direct_workspace_switch_opens_dataset_overview(monkeypatch) -> None:
     validation = {
         "folder": "/data",
         "base": "/data/new",
@@ -420,7 +623,7 @@ def test_direct_workspace_switch_starts_default_analysis(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.get_json()["response"]["dataset-switch-navigation"]["data"][
         "page"
-    ] == "species"
+    ] == "data-management"
 
 
 def test_same_identity_and_revision_commit_is_a_visible_noop(monkeypatch) -> None:
@@ -609,7 +812,7 @@ def test_different_candidate_makes_switch_primary_during_revision_change() -> No
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["data-apply-btn"]["disabled"] is False
-    assert result["data-apply-btn"]["children"] == "加载并使用"
+    assert result["data-apply-btn"]["children"] == "使用此数据集"
     assert result["data-current-refresh-btn"]["color"] == "secondary"
     assert result["data-current-refresh-btn"]["outline"] is True
 

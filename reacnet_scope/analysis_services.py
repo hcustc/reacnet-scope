@@ -62,6 +62,11 @@ from reacnet_scope.event_paths import (  # noqa: E402
     EventPathSource,
     verify_event_path,
 )
+from reacnet_scope.candidate_paths import (  # noqa: E402
+    discover_network_candidate_routes,
+    load_energy_evidence_csv,
+    rank_candidate_paths,
+)
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
@@ -353,6 +358,211 @@ def verify_event_path_for_dash(
         raise ServiceError(
             f"无效的路径验证参数: {exc}",
             reason="bad_event_path_query",
+        ) from exc
+
+
+def discover_candidate_paths_for_dash(
+    artifacts: Mapping[str, Any],
+    start_species: str | Iterable[str],
+    *,
+    current_replicate: str = "current",
+    additional_sources: str = "",
+    minimum_path_length: int = 2,
+    maximum_path_length: int = 4,
+    max_interval_gap: int | None = None,
+    max_timestep_gap: int | None = None,
+    max_expansions: int = 5_000,
+    max_paths: int = 20,
+    minimum_occurrences: int = 1,
+    energy_csv: str = "",
+) -> dict[str, Any]:
+    """Discover bounded network Candidates and attach indexed Step Evidence."""
+
+    if isinstance(start_species, str):
+        starts = [
+            line.strip()
+            for line in start_species.replace(";", "\n").splitlines()
+            if line.strip()
+        ]
+    else:
+        starts = [str(value).strip() for value in start_species if str(value).strip()]
+    reaction_file = str(artifacts.get("reaction") or "").strip()
+    if not reaction_file or not Path(reaction_file).is_file():
+        raise ServiceError(
+            "缺少 .reactionabcd，无法计算候选路径的反应频次",
+            reason="missing_reaction_network",
+        )
+    sources = _event_path_sources_for_dash(
+        artifacts,
+        current_replicate=current_replicate,
+        additional_sources=additional_sources,
+    )
+    energy_path = (
+        str(validate_browse_path(str(energy_csv)))
+        if str(energy_csv or "").strip()
+        else ""
+    )
+    try:
+        network = STORE.get(reaction_file, _reaction_min_tp(artifacts))
+        evidence_report = discover_network_candidate_routes(
+            network,
+            starts,
+            minimum_path_length=int(minimum_path_length),
+            maximum_path_length=int(maximum_path_length),
+            max_expansions=int(max_expansions),
+            max_paths=int(max_paths),
+            minimum_occurrences=int(minimum_occurrences),
+        )
+        candidate_keys = sorted(
+            {
+                str(key)
+                for path in evidence_report.get("paths") or ()
+                for key in path.get("reaction_keys") or ()
+            }
+        )
+        summaries_by_replicate: dict[str, dict[str, dict[str, Any]]] = {}
+        source_documents: list[dict[str, Any]] = []
+        for source in sources:
+            summaries = EVENT_EVIDENCE_STORE.reaction_summary(
+                source.reactionevent_file,
+                source.molecules_file,
+                candidate_keys,
+            )
+            summaries_by_replicate[source.replicate] = summaries
+            source_documents.append(
+                {
+                    "replicate": source.replicate,
+                    "reactionevent_file": source.reactionevent_file,
+                    "molecules_file": source.molecules_file,
+                    "queried_reaction_type_count": len(candidate_keys),
+                }
+            )
+
+        evidence_paths: list[dict[str, Any]] = []
+        for raw_path in evidence_report.get("paths") or ():
+            path = dict(raw_path)
+            reaction_keys = tuple(
+                str(value) for value in path.get("reaction_keys") or ()
+            )
+            step_evidence: list[dict[str, Any]] = []
+            for reaction_key_text in reaction_keys:
+                by_replicate = {
+                    replicate: dict(summaries.get(reaction_key_text) or {})
+                    for replicate, summaries in summaries_by_replicate.items()
+                }
+                total_events = sum(
+                    int(summary.get("total_events") or 0)
+                    for summary in by_replicate.values()
+                )
+                step_evidence.append(
+                    {
+                        "reaction_key": reaction_key_text,
+                        "total_events": total_events,
+                        "matched_events": sum(
+                            int(summary.get("matched_events") or 0)
+                            for summary in by_replicate.values()
+                        ),
+                        "distinct_intervals": sum(
+                            int(summary.get("distinct_intervals") or 0)
+                            for summary in by_replicate.values()
+                        ),
+                        "replicate_count": sum(
+                            int(summary.get("total_events") or 0) > 0
+                            for summary in by_replicate.values()
+                        ),
+                    }
+                )
+            if not step_evidence or any(
+                int(step["total_events"]) < int(minimum_occurrences)
+                for step in step_evidence
+            ):
+                continue
+            replicate_support = sum(
+                all(
+                    int(
+                        summaries_by_replicate[replicate]
+                        .get(reaction_key_text, {})
+                        .get("total_events")
+                        or 0
+                    )
+                    > 0
+                    for reaction_key_text in reaction_keys
+                )
+                for replicate in summaries_by_replicate
+            )
+            minimum_step_events = min(
+                int(step["total_events"]) for step in step_evidence
+            )
+            path.update(
+                occurrence_count=minimum_step_events,
+                minimum_step_occurrence_count=minimum_step_events,
+                replicate_support_count=replicate_support,
+                replicate_reproduction_rate=(
+                    replicate_support / len(summaries_by_replicate)
+                    if summaries_by_replicate
+                    else 0.0
+                ),
+                step_evidence=step_evidence,
+                support_is_lower_bound=bool(
+                    (evidence_report.get("summary") or {}).get(
+                        "traversal_truncated"
+                    )
+                ),
+            )
+            evidence_paths.append(path)
+        evidence_report["paths"] = evidence_paths
+        evidence_report["sources"] = source_documents
+        evidence_report["summary"].update(
+            {
+                "replicate_count": len(sources),
+                "candidate_route_count": len(evidence_paths),
+                "step_evidence_only": True,
+            }
+        )
+        energy = (
+            load_energy_evidence_csv(energy_path)
+            if energy_path
+            else None
+        )
+        result = rank_candidate_paths(
+            network,
+            evidence_report,
+            starts,
+            max_paths=int(max_paths),
+            minimum_occurrences=int(minimum_occurrences),
+            energy_evidence=energy,
+        )
+        result["query"].update(
+            {
+                "minimum_path_length": int(minimum_path_length),
+                "maximum_path_length": int(maximum_path_length),
+                "max_interval_gap": max_interval_gap,
+                "max_timestep_gap": max_timestep_gap,
+                "max_expansions": int(max_expansions),
+                "energy_csv": energy_path,
+                "continuous_support_filters_deferred": bool(
+                    max_interval_gap not in (None, "")
+                    or max_timestep_gap not in (None, "")
+                ),
+            }
+        )
+        return result
+    except (IndexNotReadyError, IndexStaleError) as exc:
+        raise ServiceError(
+            "事件索引尚未准备或已经过期；请在“管理数据”中建立事件索引",
+            reason="event_index_not_ready",
+        ) from exc
+    except (IndexInvalidError, EventPathAnalysisError) as exc:
+        raise ServiceError(
+            f"候选路径事件证据不可用: {exc}",
+            reason="invalid_candidate_path_evidence",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ServiceError(str(exc), reason="missing_candidate_path_source") from exc
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无效的候选路径参数: {exc}",
+            reason="bad_candidate_path_query",
         ) from exc
 
 

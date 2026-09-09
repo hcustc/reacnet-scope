@@ -471,13 +471,16 @@ def _enumerate_actual_paths(
     edges: Sequence[_EventEdge],
     *,
     path_length: int,
+    minimum_path_length: int | None = None,
     start_smiles: str,
+    start_species: frozenset[str] = frozenset(),
     expected_reaction_keys: Sequence[str] | None,
     max_interval_gap: int | None,
     max_timestep_gap: int | None,
     max_expansions: int,
     on_path: Callable[[dict[str, Any]], None],
 ) -> _TraversalState:
+    minimum_length = path_length if minimum_path_length is None else minimum_path_length
     node_by_id = {node.event_id: node for node in nodes}
     adjacency: dict[str, list[_EventEdge]] = defaultdict(list)
     for edge in edges:
@@ -532,9 +535,10 @@ def _enumerate_actual_paths(
     ) -> None:
         if state.truncated:
             return
-        if len(path_nodes) == path_length:
+        if len(path_nodes) >= minimum_length:
             if lineage:
                 emit(path_nodes, path_edges, lineage)
+        if len(path_nodes) == path_length:
             return
         for edge in adjacency.get(path_nodes[-1].event_id, ()):
             next_node = node_by_id[edge.to_event_id]
@@ -564,7 +568,9 @@ def _enumerate_actual_paths(
                 return
 
     for node in nodes:
-        if start_smiles and start_smiles not in node.reactant_terms:
+        if start_species and not start_species.intersection(node.reactant_terms):
+            continue
+        if not start_species and start_smiles and start_smiles not in node.reactant_terms:
             continue
         if (
             expected_reaction_keys is not None
@@ -899,7 +905,9 @@ def _analyze_event_paths(
     sources: Iterable[EventPathSource],
     *,
     path_length: int = 3,
+    minimum_path_length: int | None = None,
     start_smiles: str = "",
+    start_species: Sequence[str] = (),
     expected_reaction_keys: Sequence[str] | None = None,
     max_interval_gap: int | None = None,
     max_timestep_gap: int | None = None,
@@ -931,6 +939,16 @@ def _analyze_event_paths(
         if normalized_expected is not None
         else _bounded_integer(path_length, "path_length", minimum=2, maximum=8)
     )
+    safe_minimum_path_length = (
+        safe_path_length
+        if minimum_path_length is None
+        else _bounded_integer(
+            minimum_path_length,
+            "minimum_path_length",
+            minimum=2,
+            maximum=safe_path_length,
+        )
+    )
     safe_interval_gap = _optional_nonnegative_integer(
         max_interval_gap, "max_interval_gap"
     )
@@ -947,6 +965,13 @@ def _analyze_event_paths(
         max_network_paths, "max_network_paths", minimum=1
     )
     normalized_start = str(start_smiles or "").strip()
+    normalized_starts = frozenset(
+        str(value or "").strip()
+        for value in start_species
+        if str(value or "").strip()
+    )
+    if normalized_start and normalized_starts:
+        raise ValueError("start_smiles and start_species are mutually exclusive")
 
     aggregates: dict[tuple[str, ...], _SignatureAggregate] = {}
     occurrence_details: list[dict[str, Any]] = []
@@ -985,7 +1010,9 @@ def _analyze_event_paths(
             nodes,
             edges,
             path_length=safe_path_length,
+            minimum_path_length=safe_minimum_path_length,
             start_smiles=normalized_start,
+            start_species=normalized_starts,
             expected_reaction_keys=normalized_expected,
             max_interval_gap=safe_interval_gap,
             max_timestep_gap=safe_timestep_gap,
@@ -1069,7 +1096,9 @@ def _analyze_event_paths(
         },
         "query": {
             "path_length": safe_path_length,
+            "minimum_path_length": safe_minimum_path_length,
             "start_smiles": normalized_start,
+            "start_species": sorted(normalized_starts),
             "reaction_keys": list(normalized_expected or ()),
             "max_interval_gap": safe_interval_gap,
             "max_timestep_gap": safe_timestep_gap,
@@ -1142,10 +1171,55 @@ def verify_event_path(
     return report
 
 
+def discover_event_paths(
+    sources: Iterable[EventPathSource],
+    start_species: Iterable[str],
+    *,
+    minimum_path_length: int = 2,
+    maximum_path_length: int = 4,
+    max_interval_gap: int | None = None,
+    max_timestep_gap: int | None = None,
+    max_occurrence_details: int = 10_000,
+    max_expansions: int = 1_000_000,
+) -> dict[str, Any]:
+    """Discover sampled Event Paths beginning with any exact input Species.
+
+    Unlike aggregate-network reachability, every returned path is backed by a
+    strictly ordered chain of concrete RNG Reaction Occurrences connected by
+    an exact Molecule Instance and a non-empty continuous atom lineage.
+    """
+
+    normalized_starts = tuple(
+        sorted(
+            {
+                str(value or "").strip()
+                for value in start_species
+                if str(value or "").strip()
+            }
+        )
+    )
+    if not normalized_starts:
+        raise ValueError("at least one exact start Species is required")
+    report = _analyze_event_paths(
+        sources,
+        path_length=maximum_path_length,
+        minimum_path_length=minimum_path_length,
+        start_species=normalized_starts,
+        max_interval_gap=max_interval_gap,
+        max_timestep_gap=max_timestep_gap,
+        max_occurrence_details=max_occurrence_details,
+        max_expansions=max_expansions,
+        compare_aggregate_network=False,
+    )
+    report.pop("comparison", None)
+    return report
+
+
 __all__ = [
     "EVENT_PATH_SCHEMA_VERSION",
     "EventPathAnalysisError",
     "EventPathSource",
+    "discover_event_paths",
     "normalize_reaction_sequence",
     "verify_event_path",
 ]

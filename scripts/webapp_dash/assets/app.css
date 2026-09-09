@@ -6084,6 +6084,242 @@ summary:focus-visible,
 
 .rs-browser-refresh-action { display: none !important; }
 
+/* Dataset selection is intentionally folder-first. The common RNG prefix is
+   implementation detail and the browser only exposes one directory level. */
+.rs-data-selection-view,
+.rs-data-review-view {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.rs-data-selection-heading {
+  display: grid;
+  gap: 4px;
+  padding: 2px 2px 4px;
+}
+
+.rs-data-selection-card,
+.rs-data-review-card {
+  padding: 18px;
+  border: 1px solid var(--rs-border);
+  border-radius: var(--rs-radius);
+  background: var(--rs-card);
+  box-shadow: var(--rs-shadow);
+}
+
+.rs-data-selection-card .rs-browser-section-heading {
+  margin-bottom: 10px;
+}
+
+.rs-data-other-location {
+  display: grid;
+  gap: 10px;
+}
+
+.rs-data-other-location > .rs-browser-path-help {
+  margin: 0;
+}
+
+.rs-data-folder-browser-details {
+  margin-top: 4px;
+  overflow: hidden;
+  border-top: 1px solid var(--rs-border);
+}
+
+.rs-data-folder-browser-details > summary {
+  width: max-content;
+  padding-top: 13px;
+  color: var(--rs-accent);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rs-data-folder-browser {
+  display: grid;
+  gap: 11px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--rs-border);
+  border-radius: var(--rs-radius-sm);
+  background: #f8fafc;
+}
+
+.rs-data-folder-browser > .rs-browser-back-button,
+.rs-data-folder-browser > #dir-browser-select-btn {
+  width: max-content;
+}
+
+.rs-browser-context-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.rs-browser-context-role {
+  color: var(--rs-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rs-browser-context-value {
+  min-width: 0;
+  overflow: hidden;
+  color: #344054;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-browser-folder-status {
+  color: var(--rs-muted);
+  font-size: 10px;
+}
+
+.rs-browser-folder-status.is-ready {
+  color: var(--rs-success);
+}
+
+.rs-browser-folder-status.is-warning {
+  color: var(--rs-warning);
+}
+
+.rs-data-folder-browser .rs-browser-root-switcher {
+  margin: 0;
+}
+
+.rs-data-folder-browser .rs-browser-section {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--rs-border);
+}
+
+.rs-data-folder-browser .rs-browser-directory-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.rs-data-review-back {
+  width: max-content;
+  padding: 0;
+  text-decoration: none;
+}
+
+.rs-data-review-card {
+  display: grid;
+  gap: 18px;
+}
+
+.rs-data-review-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--rs-border);
+}
+
+.rs-data-review-identity {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.rs-data-review-identity strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+.rs-data-review-identity code {
+  overflow: hidden;
+  color: var(--rs-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-data-review-ready {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #eaf8f1;
+  color: var(--rs-success);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rs-data-review-capabilities {
+  display: grid;
+  gap: 9px;
+}
+
+.rs-data-review-capabilities h3,
+.rs-data-overview-action-section h3 {
+  margin: 0;
+  color: #344054;
+  font-size: 12px;
+}
+
+.rs-data-review-capability-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.rs-data-review-card .rs-browser-submit-row {
+  margin-bottom: -6px;
+}
+
+.rs-data-overview-action-section {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rs-border);
+}
+
+.rs-data-overview-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rs-data-overview-action {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--rs-border);
+  border-radius: var(--rs-radius-sm);
+  background: #fafbfc;
+}
+
+.rs-data-overview-action.is-ready {
+  border-color: #cfe7dc;
+  background: #fbfefc;
+}
+
+.rs-data-overview-action-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.rs-data-overview-action-copy strong {
+  color: #344054;
+  font-size: 11px;
+}
+
+.rs-data-overview-action-copy span {
+  overflow: hidden;
+  color: var(--rs-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rs-summary-metric {
   display: flex;
   align-items: center;
@@ -6822,6 +7058,10 @@ summary:focus-visible,
 }
 
 @media (max-width: 1100px) {
+  .rs-data-overview-action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .rs-summary-capability-list .rs-analysis-capability-list {
     grid-template-columns: repeat(3, minmax(100px, 1fr));
   }
@@ -6865,6 +7105,19 @@ summary:focus-visible,
 }
 
 @media (max-width: 768px) {
+  .rs-data-review-capability-list,
+  .rs-data-overview-action-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rs-browser-context-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rs-browser-folder-status {
+    justify-self: start;
+  }
+
   .rs-browser-recent-section .rs-browser-recent-list,
   .rs-browser-root-list {
     grid-template-columns: minmax(0, 1fr);

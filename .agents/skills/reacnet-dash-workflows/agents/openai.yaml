@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReacNet Dash 工作流"
+  short_description: "维护 Dash 数据集切换、异步回调、能力反馈与跨工具证据交接"
+  default_prompt: "使用 $reacnet-dash-workflows 完成本次 Dash 交互改动，并验证状态归属、失败处理与迟到结果。"
