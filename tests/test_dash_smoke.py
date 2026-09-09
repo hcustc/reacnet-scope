@@ -5650,6 +5650,86 @@ def test_dft_preview_turns_runtime_failures_into_alerts(
     assert payload["event-dft-download-btn"]["disabled"] is True
 
 
+@pytest.mark.parametrize("change", [
+    None, "event", "dataset", "charge", "source",
+    "review-missing", "review-old", "review-current",
+])
+def test_qc_download_rechecks_the_preview_context_before_export(tmp_path, monkeypatch, change):
+    from tests.test_reaction_readiness import _case
+
+    artifacts, event = _case(tmp_path, monkeypatch)
+    monkeypatch.setattr(svc, "save_coordinate_length_unit", lambda *_args: None)
+    # The geometry loader owns type-map settings; keep the real geometry path.
+    from reacnet_scope.trajectory import save_type_element_map
+    save_type_element_map(artifacts["trajectory"], {"1": "C", "2": "O"})
+    client = create_app().server.test_client()
+    charge_pattern = '{"stem":["ALL"],"type":"event-dft-charge"}'
+    multiplicity_pattern = '{"stem":["ALL"],"type":"event-dft-multiplicity"}'
+    states = {
+        "event-dft-reactants": [0, 1], "event-dft-products": [0],
+        "event-dft-layout": "combined",
+        "event-dft-unit-confirmation": ["angstrom"],
+        "event-dft-isolated-cluster-confirmation": ["confirmed"],
+        f"{charge_pattern}.value": [0, 0],
+        f"{charge_pattern}.id": [{"type": "event-dft-charge", "stem": stem} for stem in ("reactants", "products")],
+        f"{multiplicity_pattern}.value": [1, 1],
+        f"{multiplicity_pattern}.id": [{"type": "event-dft-multiplicity", "stem": stem} for stem in ("reactants", "products")],
+        "event-selected-store": {"row": event},
+        "app-store": {"dataset_id": "dataset-01", "label": "rep-01", "artifacts": artifacts},
+    }
+    review_case = str(change).startswith("review-")
+    if review_case:
+        states[f"{multiplicity_pattern}.value"] = [1, 3]
+    response = client.post("/_dash-update-component", json=_callback_payload(
+        client, input_ids=["event-dft-preview-btn"], changed="event-dft-preview-btn.n_clicks",
+        input_values={"event-dft-preview-btn": 1}, state_values=states,
+        output_id="event-dft-store",
+    ))
+    assert response.status_code == 200
+    payload = response.get_json()["response"]["event-dft-store"]["data"]
+    assert payload["readiness_report"]["qc_handoff"]["status"] == ("review_required" if review_case else "ready")
+    confirmation = []
+    if review_case:
+        options_response = client.post("/_dash-update-component", json=_callback_payload(
+            client, input_ids=["event-dft-store"], changed="event-dft-store.data",
+            input_values={"event-dft-store": payload}, state_values={},
+            output_id="event-dft-review-confirmation",
+        ))
+        options = options_response.get_json()["response"]["event-dft-review-confirmation"]["options"]
+        if change == "review-current":
+            confirmation = [options[0]["value"]]
+        elif change == "review-old":
+            confirmation = ["acknowledged", "review:another-report"]
+    if change == "event":
+        states["event-selected-store"] = {"row": {**event, "event_id": "another-event"}}
+    elif change == "dataset":
+        states["app-store"] = {**states["app-store"], "dataset_id": "another-dataset"}
+    elif change == "charge":
+        states[f"{charge_pattern}.value"] = [1, 1]
+    elif change == "source":
+        with Path(artifacts["trajectory"]).open("a") as stream:
+            stream.write("\n")
+    response = client.post("/_dash-update-component", json=_callback_payload(
+        client, input_ids=["event-dft-download-btn"], changed="event-dft-download-btn.n_clicks",
+        input_values={"event-dft-download-btn": 1},
+        state_values={**states, "event-dft-store": payload, "event-dft-review-confirmation": confirmation},
+        output_id="event-dft-download",
+    ))
+    if change and change != "review-current":
+        assert response.status_code == 200
+        result = response.get_json()["response"]
+        assert "event-dft-download" not in result
+        assert result["event-dft-download-btn"]["disabled"] is True
+        assert "重新" in json.dumps(result["event-dft-validation"], ensure_ascii=False)
+    else:
+        assert response.status_code == 200
+        from zipfile import ZipFile
+        download = response.get_json()["response"]["event-dft-download"]["data"]
+        with ZipFile(io.BytesIO(base64.b64decode(download["content"]))) as archive:
+            assert json.loads(archive.read("occurrence.json"))["event_id"] == event["event_id"]
+            assert json.loads(archive.read("reaction_readiness.json")) == payload["readiness_report"]
+
+
 def test_lineage_event_click_updates_selection_and_drilldown_request() -> None:
     client = create_app().server.test_client()
     event = {

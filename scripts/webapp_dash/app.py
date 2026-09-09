@@ -2047,12 +2047,7 @@ def _dft_geometry_card() -> dbc.Card:
                         html.Div(id="event-dft-validation", className="mt-2"),
                         dcc.Checklist(
                             id="event-dft-review-confirmation",
-                            options=[
-                                {
-                                    "label": "我已逐项复核 review_required 警告",
-                                    "value": "acknowledged",
-                                }
-                            ],
+                            options=[],
                             value=[],
                             className="rs-dft-unit-confirmation mt-2",
                         ),
