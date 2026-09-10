@@ -372,6 +372,8 @@ def discover_candidate_paths_for_dash(
     max_interval_gap: int | None = None,
     max_timestep_gap: int | None = None,
     max_expansions: int = 5_000,
+    max_frontier_states: int = 5_000,
+    max_generated_states: int = 10_000,
     max_paths: int = 20,
     minimum_occurrences: int = 1,
     energy_csv: str = "",
@@ -410,6 +412,8 @@ def discover_candidate_paths_for_dash(
             minimum_path_length=int(minimum_path_length),
             maximum_path_length=int(maximum_path_length),
             max_expansions=int(max_expansions),
+            max_frontier_states=int(max_frontier_states),
+            max_generated_states=int(max_generated_states),
             max_paths=int(max_paths),
             minimum_occurrences=int(minimum_occurrences),
         )
@@ -539,6 +543,8 @@ def discover_candidate_paths_for_dash(
                 "max_interval_gap": max_interval_gap,
                 "max_timestep_gap": max_timestep_gap,
                 "max_expansions": int(max_expansions),
+                "max_frontier_states": int(max_frontier_states),
+                "max_generated_states": int(max_generated_states),
                 "energy_csv": energy_path,
                 "continuous_support_filters_deferred": bool(
                     max_interval_gap not in (None, "")

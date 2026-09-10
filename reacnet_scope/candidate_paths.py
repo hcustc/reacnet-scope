@@ -39,6 +39,8 @@ def discover_network_candidate_routes(
     minimum_path_length: int = 2,
     maximum_path_length: int = 4,
     max_expansions: int = 5_000,
+    max_frontier_states: int = 5_000,
+    max_generated_states: int = 10_000,
     max_paths: int = 20,
     minimum_occurrences: int = 1,
 ) -> dict[str, Any]:
@@ -59,6 +61,8 @@ def discover_network_candidate_routes(
         ("minimum_path_length", minimum_path_length, 1, 8),
         ("maximum_path_length", maximum_path_length, 1, 8),
         ("max_expansions", max_expansions, 1, 1_000_000),
+        ("max_frontier_states", max_frontier_states, 1, 1_000_000),
+        ("max_generated_states", max_generated_states, 1, 1_000_000),
         ("max_paths", max_paths, 1, 500),
         ("minimum_occurrences", minimum_occurrences, 1, None),
     ):
@@ -70,8 +74,8 @@ def discover_network_candidate_routes(
     if minimum_path_length > maximum_path_length:
         raise ValueError("minimum_path_length must not exceed maximum_path_length")
 
-    # Keep ranking headroom while placing a hard bound on both expanded and
-    # materialized states.  The final multi-metric ranker applies max_paths.
+    # Output headroom is separate from expansion, frontier and cumulative
+    # generated-state budgets. The final ranker applies max_paths.
     candidate_limit = min(max_expansions, max(max_paths * 20, max_paths))
     sequence = itertools.count()
     queue: list[
@@ -84,21 +88,32 @@ def discover_network_candidate_routes(
             tuple[Reaction, ...],
         ]
     ] = []
+    generated_states = 0
+    peak_frontier_states = 0
+    child_candidates_examined = 0
+    truncation_reasons: set[str] = set()
     for start in starts:
         if start not in network.species:
             continue
+        if len(queue) >= max_frontier_states:
+            truncation_reasons.add("max_frontier_states")
+        if generated_states >= max_generated_states:
+            truncation_reasons.add("max_generated_states")
+        if truncation_reasons:
+            break
         heapq.heappush(
             queue,
             (-2**63, (start,), (), next(sequence), (start,), ()),
         )
+        generated_states += 1
+        peak_frontier_states = max(peak_frontier_states, len(queue))
 
     routes: list[dict[str, Any]] = []
     seen_routes: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
     expansions = 0
-    stopped_at_limit = False
     while queue:
         if len(routes) >= candidate_limit:
-            stopped_at_limit = True
+            truncation_reasons.add("candidate_limit")
             break
         _priority, _species_key, _reaction_key, _order, species, reactions = (
             heapq.heappop(queue)
@@ -134,21 +149,46 @@ def discover_network_candidate_routes(
         if depth >= maximum_path_length:
             continue
         if expansions >= max_expansions:
-            stopped_at_limit = True
+            truncation_reasons.add("max_expansions")
             break
 
         expansions += 1
         focal = species[-1]
-        children: list[tuple[Reaction, str]] = []
-        for reaction in network.consume_idx.get(focal, ()):
-            if int(reaction.tp) < minimum_occurrences:
-                continue
-            for product in sorted(set(reaction.product_smiles)):
-                if product in species:
+        frontier_slots = max_frontier_states - len(queue)
+        generation_slots = max_generated_states - generated_states
+        slots = min(frontier_slots, generation_slots)
+
+        def child_candidates():
+            nonlocal child_candidates_examined
+            for reaction in network.consume_idx.get(focal, ()):
+                if int(reaction.tp) < minimum_occurrences:
                     continue
-                children.append((reaction, product))
-        children.sort(key=lambda item: (-int(item[0].tp), item[0].key, item[1]))
-        for reaction, product in children:
+                # Stream products too: one hyperedge may have many products.
+                for product in reaction.product_smiles:
+                    if product in species:
+                        continue
+                    child_candidates_examined += 1
+                    yield reaction, product
+
+        # Retain at most the available slots plus one truncation witness, not
+        # every outgoing branch. Match the frontier's ordering, independently
+        # of adjacency input order. This bounds temporary memory, but still
+        # scans adjacent reaction/product references in this compatibility
+        # network; it is not a replacement for the production indexed search.
+        parent_bottleneck = min((int(item.tp) for item in reactions), default=2**63)
+        children = heapq.nsmallest(
+            slots + 1,
+            child_candidates(),
+            key=lambda item: (
+                -min(parent_bottleneck, int(item[0].tp)), item[1], item[0].key,
+            ),
+        )
+        if len(children) > slots:
+            if slots == frontier_slots:
+                truncation_reasons.add("max_frontier_states")
+            if slots == generation_slots:
+                truncation_reasons.add("max_generated_states")
+        for reaction, product in itertools.islice(children, slots):
             child_species = (*species, product)
             child_reactions = (*reactions, reaction)
             bottleneck = min(int(item.tp) for item in child_reactions)
@@ -164,14 +204,26 @@ def discover_network_candidate_routes(
                     child_reactions,
                 ),
             )
+            generated_states += 1
+            peak_frontier_states = max(peak_frontier_states, len(queue))
 
     return {
         "summary": {
             "discovery_kind": "md_observed_reaction_hypergraph",
             "candidate_route_count": len(routes),
-            "traversal_truncated": stopped_at_limit,
+            "traversal_truncated": bool(truncation_reasons),
+            "truncation_reasons": sorted(truncation_reasons),
             "expansions": expansions,
-            "statistics_complete": not stopped_at_limit,
+            "generated_states": generated_states,
+            "peak_frontier_states": peak_frontier_states,
+            "child_candidates_examined": child_candidates_examined,
+            "budgets": {
+                "max_expansions": max_expansions,
+                "max_frontier_states": max_frontier_states,
+                "max_generated_states": max_generated_states,
+                "candidate_limit": candidate_limit,
+            },
+            "statistics_complete": not truncation_reasons,
         },
         "sources": [],
         "paths": routes,
@@ -324,6 +376,49 @@ def _choose_focal_output(
     )
 
 
+def _declared_species_chain(
+    path: Mapping[str, Any], reactions: tuple[Reaction, ...],
+) -> tuple[str, ...]:
+    """Validate a network Candidate without inferring or repairing its identity."""
+    values = path.get("species")
+    if not isinstance(values, (list, tuple)) or len(values) != len(reactions) + 1:
+        raise ValueError("network Candidate requires an explicit anchor/carried species chain")
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError("Candidate species chain requires exact Species strings")
+    chain = tuple(values)
+    if len(set(chain)) != len(chain):
+        raise ValueError("ordinary Candidate species chain cannot revisit a Species")
+    if any(
+        chain[index] not in reaction.reactant_smiles
+        or chain[index + 1] not in reaction.product_smiles
+        for index, reaction in enumerate(reactions)
+    ):
+        raise ValueError("Candidate species chain must join the directed reaction sides")
+    return chain
+
+
+def _legacy_event_path_species_chain(
+    path: Mapping[str, Any], reactions: tuple[Reaction, ...], starts: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Explicit compatibility boundary for reports without network discovery semantics."""
+    matched_starts = sorted(set(starts).intersection(reactions[0].reactant_smiles))
+    if not matched_starts:
+        return ()
+    chain = [matched_starts[0]]
+    reported = tuple(str(value) for value in path.get("species") or ())
+    for index, reaction in enumerate(reactions):
+        next_reaction = reactions[index + 1] if index + 1 < len(reactions) else None
+        output = (
+            reported[index + 1]
+            if len(reported) == len(reactions) + 1 and reported[0] == chain[0]
+            else _choose_focal_output(chain[-1], reaction, next_reaction)
+        )
+        if not output:
+            return ()
+        chain.append(output)
+    return tuple(chain)
+
+
 def _median_edge_gap(path: Mapping[str, Any]) -> float | None:
     medians = [
         float(row["median"])
@@ -390,7 +485,7 @@ def rank_candidate_paths(
     energy_evidence: Mapping[str, EnergyEvidence | Mapping[str, Any]] | None = None,
     score_weights: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Rank sampled Event Path signatures using transparent normalized metrics."""
+    """Rank declared network routes; retain explicit legacy Event Path compatibility."""
 
     if not isinstance(max_paths, int) or isinstance(max_paths, bool) or not 1 <= max_paths <= 500:
         raise ValueError("max_paths must be an integer in [1, 500]")
@@ -413,6 +508,14 @@ def rank_candidate_paths(
         str(key): _energy_record(value)
         for key, value in (energy_evidence or {}).items()
     }
+    available_metrics = {"frequency", "structure"}
+    if not network_discovery:
+        available_metrics.update(("temporal", "continuity"))
+    if energy_by_key:
+        available_metrics.add("energy")
+    denominator = sum(weights[name] for name in sorted(available_metrics))
+    if not math.isfinite(denominator) or denominator <= 0:
+        raise ValueError("available score metrics must have a finite positive total weight")
     reaction_by_key = {reaction.key: reaction for reaction in network.reactions}
     raw_paths = [
         dict(path)
@@ -445,30 +548,22 @@ def rank_candidate_paths(
         reactions = tuple(_reaction_from_key(key, reaction_by_key) for key in keys)
         if not reactions:
             continue
-        matched_starts = sorted(set(starts).intersection(reactions[0].reactant_smiles))
-        if not matched_starts:
+        declared_chain = (
+            _declared_species_chain(path, reactions)
+            if network_discovery
+            else _legacy_event_path_species_chain(path, reactions, starts)
+        )
+        if not declared_chain or declared_chain[0] not in starts:
             continue
-        start = matched_starts[0]
+        start = declared_chain[0]
         focal = start
         species_chain = [start]
-        reported_species = tuple(
-            str(value) for value in path.get("species") or ()
-        )
         steps: list[CandidatePathStep] = []
         step_frequency_scores: list[float] = []
         step_structure_scores: list[float] = []
         step_energy_scores: list[float] = []
         for index, (key, reaction) in enumerate(zip(keys, reactions)):
-            next_reaction = reactions[index + 1] if index + 1 < len(reactions) else None
-            output = (
-                reported_species[index + 1]
-                if len(reported_species) == len(reactions) + 1
-                and reported_species[0] == start
-                else _choose_focal_output(focal, reaction, next_reaction)
-            )
-            if not output:
-                steps = []
-                break
+            output = declared_chain[index + 1]
             forward, reverse, net, _reversible = network.net_flux(reaction)
             similarity = structure_similarity(focal, output)
             energy = energy_by_key.get(key)
@@ -535,9 +630,6 @@ def rank_candidate_paths(
             "continuity": None if network_discovery else continuity_score,
             "energy": energy_score,
         }
-        denominator = sum(
-            weights[name] for name, value in metric_values.items() if value is not None
-        )
         score = sum(
             weights[name] * float(value)
             for name, value in metric_values.items()

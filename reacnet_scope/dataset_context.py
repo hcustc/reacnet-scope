@@ -100,6 +100,9 @@ def capture_dataset_revision(candidate: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "fingerprint": hashlib.sha256(encoded).hexdigest(),
         "artifacts": descriptors,
+        # Preserve the captured scope, independently of Workspace evidence
+        # associations that may replace a same-kind file in resolved artifacts.
+        "artifact_paths": dict(candidate.get("artifact_paths") or {}),
     }
 
 

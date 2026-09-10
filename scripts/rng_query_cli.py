@@ -629,6 +629,8 @@ def cmd_candidate_paths(args: argparse.Namespace) -> int:
             max_interval_gap=args.max_interval_gap,
             max_timestep_gap=args.max_timestep_gap,
             max_expansions=args.max_expansions,
+            max_frontier_states=args.max_frontier_states,
+            max_generated_states=args.max_generated_states,
             max_paths=args.top,
             minimum_occurrences=args.min_occurrences,
             energy_csv=args.energy_csv,
@@ -1723,6 +1725,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded_int("max_expansions", 1),
         default=5_000,
         help="有向反应网络的非终止状态展开上限",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-frontier-states",
+        type=_bounded_int("max_frontier_states", 1, 1_000_000),
+        default=5_000,
+        help="候选搜索队列状态数上限（默认 5000）",
+    )
+    sp_candidate_paths.add_argument(
+        "--max-generated-states",
+        type=_bounded_int("max_generated_states", 1, 1_000_000),
+        default=10_000,
+        help="累计生成的候选搜索状态上限，包含起点（默认 10000）",
     )
     sp_candidate_paths.add_argument(
         "--min-occurrences",

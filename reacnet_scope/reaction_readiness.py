@@ -63,6 +63,7 @@ def _json_safe(value: Any) -> Any:
 
 def _derived_source_revision(artifacts: Mapping[str, str]) -> dict[str, Any]:
     descriptors: list[dict[str, Any]] = []
+    captured_paths: dict[str, str] = {}
     for kind in sorted(
         {
             "reaction",
@@ -77,6 +78,7 @@ def _derived_source_revision(artifacts: Mapping[str, str]) -> dict[str, Any]:
         if not path.is_file():
             continue
         stat = path.stat()
+        captured_paths[kind] = str(path)
         descriptors.append(
             {
                 "kind": kind,
@@ -93,7 +95,32 @@ def _derived_source_revision(artifacts: Mapping[str, str]) -> dict[str, Any]:
     return {
         "fingerprint": hashlib.sha256(encoded).hexdigest(),
         "artifacts": descriptors,
+        "artifact_paths": captured_paths,
     }
+
+
+def _dataset_revision_artifacts(
+    artifacts: Mapping[str, str], source_revision: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Select the same source scope that Dataset validation fingerprinted.
+
+    Resolved QC artifacts can add or replace a trajectory through a Workspace
+    link. That geometry evidence has its own revision and source signatures;
+    it must not be compared as though it were the directory-discovered set.
+    Older contexts carry only kinds; retain that scope without guessing paths
+    when captured paths are available in a freshly validated context.
+    """
+    if not source_revision:
+        return dict(artifacts)
+    descriptors = source_revision.get("artifacts") or ()
+    kinds = {str(item["kind"]) for item in descriptors if item.get("kind")}
+    captured = source_revision.get("artifact_paths")
+    if isinstance(captured, Mapping):
+        return {kind: str(captured.get(kind) or "") for kind in kinds}
+    if kinds:
+        return {kind: str(artifacts.get(kind) or "") for kind in kinds}
+    # A fingerprint-only legacy request cannot declare a narrower scope.
+    return dict(artifacts)
 
 
 def _check(
@@ -458,7 +485,9 @@ def evaluate_reaction_readiness(
     """Evaluate one occurrence without producing a misleading numeric score."""
 
     geometry = request.geometry
-    current_revision = _derived_source_revision(artifacts)
+    revision_artifacts = _dataset_revision_artifacts(artifacts, source_revision)
+    current_revision = _derived_source_revision(revision_artifacts)
+    evidence_revision = _derived_source_revision(artifacts)
     revision = dict(source_revision or current_revision)
     checks: list[dict[str, Any]] = []
     provenance_complete = bool(
@@ -494,6 +523,7 @@ def evaluate_reaction_readiness(
             evidence={
                 "expected_fingerprint": revision.get("fingerprint"),
                 "current_fingerprint": current_revision.get("fingerprint"),
+                "artifact_kinds": sorted(revision_artifacts),
             },
             remediation=(
                 "源数据版本已变化；重新验证 Current Dataset 后再运行预检。"
@@ -690,6 +720,15 @@ def evaluate_reaction_readiness(
             checks.extend(_electronic_checks(bundle))
             checks.append(_warning_check(bundle))
 
+    unchanged = (
+        current_revision == _derived_source_revision(revision_artifacts)
+        and evidence_revision == _derived_source_revision(artifacts)
+    )
+    checks.append(_check(
+        "source_revision_unchanged_during_preflight",
+        "pass" if unchanged else "blocked",
+        remediation="预检期间来源已变化；重新验证数据集与几何证据后再运行预检。",
+    ))
     source_signatures = (
         dict(bundle.manifest.get("source_signatures") or {}) if bundle else {}
     )
@@ -702,6 +741,9 @@ def evaluate_reaction_readiness(
         checks=checks,
         source_signatures=source_signatures,
     )
+    # data_version remains the Dataset source revision supplied by the caller.
+    # evidence_version audits the full resolved set used for paired geometry.
+    report["evidence_version"] = _json_safe(evidence_revision)
     status = report["qc_handoff"]["status"]
     if status in {"blocked", "needs_input"}:
         bundle = None
