@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -45,7 +46,7 @@ from .timed_evidence import (
 )
 
 
-EVENT_EVIDENCE_SCHEMA_VERSION = 4
+EVENT_EVIDENCE_SCHEMA_VERSION = 5
 EVENT_ASSOCIATION_ALGORITHM_VERSION = 3
 EVENT_CONTINUITY_SCHEMA_VERSION = 1
 EVENT_CONTINUITY_ALGORITHM_VERSION = 2
@@ -743,6 +744,12 @@ class EventEvidenceStore:
             """
             CREATE INDEX IF NOT EXISTS events_by_reaction
             ON events(reaction_key,timestep_index,source_row,event_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS events_by_reaction_time
+            ON events(reaction_key,after_timestep,event_id)
             """
         )
         connection.execute(
@@ -1493,6 +1500,13 @@ class EventEvidenceStore:
                     raise IndexInvalidError(
                         f"Event evidence index {table} columns are incomplete"
                     )
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='events_by_reaction_time'"
+            ).fetchone() is None:
+                raise IndexInvalidError(
+                    "Event evidence index reaction timing lookup is missing"
+                )
             event_count = _strict_int(
                 meta.get("event_count"),
                 "event_count",
@@ -3416,6 +3430,125 @@ class EventEvidenceStore:
             "time_basis": opened["time_basis"],
             "source_signatures": source_signatures,
         }
+
+    def reaction_time_summary(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_keys: Iterable[str],
+    ) -> dict[str, dict[str, int | None]]:
+        """Summarize all indexed occurrences, independent of event pages."""
+        opened = self.open_required(reactionevent_file, molecules_file)
+        selected = sorted({str(key) for key in reaction_keys if str(key)})
+        result: dict[str, dict[str, int | None]] = {
+            key: {"total": 0, "first_after_timestep": None,
+                  "last_after_timestep": None} for key in selected
+        }
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            for start in range(0, len(selected), 500):
+                chunk = selected[start:start + 500]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                for key, count, first, last in connection.execute(
+                    f"SELECT reaction_key,COUNT(*),MIN(after_timestep),"
+                    f"MAX(after_timestep) FROM events WHERE reaction_key IN "
+                    f"({placeholders}) GROUP BY reaction_key", chunk
+                ):
+                    result[str(key)] = {
+                        "total": int(count),
+                        "first_after_timestep": int(first),
+                        "last_after_timestep": int(last),
+                    }
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(f"Event timing summary is corrupt: {exc}") from exc
+        finally:
+            connection.close()
+        return result
+
+    def reaction_time_bins(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_keys: Iterable[str],
+        *,
+        start: float,
+        end: float,
+        width: float,
+    ) -> dict[str, Any]:
+        """Count occurrences in half-open after-frame coordinate bins."""
+        if not all(math.isfinite(float(x)) for x in (start, end, width)):
+            raise ValueError("time window and bin width must be finite")
+        if width <= 0 or end <= start:
+            raise ValueError("time window and bin width must be positive")
+        n_bins = math.ceil((end - start) / width)
+        if n_bins > 500:
+            raise ValueError("time window exceeds the 500-bin limit")
+        opened = self.open_required(reactionevent_file, molecules_file)
+        keys = list(dict.fromkeys(str(key) for key in reaction_keys if str(key)))
+        output = {key: [0] * n_bins for key in keys}
+        totals = {key: 0 for key in keys}
+        connection = _readonly_connection(Path(opened["index_path"]))
+        try:
+            for key in keys:
+                for bucket, count in connection.execute(
+                    "SELECT CAST((after_timestep-?)/? AS INTEGER),COUNT(*) "
+                    "FROM events WHERE reaction_key=? AND after_timestep>=? "
+                    "AND after_timestep<? GROUP BY 1",
+                    (start, width, key, start, end),
+                ):
+                    index = int(bucket)
+                    if not 0 <= index < n_bins:
+                        raise IndexInvalidError("Event timing bin is outside window")
+                    output[key][index] = int(count)
+                    totals[key] += int(count)
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(f"Event timing bins are corrupt: {exc}") from exc
+        finally:
+            connection.close()
+        return {"counts": output, "totals": totals, "bin_count": n_bins,
+                "start": start, "end": end, "width": width,
+                "time_basis": opened["time_basis"]}
+
+    def query_events_window(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_key: str,
+        *,
+        start: float,
+        end: float,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Page one exact reaction and one half-open after-frame interval."""
+        if not math.isfinite(float(start)) or not math.isfinite(float(end)) or end <= start:
+            raise ValueError("invalid event time window")
+        if not 1 <= int(limit) <= 100 or int(offset) < 0:
+            raise ValueError("event page size or offset is invalid")
+        opened = self.open_required(reactionevent_file, molecules_file)
+        connection = _readonly_connection(Path(opened["index_path"]))
+        where = "reaction_key=? AND after_timestep>=? AND after_timestep<?"
+        params = (str(reaction_key), start, end)
+        try:
+            total = int(connection.execute(
+                f"SELECT COUNT(*) FROM events WHERE {where}", params
+            ).fetchone()[0])
+            records = connection.execute(
+                f"SELECT {_EVENT_SELECT_COLUMNS} FROM events WHERE {where} "
+                "ORDER BY after_timestep,event_id LIMIT ? OFFSET ?",
+                (*params, int(limit), int(offset)),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(f"Event timing page is corrupt: {exc}") from exc
+        finally:
+            connection.close()
+        rows = [_event_payload_from_record(record, event_index=int(offset) + i)
+                for i, record in enumerate(records, 1)]
+        return {"rows": rows, "total": total, "offset": int(offset),
+                "limit": int(limit), "has_more": int(offset) + len(rows) < total,
+                "time_basis": opened["time_basis"]}
 
     def reaction_counts(
         self,

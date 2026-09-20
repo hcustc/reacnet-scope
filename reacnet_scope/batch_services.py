@@ -34,6 +34,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from reacnet_scope.network import ReactionNetwork, count_atoms_fast, formula_from_counts, parse_reactionabcd  # noqa: E402
+from reacnet_scope.comparison_sources import build_comparison_source_record
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     IndexBuildInProgressError,
@@ -123,30 +124,128 @@ from reacnet_scope.workspace_services import (
 # ---------------------------------------------------------------------------
 
 
-def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
-    """Scan a directory tree for simulation conditions."""
-    from reacnet_scope.batch_compare import BatchComparator
+def _normalise_batch_scan_roots(root_dirs: Any) -> list[str]:
+    """Return one or more non-empty root paths from a string or iterable.
 
-    if not root_dir.strip():
+    The Dash batch page uses a multi-line textarea and posts the raw string;
+    callers may also pass a list of already-split paths.
+    """
+    if root_dirs is None:
         raise ServiceError("请提供数据根目录", reason="missing_dir")
 
-    try:
-        root_path = validate_browse_path(root_dir)
-    except ServiceError as exc:
-        raise ServiceError(exc.message, reason=exc.reason) from exc
-    if not root_path.is_dir():
-        raise ServiceError(f"目录不存在: {root_path}", reason="bad_dir")
-    root = str(root_path)
+    if isinstance(root_dirs, (str, os.PathLike)):
+        raw_values = [os.fspath(root_dirs)]
+    else:
+        try:
+            raw_values = [os.fspath(item) for item in root_dirs]
+        except TypeError as exc:
+            raise ServiceError("数据根目录格式无效", reason="bad_dir") from exc
 
-    comparator = BatchComparator()
-    conditions = comparator.scan_directory_tree(root)
+    roots: list[str] = []
+    for raw_value in raw_values:
+        if isinstance(raw_value, bytes):
+            raw_value = os.fsdecode(raw_value)
+        for line in str(raw_value or "").splitlines():
+            candidate = line.strip()
+            if candidate:
+                roots.append(candidate)
+    if not roots:
+        raise ServiceError("请提供数据根目录", reason="missing_dir")
+    return roots
+
+
+def scan_batch_conditions(root_dir: Any) -> dict[str, Any]:
+    """Scan one or more directory trees for simulation conditions.
+
+    ``root_dir`` may be a single path, a multi-line string, or an iterable
+    of paths.  Conditions discovered below different roots are combined and
+    re-grouped by their physical condition key so that separately supplied
+    replicate folders still form one comparison group.
+    """
+    from reacnet_scope.batch_compare import BatchComparator
+
+    raw_roots = _normalise_batch_scan_roots(root_dir)
+
+    roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for raw_root in raw_roots:
+        try:
+            root_path = validate_browse_path(raw_root)
+        except ServiceError:
+            raise
+        if not root_path.is_dir():
+            raise ServiceError(f"目录不存在: {root_path}", reason="bad_dir")
+        root_key = str(root_path)
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        roots.append(root_path)
+
+    root_count = len(roots)
+    conditions: list[Any] = []
+    warnings: list[str] = []
+    empty_roots: list[str] = []
+    for root_path in roots:
+        comparator = BatchComparator()
+        discovered = comparator.scan_directory_tree(str(root_path))
+        root_label = root_path.name or str(root_path)
+        for warning in comparator.scan_warnings:
+            warnings.append(
+                f"{root_label}: {warning}" if root_count > 1 else str(warning)
+            )
+        if discovered:
+            conditions.extend(discovered)
+        else:
+            empty_roots.append(str(root_path))
+
+    # The same physical directory may be reachable from overlapping roots.
+    deduplicated: list[Any] = []
+    seen_folders: set[str] = set()
+    for condition in conditions:
+        folder_key = os.path.realpath(str(condition.folder or ""))
+        if folder_key in seen_folders:
+            continue
+        seen_folders.add(folder_key)
+        deduplicated.append(condition)
+    conditions = deduplicated
+
     if not conditions:
+        if root_count == 1:
+            raise ServiceError(
+                f"未在 {roots[0]} 下找到包含 .reactionabcd 的子目录",
+                reason="no_conditions",
+            )
+        root_list = "、".join(str(root) for root in roots)
         raise ServiceError(
-            f"未在 {root} 下找到包含 .reactionabcd 的子目录",
+            f"未在以下目录下找到包含 .reactionabcd 的子目录：{root_list}",
             reason="no_conditions",
         )
 
-    groups = comparator.auto_group_conditions(conditions)
+    for empty_root in empty_roots:
+        warnings.append(f"{empty_root} 下未找到包含 .reactionabcd 的子目录")
+
+    grouping_comparator = BatchComparator()
+    groups = grouping_comparator.auto_group_conditions(conditions)
+    condition_group_keys = [condition.group_key for condition in conditions]
+
+    # Condition names are used as keys by the Dash request builder.  A
+    # multi-root scan can produce the same relative name under two roots, so
+    # disambiguate only the duplicates after grouping has already happened.
+    used_names: dict[str, int] = {}
+    for condition in conditions:
+        base_name = str(condition.name or "")
+        if base_name not in used_names:
+            used_names[base_name] = 1
+            continue
+        duplicate_number = used_names[base_name] + 1
+        candidate = f"{base_name} ({duplicate_number})"
+        while candidate in used_names:
+            duplicate_number += 1
+            candidate = f"{base_name} ({duplicate_number})"
+        used_names[base_name] = duplicate_number
+        used_names[candidate] = 1
+        condition.name = candidate
+
     condition_rows = [
         {
             "index": i + 1,
@@ -156,7 +255,14 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
             "o2_ratio": c.o2_ratio,
             "pressure": c.pressure,
             "replicate": c.replicate,
-            "group_key": c.group_key,
+            "model_iteration": c.model_iteration,
+            "metadata_status": "suggested",
+            "simulation_condition_status": "suggested",
+            "replicate_status": "suggested",
+            "model_iteration_status": (
+                "suggested" if c.model_iteration else "unknown"
+            ),
+            "group_key": condition_group_keys[i],
             "reaction_file": str(c.artifacts.get("reaction") or ""),
         }
         for i, c in enumerate(conditions)
@@ -168,10 +274,20 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
             "o2_ratio": g.o2_ratio,
             "pressure": g.pressure,
             "n_replicates": g.n_replicates,
+            "n_sources": len(g.conditions),
+            "metadata_status": "suggested",
             "conditions": [c.name for c in g.conditions],
         }
         for g in groups
     ]
+
+    if root_count > 1:
+        message = (
+            f"扫描完成: {root_count} 个根目录, "
+            f"{len(conditions)} 个来源, {len(groups)} 个待确认分组建议"
+        )
+    else:
+        message = f"扫描完成: {len(conditions)} 个来源, {len(groups)} 个待确认分组建议"
 
     return {
         "ok": True,
@@ -179,13 +295,17 @@ def scan_batch_conditions(root_dir: str) -> dict[str, Any]:
         "groups": group_rows,
         "total_conditions": len(conditions),
         "total_groups": len(groups),
-        "warnings": list(comparator.scan_warnings),
+        "root_count": root_count,
+        "warnings": warnings,
+        "metadata_status": "suggested",
         "meta": {
             "status": "ok",
-            "message": f"扫描完成: {len(conditions)} 个条件, {len(groups)} 个条件组",
-            "warnings": list(comparator.scan_warnings),
+            "message": message,
+            "root_count": root_count,
+            "warnings": warnings,
         },
     }
+
 
 def _validate_batch_limits(
     min_detection_rate: float,
@@ -282,6 +402,7 @@ def run_grouped_batch_comparison(
 
     comparator = BatchComparator()
     loaded_groups: list[ConditionGroup] = []
+    source_records: list[dict[str, Any]] = []
     seen_group_names: set[str] = set()
     seen_reaction_files: dict[str, str] = {}
     load_errors: list[str] = []
@@ -298,6 +419,15 @@ def run_grouped_batch_comparison(
             load_errors.append(f"条件组名称重复: {group_name}")
             continue
         seen_group_names.add(group_name)
+        group_metadata_status = str(
+            raw_group.get("metadata_status")
+            or ("confirmed" if group_name else "unknown")
+        )
+        if group_metadata_status == "suggested":
+            load_errors.append(
+                f"条件组 {group_name} 仍是目录名推断建议；请检查并明确确认后再运行"
+            )
+            continue
         raw_conditions = raw_group.get("conditions") or []
         if not isinstance(raw_conditions, list) or not raw_conditions:
             load_errors.append(f"条件组 {group_name} 没有可用的重复实验")
@@ -308,6 +438,7 @@ def run_grouped_batch_comparison(
             temperature=raw_group.get("temperature"),
             o2_ratio=raw_group.get("o2_ratio"),
             pressure=raw_group.get("pressure"),
+            metadata_status=group_metadata_status,
         )
         for condition_index, raw_source in enumerate(raw_conditions, start=1):
             source_mapping = raw_source if isinstance(raw_source, Mapping) else {}
@@ -319,6 +450,19 @@ def run_grouped_batch_comparison(
             try:
                 if not isinstance(raw_source, Mapping):
                     raise ServiceError("数据源格式无效", reason="bad_condition_source")
+                source_metadata_status = str(
+                    raw_source.get("metadata_status")
+                    or (
+                        "confirmed"
+                        if raw_source.get("replicate") not in (None, "")
+                        else "unknown"
+                    )
+                )
+                if source_metadata_status == "suggested":
+                    raise ServiceError(
+                        "目录名推断的条件/重复信息尚未确认",
+                        reason="unconfirmed_inferred_metadata",
+                    )
                 source = _resolve_batch_reaction_source(raw_source)
                 previous_group = seen_reaction_files.get(source["reaction_file"])
                 if previous_group:
@@ -326,11 +470,15 @@ def run_grouped_batch_comparison(
                         f"与条件组 {previous_group} 使用了同一反应文件",
                         reason="duplicate_reaction_file",
                     )
-                reactions = parse_reactionabcd(source["reaction_file"], min_tp=1)
-                if not reactions:
-                    raise ServiceError("反应文件没有可比较记录", reason="empty_reaction_file")
-                network = ReactionNetwork(reactions)
-                replicate = int(raw_source.get("replicate") or condition_index)
+                network, reaction_signature = load_reaction_network_snapshot(
+                    source["reaction_file"], 1
+                )
+                replicate_raw = raw_source.get("replicate")
+                replicate = int(
+                    replicate_raw
+                    if replicate_raw is not None and replicate_raw != ""
+                    else condition_index
+                )
                 if replicate < 1:
                     raise ValueError("重复编号必须大于 0")
             except ServiceError as exc:
@@ -356,12 +504,47 @@ def run_grouped_batch_comparison(
                     o2_ratio=raw_source.get("o2_ratio"),
                     pressure=raw_source.get("pressure"),
                     replicate=replicate,
+                    model_iteration=(
+                        str(raw_source.get("model_iteration"))
+                        if raw_source.get("model_iteration") not in (None, "")
+                        else None
+                    ),
+                    metadata_status=str(
+                        source_metadata_status
+                    ),
                     artifacts={
                         "reaction": source["reaction_file"],
                         "display_name": source["name"],
                     },
                 )
             )
+            source_record = build_comparison_source_record(
+                {
+                    **raw_source,
+                    "reaction_file": source["reaction_file"],
+                    "label": source["label"],
+                    "simulation_condition": (
+                        raw_source.get("simulation_condition") or group_name
+                    ),
+                    "simulation_condition_status": (
+                        "confirmed"
+                        if group_metadata_status == "confirmed"
+                        else group_metadata_status
+                    ),
+                    "replicate_status": str(
+                        raw_source.get("replicate_status")
+                        or (
+                            "confirmed"
+                            if raw_source.get("replicate") not in (None, "")
+                            else "unknown"
+                        )
+                    ),
+                    "source_revision": raw_source.get("source_revision") or {},
+                },
+                primary_kind="reaction",
+            )
+            source_record["reaction_signature"] = reaction_signature
+            source_records.append(source_record)
         if condition_group.conditions:
             loaded_groups.append(condition_group)
 
@@ -385,6 +568,17 @@ def run_grouped_batch_comparison(
             "id": f"group_{index}",
             "name": group.group_name,
             "n_replicates": group.n_replicates,
+            "n_sources": group.n_replicates,
+            "metadata_status": group.metadata_status,
+            "comparison_mode": (
+                "replicate_statistics"
+                if group.metadata_status == "confirmed"
+                and all(
+                    condition.metadata_status == "confirmed"
+                    for condition in group.conditions
+                )
+                else "independent_source"
+            ),
             "temperature": group.temperature,
             "o2_ratio": group.o2_ratio,
             "pressure": group.pressure,
@@ -402,12 +596,13 @@ def run_grouped_batch_comparison(
     for group in group_meta:
         prefix = group["id"]
         label = group["name"]
+        replicate_statistics = group["comparison_mode"] == "replicate_statistics"
         columns.extend(
             [
                 {"field": f"{prefix}_detection_rate", "headerName": f"{label} · 检出率", "type": "numericColumn"},
-                {"field": f"{prefix}_mean_tp", "headerName": f"{label} · 平均 TP", "type": "numericColumn"},
-                {"field": f"{prefix}_std_tp", "headerName": f"{label} · TP 标准差", "type": "numericColumn"},
-                {"field": f"{prefix}_mean_net_tp", "headerName": f"{label} · 平均净 TP", "type": "numericColumn"},
+                {"field": f"{prefix}_mean_tp", "headerName": f"{label} · {'平均 TP' if replicate_statistics else 'TP'}", "type": "numericColumn"},
+                {"field": f"{prefix}_std_tp", "headerName": f"{label} · {'TP 标准差' if replicate_statistics else '离散度不适用'}", "type": "numericColumn"},
+                {"field": f"{prefix}_mean_net_tp", "headerName": f"{label} · {'平均净 TP' if replicate_statistics else '净 TP'}", "type": "numericColumn"},
             ]
         )
 
@@ -429,6 +624,12 @@ def run_grouped_batch_comparison(
             stats = comparator.statistical_summary(comparison, condition_group)
             group_id = f"group_{group_index}"
             stats["id"] = group_id
+            stats["comparison_mode"] = group_meta[group_index - 1][
+                "comparison_mode"
+            ]
+            stats["metadata_status"] = group_meta[group_index - 1][
+                "metadata_status"
+            ]
             group_statistics.append(stats)
             row[f"{group_id}_detection_rate"] = stats["detection_rate"]
             row[f"{group_id}_mean_tp"] = stats["mean_tp"]
@@ -446,20 +647,53 @@ def run_grouped_batch_comparison(
         }
 
     return {
+        "schema_version": 2,
         "ok": True,
         "rows": rows,
         "columns": columns,
         "groups": group_meta,
         "details": details,
+        "source_records": source_records,
+        "identity_basis": "exact_directed_reaction_type_with_stoichiometric_multiplicity",
+        "evidence_scope": {
+            "level": "aggregated_reaction_network",
+            "supports_occurrence_comparison": False,
+            "supports_atom_lineage_comparison": False,
+            "message": (
+                "本结果比较 .reactionabcd 聚合网络记录；不等同于具体 Reaction "
+                "Occurrence 或跨来源原子谱系证据。"
+            ),
+        },
         "meta": {
             "status": "ok",
             "message": (
                 f"对比完成：{len(rows)} 个反应，{len(loaded_groups)} 个条件组，"
-                f"{sum(group.n_replicates for group in loaded_groups)} 个重复实验"
+                f"{sum(group.n_replicates for group in loaded_groups)} 个"
+                + (
+                    "重复实验"
+                    if all(
+                        group.metadata_status == "confirmed"
+                        and all(
+                            condition.metadata_status == "confirmed"
+                            for condition in group.conditions
+                        )
+                        for group in loaded_groups
+                    )
+                    else "来源"
+                )
             ),
             "n_reactions": len(rows),
             "n_groups": len(loaded_groups),
             "n_conditions": sum(group.n_replicates for group in loaded_groups),
+            "n_sources": sum(group.n_replicates for group in loaded_groups),
+            "confirmed_replicate_groups": sum(
+                group.metadata_status == "confirmed"
+                and all(
+                    condition.metadata_status == "confirmed"
+                    for condition in group.conditions
+                )
+                for group in loaded_groups
+            ),
         },
     }
 

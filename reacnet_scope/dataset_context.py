@@ -103,6 +103,31 @@ def capture_dataset_revision(candidate: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _candidate_identity_source(candidate: Mapping[str, Any]) -> str:
+    """Choose the Dataset Candidate's evidence prefix, not a linked trajectory.
+
+    A common RNG layout keeps ``<base>.reactionabcd`` and other evidence in a
+    run directory while ``<base>`` itself is a symlink to a trajectory stored
+    elsewhere.  Resolving identity from that symlink would bind Current
+    Dataset to the trajectory workspace instead of the RNG evidence workspace.
+    """
+
+    artifacts = candidate.get("artifact_paths") or {}
+    if isinstance(artifacts, Mapping):
+        for kind in (
+            "timeline",
+            "reactionevent",
+            "molecules",
+            "species",
+            "reaction",
+            "trajectory",
+        ):
+            path_text = str(artifacts.get(kind) or "").strip()
+            if path_text:
+                return path_text
+    return str(candidate.get("base") or "")
+
+
 def validate_dataset_candidate(folder: str, base: str) -> dict[str, Any]:
     """Validate identity and the latest source revision as one read-only unit."""
 
@@ -110,7 +135,9 @@ def validate_dataset_candidate(folder: str, base: str) -> dict[str, Any]:
     before_revision = capture_dataset_revision(before_candidate)
     resolved_folder = str(before_candidate["folder"])
     resolved_base = str(before_candidate["base"])
-    before_identity = dataset_id_for_source(resolved_base)
+    before_identity = dataset_id_for_source(
+        _candidate_identity_source(before_candidate)
+    )
 
     status = scan_dataset(resolved_folder, base=resolved_base)
     selected_base = str((status.get("dataset") or {}).get("selected_base") or "")
@@ -122,7 +149,9 @@ def validate_dataset_candidate(folder: str, base: str) -> dict[str, Any]:
 
     after_candidate = _candidate_at(resolved_folder, resolved_base)
     after_revision = capture_dataset_revision(after_candidate)
-    after_identity = dataset_id_for_source(resolved_base)
+    after_identity = dataset_id_for_source(
+        _candidate_identity_source(after_candidate)
+    )
     if before_revision != after_revision or before_identity != after_identity:
         raise ServiceError(
             "Dataset Candidate 的源修订在验证期间发生变化；请重试。",
@@ -151,7 +180,9 @@ def inspect_dataset_candidate(folder: str, base: str) -> dict[str, Any]:
         "folder": str(candidate["folder"]),
         "base": resolved_base,
         "label": str(candidate.get("label") or Path(resolved_base).name),
-        "dataset_id": dataset_id_for_source(resolved_base),
+        "dataset_id": dataset_id_for_source(
+            _candidate_identity_source(candidate)
+        ),
         "source_revision": capture_dataset_revision(candidate),
     }
 

@@ -73,13 +73,96 @@ def test_intermediate_candidates_cli_is_not_available() -> None:
         cli.build_parser().parse_args(["intermediate-candidates"])
 
 
-def test_automatic_candidate_paths_cli_is_not_available() -> None:
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["candidate-paths"])
+def test_candidate_paths_cli_accepts_multiple_exact_start_species() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "candidate-paths",
+            "--source",
+            "rep1=/data/run.lammpstrj",
+            "--reac",
+            "/data/run.lammpstrj.reactionabcd",
+            "--start",
+            "CCO",
+            "--start",
+            "O",
+            "--min-steps",
+            "2",
+            "--max-steps",
+            "5",
+        ]
+    )
+
+    assert args.func is cli.cmd_candidate_paths
+    assert args.start == ["CCO", "O"]
+    assert args.min_steps == 2
+    assert args.max_steps == 5
 
 
-def test_automatic_candidate_path_modules_and_public_services_are_removed() -> None:
-    assert importlib.util.find_spec("reacnet_scope.pathways") is None
-    assert importlib.util.find_spec("reacnet_scope.pathway_export") is None
-    assert not hasattr(svc, "find_pathways")
-    assert not hasattr(svc, "build_pathway_elements")
+def test_candidate_paths_cli_uses_bounded_discovery_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prefix = tmp_path / "run.lammpstrj"
+    reaction = Path(f"{prefix}.reactionabcd")
+    reactionevent = Path(f"{prefix}.reactionevent.csv")
+    molecules = Path(f"{prefix}.molecules.csv")
+    reaction.write_text("8 A->B\n6 B->C\n", encoding="utf-8")
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n0,A,B\n",
+        encoding="utf-8",
+    )
+    molecules.write_text(
+        "Timestep,Species,AtomIDs,BondIDs\n0,A,0,\n10,B,0,\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_discover(artifacts, starts, **kwargs):
+        captured.update(
+            artifacts=artifacts,
+            starts=starts,
+            kwargs=kwargs,
+        )
+        return {
+            "path_count": 1,
+            "truncated": False,
+            "energy_status": "not_provided",
+            "paths": [
+                {
+                    "rank": 1,
+                    "score": 1.0,
+                    "minimum_step_occurrence_count": 1,
+                    "start_species": "A",
+                    "species": ["A", "B", "C"],
+                    "reaction_keys": ["A->B", "B->C"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        svc,
+        "discover_candidate_paths_for_dash",
+        fake_discover,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "candidate-paths",
+            "--source",
+            f"rep1={prefix}",
+            "--reac",
+            str(reaction),
+            "--start",
+            "A",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert captured["starts"] == ["A"]
+    assert captured["kwargs"]["max_expansions"] == 5_000
+    assert "# candidate_paths=1" in capsys.readouterr().out
+
+
+def test_candidate_path_module_and_public_service_are_available() -> None:
+    assert importlib.util.find_spec("reacnet_scope.candidate_paths") is not None
+    assert hasattr(svc, "discover_candidate_paths_for_dash")

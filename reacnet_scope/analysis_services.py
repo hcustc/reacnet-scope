@@ -62,6 +62,11 @@ from reacnet_scope.event_paths import (  # noqa: E402
     EventPathSource,
     verify_event_path,
 )
+from reacnet_scope.candidate_paths import (  # noqa: E402
+    discover_network_candidate_routes,
+    load_energy_evidence_csv,
+    rank_candidate_paths,
+)
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
@@ -119,6 +124,7 @@ from reacnet_scope.queries import (  # noqa: E402
 
 
 from reacnet_scope.service_types import ServiceError
+from reacnet_scope.reaction_timing import reaction_timing_summaries
 from reacnet_scope.workspace_services import (
     _event_artifact_paths,
     validate_browse_path,
@@ -353,6 +359,211 @@ def verify_event_path_for_dash(
         raise ServiceError(
             f"无效的路径验证参数: {exc}",
             reason="bad_event_path_query",
+        ) from exc
+
+
+def discover_candidate_paths_for_dash(
+    artifacts: Mapping[str, Any],
+    start_species: str | Iterable[str],
+    *,
+    current_replicate: str = "current",
+    additional_sources: str = "",
+    minimum_path_length: int = 2,
+    maximum_path_length: int = 4,
+    max_interval_gap: int | None = None,
+    max_timestep_gap: int | None = None,
+    max_expansions: int = 5_000,
+    max_paths: int = 20,
+    minimum_occurrences: int = 1,
+    energy_csv: str = "",
+) -> dict[str, Any]:
+    """Discover bounded network Candidates and attach indexed Step Evidence."""
+
+    if isinstance(start_species, str):
+        starts = [
+            line.strip()
+            for line in start_species.replace(";", "\n").splitlines()
+            if line.strip()
+        ]
+    else:
+        starts = [str(value).strip() for value in start_species if str(value).strip()]
+    reaction_file = str(artifacts.get("reaction") or "").strip()
+    if not reaction_file or not Path(reaction_file).is_file():
+        raise ServiceError(
+            "缺少 .reactionabcd，无法计算候选路径的反应频次",
+            reason="missing_reaction_network",
+        )
+    sources = _event_path_sources_for_dash(
+        artifacts,
+        current_replicate=current_replicate,
+        additional_sources=additional_sources,
+    )
+    energy_path = (
+        str(validate_browse_path(str(energy_csv)))
+        if str(energy_csv or "").strip()
+        else ""
+    )
+    try:
+        network = STORE.get(reaction_file, _reaction_min_tp(artifacts))
+        evidence_report = discover_network_candidate_routes(
+            network,
+            starts,
+            minimum_path_length=int(minimum_path_length),
+            maximum_path_length=int(maximum_path_length),
+            max_expansions=int(max_expansions),
+            max_paths=int(max_paths),
+            minimum_occurrences=int(minimum_occurrences),
+        )
+        candidate_keys = sorted(
+            {
+                str(key)
+                for path in evidence_report.get("paths") or ()
+                for key in path.get("reaction_keys") or ()
+            }
+        )
+        summaries_by_replicate: dict[str, dict[str, dict[str, Any]]] = {}
+        source_documents: list[dict[str, Any]] = []
+        for source in sources:
+            summaries = EVENT_EVIDENCE_STORE.reaction_summary(
+                source.reactionevent_file,
+                source.molecules_file,
+                candidate_keys,
+            )
+            summaries_by_replicate[source.replicate] = summaries
+            source_documents.append(
+                {
+                    "replicate": source.replicate,
+                    "reactionevent_file": source.reactionevent_file,
+                    "molecules_file": source.molecules_file,
+                    "queried_reaction_type_count": len(candidate_keys),
+                }
+            )
+
+        evidence_paths: list[dict[str, Any]] = []
+        for raw_path in evidence_report.get("paths") or ():
+            path = dict(raw_path)
+            reaction_keys = tuple(
+                str(value) for value in path.get("reaction_keys") or ()
+            )
+            step_evidence: list[dict[str, Any]] = []
+            for reaction_key_text in reaction_keys:
+                by_replicate = {
+                    replicate: dict(summaries.get(reaction_key_text) or {})
+                    for replicate, summaries in summaries_by_replicate.items()
+                }
+                total_events = sum(
+                    int(summary.get("total_events") or 0)
+                    for summary in by_replicate.values()
+                )
+                step_evidence.append(
+                    {
+                        "reaction_key": reaction_key_text,
+                        "total_events": total_events,
+                        "matched_events": sum(
+                            int(summary.get("matched_events") or 0)
+                            for summary in by_replicate.values()
+                        ),
+                        "distinct_intervals": sum(
+                            int(summary.get("distinct_intervals") or 0)
+                            for summary in by_replicate.values()
+                        ),
+                        "replicate_count": sum(
+                            int(summary.get("total_events") or 0) > 0
+                            for summary in by_replicate.values()
+                        ),
+                    }
+                )
+            if not step_evidence or any(
+                int(step["total_events"]) < int(minimum_occurrences)
+                for step in step_evidence
+            ):
+                continue
+            replicate_support = sum(
+                all(
+                    int(
+                        summaries_by_replicate[replicate]
+                        .get(reaction_key_text, {})
+                        .get("total_events")
+                        or 0
+                    )
+                    > 0
+                    for reaction_key_text in reaction_keys
+                )
+                for replicate in summaries_by_replicate
+            )
+            minimum_step_events = min(
+                int(step["total_events"]) for step in step_evidence
+            )
+            path.update(
+                occurrence_count=minimum_step_events,
+                minimum_step_occurrence_count=minimum_step_events,
+                replicate_support_count=replicate_support,
+                replicate_reproduction_rate=(
+                    replicate_support / len(summaries_by_replicate)
+                    if summaries_by_replicate
+                    else 0.0
+                ),
+                step_evidence=step_evidence,
+                support_is_lower_bound=bool(
+                    (evidence_report.get("summary") or {}).get(
+                        "traversal_truncated"
+                    )
+                ),
+            )
+            evidence_paths.append(path)
+        evidence_report["paths"] = evidence_paths
+        evidence_report["sources"] = source_documents
+        evidence_report["summary"].update(
+            {
+                "replicate_count": len(sources),
+                "candidate_route_count": len(evidence_paths),
+                "step_evidence_only": True,
+            }
+        )
+        energy = (
+            load_energy_evidence_csv(energy_path)
+            if energy_path
+            else None
+        )
+        result = rank_candidate_paths(
+            network,
+            evidence_report,
+            starts,
+            max_paths=int(max_paths),
+            minimum_occurrences=int(minimum_occurrences),
+            energy_evidence=energy,
+        )
+        result["query"].update(
+            {
+                "minimum_path_length": int(minimum_path_length),
+                "maximum_path_length": int(maximum_path_length),
+                "max_interval_gap": max_interval_gap,
+                "max_timestep_gap": max_timestep_gap,
+                "max_expansions": int(max_expansions),
+                "energy_csv": energy_path,
+                "continuous_support_filters_deferred": bool(
+                    max_interval_gap not in (None, "")
+                    or max_timestep_gap not in (None, "")
+                ),
+            }
+        )
+        return result
+    except (IndexNotReadyError, IndexStaleError) as exc:
+        raise ServiceError(
+            "事件索引尚未准备或已经过期；请在“管理数据”中建立事件索引",
+            reason="event_index_not_ready",
+        ) from exc
+    except (IndexInvalidError, EventPathAnalysisError) as exc:
+        raise ServiceError(
+            f"候选路径事件证据不可用: {exc}",
+            reason="invalid_candidate_path_evidence",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ServiceError(str(exc), reason="missing_candidate_path_source") from exc
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            f"无效的候选路径参数: {exc}",
+            reason="bad_candidate_path_query",
         ) from exc
 
 
@@ -1034,6 +1245,162 @@ def species_detail(artifacts: dict[str, str], smiles: str) -> dict[str, Any]:
         "total_throughput": tp_reactant + tp_product,
         "n_consume_rxns": n_consume,
         "n_produce_rxns": n_produce,
+        "identity_context": _species_identity_context(
+            artifacts,
+            smiles=smi,
+            formula=formula,
+        ),
+    }
+
+
+_RNG_METADATA_MAX_BYTES = 1_048_576
+
+
+def _read_small_json_document(path: Path) -> dict[str, Any] | None:
+    """Read one explicit, bounded metadata document beside RNG artifacts."""
+
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as source:
+            raw = source.read(_RNG_METADATA_MAX_BYTES + 1)
+        if len(raw) > _RNG_METADATA_MAX_BYTES:
+            return None
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def rng_processing_metadata(artifacts: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only explicitly recorded RNG settings and their source files.
+
+    Directory names, log messages, and output appearance are intentionally not
+    used to infer processing settings.  Interactive queries also avoid opening
+    the large timed-evidence source just to inspect HDF5 attributes.
+    """
+
+    roots: list[Path] = []
+    for kind in ("reaction", "species", "timeline", "reactionevent", "molecules"):
+        path_text = str(artifacts.get(kind) or "").strip()
+        if not path_text:
+            continue
+        parent = Path(path_text).expanduser().resolve(strict=False).parent
+        if parent not in roots:
+            roots.append(parent)
+
+    fields: dict[str, dict[str, Any]] = {}
+    documents: list[str] = []
+
+    def record(name: str, value: Any, source: Path) -> None:
+        if name in fields or value is None:
+            return
+        fields[name] = {"value": value, "source": str(source)}
+
+    for root in roots:
+        run_path = root / "rng_run.json"
+        run_document = _read_small_json_document(run_path)
+        if run_document is not None:
+            documents.append(str(run_path))
+            parameters = run_document.get("parameters")
+            if not isinstance(parameters, Mapping):
+                parameters = {}
+            record("miso", parameters.get("miso"), run_path)
+            record("run_hmm", parameters.get("runHMM"), run_path)
+            record("step_interval", parameters.get("stepinterval"), run_path)
+            record("rng_source_revision", run_document.get("source_revision"), run_path)
+            record("rng_source_branch", run_document.get("source_branch"), run_path)
+            record("timestep_ps", run_document.get("timestep_ps"), run_path)
+
+        validation_path = root / "timed_output_validation.json"
+        validation = _read_small_json_document(validation_path)
+        if validation is not None:
+            documents.append(str(validation_path))
+            run = validation.get("run")
+            if not isinstance(run, Mapping):
+                run = {}
+            record("step_interval", run.get("stepinterval"), validation_path)
+            record(
+                "reacnetgenerator_version",
+                run.get("reacnetgenerator_version"),
+                validation_path,
+            )
+
+    ordered_names = (
+        "miso",
+        "run_hmm",
+        "step_interval",
+        "timestep_ps",
+        "reacnetgenerator_version",
+        "rng_source_branch",
+        "rng_source_revision",
+    )
+    return {
+        "status": "available" if fields else "unknown",
+        "fields": {
+            name: fields.get(name, {"value": None, "source": ""})
+            for name in ordered_names
+        },
+        "documents": list(dict.fromkeys(documents)),
+    }
+
+
+def _species_identity_context(
+    artifacts: Mapping[str, Any],
+    *,
+    smiles: str,
+    formula: str,
+) -> dict[str, Any]:
+    timeline = str(artifacts.get("timeline") or "").strip()
+    reactionevent = str(artifacts.get("reactionevent") or "").strip()
+    molecules = str(artifacts.get("molecules") or "").strip()
+    if timeline and Path(timeline).is_file():
+        molecular_evidence = {
+            "available": True,
+            "kind": "native_timeline_hdf5",
+            "source": str(Path(timeline).expanduser().resolve(strict=False)),
+            "message": (
+                "存在原生 Timed Evidence Source；具体原始分子实例仍需通过已发布索引做有界核查。"
+            ),
+        }
+    elif (
+        reactionevent
+        and molecules
+        and Path(reactionevent).is_file()
+        and Path(molecules).is_file()
+    ):
+        molecular_evidence = {
+            "available": True,
+            "kind": "compatible_csv_pair",
+            "source": str(Path(molecules).expanduser().resolve(strict=False)),
+            "message": (
+                "存在兼容事件与分子证据；具体原始分子实例仍需通过已发布索引做有界核查。"
+            ),
+        }
+    else:
+        molecular_evidence = {
+            "available": False,
+            "kind": "none",
+            "source": "",
+            "message": (
+                "当前来源没有可用 Molecular Evidence；RNG Species 标签不能据此下钻到具体分子实例。"
+            ),
+        }
+
+    reaction_source = str(artifacts.get("reaction") or "").strip()
+    return {
+        "schema_version": "reacnet-scope/species-identity-context/v1",
+        "identity_kind": "exact_rng_species",
+        "rng_species_label": smiles,
+        "formula": formula,
+        "formula_role": "search_and_grouping_only",
+        "reaction_source": (
+            str(Path(reaction_source).expanduser().resolve(strict=False))
+            if reaction_source
+            else ""
+        ),
+        "processing": rng_processing_metadata(artifacts),
+        "molecular_evidence": molecular_evidence,
     }
 
 
@@ -1677,6 +2044,7 @@ def collect_species_channels(
 
     production_rows = decorate(production, "produce")
     consumption_rows = decorate(consumption, "consume")
+    timing = reaction_timing_summaries(artifacts, [*production_rows, *consumption_rows])
     if include_kinetics:
         kinetics = _enrich_channel_kinetics(
             artifacts,
@@ -1698,6 +2066,7 @@ def collect_species_channels(
         "production_rows": production_rows,
         "consumption_rows": consumption_rows,
         "kinetics": kinetics,
+        "timing": timing,
     }
 
 
@@ -2194,6 +2563,7 @@ def search_reactions_by_formula(
         for idx, row in enumerate(rows, 1):
             row["rank"] = idx
 
+    timing = reaction_timing_summaries(artifacts, rows)
     return {
         "ok": True,
         "query": {
@@ -2210,6 +2580,7 @@ def search_reactions_by_formula(
             "rows": len(rows),
             "share_metric_total": share_total_metric,
             "share_metric_top_sum": share_top_sum,
+            "timing": timing,
         },
         "rows": rows,
     }

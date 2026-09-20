@@ -441,6 +441,36 @@ def resolve_dataset_input(path: str) -> dict[str, str]:
     }
 
 
+def resolve_dataset_folder_candidate(path: str) -> dict[str, str]:
+    """Resolve one user-selected folder to its single internal dataset base.
+
+    The Web UI deliberately treats a folder as the user-visible dataset.  The
+    ReacNetGenerator common prefix remains an implementation detail needed by
+    the existing loaders, so ambiguous folders fail instead of asking users to
+    choose a prefix they should not need to understand.
+    """
+
+    snapshot = browse_dataset_location(path)
+    candidates = list(snapshot.get("datasets") or [])
+    if not candidates:
+        raise ServiceError(
+            "当前文件夹中没有识别到 ReacNetGenerator 数据。",
+            reason="dataset_not_found",
+        )
+    if len(candidates) > 1:
+        raise ServiceError(
+            "当前文件夹包含多组 ReacNetGenerator 数据；请为每组数据使用独立文件夹。",
+            reason="ambiguous_dataset_folder",
+        )
+    candidate = candidates[0]
+    return {
+        "folder": str(candidate.get("folder") or snapshot.get("current_path") or ""),
+        "base": str(candidate.get("base") or ""),
+        "label": Path(str(snapshot.get("current_path") or path)).name
+        or str(candidate.get("label") or "未命名数据集"),
+    }
+
+
 def normalise_recent_datasets(
     records: Iterable[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:

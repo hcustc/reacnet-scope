@@ -11,8 +11,27 @@ from .event_paths import (
     EVENT_PATH_SCHEMA_VERSION,
     EventPathAnalysisError,
     EventPathSource,
+    discover_event_paths,
     normalize_reaction_sequence,
     verify_event_path,
+)
+from .candidate_paths import (
+    CANDIDATE_PATH_SCHEMA_VERSION,
+    SCORE_VERSION as CANDIDATE_PATH_SCORE_VERSION,
+    EnergyEvidence,
+    load_energy_evidence_csv,
+    rank_candidate_paths,
+)
+from .reaction_readiness import (
+    REACTION_READINESS_SCHEMA_VERSION,
+    ReactionReadinessRequest,
+    ReactionReadinessResult,
+    evaluate_reaction_readiness,
+)
+from .species_compare import (
+    compare_species_sources,
+    species_compare_catalog,
+    species_comparison_zip,
 )
 
 __all__ = [
@@ -24,6 +43,19 @@ __all__ = [
     "EVENT_PATH_SCHEMA_VERSION",
     "EventPathAnalysisError",
     "EventPathSource",
+    "discover_event_paths",
     "normalize_reaction_sequence",
     "verify_event_path",
+    "CANDIDATE_PATH_SCHEMA_VERSION",
+    "CANDIDATE_PATH_SCORE_VERSION",
+    "EnergyEvidence",
+    "load_energy_evidence_csv",
+    "rank_candidate_paths",
+    "REACTION_READINESS_SCHEMA_VERSION",
+    "ReactionReadinessRequest",
+    "ReactionReadinessResult",
+    "evaluate_reaction_readiness",
+    "compare_species_sources",
+    "species_compare_catalog",
+    "species_comparison_zip",
 ]

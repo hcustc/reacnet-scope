@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReacNet Scope 数据分析使用"
+  short_description: "正确检索合并物种、解释路径证据，并在一致口径下比较多个数据来源"
+  default_prompt: "使用 $reacnet-analysis-usage 分析已有 RNG 数据，核对目标代表结构并比较各来源的反应行为。"

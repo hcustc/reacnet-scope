@@ -18,6 +18,7 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import (
     ALL,
+    MATCH,
     ClientsideFunction,
     Input,
     Output,
@@ -32,35 +33,30 @@ from dash.exceptions import PreventUpdate
 
 from reacnet_scope.indexes import dataset_id_for_source
 from reacnet_scope import services as svc
+from scripts.webapp_dash.chart_presentation import empty_chart_figure
 from scripts.webapp_dash.navigation import (
     DEFAULT_PAGE,
+    PAGE_WORKFLOWS,
+    PAGE_CAPABILITY_REQUIREMENTS,
     PAGE_CLASS_NAMES,
     PAGE_DESCRIPTIONS,
     PAGE_IDS,
     PAGE_LABELS,
     PAGE_SECTIONS,
+    PAGE_WORKSPACES,
     TOP_NAV_PAGE_IDS,
+    WORKSPACE_PAGE_IDS,
+    WORKSPACE_TASK_LABELS,
+    WORKSPACE_TOOL_PAGES,
+    resolve_page_id,
 )
 PAGE_DATA_REQUIREMENTS = {
     "species": ("reaction", "reactionabcd"),
     "reactions": ("reaction", "reactionabcd"),
-    "pathway": ("timeline", ".timeline.h5 或 .reactionevent.csv + .molecules.csv"),
     "evolution": ("species", ".species + Species Abundance Index"),
     "element-distribution": ("species", ".species"),
     "events": ("timeline", ".timeline.h5 或 .reactionevent.csv + .molecules.csv"),
-    "species-fate": ("timeline", ".timeline.h5 或 .reactionevent.csv + .molecules.csv"),
     "trajectory": ("trajectory", "轨迹文件与帧索引"),
-}
-
-PAGE_CAPABILITY_REQUIREMENTS = {
-    "species": "reaction_search",
-    "reactions": "reaction_search",
-    "pathway": "event_search",
-    "evolution": "species_abundance",
-    "element-distribution": "element_distribution",
-    "events": "event_search",
-    "species-fate": "species_fate",
-    "trajectory": "trajectory_evidence",
 }
 
 _CAPABILITY_LABELS = {
@@ -70,6 +66,12 @@ _CAPABILITY_LABELS = {
     "species_fate": "物种命运分析",
     "trajectory_evidence": "轨迹证据",
     "element_distribution": "元素分布",
+}
+
+_WORKSPACE_CAPABILITIES = {
+    "species": ("reaction_search", "species_abundance", "element_distribution"),
+    "reactions": ("reaction_search", "event_search"),
+    "trajectory": ("event_search", "trajectory_evidence"),
 }
 
 _CAPABILITY_STATE_LABELS = {
@@ -83,7 +85,10 @@ _CAPABILITY_STATE_LABELS = {
     "missing_source": "缺少源数据",
 }
 
-_FATE_SPECIES_OPTION_LIMIT = 100
+def _int_with_default(value: Any, default: int) -> int:
+    """Coerce an optional integer while preserving zero as an explicit value."""
+
+    return int(default if value is None or value == "" else value)
 
 _ELEMENT_SYMBOLS = (
     "H",
@@ -360,6 +365,7 @@ def _build_dft_bundle_from_controls(
     product_indices: list[int] | None,
     layout: str,
     unit_confirmation: list[str] | None,
+    isolated_cluster_confirmation: list[str] | None,
     charge_values: list[Any],
     charge_ids: list[dict[str, Any]],
     multiplicity_values: list[Any],
@@ -369,8 +375,6 @@ def _build_dft_bundle_from_controls(
     artifacts = (app_store or {}).get("artifacts") or {}
     trajectory = str(artifacts.get("trajectory") or "")
     confirmed_now = "angstrom" in (unit_confirmation or [])
-    if confirmed_now:
-        svc.save_coordinate_length_unit(trajectory, "angstrom")
     request = svc.DftGeometryRequest(
         include_reactants=bool(reactant_indices),
         include_products=bool(product_indices),
@@ -385,7 +389,96 @@ def _build_dft_bundle_from_controls(
         ),
         source_length_unit="angstrom" if confirmed_now else None,
     )
-    return svc.build_dft_geometry_bundle(artifacts, row, request)
+    evaluation = svc.evaluate_reaction_readiness(
+        artifacts,
+        row,
+        svc.ReactionReadinessRequest(
+            geometry=request,
+            isolated_cluster_confirmed=(
+                "confirmed" in (isolated_cluster_confirmation or [])
+            ),
+        ),
+        dataset_id=str((app_store or {}).get("dataset_id") or ""),
+        source_revision=(app_store or {}).get("source_revision") or None,
+        replicate=str((app_store or {}).get("label") or "current"),
+    )
+    if confirmed_now and evaluation.bundle is not None:
+        svc.save_coordinate_length_unit(trajectory, "angstrom")
+    return evaluation
+
+
+def _dft_readiness_validation(report: dict[str, Any] | None) -> Any:
+    value = report or {}
+    qc_handoff = value.get("qc_handoff") or {}
+    status = str(qc_handoff.get("status") or "blocked")
+    colors = {
+        "blocked": "danger",
+        "needs_input": "info",
+        "review_required": "warning",
+        "ready": "success",
+    }
+    labels = {
+        "blocked": "被证据或结构条件阻断",
+        "needs_input": "需要补充或确认输入",
+        "review_required": "需要人工复核后才能导出",
+        "ready": "可交给外部 TS 流程",
+    }
+    checks = list(qc_handoff.get("checks") or [])
+    groups = []
+    for group_status in ("blocked", "needs_input", "review_required", "pass"):
+        items = [item for item in checks if item.get("status") == group_status]
+        if not items:
+            continue
+        groups.append(
+            html.Div(
+                [
+                    html.Strong(f"{group_status} ({len(items)})"),
+                    html.Ul(
+                        [
+                            html.Li(
+                                [
+                                    html.Code(str(item.get("id") or "check")),
+                                    " · ",
+                                    "；".join(
+                                        str(value)
+                                        for value in (
+                                            (item.get("evidence") or {}).get(
+                                                "message"
+                                            ),
+                                            item.get("remediation")
+                                            or item.get("claim_limit"),
+                                        )
+                                        if value
+                                    )
+                                    or "检查通过",
+                                ]
+                            )
+                            for item in items
+                        ],
+                        className="mb-1 mt-1",
+                    ),
+                ],
+                className="mt-2",
+            )
+        )
+    return dbc.Alert(
+        [
+            html.Div(
+                [
+                    html.Code(status),
+                    " · ",
+                    labels.get(status, "检查状态未知"),
+                ]
+            ),
+            *groups,
+            html.Div(
+                "ready 不表示已验证过渡态、动力学模型或可直接计算速率。",
+                className="rs-step-note mt-2",
+            ),
+        ],
+        color=colors.get(status, "secondary"),
+        className="py-2 mb-0",
+    )
 
 
 def initial_store() -> dict[str, Any]:
@@ -417,28 +510,22 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("species-grid-store", "data", {"rows": []}),
         reset("species-workspace-stage", "data", "results"),
         reset("rxn-grid-store", "data", {"rows": []}),
+        reset("rxn-timing-distribution-store", "data", None),
+        reset("rxn-timing-page-store", "data", None),
+        reset("rxn-timing-graph", "figure", {}),
+        reset("rxn-timing-event-grid", "data", []),
+        reset("rxn-timing-card", "style", {"display": "none"}),
         reset("evolution-payload-store", "data", None),
         reset("evolution-timestep", "value", None),
         reset("element-distribution-payload-store", "data", None),
         reset("element-distribution-timestep", "value", None),
         reset("event-grid-store", "data", {"rows": []}),
         reset("event-selected-store", "data", None),
+        reset("event-bookmark-validation-store", "data", None),
         reset("event-viewer-store", "data", None),
         reset("event-dft-store", "data", None),
         reset("molecule-lineage-store", "data", None),
         reset("molecule-lineage-drilldown-store", "data", None),
-        reset("event-path-store", "data", None),
-        reset("event-path-context-store", "data", None),
-        reset("event-path-wizard-step", "data", 1),
-        reset("fate-result-store", "data", None),
-        reset("fate-target-species", "value", None),
-        reset(
-            "fate-endpoints-table",
-            "data",
-            [{"category": "", "species": ""}],
-        ),
-        reset("fate-error", "children", ""),
-        reset("fate-error", "is_open", False),
         reset("species-grid", "data", []),
         reset("species-grid", "selected_rows", []),
         reset("species-grid", "active_cell", None),
@@ -466,21 +553,19 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("rxn-channel-coordinate-unit-confirm", "value", False),
         reset("rxn-channel-volume-status", "children", ""),
         reset("rxn-channel-volume-progress", "children", ""),
+        reset("rxn-channel-volume-refresh", "disabled", True),
         reset("rxn-channel-view", "style", {"display": "none"}),
         reset("rxn-channel-history-store", "data", []),
         reset("event-grid", "data", []),
         reset("event-grid", "selected_rows", []),
         reset("event-grid", "active_cell", None),
         reset("batch-matrix-grid", "selected_rows", []),
-        reset("event-path-signature-grid", "data", []),
-        reset("event-path-time-grid", "data", []),
-        reset("event-path-event-grid", "data", []),
-        reset("event-path-edge-grid", "data", []),
-        reset("event-path-cytoscape", "elements", []),
         reset("molecule-lineage-event-grid", "data", []),
         reset("molecule-lineage-event-grid", "selected_rows", []),
         reset("molecule-lineage-cytoscape", "elements", []),
-        reset("evolution-graph", "figure", go.Figure()),
+        reset("evolution-graph", "figure", empty_chart_figure(
+            "选择物种，开始查看时间演化", "在设置区添加目标，然后点击绘制。"
+        )),
         reset("element-distribution-composition-trend", "figure", go.Figure()),
         reset("element-distribution-composition-table", "data", []),
         reset("event-extract-id", "value", ""),
@@ -488,9 +573,6 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("event-frame-slider", "max", 0),
         reset("event-frame-slider", "value", 0),
         reset("event-frame-slider", "marks", {}),
-        reset("event-path-additional-sources", "value", ""),
-        reset("event-path-current-replicate", "value", ""),
-        reset("event-path-occurrence-selector", "value", None),
         reset("evolution-species-file", "value", ""),
         reset("evolution-species-files", "value", ""),
         reset("evolution-species-picker", "options", []),
@@ -616,6 +698,54 @@ def _format_bytes(value: Any) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024.0
     return f"{size:.1f} TiB"
+
+
+def _channel_volume_progress_state(task: dict[str, Any] | None) -> tuple[str, str]:
+    """Render persisted trajectory preparation facts for the channel page."""
+    value = task if isinstance(task, dict) else {}
+    state = str(value.get("state") or "")
+    class_name = "rs-kinetics-progress"
+    if not value:
+        return "正在启动轨迹索引任务…", f"{class_name} is-running"
+
+    trusted_progress = (
+        value.get("progress") if value.get("progress_trusted") else None
+    )
+    progress = (
+        min(max(float(trusted_progress), 0.0), 1.0)
+        if isinstance(trusted_progress, (int, float))
+        else None
+    )
+    source_artifact = dict(value.get("source_artifact_revision") or {})
+    source_size = int(source_artifact.get("size") or 0)
+    progress_detail = ""
+    if progress is not None:
+        progress_detail = f"：{progress * 100:.1f}%"
+        if source_size > 0:
+            progress_detail += (
+                f"（{_format_bytes(round(progress * source_size))} / "
+                f"{_format_bytes(source_size)}）"
+            )
+
+    if state in {"running", "cancel_requested"}:
+        action = (
+            "正在取消轨迹索引任务"
+            if state == "cancel_requested"
+            else "正在构建轨迹索引"
+        )
+        return f"{action}{progress_detail}", f"{class_name} is-running"
+    if state == "completed":
+        return "轨迹索引已完成，正在更新通道结果…", f"{class_name} is-running"
+    if state == "canceled":
+        return "轨迹索引任务已取消；已保留可续建检查点。", class_name
+    if state == "interrupted":
+        return "轨迹索引任务已中断；重新准备时可从检查点续建。", class_name
+    if state == "superseded":
+        return "轨迹源文件已变化，本次索引任务已停止。", class_name
+    if state == "failed":
+        message = str(value.get("message") or "未知错误")
+        return f"轨迹索引任务失败：{message}", class_name
+    return "正在检查轨迹索引状态…", f"{class_name} is-running"
 
 
 def _capability_state_class(state: Any) -> str:
@@ -1245,6 +1375,102 @@ def _event_selection_summary(selected: dict[str, Any]) -> Any:
     )
 
 
+def _species_identity_context_panel(detail: dict[str, Any]) -> Any:
+    """Render explicit RNG identity/provenance without inferring missing settings."""
+
+    context = detail.get("identity_context") or {}
+    processing = context.get("processing") or {}
+    fields = processing.get("fields") or {}
+    molecular = context.get("molecular_evidence") or {}
+    labels = (
+        ("miso", "miso"),
+        ("run_hmm", "HMM"),
+        ("step_interval", "step interval"),
+        ("timestep_ps", "timestep (ps)"),
+        ("reacnetgenerator_version", "RNG 版本"),
+        ("rng_source_branch", "RNG 分支"),
+        ("rng_source_revision", "RNG 修订"),
+    )
+
+    def display_value(value: Any) -> str:
+        if value is None or value == "":
+            return "未知（未显式记录）"
+        if isinstance(value, bool):
+            return "是" if value else "否"
+        return str(value)
+
+    setting_rows: list[Any] = []
+    for key, label in labels:
+        field = fields.get(key) or {}
+        source = str(field.get("source") or "")
+        setting_rows.extend(
+            (
+                html.Dt(label),
+                html.Dd(
+                    [
+                        html.Span(display_value(field.get("value"))),
+                        html.Code(
+                            source,
+                            title=source,
+                            className="rs-provenance-source",
+                        )
+                        if source
+                        else None,
+                    ]
+                ),
+            )
+        )
+
+    reaction_source = str(context.get("reaction_source") or "")
+    molecular_source = str(molecular.get("source") or "")
+    return html.Details(
+        [
+            html.Summary("身份、处理设置与 Molecular Evidence"),
+            html.P(
+                [
+                    "精确 RNG Species：",
+                    html.Code(
+                        str(context.get("rng_species_label") or detail.get("smiles") or "")
+                    ),
+                    "。分子式仅用于检索与分组，不代替结构身份。",
+                ],
+                className="rs-step-note mt-2",
+            ),
+            html.Dl(
+                [
+                    html.Dt("Reaction Source"),
+                    html.Dd(
+                        html.Code(reaction_source, title=reaction_source)
+                        if reaction_source
+                        else "未知（未显式记录）"
+                    ),
+                    *setting_rows,
+                    html.Dt("Molecular Evidence"),
+                    html.Dd(
+                        [
+                            html.Span(
+                                str(
+                                    molecular.get("message")
+                                    or "当前没有可说明的 Molecular Evidence。"
+                                )
+                            ),
+                            html.Code(
+                                molecular_source,
+                                title=molecular_source,
+                                className="rs-provenance-source",
+                            )
+                            if molecular_source
+                            else None,
+                        ]
+                    ),
+                ],
+                className="mt-2",
+            ),
+        ],
+        className="rs-species-provenance mt-2",
+    )
+
+
 def _structure_species_card(
     item: dict[str, Any],
     side_label: str = "物种",
@@ -1498,6 +1724,22 @@ def _selected_table_row(
 
 
 def register_callbacks(app: Any) -> None:
+    @app.callback(
+        Output("rxn-channel-lanes", "className"),
+        Output("rxn-production-grid", "hidden_columns"),
+        Output("rxn-consumption-grid", "hidden_columns"),
+        Input("rxn-channel-layout", "value"),
+        Input("rxn-channel-show-rates", "value"),
+    )
+    def _channel_display_options(layout, show_rates):
+        # P1 keeps legacy result fields compatible but removes apparent-rate
+        # columns from the ordinary product surface.
+        mode = "compare" if layout == "compare" else "stacked"
+        hidden = [
+            "event_frequency_per_ps", "k_app_display", "reverse_k_app_display",
+        ]
+        return f"rs-channel-lanes is-{mode}", hidden, hidden
+
     # ── Navigation ──────────────────────────────────────────────────
 
     @app.callback(
@@ -1526,6 +1768,14 @@ def register_callbacks(app: Any) -> None:
         Input("nav-data-management", "n_clicks"),
         Input("data-open-batch-compare-btn", "n_clicks"),
         Input("data-open-species-btn", "n_clicks"),
+        Input(
+            {"type": "data-overview-open-page", "page": ALL},
+            "n_clicks",
+        ),
+        Input(
+            {"type": "workspace-open-page", "page": ALL},
+            "n_clicks",
+        ),
         Input("data-pick-btn", "n_clicks"),
         Input("open-data-modal", "n_clicks"),
         Input("page-capability-manage-btn", "n_clicks"),
@@ -1535,46 +1785,87 @@ def register_callbacks(app: Any) -> None:
         Input("species-to-event-btn", "n_clicks"),
         Input("rxn-to-event-btn", "n_clicks"),
         Input("rxn-channel-to-event-btn", "n_clicks"),
+        Input("rxn-timing-open-events-btn", "n_clicks"),
         Input("event-back-btn", "n_clicks"),
         Input("event-extract-btn", "n_clicks"),
         Input("trajectory-back-events-btn", "n_clicks"),
         Input("dir-browser-cancel-btn", "n_clicks"),
         Input("dataset-switch-navigation", "data"),
         State("page-store", "data"),
+        prevent_initial_call=True,
     )
     def _navigate(*_args):
         triggered_id = ctx.triggered_id
+        triggered = ctx.triggered[0] if ctx.triggered else {}
+        if str(triggered.get("prop_id") or "").endswith(".n_clicks"):
+            raw_clicks = triggered.get("value")
+            if raw_clicks is None and isinstance(triggered_id, dict):
+                triggered_type = triggered_id.get("type")
+                for input_item in ctx.inputs_list:
+                    items = input_item if isinstance(input_item, list) else [input_item]
+                    for item in items:
+                        item_id = item.get("id")
+                        if not isinstance(item_id, str) or not item_id.startswith("{"):
+                            continue
+                        try:
+                            pattern_id = json.loads(item_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if pattern_id.get("type") == triggered_type:
+                            raw_clicks = item.get("value")
+                            break
+                    if raw_clicks is not None:
+                        break
+
+            def has_positive_click(value: Any) -> bool:
+                if isinstance(value, (list, tuple)):
+                    return any(has_positive_click(item) for item in value)
+                return isinstance(value, (int, float)) and value > 0
+
+            if not has_positive_click(raw_clicks):
+                # Pattern-matched controls can be inserted while the restored
+                # layout hydrates.  Their zero-valued n_clicks notification is
+                # not navigation and must not overwrite the session page.
+                raise PreventUpdate
+        triggered_string_id = (
+            triggered_id if isinstance(triggered_id, str) else None
+        )
         stored_state = (_args[-1] or {}) if _args else {}
-        stored_page = stored_state.get("page")
+        stored_page = resolve_page_id(stored_state.get("page"))
         switch_navigation = _args[-2] if len(_args) >= 2 else {}
-        if triggered_id == "dataset-switch-navigation":
+        if triggered_string_id == "dataset-switch-navigation":
             page_id = str((switch_navigation or {}).get("page") or stored_page)
-        elif triggered_id == "dir-browser-cancel-btn":
+        elif _pattern_trigger_type(triggered_id) == "data-overview-open-page":
+            page_id = str(triggered_id.get("page") or "data-management")
+        elif _pattern_trigger_type(triggered_id) == "workspace-open-page":
+            page_id = str(triggered_id.get("page") or DEFAULT_PAGE)
+        elif triggered_string_id == "dir-browser-cancel-btn":
             page_id = str(
                 ((stored_state.get("dataset_return") or {}).get("page"))
                 or "data-management"
             )
-        elif triggered_id in {
+        elif triggered_string_id in {
             "rxn-to-event-btn",
             "rxn-channel-to-event-btn",
+            "rxn-timing-open-events-btn",
         }:
             page_id = "events"
-        elif triggered_id == "event-back-btn":
+        elif triggered_string_id == "event-back-btn":
             page_id = stored_state.get("return_page") or DEFAULT_PAGE
-        elif triggered_id == "event-extract-btn":
+        elif triggered_string_id == "event-extract-btn":
             page_id = "trajectory"
-        elif triggered_id == "trajectory-back-events-btn":
+        elif triggered_string_id == "trajectory-back-events-btn":
             page_id = "events"
-        elif triggered_id in {
+        elif triggered_string_id in {
             "species-to-channels-btn",
             "species-to-event-btn",
         }:
             page_id = "reactions"
-        elif triggered_id == "data-open-batch-compare-btn":
+        elif triggered_string_id == "data-open-batch-compare-btn":
             page_id = "batch-compare"
-        elif triggered_id == "data-open-species-btn":
+        elif triggered_string_id == "data-open-species-btn":
             page_id = "species"
-        elif triggered_id in {
+        elif triggered_string_id in {
             "nav-data-management",
             "data-pick-btn",
             "open-data-modal",
@@ -1582,12 +1873,15 @@ def register_callbacks(app: Any) -> None:
             "species-open-data-modal",
         }:
             page_id = "data-management"
-        elif triggered_id == "species-to-evolution-btn":
+        elif triggered_string_id == "species-to-evolution-btn":
             page_id = "evolution"
         else:
-            page_id = triggered_id.removeprefix("nav-") if triggered_id else stored_page
-        if page_id not in PAGE_IDS:
-            page_id = DEFAULT_PAGE
+            page_id = (
+                triggered_string_id.removeprefix("nav-")
+                if triggered_string_id
+                else stored_page
+            )
+        page_id = resolve_page_id(page_id)
         page_classes = {
             pid: (
                 f"{PAGE_CLASS_NAMES.get(pid, 'rs-page')} active"
@@ -1596,13 +1890,14 @@ def register_callbacks(app: Any) -> None:
             )
             for pid in PAGE_IDS
         }
+        active_workspace = PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE)
         nav_classes = {
-            pid: f"rs-top-nav-item{' active' if pid == page_id else ''}"
+            pid: f"rs-top-nav-item{' active' if pid == active_workspace else ''}"
             for pid in TOP_NAV_PAGE_IDS
         }
         page_state = {"page": page_id}
         if (
-            triggered_id in {
+            triggered_string_id in {
                 "data-pick-btn",
                 "open-data-modal",
                 "page-capability-manage-btn",
@@ -1617,20 +1912,21 @@ def register_callbacks(app: Any) -> None:
             }
         elif (
             page_id == "data-management"
-            and triggered_id == "data-pick-btn"
+            and triggered_string_id == "data-pick-btn"
             and stored_state.get("dataset_return")
         ):
             page_state["dataset_return"] = dict(stored_state["dataset_return"])
         return_context = {
             "rxn-to-event-btn": ("reactions", "返回反应式检索"),
             "rxn-channel-to-event-btn": ("reactions", "返回反应通道"),
-        }.get(triggered_id)
+            "rxn-timing-open-events-btn": ("reactions", "返回时间分布"),
+        }.get(triggered_string_id)
         if page_id == "events" and return_context:
             page_state.update(
                 return_page=return_context[0],
                 return_label=return_context[1],
             )
-        elif triggered_id in {
+        elif triggered_string_id in {
             "event-extract-btn",
             "trajectory-back-events-btn",
         }:
@@ -1638,12 +1934,12 @@ def register_callbacks(app: Any) -> None:
                 if stored_state.get(key):
                     page_state[key] = stored_state[key]
         focus_request: Any = no_update
-        if triggered_id == "data-pick-btn":
+        if triggered_string_id == "data-pick-btn":
             focus_request = {
                 "token": f"picker-{time.time_ns()}",
                 "target": "data-browser-title",
             }
-        elif triggered_id in {
+        elif triggered_string_id in {
             "open-data-modal",
             "page-capability-manage-btn",
             "species-open-data-modal",
@@ -1664,11 +1960,11 @@ def register_callbacks(app: Any) -> None:
                 "token": f"data-workspace-{time.time_ns()}",
                 "target": (
                     preparation_target
-                    if triggered_id == "page-capability-manage-btn"
+                    if triggered_string_id == "page-capability-manage-btn"
                     else "data-candidate-summary"
                 ),
             }
-        elif triggered_id == "dir-browser-cancel-btn":
+        elif triggered_string_id == "dir-browser-cancel-btn":
             focus_request = {
                 "token": f"cancel-{time.time_ns()}",
                 "target": str(
@@ -1676,7 +1972,7 @@ def register_callbacks(app: Any) -> None:
                     or "data-candidate-summary"
                 ),
             }
-        elif triggered_id == "dataset-switch-navigation":
+        elif triggered_string_id == "dataset-switch-navigation":
             focus_request = {
                 "token": str((switch_navigation or {}).get("request_id") or time.time_ns()),
                 "target": (
@@ -1694,22 +1990,22 @@ def register_callbacks(app: Any) -> None:
             + (
                 (
                     "rs-top-nav-item rs-nav-utility active"
-                    if page_id == "data-management"
+                    if active_workspace == "data-management"
                     else "rs-top-nav-item rs-nav-utility"
                 ),
                 (
                     "rs-top-nav-item rs-nav-utility active"
-                    if page_id == "batch-compare"
+                    if active_workspace == "batch-compare"
                     else "rs-top-nav-item rs-nav-utility"
                 ),
             )
             + tuple(
-                "page" if pid == page_id else "false"
+                "page" if pid == active_workspace else "false"
                 for pid in TOP_NAV_PAGE_IDS
             )
             + (
-                "page" if page_id == "data-management" else "false",
-                "page" if page_id == "batch-compare" else "false",
+                "page" if active_workspace == "data-management" else "false",
+                "page" if active_workspace == "batch-compare" else "false",
             )
             + (
                 page_state,
@@ -1785,8 +2081,8 @@ def register_callbacks(app: Any) -> None:
         """Keep visible page chrome aligned when session storage restores page-store."""
         state = page_store if isinstance(page_store, dict) else {}
         page_id = str(state.get("page") or DEFAULT_PAGE)
-        if page_id not in PAGE_IDS:
-            page_id = DEFAULT_PAGE
+        page_id = resolve_page_id(page_id)
+        active_workspace = PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE)
         page_classes = tuple(
             (
                 f"{PAGE_CLASS_NAMES.get(pid, 'rs-page')} active"
@@ -1796,7 +2092,7 @@ def register_callbacks(app: Any) -> None:
             for pid in PAGE_IDS
         )
         nav_classes = tuple(
-            f"rs-top-nav-item{' active' if pid == page_id else ''}"
+            f"rs-top-nav-item{' active' if pid == active_workspace else ''}"
             for pid in TOP_NAV_PAGE_IDS
         )
         return (
@@ -1804,21 +2100,21 @@ def register_callbacks(app: Any) -> None:
             *nav_classes,
             (
                 "rs-top-nav-item rs-nav-utility active"
-                if page_id == "data-management"
+                if active_workspace == "data-management"
                 else "rs-top-nav-item rs-nav-utility"
             ),
             (
                 "rs-top-nav-item rs-nav-utility active"
-                if page_id == "batch-compare"
+                if active_workspace == "batch-compare"
                 else "rs-top-nav-item rs-nav-utility"
             ),
             *(
-                "page" if pid == page_id else "false"
+                "page" if pid == active_workspace else "false"
                 for pid in TOP_NAV_PAGE_IDS
             ),
             *(
-                "page" if page_id == "data-management" else "false",
-                "page" if page_id == "batch-compare" else "false",
+                "page" if active_workspace == "data-management" else "false",
+                "page" if active_workspace == "batch-compare" else "false",
             ),
             PAGE_LABELS[page_id],
             PAGE_SECTIONS[page_id],
@@ -1850,7 +2146,7 @@ def register_callbacks(app: Any) -> None:
         Input("app-store", "data"),
     )
     def _update_page_data_status(page_store, app_store):
-        page_id = (page_store or {}).get("page") or "species"
+        page_id = resolve_page_id((page_store or {}).get("page"))
         inputs_pending = bool((app_store or {}).get("inputs_pending"))
 
         def ready_status(message: str) -> tuple[str, str]:
@@ -1922,306 +2218,6 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
-        Output("fate-target-species", "options"),
-        Output("fate-endpoints-table", "dropdown"),
-        Input("app-store", "data"),
-        Input("fate-target-species", "search_value"),
-        Input("fate-endpoint-species-search", "value"),
-        State("fate-target-species", "value"),
-        State("fate-endpoints-table", "data"),
-    )
-    def _load_species_fate_catalog(
-        app_store,
-        target_search,
-        endpoint_search,
-        target_value,
-        endpoint_rows,
-    ):
-        capabilities = _capabilities_from_store(app_store)
-        if str((capabilities.get("species_fate") or {}).get("state")) != "ready":
-            return [], {"species": {"options": []}}
-        artifacts = (app_store or {}).get("artifacts", {}) or {}
-        target_query = str(target_search or "").strip()
-        endpoint_query = str(endpoint_search or "").strip()
-        try:
-            target_catalog = svc.species_fate_catalog_for_dataset(
-                artifacts,
-                query=target_query,
-                limit=_FATE_SPECIES_OPTION_LIMIT,
-            )
-            endpoint_catalog = (
-                target_catalog
-                if endpoint_query == target_query
-                else svc.species_fate_catalog_for_dataset(
-                    artifacts,
-                    query=endpoint_query,
-                    limit=_FATE_SPECIES_OPTION_LIMIT,
-                )
-            )
-        except svc.ServiceError:
-            return [], {"species": {"options": []}}
-
-        def options_for(catalog, selected=()):
-            options = [
-                {
-                    "label": f"{row['species']} · {row['species_id']}",
-                    "value": row["species"],
-                }
-                for row in catalog
-            ]
-            known = {str(option["value"]) for option in options}
-            for value in selected:
-                species = str(value or "").strip()
-                if species and species not in known:
-                    options.append({"label": species, "value": species})
-                    known.add(species)
-            return options
-
-        preserve_selection = ctx.triggered_id != "app-store"
-        selected_endpoints = (
-            [row.get("species") for row in (endpoint_rows or [])]
-            if preserve_selection
-            else []
-        )
-        target_options = options_for(
-            target_catalog,
-            [target_value] if preserve_selection else [],
-        )
-        endpoint_options = options_for(endpoint_catalog, selected_endpoints)
-        return target_options, {"species": {"options": endpoint_options}}
-
-    @app.callback(
-        Output("fate-endpoints-table", "data"),
-        Input("fate-add-endpoint-btn", "n_clicks"),
-        State("fate-endpoints-table", "data"),
-        prevent_initial_call=True,
-    )
-    def _add_species_fate_endpoint(_n_clicks, rows):
-        return [*(rows or []), {"category": "", "species": ""}]
-
-    @app.callback(
-        Output("fate-run-btn", "disabled"),
-        Input("app-store", "data"),
-    )
-    def _disable_species_fate_run(app_store):
-        capability = (
-            _capabilities_from_store(app_store).get("species_fate") or {}
-        )
-        return str(capability.get("state") or "") != "ready"
-
-    @app.callback(
-        Output("fate-result-store", "data"),
-        Output("fate-error", "children"),
-        Output("fate-error", "is_open"),
-        Input("fate-run-btn", "n_clicks"),
-        State("app-store", "data"),
-        State("fate-target-species", "value"),
-        State("fate-endpoints-table", "data"),
-        State("fate-anchor-mode", "value"),
-        State("fate-atom-elements", "value"),
-        State("fate-anchor-values", "value"),
-        State("fate-formation-start", "value"),
-        State("fate-formation-end", "value"),
-        State("fate-followup-end", "value"),
-        State("fate-min-followup", "value"),
-        State("fate-max-events", "value"),
-        State("fate-max-branches", "value"),
-        State("fate-detail-limit", "value"),
-        State("fate-global-episode-limit", "value"),
-        prevent_initial_call=True,
-    )
-    def _run_species_fate(
-        _n_clicks,
-        app_store,
-        target,
-        endpoint_rows,
-        anchor_mode,
-        atom_element_text,
-        anchor_values,
-        formation_start,
-        formation_end,
-        followup_end,
-        minimum_followup,
-        max_events,
-        max_branches,
-        detail_limit,
-        global_episode_limit,
-    ):
-        endpoint_categories: dict[str, list[str]] = {}
-        for row in endpoint_rows or []:
-            category = str(row.get("category") or "").strip()
-            species = str(row.get("species") or "").strip()
-            if category and species:
-                endpoint_categories.setdefault(category, []).append(species)
-        atom_elements: dict[int, str] = {}
-        try:
-            for line in str(atom_element_text or "").replace(",", "\n").splitlines():
-                if not line.strip():
-                    continue
-                atom_id, element = line.split("=", 1)
-                atom_elements[int(atom_id.strip())] = element.strip()
-            values = [
-                value.strip()
-                for value in str(anchor_values or "").split(",")
-                if value.strip()
-            ]
-            result = svc.build_species_fate_analysis(
-                (app_store or {}).get("artifacts", {}) or {},
-                target_species=str(target or ""),
-                endpoint_categories=endpoint_categories,
-                atom_elements=atom_elements,
-                anchor_mode=str(anchor_mode or "heavy_atoms"),
-                anchor_elements=(values if anchor_mode == "elements" else ()),
-                anchor_atom_ids=(
-                    [int(value) for value in values]
-                    if anchor_mode == "atom_ids"
-                    else ()
-                ),
-                formation_start_frame=int(formation_start or 0),
-                formation_end_frame=(
-                    int(formation_end) if formation_end is not None else None
-                ),
-                followup_end_frame=(
-                    int(followup_end) if followup_end is not None else None
-                ),
-                minimum_followup_frames=int(minimum_followup or 0),
-                max_events_per_episode=int(max_events or 10_000),
-                max_active_branches=int(max_branches or 1_000),
-                detail_retention_limit=int(detail_limit or 0),
-                global_episode_limit=(
-                    int(global_episode_limit)
-                    if global_episode_limit is not None
-                    else None
-                ),
-            )
-        except (svc.ServiceError, TypeError, ValueError) as exc:
-            message = getattr(exc, "message", str(exc))
-            return no_update, message, True
-        return result, "", False
-
-    @app.callback(
-        Output("fate-summary", "children"),
-        Output("fate-signatures", "children"),
-        Output("fate-marginals", "children"),
-        Output("fate-pathways", "children"),
-        Output("fate-times", "children"),
-        Output("fate-episodes", "children"),
-        Input("fate-result-store", "data"),
-    )
-    def _render_species_fate(result):
-        if not result:
-            empty = html.P("运行后显示结果。", className="rs-step-note")
-            return empty, empty, empty, empty, empty, empty
-
-        def table(rows: list[dict[str, Any]], fields: list[str]) -> Any:
-            visible = [
-                {field: row.get(field) for field in fields}
-                for row in rows
-            ]
-            return dash_table.DataTable(
-                data=visible,
-                columns=[{"name": field, "id": field} for field in fields],
-                page_size=12,
-                style_table={"overflowX": "auto"},
-                style_cell={"textAlign": "left", "maxWidth": "360px", "overflow": "hidden", "textOverflow": "ellipsis"},
-            )
-
-        result_status = str(result.get("status") or "failed")
-        if result_status != "complete":
-            detail = dict(
-                result.get("failure")
-                or result.get("global_incompleteness")
-                or {}
-            )
-            message = str(detail.get("message") or "主统计不可发布。")
-            notice = dbc.Alert(
-                f"Result={result_status}: {message}",
-                color="danger" if result_status == "failed" else "warning",
-            )
-            unavailable = html.P(
-                "计算未覆盖可信的完整 cohort；主 branching statistics 为 NA。",
-                className="rs-step-note",
-            )
-            episode_table = table(
-                list(result.get("episodes") or []),
-                [
-                    "formation_episode_id",
-                    "status",
-                    "anchor_atom_ids",
-                    "topology",
-                    "censoring_reasons",
-                    "event_ids",
-                ],
-            )
-            return (
-                notice,
-                unavailable,
-                unavailable,
-                unavailable,
-                unavailable,
-                episode_table,
-            )
-
-        summary = dict(result.get("summary") or {})
-        cards = html.Div(
-            [
-                dbc.Badge(f"Formations {summary.get('formation_count', 0)}", color="secondary"),
-                dbc.Badge(f"Main cohort {summary.get('main_cohort_size', 0)}", color="secondary"),
-                dbc.Badge(f"Resolved {summary.get('fully_resolved_count', 0)}", color="success"),
-                dbc.Badge(f"Censored {summary.get('censored_count', 0)}", color="warning"),
-                dbc.Badge(f"Resolution {summary.get('resolution_fraction') if summary.get('resolution_fraction') is not None else 'NA'}", color="info"),
-            ],
-            className="d-flex flex-wrap gap-2",
-        )
-        signatures = table(
-            list(summary.get("fate_signatures") or []),
-            ["fate_signature_id", "label", "episode_count", "resolved_episode_conditional_probability"],
-        )
-        marginals = table(
-            list(summary.get("endpoint_marginals") or []),
-            ["endpoint_category", "episode_occurrence_count", "terminal_instance_count", "marginal_occurrence_probability", "unconditional_mean_multiplicity", "conditional_mean_multiplicity"],
-        )
-        pathways = table(
-            [*list(summary.get("first_exit_channels") or []), *list(summary.get("linear_paths") or [])],
-            ["reaction_type", "linear_reaction_type_sequence", "episode_count", "first_exit_channel_conditional_probability", "linear_path_conditional_probability"],
-        )
-        time_rows = [
-            {"metric": metric, **dict(values)}
-            for metric, values in dict(summary.get("time_distributions") or {}).items()
-        ]
-        times = table(time_rows, ["metric", "count", "min", "median", "mean", "max"])
-        episodes = table(
-            list(result.get("episodes") or []),
-            ["formation_episode_id", "status", "anchor_atom_ids", "topology", "censoring_reasons", "event_ids"],
-        )
-        return cards, signatures, marginals, pathways, times, episodes
-
-    @app.callback(
-        Output("fate-download-json", "data"),
-        Input("fate-download-json-btn", "n_clicks"),
-        State("fate-result-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_species_fate_json(_n_clicks, result):
-        if not result:
-            raise PreventUpdate
-        return dcc.send_string(
-            svc.species_fate_to_json(result), "fate-result.json"
-        )
-
-    @app.callback(
-        Output("fate-download-tables", "data"),
-        Input("fate-download-tables-btn", "n_clicks"),
-        State("fate-result-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_species_fate_tables(_n_clicks, result):
-        if not result:
-            raise PreventUpdate
-        payload = svc.species_fate_tables_zip(result)
-        return dcc.send_bytes(lambda buffer: buffer.write(payload), "fate-tables.zip")
-
-    @app.callback(
         Output("app-store", "data", allow_duplicate=True),
         Output("dataset-session-store", "data", allow_duplicate=True),
         Input("species-search-btn", "n_clicks"),
@@ -2229,7 +2225,6 @@ def register_callbacks(app: Any) -> None:
         Input("evolution-search-btn", "n_clicks"),
         Input("element-distribution-search-btn", "n_clicks"),
         Input("event-rxn-btn", "n_clicks"),
-        Input("event-path-run-btn", "n_clicks"),
         Input("trajectory-refresh-btn", "n_clicks"),
         State("app-store", "data"),
         State("dataset-session-store", "data"),
@@ -2364,6 +2359,217 @@ def register_callbacks(app: Any) -> None:
         if opens_browser or recent_entry_triggered:
             return "rs-data-view d-none", "rs-data-view"
         return "rs-data-view", "rs-data-view d-none"
+
+    @app.callback(
+        Output("data-selection-view", "className"),
+        Output("data-review-view", "className"),
+        Input("dataset-browser-candidate", "data"),
+    )
+    def _switch_dataset_selection_step(candidate):
+        selected = candidate if isinstance(candidate, dict) else {}
+        if selected.get("folder") and selected.get("base"):
+            return "rs-data-selection-view d-none", "rs-data-review-view"
+        return "rs-data-selection-view", "rs-data-review-view d-none"
+
+    @app.callback(
+        Output("dataset-browser-candidate", "data", allow_duplicate=True),
+        Input("data-review-back-btn", "n_clicks"),
+        Input("data-review-return-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _return_to_dataset_selection(_back_clicks, _return_clicks):
+        if not _triggered_click_value():
+            raise PreventUpdate
+        return None
+
+    @app.callback(
+        Output("data-review-summary", "children"),
+        Output("data-review-capabilities", "children"),
+        Output("data-review-artifacts", "children"),
+        Input("dataset-browser-candidate", "data"),
+    )
+    def _render_dataset_review(candidate):
+        selected = candidate if isinstance(candidate, dict) else {}
+        if not selected.get("folder") or not selected.get("base"):
+            return "", "", ""
+        try:
+            target = _validated_dataset_target(selected)
+            snapshot = svc.browse_dataset_location(target["folder"])
+            actual = _candidate_for_base(snapshot, target["base"])
+            if actual is None:
+                raise svc.ServiceError(
+                    "所选数据集已不存在。",
+                    reason="candidate_missing",
+                )
+        except svc.ServiceError as exc:
+            return (
+                dbc.Alert(str(exc.message), color="danger", role="alert"),
+                "",
+                "",
+            )
+        capabilities = dict(actual.get("analysis_capabilities") or {})
+        label = str(selected.get("label") or Path(target["folder"]).name)
+        summary = html.Div(
+            [
+                html.Div(
+                    [
+                        html.Strong(label),
+                        html.Code(target["folder"]),
+                    ],
+                    className="rs-data-review-identity",
+                ),
+                html.Span("可使用", className="rs-data-review-ready"),
+            ],
+            className="rs-data-review-summary-row",
+        )
+        artifacts = dict(actual.get("artifact_paths") or {})
+        return (
+            summary,
+            _render_analysis_capabilities(
+                capabilities,
+                class_name="rs-analysis-capability-list rs-data-review-capability-list",
+            ),
+            _render_artifacts(artifacts),
+        )
+
+    @app.callback(
+        Output("workspace-task-nav", "children"),
+        Input("page-store", "data"),
+    )
+    def _render_workspace_task_navigation(page_store):
+        page_id = resolve_page_id((page_store or {}).get("page"))
+        workspace_id = PAGE_WORKSPACES[page_id]
+        page_ids = WORKSPACE_TOOL_PAGES.get(workspace_id, (workspace_id,))
+        if len(page_ids) <= 1:
+            return []
+        return [
+            html.Span(
+                PAGE_LABELS[workspace_id],
+                className="rs-workspace-task-label",
+            ),
+            *[
+                dbc.Button(
+                    WORKSPACE_TASK_LABELS[tool_page],
+                    id={"type": "workspace-open-page", "page": tool_page},
+                    color="primary" if tool_page == page_id else "secondary",
+                    outline=tool_page != page_id,
+                    active=tool_page == page_id,
+                    size="sm",
+                )
+                for tool_page in page_ids
+            ],
+        ]
+
+    @app.callback(
+        Output("data-overview-actions", "children"),
+        Input("app-store", "data"),
+    )
+    def _render_dataset_overview_actions(app_store):
+        current = app_store if isinstance(app_store, dict) else {}
+        loaded = bool(current.get("dataset_id"))
+        capabilities = _capabilities_from_store(current) if loaded else {}
+        cards: list[Any] = []
+        for page_id in WORKSPACE_PAGE_IDS:
+            capability_keys = _WORKSPACE_CAPABILITIES.get(page_id, ())
+            workspace_evidence = [
+                (key, dict(capabilities.get(key) or {}))
+                for key in capability_keys
+            ]
+            if page_id == "data-management":
+                state = "ready" if loaded else "no-dataset"
+                state_label = "当前数据集" if loaded else "先选择数据集"
+                reason = (
+                    f"当前：{current.get('label') or current.get('base') or '已加载'}"
+                    if loaded
+                    else "检查 Dataset Candidate 后再明确设为 Current Dataset。"
+                )
+            elif page_id == "batch-compare":
+                state = "ready"
+                state_label = "可独立使用"
+                reason = "对比来源选择不会改变 Current Dataset。"
+            else:
+                states = [
+                    _capability_state_class(evidence.get("state"))
+                    for _key, evidence in workspace_evidence
+                ]
+                if not loaded:
+                    state = "no-dataset"
+                elif states and all(item == "ready" for item in states):
+                    state = "ready"
+                elif "needs-preparation" in states:
+                    state = "needs-preparation"
+                else:
+                    state = next(
+                        (item for item in states if item != "ready"),
+                        "unknown",
+                    )
+                state_label = (
+                    _CAPABILITY_STATE_LABELS.get(state, "状态待检查")
+                    if loaded
+                    else "先选择数据集"
+                )
+                reasons = [
+                    f"{_CAPABILITY_LABELS[key]}：{evidence.get('reason')}"
+                    for key, evidence in workspace_evidence
+                    if evidence.get("reason")
+                ]
+                reason = "；".join(reasons) or (
+                    "尚无该工作区的能力状态，请刷新数据集状态。"
+                    if loaded
+                    else "选择并使用数据集后，在此查看证据条件。"
+                )
+            question, required, _next_step = PAGE_WORKFLOWS[page_id]
+            cards.append(html.Div([
+                html.Div([
+                    html.Strong(PAGE_LABELS[page_id]),
+                    html.Span(state_label, className=f"rs-capability-state is-{state}"),
+                ], className="rs-workflow-card-heading"),
+                html.P(question, className="rs-workflow-question"),
+                html.P(f"从这里开始：{required}", className="rs-workflow-input"),
+                html.Div(reason, className="rs-workflow-reason"),
+                dbc.Button(
+                    "进入工作区" if page_id != "data-management" else "管理数据集",
+                    id={"type": "data-overview-open-page", "page": page_id},
+                    color="primary" if state == "ready" else "secondary",
+                    outline=True,
+                    size="sm",
+                ),
+            ], className=f"rs-workflow-card is-{state}"))
+        return html.Div([
+            html.Div([
+                html.Span("五个工作区", className="rs-data-section-kicker"),
+                html.H2("从一条可复核主线开始"),
+                html.P("先确认数据集，再从物种与反应下钻到具体事件、轨迹与谱系；对比保持独立来源选择。"),
+            ], className="rs-workflow-intro"),
+            html.Section([
+                html.H3("普通工作区"),
+                html.P(
+                    "退役工具不再挂载在 Dash；公共 CLI/API 与共用证据能力继续保留。",
+                    className="rs-workflow-group-description",
+                ),
+                html.Div(cards, className="rs-workflow-grid"),
+            ], className="rs-workflow-group"),
+        ], className="rs-workflow-launcher")
+
+    @app.callback(
+        Output("page-workflow-guide", "children"),
+        Input("page-store", "data"),
+    )
+    def _render_workflow_guide(page_store):
+        page = resolve_page_id((page_store or {}).get("page"))
+        if page == "data-management":
+            return []
+        workflow = PAGE_WORKFLOWS.get(page)
+        if workflow is None:
+            return []
+        question, required, next_step = workflow
+        return html.Details([
+            html.Summary([html.Span("使用指引"), html.Span(question)]),
+            html.Div([
+                html.P([html.Strong("准备："), required]),
+                html.P([html.Strong("后续："), next_step]),
+            ], className="rs-workflow-guide-body"),
+        ], className="rs-workflow-guide")
 
     @app.callback(
         Output("data-recent-datasets", "children"),
@@ -2601,7 +2807,7 @@ def register_callbacks(app: Any) -> None:
             apply_label = "正在加载…"
             apply_disabled = True
         elif switch_state == "failed" and has_candidate:
-            apply_label = "重试加载"
+            apply_label = "重试"
             apply_disabled = False
         elif same_revision or (
             switch_state == "succeeded" and not is_different_candidate
@@ -2609,7 +2815,7 @@ def register_callbacks(app: Any) -> None:
             apply_label = "当前数据集"
             apply_disabled = True
         else:
-            apply_label = "加载并使用"
+            apply_label = "使用此数据集"
             apply_disabled = not has_candidate
 
         if context_state == "revision-changed":
@@ -2673,7 +2879,7 @@ def register_callbacks(app: Any) -> None:
             if not current.get("dataset_id"):
                 return (
                     "请先选择一个候选数据集；浏览和检查不会改变当前数据集，"
-                    "只有点击“加载并使用”才会切换。 "
+                    "只有点击“使用此数据集”才会切换。 "
                     "可先使用“最近使用”或输入服务器路径。"
                 )
             if current.get("context_state") == "revision-changed":
@@ -2683,7 +2889,7 @@ def register_callbacks(app: Any) -> None:
                 )
             return (
                 "请先选择一个候选数据集；浏览和检查不会改变当前数据集，"
-                "只有点击“加载并使用”才会切换。当前数据集仍然有效。"
+                "只有点击“使用此数据集”才会切换。当前数据集仍然有效。"
             )
         if state == "validating":
             return "正在验证候选数据集和最新源修订；当前数据集仍然有效，可继续使用其他分析页。 "
@@ -2702,7 +2908,7 @@ def register_callbacks(app: Any) -> None:
         if svc.is_same_dataset_revision(current, inspected):
             return "所选数据集与当前数据集的身份和源修订一致，无需重复加载。 "
         return (
-            "点击“加载并使用”后，将验证候选数据集的最新源修订并原子切换。 "
+            "点击“使用此数据集”后，将验证候选数据集的最新源修订并原子切换。 "
             "旧结果与选择会清空；查询条件会保留，但不会自动运行。 "
         )
 
@@ -3337,10 +3543,10 @@ def register_callbacks(app: Any) -> None:
         Input("data-folder-input", "value"),
         Input("dir-browser-path-input", "n_submit"),
         Input("dir-browser-go-btn", "n_clicks"),
+        Input("dir-browser-select-btn", "n_clicks"),
         Input({"type": "dir-browser-root", "index": ALL}, "n_clicks"),
         Input({"type": "dir-browser-entry", "name": ALL}, "n_clicks"),
         Input("dir-browser-back-btn", "n_clicks"),
-        Input({"type": "dir-browser-dataset", "name": ALL}, "n_clicks"),
         Input({"type": "dir-browser-recent-entry", "index": ALL}, "n_clicks"),
         Input("dir-browser-filter-input", "value"),
         State("dir-browser-path", "data"),
@@ -3358,10 +3564,10 @@ def register_callbacks(app: Any) -> None:
         manual_dataset_input,
         path_submit,
         go_clicks,
+        select_current_clicks,
         _root_clicks,
         _entry_clicks,
         back_clicks,
-        _dataset_clicks,
         _recent_clicks,
         browser_filter,
         current_path,
@@ -3398,6 +3604,7 @@ def register_callbacks(app: Any) -> None:
                 candidate=candidate,
                 app_store=app_store,
                 filter_text=browser_filter,
+                select_dataset=False,
             )
 
         # --- ADVANCED MANUAL INPUT -----------------------------------
@@ -3464,7 +3671,28 @@ def register_callbacks(app: Any) -> None:
                     filter_text=browser_filter,
                     app_store=app_store,
                 )
-            return _build_dir_browser_response(
+            return _select_dataset_folder_response(
+                target,
+                current_path=current_path,
+                candidate=candidate,
+                app_store=app_store,
+                filter_text=browser_filter,
+            )
+
+        # --- CHECK CURRENT FOLDER ------------------------------------
+        if triggered_id == "dir-browser-select-btn":
+            if not select_current_clicks:
+                raise PreventUpdate
+            target = str(current_path or "").strip()
+            if not target:
+                return _recover_browser_error(
+                    current_path,
+                    candidate,
+                    reason="empty_path",
+                    filter_text=browser_filter,
+                    app_store=app_store,
+                )
+            return _select_dataset_folder_response(
                 target,
                 current_path=current_path,
                 candidate=candidate,
@@ -3502,6 +3730,7 @@ def register_callbacks(app: Any) -> None:
                 candidate=candidate,
                 app_store=app_store,
                 filter_text=browser_filter,
+                select_dataset=False,
             )
 
         # --- NAVIGATE TO SUBDIR ---------------------------------------
@@ -3526,6 +3755,7 @@ def register_callbacks(app: Any) -> None:
                 candidate=candidate,
                 app_store=app_store,
                 filter_text=browser_filter,
+                select_dataset=False,
             )
 
         # --- GO UP ----------------------------------------------------
@@ -3543,6 +3773,7 @@ def register_callbacks(app: Any) -> None:
                     candidate=candidate,
                     app_store=app_store,
                     filter_text=browser_filter,
+                    select_dataset=False,
                 )
             except svc.ServiceError:
                 return _recover_browser_error(
@@ -3552,17 +3783,6 @@ def register_callbacks(app: Any) -> None:
                     filter_text=browser_filter,
                     app_store=app_store,
                 )
-
-        # --- SELECT DATASET CARD -------------------------------------
-        if _pattern_trigger_type(triggered_id) == "dir-browser-dataset":
-            if not _triggered_click_value():
-                raise PreventUpdate
-            return _select_browser_candidate(
-                current_path,
-                triggered_id.get("name", ""),
-                filter_text=browser_filter,
-                app_store=app_store,
-            )
 
         # --- SELECT RECENT DATASET -----------------------------------
         if _pattern_trigger_type(triggered_id) == "dir-browser-recent-entry":
@@ -3579,9 +3799,8 @@ def register_callbacks(app: Any) -> None:
                     filter_text=browser_filter,
                     app_store=app_store,
                 )
-            return _select_browser_candidate(
-                record.get("folder", ""),
-                Path(str(record.get("base") or "")).name,
+            return _select_recent_dataset(
+                record,
                 filter_text=browser_filter,
                 fallback_path=current_path,
                 fallback_candidate=candidate,
@@ -3592,6 +3811,7 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("dataset-switch-transaction", "data"),
+        Output("dataset-switch-request", "data"),
         Input("data-apply-btn", "n_clicks"),
         Input("data-browser-index-btn", "n_clicks"),
         Input("dir-browser-cancel-btn", "n_clicks"),
@@ -3610,7 +3830,7 @@ def register_callbacks(app: Any) -> None:
         transaction,
         bound_operations,
     ):
-        """Validate and resolve one authoritative switch request atomically."""
+        """Keep one authoritative switch request for this browser tab."""
         triggered = ctx.triggered_id
         current = transaction if isinstance(transaction, dict) else {}
         selected = candidate if isinstance(candidate, dict) else {}
@@ -3619,61 +3839,36 @@ def register_callbacks(app: Any) -> None:
             if current.get("state") == "validating":
                 raise PreventUpdate
             if any(bool(value) for value in bound_operations or []):
-                return {
-                    "state": "failed",
-                    "candidate": selected,
-                    "reason": "analysis_in_progress",
-                    "message": (
-                        "当前分析仍在完成，暂不能切换数据集。"
-                        "等待该分析结束后重试；当前数据集和所选数据集均已保留。"
-                    ),
-                }
+                return (
+                    {
+                        "state": "failed",
+                        "candidate": selected,
+                        "reason": "analysis_in_progress",
+                        "message": (
+                            "当前分析仍在完成，暂不能切换数据集。"
+                            "等待该分析结束后重试；"
+                            "当前数据集和所选数据集均已保留。"
+                        ),
+                    },
+                    no_update,
+                )
             if not selected.get("folder") or not selected.get("base"):
-                return {
-                    "state": "failed",
-                    "candidate": selected,
-                    "reason": "missing_candidate",
-                    "message": "请先选择要加载的数据集。当前数据集未改变。",
-                }
+                return (
+                    {
+                        "state": "failed",
+                        "candidate": selected,
+                        "reason": "missing_candidate",
+                        "message": (
+                            "请先选择要加载的数据集。当前数据集未改变。"
+                        ),
+                    },
+                    no_update,
+                )
             request = svc.begin_dataset_switch(
                 selected,
                 origin=dict((page_store or {}).get("dataset_return") or {}),
             )
-            request_id = str(request.get("request_id") or "")
-            try:
-                validation = svc.validate_dataset_candidate(
-                    str(selected.get("folder") or ""),
-                    str(selected.get("base") or ""),
-                )
-                result = {
-                    "request_id": request_id,
-                    "ok": True,
-                    "validation": validation,
-                    "completed_ns": time.time_ns(),
-                }
-            except svc.ServiceError as exc:
-                result = {
-                    "request_id": request_id,
-                    "ok": False,
-                    "reason": str(exc.reason or "validation_failed"),
-                    "message": (
-                        f"{exc.message} 当前数据集未改变；"
-                        "请修正数据来源后重试。"
-                    ),
-                    "completed_ns": time.time_ns(),
-                }
-            except Exception:
-                result = {
-                    "request_id": request_id,
-                    "ok": False,
-                    "reason": "validation_failed",
-                    "message": (
-                        "暂时无法加载所选数据集，当前数据集未改变；"
-                        "请重试或重新选择。"
-                    ),
-                    "completed_ns": time.time_ns(),
-                }
-            return svc.resolve_dataset_switch(request, result)
+            return request, request
 
         if triggered in {"data-browser-index-btn", "dir-browser-cancel-btn"}:
             superseded = svc.supersede_dataset_switch(
@@ -3684,14 +3879,18 @@ def register_callbacks(app: Any) -> None:
                     else "cancelled"
                 ),
             )
-            return superseded or {
-                "state": "superseded",
-                "reason": (
-                    "returned_to_index_management"
-                    if triggered == "data-browser-index-btn"
-                    else "cancelled"
-                ),
-            }
+            return (
+                superseded
+                or {
+                    "state": "superseded",
+                    "reason": (
+                        "returned_to_index_management"
+                        if triggered == "data-browser-index-btn"
+                        else "cancelled"
+                    ),
+                },
+                no_update,
+            )
 
         if triggered == "page-store":
             if (page_store or {}).get("page") == "data-management":
@@ -3699,15 +3898,103 @@ def register_callbacks(app: Any) -> None:
             superseded = svc.supersede_dataset_switch(current, reason="left_workspace")
             if superseded == current:
                 raise PreventUpdate
-            return superseded
+            return superseded, no_update
 
         if triggered == "dataset-browser-candidate":
             if current.get("state") == "validating":
-                return svc.supersede_dataset_switch(current, reason="candidate_changed")
+                return (
+                    svc.supersede_dataset_switch(current, reason="candidate_changed"),
+                    no_update,
+                )
             if selected:
-                return {"state": "candidate-selected", "candidate": selected}
-            return {"state": "idle"}
+                return {"state": "candidate-selected", "candidate": selected}, no_update
+            return {"state": "idle"}, no_update
         raise PreventUpdate
+
+    @app.callback(
+        Output("dataset-switch-validation", "data"),
+        Input("dataset-switch-request", "data"),
+        background=True,
+        prevent_initial_call=True,
+    )
+    def _validate_dataset_switch(switch_request):
+        request = switch_request if isinstance(switch_request, dict) else {}
+        if request.get("state") != "validating":
+            raise PreventUpdate
+        request_id = str(request.get("request_id") or "")
+        candidate = request.get("candidate") or {}
+        try:
+            validation = svc.validate_dataset_candidate(
+                str(candidate.get("folder") or ""),
+                str(candidate.get("base") or ""),
+            )
+            validation = {
+                **validation,
+                "label": str(
+                    candidate.get("label")
+                    or Path(str(candidate.get("folder") or "")).name
+                    or validation.get("label")
+                    or "未命名数据集"
+                ),
+            }
+        except svc.ServiceError as exc:
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "reason": str(exc.reason or "validation_failed"),
+                "message": (
+                    f"{exc.message} 当前数据集未改变；"
+                    "请修正数据来源后重试。"
+                ),
+                "completed_ns": time.time_ns(),
+            }
+        except Exception:
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "reason": "validation_failed",
+                "message": (
+                    "暂时无法加载所选数据集，当前数据集未改变；"
+                    "请重试或重新选择。"
+                ),
+                "completed_ns": time.time_ns(),
+            }
+        return {
+            "request_id": request_id,
+            "ok": True,
+            "validation": validation,
+            "completed_ns": time.time_ns(),
+        }
+
+    @app.callback(
+        Output("dataset-switch-transaction", "data", allow_duplicate=True),
+        Input("dataset-switch-validation", "data"),
+        State("dataset-switch-transaction", "data"),
+        State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _resolve_dataset_switch_validation(
+        validation_result,
+        transaction,
+        bound_operations,
+    ):
+        """Resolve validation outside the callback that initiated the request."""
+        current = transaction if isinstance(transaction, dict) else {}
+        if any(bool(value) for value in bound_operations or []):
+            return {
+                **current,
+                "state": "failed",
+                "reason": "analysis_in_progress",
+                "message": (
+                    "数据集检查完成时仍有当前数据集的分析在运行，"
+                    "因此结果未提交。"
+                    "当前数据集和所选数据集均已保留；等待分析结束后重试。"
+                ),
+            }
+        resolved = svc.resolve_dataset_switch(current, validation_result)
+        if resolved == current:
+            raise PreventUpdate
+        return resolved
 
     @app.callback(
         Output("data-load-feedback", "children", allow_duplicate=True),
@@ -3776,19 +4063,23 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
-        Output({"type": "dir-browser-dataset", "name": ALL}, "disabled"),
+        Output("dir-browser-select-btn", "disabled"),
+        Input("dir-browser-path", "data"),
+        Input("dataset-switch-transaction", "data"),
+    )
+    def _toggle_check_current_folder(current_path, transaction):
+        validating = (transaction or {}).get("state") == "validating"
+        return validating or not bool(str(current_path or "").strip())
+
+    @app.callback(
         Output({"type": "dir-browser-recent-entry", "index": ALL}, "disabled"),
         Input("dataset-switch-transaction", "data"),
-        State({"type": "dir-browser-dataset", "name": ALL}, "id"),
         State({"type": "dir-browser-recent-entry", "index": ALL}, "id"),
         prevent_initial_call=True,
     )
-    def _lock_dynamic_dataset_choices(transaction, candidate_ids, recent_ids):
+    def _lock_dynamic_dataset_choices(transaction, recent_ids):
         validating = (transaction or {}).get("state") == "validating"
-        return (
-            [validating for _item in candidate_ids or []],
-            [validating for _item in recent_ids or []],
-        )
+        return [validating for _item in recent_ids or []]
 
     @app.callback(
         Output("app-store", "data", allow_duplicate=True),
@@ -3816,17 +4107,12 @@ def register_callbacks(app: Any) -> None:
         if request.get("state") != "succeeded":
             raise PreventUpdate
         validation = request.get("validation") or {}
-        origin_page = str((request.get("origin") or {}).get("page") or "")
-        destination_page = (
-            origin_page
-            if origin_page in PAGE_IDS and origin_page != "data-management"
-            else DEFAULT_PAGE
-        )
         navigation = {
             "request_id": str(request.get("request_id") or ""),
-            # Resume the analysis that opened the picker. A direct load starts
-            # at the default analysis page instead of ending in index upkeep.
-            "page": destination_page,
+            # A successful switch always lands on the dataset overview so the
+            # user can see which analyses this partial or complete dataset
+            # actually enables.
+            "page": "data-management",
         }
         label = str(validation.get("label") or "未命名数据集")
         if svc.is_same_dataset_revision(current_store, validation):
@@ -4110,6 +4396,9 @@ def register_callbacks(app: Any) -> None:
                 ("forward_tp", "频次", 72),
                 ("reverse_tp", "逆向", 72),
                 ("net_tp", "净频次", 76),
+                ("first_time", "首次后帧时间", 110),
+                ("last_time", "末次后帧时间", 110),
+                ("timing_unit", "时间单位", 110),
                 ("ratio_pct", "占比%", 68),
                 ("event_frequency_per_ps", "事件频率/ps⁻¹", 110),
                 ("k_app_display", "表观 k", 150),
@@ -4310,7 +4599,7 @@ def register_callbacks(app: Any) -> None:
                 [],
                 _species_columns(),
                 [],
-                '请先在「管理数据」中导入包含 reactionabcd 的数据目录。',
+                '请先在「数据集」中选择包含 reactionabcd 的数据文件夹。',
                 {"rows": []},
                 [],
                 50,
@@ -4801,6 +5090,7 @@ def register_callbacks(app: Any) -> None:
                         html.Dd(_fmt_num(detail.get("n_produce_rxns"))),
                     ]
                 ),
+                _species_identity_context_panel(detail),
             ],
             className="rs-detail-stats",
         )
@@ -4909,12 +5199,21 @@ def register_callbacks(app: Any) -> None:
                 {"display": "block"},
             )
         rows = result.get("rows") or []
+        timing = (result.get("meta") or {}).get("timing") or {}
+        timing_notice = (
+            "事件索引未就绪，首次/末次时间不可用；请在管理数据中准备或重建事件索引。"
+            if str(timing.get("status") or "").startswith("event_index_") or timing.get("status") == "missing_reactionevent"
+            else "未确认 timestep → ps 换算；时间列保留原始坐标。"
+            if timing.get("status") == "time_conversion_missing"
+            else "当前事件源只有分析帧序号；时间列单位为 analyzed_frame。"
+            if timing.get("status") == "analyzed_frame_only" else None
+        )
         return (
             rows,
             _reaction_columns(with_share=bool(with_share)),
             [],
             None,
-            None,
+            timing_notice,
             {"rows": rows, "meta": result.get("meta", {})},
             {"display": "none"},
             {"display": "block"},
@@ -5113,7 +5412,14 @@ def register_callbacks(app: Any) -> None:
         )
         production_rows = result.get("production_rows") or []
         consumption_rows = result.get("consumption_rows") or []
-        message = str((result.get("kinetics") or {}).get("message") or "")
+        timing = result.get("timing") or {}
+        message = str(timing.get("message") or "")
+        if str(timing.get("status") or "").startswith("event_index_") or timing.get("status") == "missing_reactionevent":
+            message += " 事件索引未就绪；首次/末次时间不可用，请准备或重建事件索引。"
+        elif timing.get("status") == "time_conversion_missing":
+            message += " 未确认 timestep → ps；时间列保留原始 timestep。"
+        elif timing.get("status") == "analyzed_frame_only":
+            message += " 当前事件源仅有分析帧序号；时间列单位为 analyzed_frame。"
         return (
             production_rows,
             columns,
@@ -5151,12 +5457,12 @@ def register_callbacks(app: Any) -> None:
             ),
             (
                 Output("rxn-channel-timestep-save-btn", "children"),
-                "正在计算…",
-                "保存并重新计算",
+                "正在刷新…",
+                "保存并刷新时间",
             ),
             (
                 Output("rxn-channel-timestep-progress", "children"),
-                "正在读取索引并计算表观速率…",
+                "正在读取索引并刷新通道时间…",
                 "",
             ),
             (
@@ -5189,11 +5495,12 @@ def register_callbacks(app: Any) -> None:
                 artifacts,
                 selected_smiles,
                 top=max(1, int(top or 50)),
+                include_kinetics=False,
             )
         except svc.ServiceError as exc:
             return (
                 dbc.Alert(
-                    f"已保存 1 timestep = {confirmed:g} ps，但重新计算失败。",
+                    f"已保存 1 timestep = {confirmed:g} ps，但刷新通道时间失败。",
                     color="warning",
                     className="mb-0 py-1 px-2",
                 ),
@@ -5210,12 +5517,10 @@ def register_callbacks(app: Any) -> None:
             )
 
         columns = _direct_channel_columns()
-        kinetics_message = str(
-            (result.get("kinetics") or {}).get("message") or ""
-        )
+        timing_message = str((result.get("timing") or {}).get("message") or "")
         return (
             dbc.Alert(
-                f"已保存：1 timestep = {confirmed:g} ps，并已重新计算。",
+                f"已保存：1 timestep = {confirmed:g} ps，并已刷新通道时间。",
                 color="success",
                 className="mb-0 py-1 px-2",
             ),
@@ -5223,13 +5528,47 @@ def register_callbacks(app: Any) -> None:
             columns,
             result.get("consumption_rows") or [],
             columns,
-            kinetics_message,
+            timing_message,
             [],
             [],
             None,
             None,
             None,
         )
+
+    @app.callback(
+        Output(
+            "rxn-channel-volume-progress",
+            "children",
+            allow_duplicate=True,
+        ),
+        Output(
+            "rxn-channel-volume-progress",
+            "className",
+            allow_duplicate=True,
+        ),
+        Input("rxn-channel-volume-refresh", "n_intervals"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_channel_volume_progress(_tick, store):
+        current = store if isinstance(store, dict) else {}
+        current_dataset_id = _current_dataset_id(current)
+        tasks = svc.list_preparation_tasks([current])
+        task = next(
+            (
+                item
+                for item in tasks
+                if str(item.get("capability") or "") == "trajectory"
+                and (
+                    not current_dataset_id
+                    or str(item.get("dataset_id") or "")
+                    == current_dataset_id
+                )
+            ),
+            None,
+        )
+        return _channel_volume_progress_state(task)
 
     @app.callback(
         Output("rxn-channel-volume-status", "children", allow_duplicate=True),
@@ -5270,6 +5609,11 @@ def register_callbacks(app: Any) -> None:
                 Output("rxn-channel-volume-progress", "className"),
                 "rs-kinetics-progress is-running",
                 "rs-kinetics-progress",
+            ),
+            (
+                Output("rxn-channel-volume-refresh", "disabled"),
+                False,
+                True,
             ),
         ],
     )
@@ -5333,6 +5677,7 @@ def register_callbacks(app: Any) -> None:
                 artifacts,
                 selected_smiles,
                 top=max(1, int(top or 50)),
+                include_kinetics=False,
             )
         except svc.ServiceError as exc:
             return (
@@ -5418,6 +5763,16 @@ def register_callbacks(app: Any) -> None:
                 "focus_smiles": focus_smiles,
                 "reaction_formula": row.get("reaction_formulas"),
                 "reaction_smiles": row.get("reaction_smiles"),
+                "reactant_smiles": json.dumps(row.get("reactant_smiles") or [], ensure_ascii=False),
+                "product_smiles": json.dumps(row.get("product_smiles") or [], ensure_ascii=False),
+                "timing_status": row.get("timing_status"),
+                "timing_unit": row.get("timing_unit"),
+                "time_basis": row.get("time_basis"),
+                "timestep_ps": row.get("timestep_ps"),
+                "first_after_timestep": row.get("first_after_timestep"),
+                "last_after_timestep": row.get("last_after_timestep"),
+                "first_time_ps": row.get("first_time_ps"),
+                "last_time_ps": row.get("last_time_ps"),
                 "forward_tp": row.get("forward_tp"),
                 "reverse_tp": row.get("reverse_tp"),
                 "net_tp": row.get("net_tp"),
@@ -5591,7 +5946,7 @@ def register_callbacks(app: Any) -> None:
             )
             production_rows = result.get("production_rows") or []
             consumption_rows = result.get("consumption_rows") or []
-            message = str((result.get("kinetics") or {}).get("message") or "")
+            message = str((result.get("timing") or {}).get("message") or "")
         except svc.ServiceError as exc:
             production_rows = []
             consumption_rows = []
@@ -6038,9 +6393,7 @@ def register_callbacks(app: Any) -> None:
             targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
             targets = [targets_text_default] if targets_text_default else []
         if not targets:
-            from plotly.graph_objects import Figure
-
-            return Figure(), "请先输入目标物种或分子式（或用物种检索中选择的物种）。", None
+            return empty_chart_figure("尚未选择目标物种", "输入目标或从物种目录选择后再绘制。"), "请先输入目标物种或分子式（或用物种检索中选择的物种）。", None
         try:
             payload = svc.build_species_evolution(
                 artifacts,
@@ -6058,9 +6411,7 @@ def register_callbacks(app: Any) -> None:
                 time_align=time_align or "raw",
             )
         except svc.ServiceError as exc:
-            from plotly.graph_objects import Figure
-
-            return Figure(), str(exc.message), None
+            return empty_chart_figure("本次绘图未完成", "请查看上方提示，调整设置后重试。"), str(exc.message), None
 
         curves = payload.get("curves") or []
         curve_filter_text = (curve_filter or "").strip().casefold()
@@ -6093,6 +6444,8 @@ def register_callbacks(app: Any) -> None:
             legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "left", "x": 0},
             hovermode="x unified",
         )
+        if not fig.data:
+            fig = go.Figure(empty_chart_figure("没有可显示的曲线", "请检查目标物种、曲线筛选及数据范围。"))
         visible_names = [
             str(curve.get("name") or curve.get("query") or "")
             for curve in curves
@@ -6107,6 +6460,13 @@ def register_callbacks(app: Any) -> None:
             "；".join(warnings) if warnings else None,
             {**payload, "visible_curve_names": visible_names},
         )
+
+    @app.callback(
+        Output("evolution-csv-btn", "disabled"),
+        Input("evolution-payload-store", "data"),
+    )
+    def _evolution_export_available(payload):
+        return not bool(payload and payload.get("curves"))
 
     # ── CSV export: evolution ───────────────────────────────────────
 
@@ -6404,7 +6764,7 @@ def register_callbacks(app: Any) -> None:
             text = f"正在建立元素分布索引 · {percent}%"
             class_name = "rs-index-status is-building"
         elif state == "missing_source":
-            text = "请先在“管理数据”中选择包含 .species 的数据集"
+            text = "请先在“数据集”中选择包含 .species 的数据集"
             class_name = "rs-index-status is-warning"
         elif state in {"stale", "invalid"}:
             text = "元素分布索引需要重建：运行 reacnet-scope prepare rebuild element-distribution <目录>"
@@ -6433,6 +6793,220 @@ def register_callbacks(app: Any) -> None:
             options,
             filter_value,
         )
+
+    # ── Exact reaction timing ───────────────────────────────────────
+
+    @app.callback(
+        Output("rxn-timing-distribution-store", "data"),
+        Output("rxn-timing-graph", "figure"),
+        Output("rxn-timing-status", "children"),
+        Output("rxn-timing-card", "style", allow_duplicate=True),
+        Output("rxn-timing-start", "value"),
+        Output("rxn-timing-end", "value"),
+        Output("rxn-timing-width", "value"),
+        Output("rxn-timing-graph", "clickData"),
+        Input("rxn-grid", "selected_rows"),
+        Input("rxn-channel-selection-store", "data"),
+        Input("rxn-timing-apply-btn", "n_clicks"),
+        State("rxn-grid", "data"),
+        State("rxn-timing-distribution-store", "data"),
+        State("rxn-timing-start", "value"),
+        State("rxn-timing-end", "value"),
+        State("rxn-timing-width", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[(
+            Output({"type": "dataset-bound-operation", "name": "reaction-timing-chart"}, "data"),
+            True, False,
+        )],
+    )
+    def _show_reaction_timing(
+        selected, channel_selection, _apply, rows, previous,
+        start, end, width, store,
+    ):
+        trigger = ctx.triggered_id
+        dataset_id = (store or {}).get("dataset_id")
+        if trigger == "rxn-timing-apply-btn":
+            if not previous or previous.get("dataset_id") != dataset_id:
+                raise PreventUpdate
+            row = previous["selection"]
+            requested = {"start": start, "end": end, "width": width}
+        elif trigger == "rxn-channel-selection-store":
+            row = ((channel_selection or {}).get("row") or {})
+            requested = {}
+        else:
+            row = _selected_table_row(selected, rows) or {}
+            requested = {}
+        if not row:
+            return None, go.Figure(), "", {"display": "none"}, None, None, None, None
+        reactants = list(row.get("reactant_smiles") or [])
+        products = list(row.get("product_smiles") or [])
+        try:
+            result = svc.reaction_time_distribution(
+                (store or {}).get("artifacts") or {}, reactants, products,
+                **requested,
+            )
+        except svc.ServiceError as exc:
+            return None, go.Figure(), exc.message, {"display": "block"}, start, end, width, None
+        bins = result["bins"]
+        fig = go.Figure()
+        for direction, label, color in (
+            ("forward", "正向", "#337ab7"),
+            ("reverse", "严格逆向", "#d88442"),
+        ):
+            if direction == "reverse" and result["self_reverse"]:
+                continue
+            fig.add_bar(
+                name=label,
+                x=[(item["start"] + item["end"]) / 2 for item in bins],
+                y=[item[direction] for item in bins],
+                width=[item["end"] - item["start"] for item in bins],
+                marker_color=color,
+                customdata=[[item["index"], direction] for item in bins],
+                hovertemplate="%{y} 次<extra>" + label + "</extra>",
+            )
+        fig.update_layout(
+            barmode="group", xaxis_title=f"事件后帧时间 / {result['unit']}",
+            yaxis_title="发生次数", xaxis_range=[result["start"], result["end"]],
+            margin={"l": 50, "r": 15, "t": 15, "b": 45},
+        )
+        note = (
+            f"时间窗 [{result['start']:g}, {result['end']:g}) {result['unit']}；"
+            f"分箱宽度 {result['width']:g} {result['unit']}；"
+            f"窗内正向 {result['forward_total']} 次、逆向 {result['reverse_total']} 次。"
+            "反应发生于前后采样帧之间，后帧时间仅用于定位。"
+        )
+        if result["self_reverse"]:
+            note += "此反应完全自反，只显示一组事件。"
+        if result["unit"] != "ps":
+            note += "未确认 timestep → ps 换算或仅有分析帧序号；当前不显示 ps。"
+        return (
+            {**result, "selection": {"reactant_smiles": reactants,
+                                    "product_smiles": products,
+                                    "reaction_smiles": row.get("reaction_smiles")},
+             "dataset_id": dataset_id},
+            fig, note, {"display": "block"},
+            result["start"], result["end"], result["width"], None,
+        )
+
+    @app.callback(
+        Output("rxn-timing-page-store", "data", allow_duplicate=True),
+        Output("rxn-timing-event-grid", "data", allow_duplicate=True),
+        Output("rxn-timing-event-grid", "columns"),
+        Output("rxn-timing-bin-status", "children"),
+        Input("rxn-timing-graph", "clickData"),
+        Input("rxn-timing-prev-btn", "n_clicks"),
+        Input("rxn-timing-next-btn", "n_clicks"),
+        Input("rxn-timing-distribution-store", "data"),
+        State("rxn-timing-page-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+        running=[(
+            Output({"type": "dataset-bound-operation", "name": "reaction-timing-page"}, "data"),
+            True, False,
+        )],
+    )
+    def _page_reaction_timing(click_data, _prev, _next, distribution, previous, store):
+        empty = (None, [], _event_columns(), "点击时间箱查看该方向的全部事件，可逐页核查。")
+        if ctx.triggered_id == "rxn-timing-distribution-store" or not distribution:
+            return empty
+        dataset_id = (store or {}).get("dataset_id")
+        if distribution.get("dataset_id") != dataset_id:
+            return empty
+        if ctx.triggered_id == "rxn-timing-graph":
+            point = ((click_data or {}).get("points") or [{}])[0]
+            custom = point.get("customdata") or []
+            if len(custom) != 2:
+                return empty
+            index, direction = int(custom[0]), str(custom[1])
+            if not 0 <= index < len(distribution["bins"]) or direction not in {"forward", "reverse"}:
+                return empty
+            item = distribution["bins"][index]
+            key = distribution["reaction_key"] if direction == "forward" else distribution["reverse_reaction_key"]
+            offset = 0
+        else:
+            if not previous or previous.get("dataset_id") != dataset_id:
+                return empty
+            item = previous["bin"]
+            direction = previous["direction"]
+            key = previous["reaction_key"]
+            offset = max(0, int(previous["offset"]) + (25 if ctx.triggered_id == "rxn-timing-next-btn" else -25))
+            if offset >= int(previous["total"]):
+                offset = int(previous["offset"])
+        try:
+            page = svc.reaction_time_events(
+                (store or {}).get("artifacts") or {}, key,
+                start_raw=item["start_raw"], end_raw=item["end_raw"],
+                offset=offset, limit=25,
+            )
+        except svc.ServiceError as exc:
+            return None, [], _event_columns(), exc.message
+        for event in page["rows"]:
+            event["selected_direction"] = direction
+            event["bin_start_raw"] = item["start_raw"]
+            event["bin_end_raw"] = item["end_raw"]
+            event["bin_start"] = item["start"]
+            event["bin_end"] = item["end"]
+        text = (
+            f"{direction} [{item['start']:g}, {item['end']:g}) {distribution['unit']}："
+            f"{page['total']} 个事件；当前第 {offset + 1 if page['total'] else 0}–"
+            f"{offset + len(page['rows'])} 个。"
+        )
+        return (
+            {**page, "bin": item, "direction": direction,
+             "reaction_key": key, "dataset_id": dataset_id,
+             "reaction_smiles": distribution["selection"].get("reaction_smiles")},
+            _event_table_rows(page["rows"]), _event_columns(), text,
+        )
+
+    @app.callback(
+        Output("rxn-timing-prev-btn", "disabled"),
+        Output("rxn-timing-next-btn", "disabled"),
+        Output("rxn-timing-open-events-btn", "disabled"),
+        Output("rxn-timing-csv-btn", "disabled"),
+        Input("rxn-timing-page-store", "data"),
+    )
+    def _timing_page_actions(page):
+        page = page or {}
+        total = int(page.get("total") or 0)
+        offset = int(page.get("offset") or 0)
+        length = len(page.get("rows") or [])
+        return offset == 0, offset + length >= total, length == 0, length == 0
+
+    @app.callback(
+        Output("event-grid-store", "data", allow_duplicate=True),
+        Output("event-grid", "data", allow_duplicate=True),
+        Output("event-grid", "columns", allow_duplicate=True),
+        Output("event-alert", "children", allow_duplicate=True),
+        Output("event-reaction-text", "value", allow_duplicate=True),
+        Input("rxn-timing-open-events-btn", "n_clicks"),
+        State("rxn-timing-page-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _open_timing_events(_clicks, page, store):
+        if not page or page.get("dataset_id") != (store or {}).get("dataset_id"):
+            raise PreventUpdate
+        rows = page.get("rows") or []
+        return (
+            {"rows": rows, "kind": "rng_event", "config": {"max_events": 25},
+             "meta": {"message": "来自所选时间箱；可选择事件查看详情与轨迹。"}},
+            _event_table_rows(rows), _event_columns(),
+            "来自所选时间箱；请选择具体事件查看详情与轨迹。",
+            page.get("reaction_smiles") or "",
+        )
+
+    @app.callback(
+        Output("rxn-timing-csv-download", "data"),
+        Input("rxn-timing-csv-btn", "n_clicks"),
+        State("rxn-timing-page-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _download_timing_events(_clicks, page):
+        if not page or not page.get("rows"):
+            raise PreventUpdate
+        return {"content": svc.rows_to_csv(page["rows"]),
+                "filename": "reaction_time_events.csv", "type": "text/csv"}
 
     # ── Event evidence ──────────────────────────────────────────────
 
@@ -6469,8 +7043,8 @@ def register_callbacks(app: Any) -> None:
         artifacts = (store or {}).get("artifacts", {}) or {}
         config = {
             "reaction_text": reaction_text or "",
-            "before_frames": int(before or 3),
-            "after_frames": int(after or 3),
+            "before_frames": _int_with_default(before, 3),
+            "after_frames": _int_with_default(after, 3),
             "max_events": int(max_events or 100),
         }
         try:
@@ -6522,6 +7096,8 @@ def register_callbacks(app: Any) -> None:
         Output("event-selection-card", "style"),
         Output("event-extract-btn", "disabled"),
         Output("event-extract-btn", "children"),
+        Output("event-bookmark-store", "data"),
+        Output("event-bookmark-status", "children"),
         Output("molecule-lineage-store", "data", allow_duplicate=True),
         Output("molecule-lineage-results", "style", allow_duplicate=True),
         Input("event-grid", "selected_row_ids"),
@@ -6566,6 +7142,20 @@ def register_callbacks(app: Any) -> None:
             extract_label = "缺少轨迹文件"
         else:
             extract_label = "打开轨迹查看"
+        config = selected.get("config") or {}
+        try:
+            bookmark = svc.create_event_bookmark(
+                app_store or {},
+                row,
+                before_frames=_int_with_default(config.get("before_frames"), 3),
+                after_frames=_int_with_default(config.get("after_frames"), 3),
+            )
+            bookmark_status = (
+                "已保存稳定事件书签；再次使用时会核验数据集身份、来源修订和事件 ID。"
+            )
+        except svc.ServiceError as exc:
+            bookmark = None
+            bookmark_status = str(exc.message)
         return (
             selected,
             event_id,
@@ -6573,8 +7163,107 @@ def register_callbacks(app: Any) -> None:
             {"display": "block"},
             not (association_ready and trajectory_ready),
             extract_label,
+            bookmark,
+            bookmark_status,
             None,
             {"display": "none"},
+        )
+
+    @app.callback(
+        Output("event-bookmark-validation-store", "data"),
+        Output("event-selected-store", "data", allow_duplicate=True),
+        Output("event-extract-id", "value", allow_duplicate=True),
+        Output("event-selected-summary", "children", allow_duplicate=True),
+        Output("event-selection-card", "style", allow_duplicate=True),
+        Output("event-extract-btn", "disabled", allow_duplicate=True),
+        Output("event-extract-btn", "children", allow_duplicate=True),
+        Output("event-bookmark-status", "children", allow_duplicate=True),
+        Output("event-reaction-text", "value", allow_duplicate=True),
+        Output("event-rxn-before", "value", allow_duplicate=True),
+        Output("event-rxn-after", "value", allow_duplicate=True),
+        Output("event-alert", "children", allow_duplicate=True),
+        Input("app-store", "data"),
+        Input("event-bookmark-store", "data"),
+        Input("page-store", "data"),
+        State("event-selected-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _restore_event_bookmark(app_store, bookmark, page_store, selected):
+        page = str((page_store or {}).get("page") or "")
+        if page not in {"events", "trajectory"} or not bookmark:
+            raise PreventUpdate
+        current_event_id = str(
+            (((selected or {}).get("row") or {}).get("event_id")) or ""
+        )
+        bookmark_event_id = str(bookmark.get("event_id") or "")
+        if current_event_id and current_event_id == bookmark_event_id:
+            raise PreventUpdate
+
+        store = app_store or {}
+        try:
+            restored = svc.restore_event_bookmark(
+                store.get("artifacts") or {},
+                bookmark,
+                dataset_id=str(store.get("dataset_id") or ""),
+                source_revision=store.get("source_revision") or {},
+            )
+        except svc.ServiceError as exc:
+            validation = {
+                "state": "rejected",
+                "event_id": bookmark_event_id,
+                "reason": str(exc.reason),
+                "message": str(exc.message),
+            }
+            return (
+                validation,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                f"事件书签未恢复：{exc.message}",
+                no_update,
+                no_update,
+                no_update,
+                str(exc.message),
+            )
+
+        restored_selection = restored["selection"]
+        row = restored_selection["row"]
+        config = restored_selection["config"]
+        association_ready = (
+            row.get("association_status") == "matched"
+            and bool(row.get("atom_id_list"))
+        )
+        trajectory_ready = bool((store.get("artifacts") or {}).get("trajectory"))
+        if not association_ready:
+            extract_label = "该事件无法定位原子"
+        elif not trajectory_ready:
+            extract_label = "缺少轨迹文件"
+        else:
+            extract_label = "打开轨迹查看"
+        validation = {
+            "state": "restored",
+            "event_id": str(row.get("event_id") or ""),
+            "dataset_id": str(store.get("dataset_id") or ""),
+            "source_revision_fingerprint": str(
+                (store.get("source_revision") or {}).get("fingerprint") or ""
+            ),
+        }
+        return (
+            validation,
+            restored_selection,
+            str(row.get("event_id") or ""),
+            _event_selection_summary(restored_selection),
+            {"display": "block"},
+            not (association_ready and trajectory_ready),
+            extract_label,
+            restored["message"],
+            str(config.get("reaction_text") or ""),
+            int(config.get("before_frames", 3)),
+            int(config.get("after_frames", 3)),
+            restored["message"],
         )
 
     @app.callback(
@@ -6797,8 +7486,8 @@ def register_callbacks(app: Any) -> None:
                 viewer = svc.build_rng_event_visualization(
                     artifacts,
                     row,
-                    before_frames=int(config.get("before_frames") or 3),
-                    after_frames=int(config.get("after_frames") or 3),
+                    before_frames=_int_with_default(config.get("before_frames"), 3),
+                    after_frames=_int_with_default(config.get("after_frames"), 3),
                     environment_radius=float(
                         4.0
                         if environment_radius is None
@@ -6872,6 +7561,7 @@ def register_callbacks(app: Any) -> None:
         Output("event-dft-products", "options"),
         Output("event-dft-products", "value"),
         Output("event-dft-unit-confirmation", "value"),
+        Output("event-dft-isolated-cluster-confirmation", "value"),
         Output("event-dft-preview-btn", "disabled"),
         Output("event-dft-alert", "children"),
         Input("event-selected-store", "data"),
@@ -6888,7 +7578,7 @@ def register_callbacks(app: Any) -> None:
             or not viewer
             or viewer_event_id != event_id
         ):
-            return {"display": "none"}, [], [], [], [], [], True, (
+            return {"display": "none"}, [], [], [], [], [], [], True, (
                 "只有具有精确 Molecular Evidence 的 matched 事件可以导出 DFT 几何。"
             )
         reactants = _dft_participant_options(row, "reactant")
@@ -6911,6 +7601,7 @@ def register_callbacks(app: Any) -> None:
             products,
             [option["value"] for option in products],
             ["angstrom"] if confirmed else [],
+            [],
             not bool(reactants or products),
             message,
         )
@@ -6968,10 +7659,12 @@ def register_callbacks(app: Any) -> None:
         Output("event-dft-preview-panel", "style", allow_duplicate=True),
         Output("event-dft-validation", "children", allow_duplicate=True),
         Output("event-dft-summary", "children", allow_duplicate=True),
+        Output("event-dft-review-confirmation", "value", allow_duplicate=True),
         Input("event-dft-reactants", "value"),
         Input("event-dft-products", "value"),
         Input("event-dft-layout", "value"),
         Input("event-dft-unit-confirmation", "value"),
+        Input("event-dft-isolated-cluster-confirmation", "value"),
         Input({"type": "event-dft-charge", "stem": ALL}, "value"),
         Input({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
         Input("event-selected-store", "data"),
@@ -6982,11 +7675,12 @@ def register_callbacks(app: Any) -> None:
         _products,
         _layout,
         _unit,
+        _isolated_cluster,
         _charges,
         _multiplicities,
         _selected,
     ):
-        return None, True, {"display": "none"}, [], []
+        return None, True, {"display": "none"}, [], [], []
 
     @app.callback(
         Output("event-dft-store", "data"),
@@ -7001,6 +7695,7 @@ def register_callbacks(app: Any) -> None:
         State("event-dft-products", "value"),
         State("event-dft-layout", "value"),
         State("event-dft-unit-confirmation", "value"),
+        State("event-dft-isolated-cluster-confirmation", "value"),
         State({"type": "event-dft-charge", "stem": ALL}, "value"),
         State({"type": "event-dft-charge", "stem": ALL}, "id"),
         State({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
@@ -7025,6 +7720,7 @@ def register_callbacks(app: Any) -> None:
         product_indices,
         layout,
         unit_confirmation,
+        isolated_cluster_confirmation,
         charge_values,
         charge_ids,
         multiplicity_values,
@@ -7035,13 +7731,14 @@ def register_callbacks(app: Any) -> None:
         if n_clicks is None:
             raise PreventUpdate
         try:
-            bundle = _build_dft_bundle_from_controls(
+            evaluation = _build_dft_bundle_from_controls(
                 selected=selected,
                 app_store=app_store,
                 reactant_indices=reactant_indices,
                 product_indices=product_indices,
                 layout=layout,
                 unit_confirmation=unit_confirmation,
+                isolated_cluster_confirmation=isolated_cluster_confirmation,
                 charge_values=charge_values,
                 charge_ids=charge_ids,
                 multiplicity_values=multiplicity_values,
@@ -7065,27 +7762,29 @@ def register_callbacks(app: Any) -> None:
                 {"display": "none"},
                 True,
             )
+        report = evaluation.report
+        status = str((report.get("qc_handoff") or {}).get("status") or "blocked")
+        validation = _dft_readiness_validation(report)
+        if evaluation.bundle is None:
+            return (
+                {"readiness_report": report},
+                validation,
+                [html.Span(status, className="rs-stat-chip")],
+                [],
+                None,
+                {"display": "none"},
+                True,
+            )
+        bundle = evaluation.bundle
         manifest = bundle.manifest
         warnings = [
             warning
             for geometry in manifest.get("geometries") or []
             for warning in geometry.get("warnings") or []
         ]
-        validation = dbc.Alert(
-            [
-                html.Div("几何完整性检查通过。"),
-                html.Ul(
-                    [html.Li(str(item.get("message") or "")) for item in warnings],
-                    className="mb-0 mt-1",
-                )
-                if warnings
-                else None,
-            ],
-            color="warning" if warnings else "success",
-            className="py-2 mb-0",
-        )
         geometry_meta = manifest.get("geometries") or []
         summary = [
+            html.Span(status, className="rs-stat-chip"),
             html.Span(f"文件 {len(bundle.geometries)}", className="rs-stat-chip"),
             html.Span(
                 f"最大 {max(int(item.get('atom_count') or 0) for item in geometry_meta)} 原子",
@@ -7104,7 +7803,24 @@ def register_callbacks(app: Any) -> None:
             options,
             options[0]["value"],
             {"display": "block"},
-            False,
+            status != "ready",
+        )
+
+    @app.callback(
+        Output("event-dft-download-btn", "disabled", allow_duplicate=True),
+        Input("event-dft-review-confirmation", "value"),
+        State("event-dft-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _acknowledge_dft_review(confirmation, payload):
+        report = (payload or {}).get("readiness_report") or {}
+        status = str((report.get("qc_handoff") or {}).get("status") or "")
+        if status == "ready":
+            return False
+        return not (
+            status == "review_required"
+            and "acknowledged" in (confirmation or [])
+            and bool((payload or {}).get("geometries"))
         )
 
     @app.callback(
@@ -7120,25 +7836,37 @@ def register_callbacks(app: Any) -> None:
         Input("event-dft-download-btn", "n_clicks"),
         State("event-dft-store", "data"),
         State("event-selected-store", "data"),
+        State("event-dft-review-confirmation", "value"),
         prevent_initial_call=True,
     )
     def _download_dft_geometry(
         n_clicks,
         payload,
         selected,
+        review_confirmation,
     ):
         if n_clicks is None or not payload:
+            raise PreventUpdate
+        report = payload.get("readiness_report") or {}
+        status = str((report.get("qc_handoff") or {}).get("status") or "")
+        if status not in {"ready", "review_required"}:
+            raise PreventUpdate
+        if status == "review_required" and "acknowledged" not in (
+            review_confirmation or []
+        ):
             raise PreventUpdate
         bundle = svc.DftGeometryBundle(
             manifest=dict(payload.get("manifest") or {}),
             geometries=dict(payload.get("geometries") or {}),
             atom_map_csv=str(payload.get("atom_map_csv") or ""),
             readme=str(payload.get("readme") or ""),
+            readiness_report=dict(report),
+            occurrence=dict(payload.get("occurrence") or {}),
         )
         event_id = str(((selected or {}).get("row") or {}).get("event_id") or "event")
         return dcc.send_bytes(
             bundle.to_zip(),
-            f"{event_id}_dft_geometry.zip",
+            f"{event_id}_qc_handoff.zip",
             type="application/zip",
         )
 
@@ -7214,6 +7942,7 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-json-btn", "disabled"),
         Output("molecule-lineage-csv-btn", "disabled"),
         Input("molecule-lineage-run-btn", "n_clicks"),
+        Input("molecule-lineage-continue-btn", "n_clicks"),
         State("molecule-lineage-participant", "value"),
         State("molecule-lineage-anchor-mode", "value"),
         State("molecule-lineage-anchor-value", "value"),
@@ -7221,9 +7950,13 @@ def register_callbacks(app: Any) -> None:
         State("molecule-lineage-depth-forward", "value"),
         State("molecule-lineage-node-limit", "value"),
         State("molecule-lineage-recross-window", "value"),
+        State("molecule-lineage-branch", "value"),
+        State("molecule-lineage-continue-depth", "value"),
+        State("molecule-lineage-continue-node-limit", "value"),
         State("event-selected-store", "data"),
         State("event-viewer-store", "data"),
         State("app-store", "data"),
+        State("molecule-lineage-store", "data"),
         prevent_initial_call=True,
         running=[
             (
@@ -7241,6 +7974,7 @@ def register_callbacks(app: Any) -> None:
     )
     def _run_molecule_lineage(
         n_clicks,
+        continue_clicks,
         participant_value,
         anchor_mode,
         anchor_value,
@@ -7248,42 +7982,80 @@ def register_callbacks(app: Any) -> None:
         depth_forward,
         node_limit,
         recross_window,
+        branch_id,
+        continue_depth,
+        continue_node_limit,
         selected,
         viewer,
         app_store,
+        existing_report,
     ):
-        if n_clicks is None:
+        triggered = ctx.triggered_id
+        if triggered not in {
+            "molecule-lineage-run-btn",
+            "molecule-lineage-continue-btn",
+        }:
             raise PreventUpdate
         try:
-            side, index_text = str(participant_value or "").split(":", 1)
-            participant_index = int(index_text)
-            tokens = [
-                value
-                for value in re.split(r"[,;\s]+", str(anchor_value or "").strip())
-                if value
-            ]
-            anchor_elements = tokens if anchor_mode == "elements" else []
-            anchor_atom_ids = (
-                [int(value) for value in tokens]
-                if anchor_mode == "atom_ids"
-                else []
-            )
-            report = svc.build_molecule_lineage_analysis(
-                (app_store or {}).get("artifacts") or {},
-                (selected or {}).get("row") or {},
-                side=side,
-                participant_index=participant_index,
-                viewer=viewer,
-                anchor_mode=str(anchor_mode or "non_hydrogen"),
-                anchor_elements=anchor_elements,
-                anchor_atom_ids=anchor_atom_ids,
-                depth_backward=int(depth_backward),
-                depth_forward=int(depth_forward),
-                max_molecule_nodes=int(node_limit),
-                recrossing_window=int(recross_window),
-            )
+            if triggered == "molecule-lineage-continue-btn":
+                if not existing_report or not branch_id:
+                    raise ValueError("请先选择一条可继续追踪的分支")
+                report = svc.continue_molecule_lineage_analysis(
+                    (app_store or {}).get("artifacts") or {},
+                    existing_report,
+                    branch_id=str(branch_id),
+                    persistent_depth=int(continue_depth),
+                    max_molecule_nodes=int(continue_node_limit),
+                    recrossing_window=int(recross_window),
+                    dataset_id=str((app_store or {}).get("dataset_id") or ""),
+                    source_revision=(app_store or {}).get("source_revision") or {},
+                )
+            else:
+                if n_clicks is None:
+                    raise PreventUpdate
+                side, index_text = str(participant_value or "").split(":", 1)
+                participant_index = int(index_text)
+                tokens = [
+                    value
+                    for value in re.split(
+                        r"[,;\s]+", str(anchor_value or "").strip()
+                    )
+                    if value
+                ]
+                anchor_elements = tokens if anchor_mode == "elements" else []
+                anchor_atom_ids = (
+                    [int(value) for value in tokens]
+                    if anchor_mode == "atom_ids"
+                    else []
+                )
+                report = svc.build_molecule_lineage_analysis(
+                    (app_store or {}).get("artifacts") or {},
+                    (selected or {}).get("row") or {},
+                    side=side,
+                    participant_index=participant_index,
+                    viewer=viewer,
+                    anchor_mode=str(anchor_mode or "non_hydrogen"),
+                    anchor_elements=anchor_elements,
+                    anchor_atom_ids=anchor_atom_ids,
+                    depth_backward=int(depth_backward),
+                    depth_forward=int(depth_forward),
+                    max_molecule_nodes=int(node_limit),
+                    recrossing_window=int(recross_window),
+                    dataset_id=str((app_store or {}).get("dataset_id") or ""),
+                    source_revision=(app_store or {}).get("source_revision") or {},
+                )
         except (svc.ServiceError, TypeError, ValueError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            if triggered == "molecule-lineage-continue-btn":
+                return (
+                    no_update,
+                    dbc.Alert(message, color="danger", className="py-2 mb-0"),
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                )
             return (
                 None,
                 dbc.Alert(message, color="danger", className="py-2 mb-0"),
@@ -7293,46 +8065,18 @@ def register_callbacks(app: Any) -> None:
                 True,
                 True,
             )
-        summary = report.get("summary") or {}
-        trend_labels = {
-            "growth": "总体增长",
-            "degradation": "总体降解",
-            "mixed": "增长/降解并存",
-            "structurally stable": "重原子规模不变",
-            "undetermined": "趋势未判定",
-        }
-        summary_chips = [
-            html.Span(
-                f"分子节点 {int(summary.get('molecule_node_count') or 0)}",
-                className="rs-stat-chip",
-            ),
-            html.Span(
-                f"事件 {int(summary.get('event_count') or 0)}",
-                className="rs-stat-chip",
-            ),
-            html.Span(
-                f"快速回穿 {int(summary.get('recrossing_episode_count') or 0)}",
-                className="rs-stat-chip",
-            ),
-            html.Span(
-                trend_labels.get(
-                    str(summary.get("aggregate_trend") or "undetermined"),
-                    "趋势未判定",
-                ),
-                className="rs-stat-chip",
-            ),
-        ]
-        truncations = report.get("truncations") or []
-        truncation_text = (
-            f"有 {len(truncations)} 条分支在设定边界或证据连续性处停止；"
-            "详情已写入 JSON/CSV。"
-            if truncations
-            else "所有已访问分支均在当前证据和边界内完整结束。"
+        summary_chips, truncation_text = _molecule_lineage_result_presentation(
+            report
+        )
+        message = (
+            "所选分支已继续追踪，并按稳定事件和分子身份合并；既有片段保持不变。"
+            if triggered == "molecule-lineage-continue-btn"
+            else "分支追踪已完成。图用于总览；下方事件表和导出文件是审计依据。"
         )
         return (
             report,
             dbc.Alert(
-                "谱系已构建。图用于总览；下方事件表和导出文件是审计依据。",
+                message,
                 color="success",
                 className="py-2 mb-0",
             ),
@@ -7348,16 +8092,32 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-event-grid", "data"),
         Output("molecule-lineage-event-grid", "columns"),
         Output("molecule-lineage-event-grid", "selected_rows"),
+        Output("molecule-lineage-branch", "options"),
+        Output("molecule-lineage-branch", "value"),
+        Output("molecule-lineage-continue-btn", "disabled"),
+        Output("molecule-lineage-branch-summary", "children"),
         Input("molecule-lineage-store", "data"),
         Input("molecule-lineage-view", "value"),
     )
     def _render_molecule_lineage(report, view):
         if not report:
-            return [], [], _molecule_lineage_event_columns(), []
+            return (
+                [],
+                [],
+                _molecule_lineage_event_columns(),
+                [],
+                [],
+                None,
+                True,
+                "当前还没有分支追踪结果。",
+            )
         selected_view = (
             str(view) if str(view) in {"raw", "persistent"} else "persistent"
         )
         rows = _molecule_lineage_event_rows(report)
+        options, branch_value, disabled, branch_summary = (
+            _molecule_lineage_branch_controls(report)
+        )
         return (
             ((report.get("views") or {}).get(selected_view) or {}).get(
                 "elements"
@@ -7366,6 +8126,10 @@ def register_callbacks(app: Any) -> None:
             rows,
             _molecule_lineage_event_columns(),
             [],
+            options,
+            branch_value,
+            disabled,
+            branch_summary,
         )
 
     @app.callback(
@@ -7386,7 +8150,7 @@ def register_callbacks(app: Any) -> None:
     ):
         event_id = ""
         if ctx.triggered_id == "molecule-lineage-cytoscape":
-            if (tapped_node or {}).get("kind") != "event":
+            if (tapped_node or {}).get("kind") not in {"event", "molecule"}:
                 raise PreventUpdate
             event_id = str((tapped_node or {}).get("event_id") or "")
         elif selected_row_ids:
@@ -7609,556 +8373,240 @@ def register_callbacks(app: Any) -> None:
             "type": "text/plain",
         }
 
-    # ── Candidate pathways ─────────────────────────────────────────
-
-    def _event_path_evidence_files(
-        artifacts: dict[str, Any],
-    ) -> tuple[str, str, str]:
-        """Resolve the same native-timeline precedence as core services.
-
-        Returns ``(event_file, molecule_file, source_kind)`` where
-        ``source_kind`` is ``native`` for a ``.timeline.h5`` and ``csv`` for
-        the legacy file pair.
-        """
-        values = dict(artifacts or {})
-        timeline = str(values.get("timeline") or "").strip()
-        if timeline:
-            return timeline, "", "native"
-        reactionevent = str(values.get("reactionevent") or "").strip()
-        molecules = str(values.get("molecules") or "").strip()
-        return reactionevent, molecules, "csv"
-
-    @app.callback(
-        Output("event-path-current-replicate", "value"),
-        Output("event-path-current-source-summary", "children"),
-        Output("event-path-index-status", "children"),
-        Output("event-path-index-status", "className"),
-        Input("app-store", "data"),
-    )
-    def _event_path_current_source(app_store):
-        store = app_store or {}
-        artifacts = store.get("artifacts") or {}
-        base = str(store.get("base") or "").strip()
-        label = Path(base).name if base else str(store.get("label") or "current")
-        if label.endswith(".lammpstrj"):
-            label = label[: -len(".lammpstrj")]
-        label = label or "current"
-        reactionevent, molecules, source_kind = _event_path_evidence_files(
-            artifacts
-        )
-        molecule_label = (
-            "原生 timeline.h5（已包含）"
-            if source_kind == "native"
-            else (Path(molecules).name if molecules else "未检测到")
-        )
-        source_rows = [
-            html.Div(
-                [html.Span("当前重复"), html.Strong(label)],
-                className="rs-event-path-source-row",
-            ),
-            html.Div(
-                [
-                    html.Span("事件文件"),
-                    html.Code(
-                        Path(reactionevent).name
-                        if reactionevent
-                        else "未检测到"
-                    ),
-                ],
-                className="rs-event-path-source-row",
-            ),
-            html.Div(
-                [
-                    html.Span("分子实例文件"),
-                    html.Code(molecule_label),
-                ],
-                className="rs-event-path-source-row",
-            ),
-        ]
-        if not reactionevent:
-            return (
-                label,
-                source_rows,
-                "缺少 .timeline.h5 或 .reactionevent.csv",
-                "rs-page-status is-blocked",
-            )
-        if source_kind == "csv" and not molecules:
-            return (
-                label,
-                source_rows,
-                "缺少 .molecules.csv，无法证明原子连续性",
-                "rs-page-status is-blocked",
-            )
-        try:
-            validation = svc.validate_event_path_sources_for_dash(
-                artifacts,
-                current_replicate=label,
-            )
-        except svc.ServiceError as exc:
-            return (
-                label,
-                source_rows,
-                exc.message,
-                "rs-page-status is-blocked",
-            )
-        return (
-            label,
-            source_rows,
-            (
-                f"事件索引已就绪 · "
-                f"{int(validation.get('total_event_count') or 0):,} 个事件"
-            ),
-            "rs-page-status is-ready",
-        )
-
-    @app.callback(
-        Output("event-path-additional-source-panel", "style"),
-        Input("event-path-source-mode", "value"),
-    )
-    def _event_path_additional_source_visibility(source_mode):
-        return {} if source_mode == "multiple" else {"display": "none"}
-
-    @app.callback(
-        Output("event-path-sequence-preview", "children"),
-        Input("event-path-reaction-sequence", "value"),
-    )
-    def _event_path_sequence_preview(reaction_sequence):
-        reactions = [
-            line.strip()
-            for line in str(reaction_sequence or "").splitlines()
-            if line.strip()
-        ]
-        if not reactions:
-            return "尚未输入路径。"
-        return f"将按顺序验证 {len(reactions)} 步：" + " → ".join(reactions)
-
-    @app.callback(
-        Output("event-path-review-summary", "children"),
-        Input("event-path-current-replicate", "value"),
-        Input("event-path-source-mode", "value"),
-        Input("event-path-additional-sources", "value"),
-        Input("event-path-reaction-sequence", "value"),
-        Input("event-path-max-interval-gap", "value"),
-        Input("event-path-max-timestep-gap", "value"),
-        Input("event-path-max-details", "value"),
-    )
-    def _event_path_review_summary(
-        current_replicate,
-        source_mode,
-        additional_sources,
-        reaction_sequence,
-        max_interval_gap,
-        max_timestep_gap,
-        max_details,
-    ):
-        extra_lines = [
-            line.strip()
-            for line in str(additional_sources or "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        replicate_count = 1 + (len(extra_lines) if source_mode == "multiple" else 0)
-        reactions = [
-            line.strip()
-            for line in str(reaction_sequence or "").splitlines()
-            if line.strip()
-        ]
-        return [
-            html.Div(
-                [html.Span("数据"), html.Strong(f"{replicate_count} 个重复")],
-                className="rs-event-path-review-row",
-            ),
-            html.Div(
-                [
-                    html.Span("当前重复"),
-                    html.Strong(str(current_replicate or "current")),
-                ],
-                className="rs-event-path-review-row",
-            ),
-            html.Div(
-                [
-                    html.Span("路径定义"),
-                    html.Strong(f"{len(reactions)} 步明确 Reaction Type"),
-                ],
-                className="rs-event-path-review-row",
-            ),
-            html.Div(
-                [
-                    html.Span("反应序列"),
-                    html.Code(" → ".join(reactions) or "未填写"),
-                ],
-                className="rs-event-path-review-row",
-            ),
-            html.Div(
-                [
-                    html.Span("时间限制"),
-                    html.Strong(
-                        f"区间差 ≤ {max_interval_gap if max_interval_gap not in (None, '') else '不限'}；"
-                        f"空闲 timestep ≤ {max_timestep_gap if max_timestep_gap not in (None, '') else '不限'}"
-                    ),
-                ],
-                className="rs-event-path-review-row",
-            ),
-            html.Div(
-                [
-                    html.Span("下钻明细"),
-                    html.Strong(f"最多 {int(max_details or 0):,} 次具体发生"),
-                ],
-                className="rs-event-path-review-row",
-            ),
-        ]
-
-    @app.callback(
-        Output("event-path-wizard-step", "data"),
-        Output("event-path-wizard-feedback", "children"),
-        Input("event-path-step1-next", "n_clicks"),
-        Input("event-path-step2-back", "n_clicks"),
-        Input("event-path-step2-next", "n_clicks"),
-        Input("event-path-step3-back", "n_clicks"),
-        Input("event-path-step4-edit", "n_clicks"),
-        Input("event-path-store", "data"),
-        Input("app-store", "data"),
-        State("event-path-wizard-step", "data"),
-        State("event-path-current-replicate", "value"),
-        State("event-path-source-mode", "value"),
-        State("event-path-additional-sources", "value"),
-        State("event-path-reaction-sequence", "value"),
-        prevent_initial_call=True,
-    )
-    def _navigate_event_path_wizard(
-        _step1_next,
-        _step2_back,
-        _step2_next,
-        _step3_back,
-        _step4_edit,
-        report,
-        app_store,
-        current_step,
-        current_replicate,
-        source_mode,
-        additional_sources,
-        reaction_sequence,
-    ):
-        triggered = ctx.triggered_id
-        step = int(current_step or 1)
-        if triggered == "app-store":
-            return 1, ""
-        if triggered == "event-path-store":
-            if report:
-                return 4, ""
-            raise PreventUpdate
-        if triggered == "event-path-step2-back":
-            return 1, ""
-        if triggered in {"event-path-step3-back", "event-path-step4-edit"}:
-            return 2, ""
-        if triggered == "event-path-step2-next":
-            reactions = [
-                line.strip()
-                for line in str(reaction_sequence or "").splitlines()
-                if line.strip()
-            ]
-            if not 2 <= len(reactions) <= 8:
-                return step, dbc.Alert("请按顺序填写 2–8 个 Reaction Type，每行一个。", color="danger")
-            if any(line.replace("→", "->").count("->") != 1 for line in reactions):
-                return step, dbc.Alert("每个 Reaction Type 必须包含一个“->”。", color="danger")
-            return 3, ""
-        if triggered == "event-path-step1-next":
-            artifacts = (app_store or {}).get("artifacts") or {}
-            extras = (
-                str(additional_sources or "")
-                if source_mode == "multiple"
-                else ""
-            )
-            if source_mode == "multiple" and not extras.strip():
-                return 1, dbc.Alert(
-                    "已选择跨重复分析，请至少填写一个附加重复；"
-                    "否则选择“只分析当前数据集”。",
-                    color="warning",
-                )
-            try:
-                validation = svc.validate_event_path_sources_for_dash(
-                    artifacts,
-                    current_replicate=str(current_replicate or "current"),
-                    additional_sources=extras,
-                )
-            except svc.ServiceError as exc:
-                return 1, dbc.Alert(exc.message, color="danger")
-            return 2, dbc.Alert(
-                f"数据检查通过：{int(validation.get('replicate_count') or 0)} 个重复、"
-                f"{int(validation.get('total_event_count') or 0):,} 个事件。",
-                color="success",
-            )
-        raise PreventUpdate
-
-    @app.callback(
-        Output("event-path-step-1", "style"),
-        Output("event-path-step-2", "style"),
-        Output("event-path-step-3", "style"),
-        Output("event-path-results", "style"),
-        Output("event-path-progress-1", "className"),
-        Output("event-path-progress-2", "className"),
-        Output("event-path-progress-3", "className"),
-        Output("event-path-progress-4", "className"),
-        Input("event-path-wizard-step", "data"),
-    )
-    def _render_event_path_wizard(step_value):
-        step = max(1, min(4, int(step_value or 1)))
-        panel_styles = [
-            {} if step == index else {"display": "none"}
-            for index in (1, 2, 3)
-        ]
-        result_style = {} if step == 4 else {"display": "none"}
-
-        def step_class(index):
-            suffix = " is-active" if index == step else (" is-complete" if index < step else "")
-            return f"rs-event-path-step{suffix}"
-
-        return (
-            *panel_styles,
-            result_style,
-            *(step_class(index) for index in (1, 2, 3, 4)),
-        )
-
-    @app.callback(
-        Output("event-path-run-btn", "disabled"),
-        Input("app-store", "data"),
-    )
-    def _event_path_run_disabled(app_store):
-        artifacts = (app_store or {}).get("artifacts") or {}
-        reactionevent, molecules, source_kind = _event_path_evidence_files(
-            artifacts
-        )
-        if not reactionevent:
-            return True
-        return source_kind == "csv" and not molecules
-
-    @app.callback(
-        Output("event-path-store", "data"),
-        Output("event-path-context-store", "data"),
-        Output("event-path-alert", "children"),
-        Output("event-path-summary", "children"),
-        Output("event-path-summary-explanation", "children"),
-        Input("event-path-run-btn", "n_clicks"),
-        State("event-path-current-replicate", "value"),
-        State("event-path-source-mode", "value"),
-        State("event-path-additional-sources", "value"),
-        State("event-path-reaction-sequence", "value"),
-        State("event-path-max-interval-gap", "value"),
-        State("event-path-max-timestep-gap", "value"),
-        State("event-path-max-details", "value"),
-        State("app-store", "data"),
-        prevent_initial_call=True,
-        running=[
-            (
-                Output({"type": "dataset-bound-operation", "name": "path-verification"}, "data"),
-                True,
-                False,
-            ),
-        ],
-    )
-    def _run_event_path_analysis(
-        n_clicks,
-        current_replicate,
-        source_mode,
-        additional_sources,
-        reaction_sequence,
-        max_interval_gap,
-        max_timestep_gap,
-        max_details,
-        app_store,
-    ):
-        if n_clicks is None:
-            raise PreventUpdate
-        artifacts = (app_store or {}).get("artifacts") or {}
-        try:
-            report = svc.verify_event_path_for_dash(
-                artifacts,
-                current_replicate=str(current_replicate or "current"),
-                additional_sources=(
-                    str(additional_sources or "")
-                    if source_mode == "multiple"
-                    else ""
-                ),
-                reaction_sequence=str(reaction_sequence or ""),
-                max_interval_gap=max_interval_gap,
-                max_timestep_gap=max_timestep_gap,
-                max_occurrence_details=int(1000 if max_details is None else max_details),
-            )
-        except svc.ServiceError as exc:
-            return (
-                None,
-                None,
-                dbc.Alert(exc.message, color="danger", className="py-2 mb-0"),
-                [],
-                [],
-            )
-        verification = report.get("verification") or {}
-        status = str(verification.get("status") or "inconclusive")
-        labels = {
-            "supported": "有证据",
-            "not_observed": "未观察到",
-            "inconclusive": "证据不足",
-        }
-        message = f"{labels.get(status, '证据不足')}：{verification.get('message') or ''}"
-        if report.get("occurrence_details_truncated"):
-            message += " 具体发生明细只保留到界面设定上限，汇总统计仍完整。"
-        return (
-            report,
-            {
-                "schema_version": "reacnet-scope/event-path-context/v1",
-                "dataset_id": _current_dataset_id(app_store),
-            },
-            dbc.Alert(
-                message,
-                color="success" if status == "supported" else "warning",
-                className="py-2 mb-0",
-            ),
-            _event_path_summary_cards(report),
-            _event_path_summary_explanation(report),
-        )
-
-    @app.callback(
-        Output("event-path-signature-grid", "data"),
-        Output("event-path-signature-grid", "columns"),
-        Output("event-path-signature-grid", "selected_rows"),
-        Input("event-path-store", "data"),
-    )
-    def _render_verified_path_signature(report):
-        if not report:
-            return [], _event_path_signature_columns(), []
-        rows = svc.event_path_signature_rows(report)
-        return rows, _event_path_signature_columns(), ([0] if rows else [])
-
-    @app.callback(
-        Output("event-path-occurrence-selector", "options"),
-        Output("event-path-occurrence-selector", "value"),
-        Output("event-path-selected-summary", "children"),
-        Output("event-path-time-grid", "data"),
-        Output("event-path-time-grid", "columns"),
-        Input("event-path-signature-grid", "selected_rows"),
-        State("event-path-signature-grid", "data"),
-        State("event-path-store", "data"),
-    )
-    def _select_event_path_signature(selected_rows, rows, report):
-        selected = _selected_table_row(selected_rows, rows)
-        if not selected or not report:
-            return [], None, "从上方选择路径签名。", [], _event_path_time_columns()
-        signature_id = str(selected.get("signature_id") or "")
-        occurrences = svc.event_path_occurrences_for_signature(report, signature_id)
-        options = [
-            {
-                "label": (
-                    f"{item.get('replicate')} · {item.get('path_id')} · "
-                    f"{int(item.get('lineage_atom_support_count') or 0)} 个连续原子"
-                ),
-                "value": str(item.get("path_id") or ""),
-            }
-            for item in occurrences
-        ]
-        detail_note = (
-            f"保留了 {len(occurrences)} 次具体发生可供审计。"
-            if occurrences
-            else "该签名的具体发生明细未保留；提高“审计明细上限”后重跑。"
-        )
-        return (
-            options,
-            options[0]["value"] if options else None,
-            f"{signature_id} · {detail_note}",
-            svc.event_path_signature_time_rows(report, signature_id),
-            _event_path_time_columns(),
-        )
-
-    @app.callback(
-        Output("event-path-cytoscape", "elements"),
-        Output("event-path-event-grid", "data"),
-        Output("event-path-event-grid", "columns"),
-        Output("event-path-edge-grid", "data"),
-        Output("event-path-edge-grid", "columns"),
-        Output("event-path-occurrence-summary", "children"),
-        Input("event-path-occurrence-selector", "value"),
-        State("event-path-store", "data"),
-    )
-    def _render_event_path_occurrence(path_id, report):
-        occurrence = next(
-            (
-                item
-                for item in (report or {}).get("occurrences") or []
-                if str(item.get("path_id") or "") == str(path_id or "")
-            ),
-            None,
-        )
-        if occurrence is None:
-            return (
-                [],
-                [],
-                _event_path_event_columns(),
-                [],
-                _event_path_edge_columns(),
-                "选择一次具体发生以查看严格事件链。",
-            )
-        event_rows, edge_rows = svc.event_path_occurrence_rows(occurrence)
-        lineage = [int(value) for value in occurrence.get("lineage_atom_ids") or []]
-        return (
-            svc.build_event_path_occurrence_elements(occurrence),
-            event_rows,
-            _event_path_event_columns(),
-            edge_rows,
-            _event_path_edge_columns(),
-            (
-                f"{occurrence.get('replicate')} · {occurrence.get('path_id')} · "
-                f"事件 {' → '.join(str(value) for value in occurrence.get('event_ids') or [])} · "
-                f"全路径连续原子：{';'.join(map(str, lineage)) or '—'}"
-            ),
-        )
-
-    @app.callback(
-        Output("event-path-json-download", "data"),
-        Input("event-path-json-btn", "n_clicks"),
-        State("event-path-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_event_path_json(n_clicks, report):
-        if n_clicks is None or not report:
-            raise PreventUpdate
-        return dcc.send_string(
-            json.dumps(report, ensure_ascii=False, indent=2),
-            "path-verification.json",
-        )
-
-    @app.callback(
-        Output("event-path-csv-download", "data"),
-        Input("event-path-csv-btn", "n_clicks"),
-        State("event-path-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _download_event_path_csv(n_clicks, report):
-        if n_clicks is None or not report:
-            raise PreventUpdate
-        rows = svc.event_path_signature_rows(report)
-        if not rows:
-            raise PreventUpdate
-        return {
-            "content": svc.rows_to_csv(rows),
-            "filename": "path-verification.csv",
-            "type": "text/csv",
-        }
-
-    @app.callback(
-        Output("event-path-store", "data", allow_duplicate=True),
-        Output("event-path-context-store", "data", allow_duplicate=True),
-        Input("app-store", "data"),
-        State("event-path-context-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _reset_event_paths_on_dataset_change(app_store, event_path_context):
-        if not event_path_context:
-            raise PreventUpdate
-        if str(event_path_context.get("dataset_id") or "") == _current_dataset_id(
-            app_store
-        ):
-            raise PreventUpdate
-        return None, None
-
     # ── Batch comparison ────────────────────────────────────────────
+
+    @app.callback(
+        Output("species-compare-managed", "options"),
+        Input("batch-managed-store", "data"),
+    )
+    def _species_compare_managed_options(managed):
+        return [
+            {"label": str(item.get("label") or item.get("base")), "value": str(item["id"])}
+            for item in (managed or {}).get("datasets", [])
+            if item.get("id")
+        ]
+
+    @app.callback(
+        Output("species-compare-sources-store", "data"),
+        Input("species-compare-add-managed", "n_clicks"),
+        Input("species-compare-add-path", "n_clicks"),
+        Input({"type": "species-compare-remove", "path": ALL}, "n_clicks"),
+        State("species-compare-managed", "value"),
+        State("batch-managed-store", "data"),
+        State("species-compare-path", "value"),
+        State("species-compare-new-label", "value"),
+        State("species-compare-sources-store", "data"),
+        State({"type": "species-compare-target", "path": ALL}, "value"),
+        State({"type": "species-compare-target", "path": ALL}, "id"),
+        State({"type": "species-compare-label", "path": ALL}, "value"),
+        State({"type": "species-compare-label", "path": ALL}, "id"),
+        State({"type": "species-compare-model-iteration", "path": ALL}, "value"),
+        State({"type": "species-compare-model-iteration", "path": ALL}, "id"),
+        State({"type": "species-compare-condition", "path": ALL}, "value"),
+        State({"type": "species-compare-condition", "path": ALL}, "id"),
+        State({"type": "species-compare-replicate", "path": ALL}, "value"),
+        State({"type": "species-compare-replicate", "path": ALL}, "id"),
+        prevent_initial_call=True,
+    )
+    def _edit_species_compare_sources(
+        _add_managed, _add_path, _remove, managed_ids, managed, path_text,
+        new_label, sources, targets, target_ids, labels, label_ids,
+        model_iterations, model_iteration_ids, conditions, condition_ids,
+        replicates, replicate_ids,
+    ):
+        sources = [dict(item) for item in (sources or [])]
+        current = {item["species_file"]: item for item in sources}
+        for value, item_id in zip(targets or [], target_ids or []):
+            path = item_id["path"]
+            if path in current:
+                current[path]["target_smiles"] = str(value or "").strip()
+        for value, item_id in zip(labels or [], label_ids or []):
+            path = item_id["path"]
+            if path in current:
+                current[path]["label"] = str(value or "").strip()
+        for field, values, item_ids in (
+            ("model_iteration", model_iterations, model_iteration_ids),
+            ("simulation_condition", conditions, condition_ids),
+            ("replicate", replicates, replicate_ids),
+        ):
+            for value, item_id in zip(values or [], item_ids or []):
+                path = item_id["path"]
+                if path in current:
+                    current[path][field] = str(value or "").strip()
+
+        triggered = ctx.triggered_id
+        if isinstance(triggered, dict) and triggered.get("type") == "species-compare-remove":
+            return [item for item in sources if item["species_file"] != triggered.get("path")]
+        additions: list[dict[str, Any]] = []
+        if triggered == "species-compare-add-managed":
+            lookup = {str(item.get("id")): item for item in (managed or {}).get("datasets", [])}
+            for dataset_id in managed_ids or []:
+                dataset = lookup.get(str(dataset_id))
+                if dataset:
+                    additions.append(
+                        {
+                            "path": f"{dataset['base']}.species",
+                            "label": str(dataset.get("label") or ""),
+                            "dataset_id": str(dataset.get("dataset_id") or ""),
+                            "source_revision": dataset.get("source_revision") or {},
+                        }
+                    )
+        elif triggered == "species-compare-add-path" and str(path_text or "").strip():
+            additions.append(
+                {
+                    "path": str(path_text).strip(),
+                    "label": str(new_label or "").strip(),
+                }
+            )
+        else:
+            raise PreventUpdate
+        for addition in additions:
+            path = str(addition.get("path") or "")
+            label = str(addition.get("label") or "")
+            resolved = str(Path(path).expanduser().resolve())
+            if resolved not in current:
+                item = {
+                    "species_file": resolved,
+                    "label": label or Path(resolved).stem,
+                    "target_smiles": "",
+                    "model_iteration": "",
+                    "simulation_condition": "",
+                    "replicate": "",
+                    "dataset_id": str(addition.get("dataset_id") or ""),
+                    "source_revision": addition.get("source_revision") or {},
+                }
+                sources.append(item)
+                current[resolved] = item
+        return sources
+
+    @app.callback(
+        Output("species-compare-sources", "children"),
+        Input("species-compare-sources-store", "data"),
+    )
+    def _render_species_compare_sources(sources):
+        if not sources:
+            return html.P("添加至少两个来源后，分别选择或输入精确 SMILES。", className="small text-muted")
+        rows = []
+        for source in sources:
+            path = source["species_file"]
+            catalog = svc.species_compare_catalog(path)
+            rows.append(html.Div([
+                html.Div(path, className="small text-muted", title=path),
+                dcc.Input(id={"type": "species-compare-label", "path": path}, value=source.get("label") or "", placeholder="来源名称"),
+                dcc.Dropdown(id={"type": "species-compare-choice", "path": path},
+                             options=catalog["options"], placeholder="从此来源的索引选择精确 SMILES", style={"minWidth": 260}),
+                dcc.Input(id={"type": "species-compare-target", "path": path},
+                          value=source.get("target_smiles") or "", placeholder="或输入精确 SMILES"),
+                dcc.Input(id={"type": "species-compare-model-iteration", "path": path},
+                          value=source.get("model_iteration") or "", placeholder="模型迭代（未知可留空）"),
+                dcc.Input(id={"type": "species-compare-condition", "path": path},
+                          value=source.get("simulation_condition") or "", placeholder="Simulation Condition（未知可留空）"),
+                dcc.Input(id={"type": "species-compare-replicate", "path": path},
+                          value=source.get("replicate") or "", placeholder="Replicate（未知可留空）"),
+                dbc.Button("移除", id={"type": "species-compare-remove", "path": path}, size="sm", color="danger", outline=True),
+                html.Span(catalog["message"], className="small text-muted"),
+            ], className="rs-query-row", key=path))
+        return rows
+
+    @app.callback(
+        Output({"type": "species-compare-target", "path": MATCH}, "value"),
+        Input({"type": "species-compare-choice", "path": MATCH}, "value"),
+        prevent_initial_call=True,
+    )
+    def _choose_species_compare_targets(choice):
+        if not choice:
+            raise PreventUpdate
+        return choice
+
+    @app.callback(
+        Output("species-compare-graph", "figure"),
+        Output("species-compare-summary", "data"),
+        Output("species-compare-summary", "columns"),
+        Output("species-compare-alert", "children"),
+        Output("species-compare-result-store", "data"),
+        Output("species-compare-export", "disabled"),
+        Input("species-compare-run", "n_clicks"),
+        Input("species-compare-sources-store", "data"),
+        Input({"type": "species-compare-target", "path": ALL}, "value"),
+        Input({"type": "species-compare-target", "path": ALL}, "id"),
+        Input({"type": "species-compare-label", "path": ALL}, "value"),
+        Input({"type": "species-compare-label", "path": ALL}, "id"),
+        Input({"type": "species-compare-model-iteration", "path": ALL}, "value"),
+        Input({"type": "species-compare-model-iteration", "path": ALL}, "id"),
+        Input({"type": "species-compare-condition", "path": ALL}, "value"),
+        Input({"type": "species-compare-condition", "path": ALL}, "id"),
+        Input({"type": "species-compare-replicate", "path": ALL}, "value"),
+        Input({"type": "species-compare-replicate", "path": ALL}, "id"),
+        Input("species-compare-axis", "value"),
+        prevent_initial_call=True,
+        running=[(Output("species-compare-run", "disabled"), True, False)],
+    )
+    def _run_species_compare(
+        _clicks, sources, targets, target_ids, labels, label_ids,
+        model_iterations, model_iteration_ids, conditions, condition_ids,
+        replicates, replicate_ids, axis,
+    ):
+        empty = (go.Figure(), [], [], "来源或目标变化后，请重新比较。", None, True)
+        if ctx.triggered_id != "species-compare-run":
+            return empty
+        current = {item["species_file"]: dict(item) for item in (sources or [])}
+        for value, item_id in zip(targets or [], target_ids or []):
+            if item_id["path"] in current:
+                current[item_id["path"]]["target_smiles"] = str(value or "").strip()
+        for value, item_id in zip(labels or [], label_ids or []):
+            if item_id["path"] in current:
+                current[item_id["path"]]["label"] = str(value or "").strip()
+        for field, values, item_ids in (
+            ("model_iteration", model_iterations, model_iteration_ids),
+            ("simulation_condition", conditions, condition_ids),
+            ("replicate", replicates, replicate_ids),
+        ):
+            for value, item_id in zip(values or [], item_ids or []):
+                if item_id["path"] in current:
+                    current[item_id["path"]][field] = str(value or "").strip()
+        try:
+            payload = svc.compare_species_sources(list(current.values()), x_axis=axis or "step")
+        except svc.ServiceError as exc:
+            return go.Figure(), [], [], exc.message, None, True
+        fig = go.Figure()
+        for index, curve in enumerate(payload["curves"], 1):
+            fig.add_trace(go.Scatter(x=curve["x_values"], y=curve["values"], mode="lines", name=f"{index}. {curve['label']}",
+                                     customdata=[curve["target_smiles"]] * len(curve["values"]),
+                                     hovertemplate="%{fullData.name}<br>%{customdata}<br>%{x}: %{y}<extra></extra>"))
+        fig.update_layout(xaxis_title=payload["x_name"], yaxis_title="丰度", template="plotly_white", hovermode="x unified")
+        columns = [{"name": name, "id": field} for field, name in [
+            ("label", "来源"), ("species_file", "来源文件"), ("target_smiles", "精确 SMILES"), ("status_text", "状态"),
+            ("model_iteration_display", "模型迭代"),
+            ("simulation_condition_display", "Simulation Condition"),
+            ("replicate_display", "Replicate"),
+            ("identity_basis_text", "身份口径"),
+            ("processing_summary", "RNG 处理"),
+            ("evidence_scope_text", "证据层级"),
+            ("time_basis_text", "时间口径"),
+            ("initial", "初始值"), ("final", "末值"), ("peak", "峰值"),
+            ("peak_time", "峰值时间"), ("message", "说明")]]
+        comparability = payload.get("comparability") or {}
+        alert = dbc.Alert(
+            str(comparability.get("message") or "对比完成"),
+            color=(
+                "warning"
+                if comparability.get("status") == "not_comparable"
+                else "info"
+            ),
+            className="py-1 px-2 mb-0",
+        )
+        return fig, payload["summary"], columns, alert, payload, False
+
+    @app.callback(
+        Output("species-compare-download", "data"),
+        Input("species-compare-export", "n_clicks"),
+        State("species-compare-result-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _export_species_compare(_clicks, payload):
+        if not payload:
+            raise PreventUpdate
+        return dcc.send_bytes(svc.species_comparison_zip(payload), "species_comparison.zip")
 
     @app.callback(
         Output("batch-managed-selector", "options"),
@@ -8172,9 +8620,12 @@ def register_callbacks(app: Any) -> None:
         options = catalog["options"]
         enabled_count = sum(not bool(option.get("disabled")) for option in options)
         if enabled_count:
-            status = f"可选择 {enabled_count} 个已管理数据集；每个数据集作为一个独立条件组。"
+            status = (
+                f"可选择 {enabled_count} 个已管理数据集；默认只按独立来源比较，"
+                "不会把它们称为 Replicate。"
+            )
         else:
-            status = "暂无含 reactionabcd 的当前数据集；可前往管理数据加载，或使用下方目录扫描。"
+            status = "暂无含 reactionabcd 的当前数据集；可前往数据集页面选择，或使用下方目录扫描。"
         return options, {"datasets": catalog["datasets"]}, status
 
     @app.callback(
@@ -8203,6 +8654,8 @@ def register_callbacks(app: Any) -> None:
         Output("batch-condition-selector", "value"),
         Output("batch-conditions-store", "data"),
         Output("batch-conditions-status", "children"),
+        Output("batch-scan-review", "data"),
+        Output("batch-confirm-inferred-metadata", "value"),
         Input("batch-scan-btn", "n_clicks"),
         State("batch-root-dir", "value"),
         prevent_initial_call=True,
@@ -8217,25 +8670,28 @@ def register_callbacks(app: Any) -> None:
                 f"扫描失败：{exc.message}",
                 color="danger",
                 className="py-1 px-2 mb-0",
-            )
+            ), [], []
         except Exception as exc:
             return [], [], None, dbc.Alert(
                 f"扫描失败：{exc}",
                 color="danger",
                 className="py-1 px-2 mb-0",
-            )
+            ), [], []
         groups = payload.get("groups") or []
         options = [
             {
-                "label": f"{g['group_name']} ({g['n_replicates']} 个重复)",
+                "label": f"{g['group_name']} ({g.get('n_sources', g['n_replicates'])} 个来源，待确认)",
                 "value": g["group_name"],
             }
             for g in groups
         ]
         warnings = payload.get("warnings") or []
+        root_count = int(payload.get("root_count") or 1)
+        root_prefix = f"{root_count} 个根目录，" if root_count > 1 else ""
         status_text = (
-            f"扫描完成：{payload.get('total_conditions', 0)} 个条件，"
-            f"{payload.get('total_groups', 0)} 个条件组；已默认选择全部条件组。"
+            f"扫描完成：{root_prefix}{payload.get('total_conditions', 0)} 个来源，"
+            f"{payload.get('total_groups', 0)} 个分组建议。目录名结果尚未确认，"
+            "请检查/修改上表后勾选确认。"
         )
         status = html.Div(
             [
@@ -8248,19 +8704,42 @@ def register_callbacks(app: Any) -> None:
                 else None,
             ]
         )
-        return options, [option["value"] for option in options], payload, status
+        review_rows = [
+            {
+                **condition,
+                "source_group": condition.get("group_key"),
+                "simulation_condition": condition.get("group_key") or "",
+                "metadata_status": "待确认",
+            }
+            for condition in payload.get("conditions") or []
+        ]
+        return options, [], payload, status, review_rows, []
+
+    @app.callback(
+        Output("batch-confirm-inferred-metadata", "value", allow_duplicate=True),
+        Input("batch-scan-review", "data_timestamp"),
+        prevent_initial_call=True,
+    )
+    def _reset_batch_metadata_confirmation(data_timestamp):
+        if data_timestamp is None:
+            raise PreventUpdate
+        return []
 
     @app.callback(
         Output("batch-selection-summary", "children"),
         Output("batch-compare-btn", "disabled"),
         Input("batch-managed-selector", "value"),
         Input("batch-condition-selector", "value"),
+        Input("batch-scan-review", "data"),
+        Input("batch-confirm-inferred-metadata", "value"),
         State("batch-managed-store", "data"),
         State("batch-conditions-store", "data"),
     )
     def _summarize_batch_selection(
         managed_selected,
         scanned_selected,
+        reviewed_sources,
+        confirmation,
         managed_payload,
         scanned_payload,
     ):
@@ -8270,16 +8749,18 @@ def register_callbacks(app: Any) -> None:
                 managed_payload,
                 scanned_selected,
                 scanned_payload,
+                reviewed_sources=reviewed_sources,
+                inferred_metadata_confirmed="confirmed" in (confirmation or []),
             )
         except svc.ServiceError as exc:
             return f"选择不可用：{exc.message}", True
         group_count = len(requests)
-        replicate_count = sum(len(item.get("conditions") or []) for item in requests)
+        source_count = sum(len(item.get("conditions") or []) for item in requests)
         if not group_count:
             return "请选择已管理数据集，或扫描并选择条件组。", True
         comparison_hint = "建议至少选择两个条件组。" if group_count < 2 else "可以开始对比。"
         return (
-            f"已选择 {group_count} 个条件组、{replicate_count} 个重复实验；{comparison_hint}",
+            f"已选择 {group_count} 个比较组、{source_count} 个来源；{comparison_hint}",
             False,
         )
 
@@ -8299,6 +8780,8 @@ def register_callbacks(app: Any) -> None:
         Input("batch-top-n", "value"),
         Input("batch-managed-store", "data"),
         Input("batch-conditions-store", "data"),
+        Input("batch-scan-review", "data"),
+        Input("batch-confirm-inferred-metadata", "value"),
         prevent_initial_call=True,
     )
     def _run_batch_comparison(
@@ -8309,6 +8792,8 @@ def register_callbacks(app: Any) -> None:
         top_n,
         managed_payload,
         conditions_payload,
+        reviewed_sources,
+        confirmation,
     ):
         empty_store = {"rows": [], "columns": [], "details": {}, "groups": []}
         if ctx.triggered_id != "batch-compare-btn":
@@ -8322,7 +8807,7 @@ def register_callbacks(app: Any) -> None:
                     (
                         "确认选择后点击“对比”生成新的统计结果。"
                         if has_selection
-                        else "可直接选择已管理数据集，也可扫描目录并选择自动识别的重复实验组。"
+                        else "可直接选择已管理数据集，也可扫描目录并检查、确认分组建议。"
                     ),
                 ),
                 empty_store,
@@ -8338,6 +8823,8 @@ def register_callbacks(app: Any) -> None:
                 managed_payload,
                 scanned_selected,
                 conditions_payload,
+                reviewed_sources=reviewed_sources,
+                inferred_metadata_confirmed="confirmed" in (confirmation or []),
             )
             payload = svc.run_grouped_batch_comparison(
                 group_requests,
@@ -8376,12 +8863,22 @@ def register_callbacks(app: Any) -> None:
             "details": payload.get("details") or {},
             "groups": payload.get("groups") or [],
             "meta": payload.get("meta") or {},
+            "source_records": payload.get("source_records") or [],
+            "identity_basis": payload.get("identity_basis") or "",
+            "evidence_scope": payload.get("evidence_scope") or {},
         }
+        evidence_message = str(
+            (payload.get("evidence_scope") or {}).get("message") or ""
+        )
         return (
             rows,
             columns,
             [],
-            dbc.Alert(message, color="success", className="py-2 rs-batch-summary-alert"),
+            dbc.Alert(
+                [html.Div(message), html.Div(evidence_message, className="small")],
+                color="success",
+                className="py-2 rs-batch-summary-alert",
+            ),
             store,
             {},
             False,
@@ -8409,9 +8906,19 @@ def register_callbacks(app: Any) -> None:
         std_values = [float(item.get("std_tp") or 0) for item in groups]
 
         fig = go.Figure()
+        has_replicate_statistics = any(
+            (
+                item.get("comparison_mode") == "replicate_statistics"
+                or (
+                    not item.get("comparison_mode")
+                    and item.get("n_replicates") is not None
+                )
+            )
+            for item in groups
+        )
         fig.add_trace(
             go.Bar(
-                name="组平均 TP",
+                name="组平均 TP" if has_replicate_statistics else "来源 TP",
                 x=group_names,
                 y=mean_values,
                 error_y={"type": "data", "array": std_values, "visible": True},
@@ -8432,7 +8939,7 @@ def register_callbacks(app: Any) -> None:
         if replicate_x:
             fig.add_trace(
                 go.Scatter(
-                    name="单次重复",
+                    name="已确认 Replicate" if has_replicate_statistics else "来源",
                     x=replicate_x,
                     y=replicate_y,
                     text=replicate_text,
@@ -8453,6 +8960,13 @@ def register_callbacks(app: Any) -> None:
 
         stat_cards = []
         for group in groups:
+            replicate_statistics = (
+                group.get("comparison_mode") == "replicate_statistics"
+                or (
+                    not group.get("comparison_mode")
+                    and group.get("n_replicates") is not None
+                )
+            )
             ci_lower = group.get("ci_95_lower", "-")
             ci_upper = group.get("ci_95_upper", "-")
             stat_cards.append(
@@ -8460,16 +8974,24 @@ def register_callbacks(app: Any) -> None:
                     [
                         html.Div(str(group.get("group_name") or "条件组"), className="rs-batch-stat-title"),
                         html.Div(
-                            f"检出 {group.get('detected_count', 0)}/{group.get('n_replicates', 0)} · "
+                            f"检出 {group.get('detected_count', 0)}/{group.get('n_replicates', 0)} 个来源 · "
                             f"检出率 {group.get('detection_rate', 0):.3f}",
                             className="rs-batch-stat-line",
                         ),
                         html.Div(
-                            f"平均 TP {group.get('mean_tp', 0):.2f} ± {group.get('std_tp', 0):.2f}",
+                            (
+                                f"平均 TP {group.get('mean_tp', 0):.2f} ± {group.get('std_tp', 0):.2f}"
+                                if replicate_statistics
+                                else f"TP {group.get('mean_tp', 0):.2f}；未声明重复统计"
+                            ),
                             className="rs-batch-stat-line",
                         ),
                         html.Div(
-                            f"平均净 TP {group.get('mean_net_tp', 0):.2f} · 95% CI [{ci_lower}, {ci_upper}]",
+                            (
+                                f"平均净 TP {group.get('mean_net_tp', 0):.2f} · 95% CI [{ci_lower}, {ci_upper}]"
+                                if replicate_statistics
+                                else f"净 TP {group.get('mean_net_tp', 0):.2f} · 置信区间不适用"
+                            ),
                             className="rs-batch-stat-line",
                         ),
                     ],
@@ -8502,14 +9024,10 @@ def register_callbacks(app: Any) -> None:
         if not rows:
             raise PreventUpdate
         try:
-            content = svc.batch_comparison_to_csv(grid_store)
+            content = svc.batch_comparison_package(grid_store)
         except svc.ServiceError:
             raise PreventUpdate
-        return {
-            "content": content,
-            "filename": "batch_comparison.csv",
-            "type": "text/csv;charset=utf-8",
-        }
+        return dcc.send_bytes(content, "batch_comparison.zip")
 
 # ── Directory browser helpers ───────────────────────────────────────
 
@@ -8583,19 +9101,6 @@ def _candidate_for_base(snapshot: dict[str, Any], base: str) -> dict[str, Any] |
     target = str(base or "")
     return next(
         (item for item in snapshot.get("datasets") or [] if item.get("base") == target),
-        None,
-    )
-
-
-def _candidate_for_name(snapshot: dict[str, Any], name: str) -> dict[str, Any] | None:
-    """Resolve a client-visible candidate name through a fresh snapshot."""
-    target = str(name or "")
-    return next(
-        (
-            item
-            for item in snapshot.get("datasets") or []
-            if str(item.get("label") or "") == target
-        ),
         None,
     )
 
@@ -8741,7 +9246,7 @@ def _browser_error_copy(reason: str) -> str:
         ),
         "not_directory": (
             "目标不是可浏览目录。原浏览位置和当前数据集已保留；"
-            "请输入目录或准确的数据集公共前缀。"
+            "请输入一个数据集文件夹。"
         ),
         "recent_missing": (
             "最近记录已失效。原浏览位置和当前数据集已保留；"
@@ -8832,6 +9337,7 @@ def _build_dir_browser_response(
     candidate: dict[str, Any] | None = None,
     app_store: dict[str, Any] | None = None,
     filter_text: Any = "",
+    select_dataset: bool = True,
 ) -> tuple:
     """Build a complete browser snapshot response without applying a dataset."""
     try:
@@ -8846,15 +9352,17 @@ def _build_dir_browser_response(
         )
     datasets = data.get("datasets") or []
     preferred_base = str(resolved.get("preferred_base") or "")
-    actual = (
-        _candidate_for_base(data, preferred_base)
-        if preferred_base else None
-    )
-    if actual is None and not preferred_base and len(datasets) == 1:
-        actual = datasets[0]
-    if actual is None and not preferred_base:
-        current = app_store if isinstance(app_store, dict) else {}
-        actual = _candidate_for_base(data, str(current.get("base") or ""))
+    actual = None
+    if select_dataset:
+        actual = (
+            _candidate_for_base(data, preferred_base)
+            if preferred_base else None
+        )
+        if actual is None and not preferred_base and len(datasets) == 1:
+            actual = datasets[0]
+        if actual is None and not preferred_base:
+            current = app_store if isinstance(app_store, dict) else {}
+            actual = _candidate_for_base(data, str(current.get("base") or ""))
     candidate = _compact_browser_candidate(actual) if actual else None
     if preferred_base and actual is None:
         error = _browser_error_copy("candidate_missing")
@@ -8869,48 +9377,87 @@ def _build_dir_browser_response(
     )
 
 
-def _select_browser_candidate(
-    folder: str,
-    name: str,
+def _select_dataset_folder_response(
+    path_str: str,
+    *,
+    current_path: Any = "",
+    candidate: dict[str, Any] | None = None,
+    app_store: dict[str, Any] | None = None,
+    filter_text: Any = "",
+) -> tuple:
+    """Inspect one user-visible folder and enter the confirmation step."""
+
+    try:
+        selected = svc.resolve_dataset_folder_candidate(path_str)
+        snapshot = svc.browse_dataset_location(selected["folder"])
+    except svc.ServiceError as exc:
+        reason = str(exc.reason or "read_error")
+        message = {
+            "dataset_not_found": (
+                "当前文件夹中没有识别到 ReacNetGenerator 数据；"
+                "可以继续浏览其子文件夹。"
+            ),
+            "ambiguous_dataset_folder": (
+                "当前文件夹包含多组数据；请为每组数据使用独立文件夹。"
+            ),
+        }.get(reason)
+        if message:
+            if str(current_path or "").strip():
+                return _refresh_browser_location(
+                    current_path,
+                    candidate,
+                    filter_text=filter_text,
+                    error=message,
+                    app_store=app_store,
+                )
+            return _build_dir_browser_error_response(message)
+        return _recover_browser_error(
+            current_path,
+            candidate,
+            reason=reason,
+            filter_text=filter_text,
+            app_store=app_store,
+        )
+    return _build_dir_browser_snapshot_response(
+        snapshot,
+        selected,
+        filter_text=str(filter_text or ""),
+        app_store=app_store,
+    )
+
+
+def _select_recent_dataset(
+    record: dict[str, Any],
     *,
     filter_text: Any = "",
     fallback_path: Any = "",
     fallback_candidate: dict[str, Any] | None = None,
     app_store: dict[str, Any] | None = None,
 ) -> tuple:
-    """Read a directory once then set its explicitly selected candidate."""
+    """Revalidate a recent record by its exact base while showing its folder label."""
+    folder = str(record.get("folder") or "")
+    base = str(record.get("base") or "")
     try:
         snapshot = svc.browse_dataset_location(folder)
-    except svc.ServiceError as exc:
+    except svc.ServiceError:
         return _recover_browser_error(
             fallback_path or folder,
             fallback_candidate,
-            reason=(
-                "recent_missing"
-                if fallback_path
-                else str(exc.reason or "read_error")
-            ),
+            reason="recent_missing",
             filter_text=filter_text,
             app_store=app_store,
         )
-    candidate = _candidate_for_name(snapshot, name)
-    if candidate is None:
-        if fallback_path:
-            return _recover_browser_error(
-                fallback_path,
-                fallback_candidate,
-                reason="recent_missing",
-                filter_text=filter_text,
-                app_store=app_store,
-            )
-        return _build_dir_browser_snapshot_response(
-            snapshot,
-            None,
-            error=_browser_error_copy("candidate_missing"),
-            filter_text=str(filter_text or ""),
+    actual = _candidate_for_base(snapshot, base)
+    if actual is None:
+        return _recover_browser_error(
+            fallback_path or folder,
+            fallback_candidate,
+            reason="recent_missing",
+            filter_text=filter_text,
             app_store=app_store,
         )
-    compact = _compact_browser_candidate(candidate)
+    compact = _compact_browser_candidate(actual)
+    compact["label"] = str(record.get("label") or Path(folder).name)
     return _build_dir_browser_snapshot_response(
         snapshot,
         compact,
@@ -8927,86 +9474,19 @@ def _render_browser_current(
     filter_text: str = "",
     app_store: dict[str, Any] | None = None,
 ) -> Any:
-    """Render compact starting-location controls and dataset candidates."""
+    """Render the current folder without exposing internal dataset prefixes."""
     snapshot = data or {}
-    current = app_store if isinstance(app_store, dict) else {}
-    current_label = str(current.get("label") or "未选择").strip()
+    current_path = str(snapshot.get("current_path") or "")
     datasets = list(snapshot.get("datasets") or [])
-    selected_base = str((candidate or {}).get("base") or "")
-    matched, visible = _bounded_browser_items(
-        datasets,
-        filter_text,
-        key="label",
-    )
-    if selected_base and not filter_text and not any(
-        str(item.get("base") or "") == selected_base for item in visible
-    ):
-        selected = _candidate_for_base(snapshot, selected_base)
-        if selected is not None:
-            visible = [*visible[: _BROWSER_RENDER_LIMIT - 1], selected]
-    visible_selection = any(
-        str(item.get("base") or "") == selected_base for item in visible
-    )
-
-    if not datasets:
-        candidate_content: Any = html.Div(
-            "当前目录没有数据集，可以继续打开下方文件夹。",
-            className="rs-browser-empty-line",
-            **{"role": "status"},
-        )
-    elif not matched:
-        candidate_content = html.Div(
-            [
-                html.Span("没有数据集匹配当前筛选。"),
-                html.Span(" 选择“清除”恢复全部内容。"),
-            ],
-            className="rs-browser-empty-line is-filter-empty",
-            **{"role": "status"},
-        )
+    if len(datasets) == 1:
+        status_copy = "已识别到 ReacNetGenerator 数据。"
+        status_class = "rs-browser-folder-status is-ready"
+    elif len(datasets) > 1:
+        status_copy = "此文件夹包含多组数据，请分别放入独立文件夹。"
+        status_class = "rs-browser-folder-status is-warning"
     else:
-        candidate_content = html.Div(
-            [
-                _render_candidate_radio(
-                    item,
-                    selected=(str(item.get("base") or "") == selected_base),
-                    tabbable=(
-                        str(item.get("base") or "") == selected_base
-                        or not visible_selection and position == 0
-                    ),
-                )
-                for position, item in enumerate(visible)
-            ],
-            className="rs-browser-candidate-list",
-            **{
-                "role": "radiogroup",
-                "aria-label": "候选数据集",
-            },
-        )
-    candidate_section = html.Section(
-        [
-            html.Div(
-                [
-                    html.H3(
-                        "候选数据集",
-                        className="rs-browser-section-title",
-                    ),
-                    _render_item_count(
-                        shown=len(visible),
-                        matched=len(matched),
-                        total=len(datasets),
-                    ),
-                ],
-                className="rs-browser-section-heading",
-            ),
-            html.P(
-                "选择候选只用于检查；当前数据集在点击“加载并使用”之前不会改变。",
-                className="rs-browser-candidate-note",
-            ),
-            candidate_content,
-            _render_selected_candidate_details(snapshot, selected_base),
-        ],
-        className="rs-browser-section rs-browser-candidates",
-    )
+        status_copy = "当前文件夹未识别到数据，可以继续打开子文件夹。"
+        status_class = "rs-browser-folder-status"
     alert = (
         html.Div(
             error,
@@ -9020,22 +9500,15 @@ def _render_browser_current(
         [
             html.Div(
                 [
-                    html.Span("当前数据集", className="rs-browser-context-role"),
-                    html.Strong(
-                        current_label or "未选择",
-                        className="rs-browser-context-value",
-                    ),
-                    html.Span(
-                        "浏览和选择候选不会替换当前数据集；点击“加载并使用”后才会切换。",
-                        className="rs-browser-context-note",
-                    ),
+                    html.Span("当前位置", className="rs-browser-context-role"),
+                    html.Code(current_path, className="rs-browser-context-value"),
+                    html.Span(status_copy, className=status_class),
                 ],
                 className="rs-browser-context-strip",
-                **{"aria-label": "当前数据集上下文"},
+                **{"aria-label": "当前文件夹"},
             ),
             _render_allowed_roots(),
             alert,
-            candidate_section,
         ]
     )
 
@@ -9120,100 +9593,6 @@ def _render_allowed_roots() -> Any:
             ),
         ],
         className="rs-browser-root-switcher",
-    )
-
-
-def _render_candidate_radio(
-    item: dict[str, Any],
-    *,
-    selected: bool,
-    tabbable: bool,
-) -> Any:
-    capabilities = dict(item.get("analysis_capabilities") or {})
-    compatibility_states = dict(item.get("capability_states") or {})
-    states = [
-        _capability_state_class(
-            (capabilities.get(key) or {}).get("state")
-            or compatibility_states.get(key)
-            or "missing-source"
-        )
-        for key in _CAPABILITY_LABELS
-    ]
-    ready_count = sum(state == "ready" for state in states)
-    preparable_count = sum(
-        state in {"needs-preparation", "preparing", "stale"}
-        for state in states
-    )
-    readiness_text = f"{ready_count} 项分析功能可直接使用"
-    if preparable_count:
-        readiness_text += f" · {preparable_count} 项可稍后启用"
-    artifact_count = len(dict(item.get("artifact_paths") or {}))
-    return html.Button(
-        [
-            html.Span(className="rs-browser-radio-indicator", **{"aria-hidden": "true"}),
-            html.Span(
-                [
-                    html.Strong(
-                        str(item.get("label") or "未命名候选"),
-                        className="rs-browser-candidate-name",
-                    ),
-                    html.Span(
-                        f"识别到 {artifact_count} 项源数据",
-                        className="rs-browser-candidate-location",
-                    ),
-                    html.Span(
-                        readiness_text,
-                        className="rs-browser-candidate-readiness",
-                    ),
-                ],
-                className="rs-browser-candidate-content",
-            ),
-        ],
-        id={
-            "type": "dir-browser-dataset",
-            "name": str(item.get("label") or ""),
-        },
-        type="button",
-        role="radio",
-        title=f"{str(item.get('label') or '未命名候选')} — {str(item.get('base') or '')}",
-        tabIndex=0 if tabbable else -1,
-        className=(
-            "rs-browser-candidate-row is-selected"
-            if selected
-            else "rs-browser-candidate-row"
-        ),
-        **{"aria-checked": "true" if selected else "false"},
-    )
-
-
-def _render_selected_candidate_details(
-    snapshot: dict[str, Any],
-    selected_base: str,
-) -> Any:
-    selected = _candidate_for_base(snapshot, selected_base) if selected_base else None
-    if selected is None:
-        return None
-    capabilities = dict(selected.get("analysis_capabilities") or {})
-    artifact_names = sorted(
-        Path(str(path)).name
-        for path in (selected.get("artifact_paths") or {}).values()
-    )
-    return html.Details(
-        [
-            html.Summary("候选来源与能力证据"),
-            html.Div(
-                [
-                    html.Div("完整公共前缀", className="rs-browser-detail-label"),
-                    html.Code(selected_base),
-                    html.Div("发现的源工件", className="rs-browser-detail-label"),
-                    html.Ul([html.Li(name) for name in artifact_names]),
-                    html.Div("分析功能", className="rs-browser-detail-label"),
-                    _render_analysis_capabilities(capabilities),
-                ],
-                className="rs-browser-candidate-details-body",
-            ),
-        ],
-        className="rs-browser-candidate-details",
     )
 
 
@@ -9405,6 +9784,9 @@ def _reaction_columns(*, with_share: bool = False):
         {"field": "tp", "headerName": "TP", "width": 85, "type": "numericColumn"},
         {"field": "reverse_tp", "headerName": "Reverse", "width": 95, "type": "numericColumn"},
         {"field": "net_tp", "headerName": "Net", "width": 85, "type": "numericColumn"},
+        {"field": "first_time", "headerName": "首次后帧时间", "width": 120, "type": "numericColumn"},
+        {"field": "last_time", "headerName": "末次后帧时间", "width": 120, "type": "numericColumn"},
+        {"field": "timing_unit", "headerName": "时间单位", "width": 115},
         {"field": "delta_exact_mass", "headerName": "Δ Exact", "width": 105, "type": "numericColumn"},
         {"field": "delta_nominal_mass", "headerName": "Δ Nominal", "width": 110, "type": "numericColumn"},
     ]
@@ -9423,8 +9805,15 @@ _EVENT_TABLE_COLUMNS = [
     {"field": "event_index", "headerName": "事件序号", "type": "numericColumn"},
     {"field": "event_id", "headerName": "事件 ID"},
     {"field": "timestep_index", "headerName": "事件区间", "type": "numericColumn"},
-    {"field": "before_timestep", "headerName": "反应前 timestep", "type": "numericColumn"},
-    {"field": "after_timestep", "headerName": "反应后 timestep", "type": "numericColumn"},
+    {"field": "before_timestep", "headerName": "反应前原始坐标", "type": "numericColumn"},
+    {"field": "after_timestep", "headerName": "反应后原始坐标", "type": "numericColumn"},
+    {"field": "raw_time_unit", "headerName": "原始坐标单位"},
+    {"field": "before_time_ps", "headerName": "反应前 / ps", "type": "numericColumn"},
+    {"field": "after_time_ps", "headerName": "反应后 / ps", "type": "numericColumn"},
+    {"field": "time_unit", "headerName": "时间单位"},
+    {"field": "time_basis", "headerName": "原始时间依据"},
+    {"field": "timestep_ps", "headerName": "timestep → ps", "type": "numericColumn"},
+    {"field": "reaction_key", "headerName": "精确反应键"},
     {"field": "reactant", "headerName": "反应物"},
     {"field": "product", "headerName": "产物"},
     {"field": "atom_count", "headerName": "原子数", "type": "numericColumn"},
@@ -9520,104 +9909,114 @@ def _molecule_lineage_event_columns() -> list[dict[str, Any]]:
     )
 
 
-def _event_path_signature_columns():
-    return _dt_columns(
-        [
-            {"field": "rank", "headerName": "#", "type": "numericColumn"},
-            {"field": "signature_id", "headerName": "路径签名 ID"},
-            {"field": "reaction_path", "headerName": "实际反应事件序列"},
-            {"field": "occurrences", "headerName": "发生次数", "type": "numericColumn"},
-            {"field": "atom_lineages", "headerName": "原子谱系支持", "type": "numericColumn"},
-            {"field": "lineage_sets", "headerName": "谱系集合支持", "type": "numericColumn"},
-            {"field": "replicate_support", "headerName": "重复支持数", "type": "numericColumn"},
-            {"field": "reproduction_rate", "headerName": "跨重复复现率", "type": "numericColumn"},
-            {"field": "median_timestep_span", "headerName": "中位 timestep 跨度", "type": "numericColumn"},
-            {"field": "pure_h_cycle", "headerName": "纯氢循环"},
-            {"field": "return_cycle", "headerName": "首尾往返"},
-            {"field": "support_is_lower_bound", "headerName": "支持数为下界"},
-        ]
-    )
-
-
-def _event_path_event_columns():
-    return _dt_columns(
-        [
-            {"field": "step", "headerName": "节点", "type": "numericColumn"},
-            {"field": "event_id", "headerName": "事件 ID"},
-            {"field": "interval", "headerName": "事件区间", "type": "numericColumn"},
-            {"field": "before_timestep", "headerName": "反应前 timestep", "type": "numericColumn"},
-            {"field": "after_timestep", "headerName": "反应后 timestep", "type": "numericColumn"},
-            {"field": "reaction", "headerName": "具体反应"},
-            {"field": "participating_atoms", "headerName": "参与原子 ID"},
-        ]
-    )
-
-
-def _event_path_time_columns():
-    return _dt_columns(
-        [
-            {"field": "edge", "headerName": "相邻边", "type": "numericColumn"},
-            {"field": "samples", "headerName": "样本数", "type": "numericColumn"},
-            {"field": "interval_min", "headerName": "区间差 min", "type": "numericColumn"},
-            {"field": "interval_median", "headerName": "区间差 median", "type": "numericColumn"},
-            {"field": "interval_mean", "headerName": "区间差 mean", "type": "numericColumn"},
-            {"field": "interval_max", "headerName": "区间差 max", "type": "numericColumn"},
-            {"field": "idle_min", "headerName": "空闲 timestep min", "type": "numericColumn"},
-            {"field": "idle_median", "headerName": "空闲 timestep median", "type": "numericColumn"},
-            {"field": "idle_mean", "headerName": "空闲 timestep mean", "type": "numericColumn"},
-            {"field": "idle_max", "headerName": "空闲 timestep max", "type": "numericColumn"},
-            {"field": "anchor_min", "headerName": "锚点差 min", "type": "numericColumn"},
-            {"field": "anchor_median", "headerName": "锚点差 median", "type": "numericColumn"},
-            {"field": "anchor_mean", "headerName": "锚点差 mean", "type": "numericColumn"},
-            {"field": "anchor_max", "headerName": "锚点差 max", "type": "numericColumn"},
-        ]
-    )
-
-
-def _event_path_edge_columns():
-    return _dt_columns(
-        [
-            {"field": "edge", "headerName": "边", "type": "numericColumn"},
-            {"field": "from_event_id", "headerName": "前一事件"},
-            {"field": "to_event_id", "headerName": "后一事件"},
-            {"field": "molecule_instances", "headerName": "精确分子实例（物种 @ 原子集）"},
-            {"field": "carrier_atom_ids", "headerName": "携带原子 ID"},
-            {"field": "interval_gap", "headerName": "区间差", "type": "numericColumn"},
-            {"field": "idle_timestep_gap", "headerName": "空闲 timestep", "type": "numericColumn"},
-            {"field": "anchor_timestep_gap", "headerName": "锚点 timestep 差", "type": "numericColumn"},
-        ]
-    )
-
-
-def _event_path_summary_cards(report: dict[str, Any]) -> None:
-    return None
-
-
-def _event_path_summary_explanation(report: dict[str, Any]) -> list[Any]:
-    """Explain the tri-state conclusion and its concrete support."""
+def _molecule_lineage_result_presentation(
+    report: dict[str, Any],
+) -> tuple[list[Any], str]:
     summary = report.get("summary") or {}
-    verification = report.get("verification") or {}
-    labels = {
-        "supported": "有证据",
-        "not_observed": "未观察到",
-        "inconclusive": "证据不足",
+    trend_labels = {
+        "growth": "总体增长",
+        "degradation": "总体降解",
+        "mixed": "增长/降解并存",
+        "structurally stable": "重原子规模不变",
+        "undetermined": "趋势未判定",
     }
-    status = str(verification.get("status") or "inconclusive")
-    reaction_path = " → ".join(
-        str(value) for value in verification.get("reaction_keys") or []
-    )
-    occurrences = int(summary.get("actual_path_occurrence_count") or 0)
-    lineages = int(
-        summary.get("independent_atom_lineage_support_count") or 0
-    )
-    return [
-        html.Strong(f"结论：{labels.get(status, '证据不足')}。"),
-        html.Span(str(verification.get("message") or "")),
-        html.Code(reaction_path),
+    summary_chips = [
         html.Span(
-            f"完整事件链发生 {occurrences:,} 次，由 {lineages:,} 个去重原子谱系支持。"
+            f"查询片段 {int(summary.get('segment_count') or 1)}",
+            className="rs-stat-chip",
+        ),
+        html.Span(
+            f"分子节点 {int(summary.get('molecule_node_count') or 0)}",
+            className="rs-stat-chip",
+        ),
+        html.Span(
+            f"事件 {int(summary.get('event_count') or 0)}",
+            className="rs-stat-chip",
+        ),
+        html.Span(
+            f"快速回穿 {int(summary.get('recrossing_episode_count') or 0)}",
+            className="rs-stat-chip",
+        ),
+        html.Span(
+            trend_labels.get(
+                str(summary.get("aggregate_trend") or "undetermined"),
+                "趋势未判定",
+            ),
+            className="rs-stat-chip",
         ),
     ]
+    branches = report.get("branch_summaries") or []
+    continuable = sum(bool(row.get("can_continue")) for row in branches)
+    if branches:
+        truncation_text = (
+            f"当前有 {len(branches)} 条停止分支：{continuable} 条因预算停止、"
+            f"可继续追踪；其余 {len(branches) - continuable} 条停在证据边界或连续性断点。"
+        )
+    else:
+        truncation_text = "当前没有未交接的停止分支。"
+    return summary_chips, truncation_text
+
+
+def _molecule_lineage_branch_controls(
+    report: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str | None, bool, Any]:
+    directions = {"backward": "向前溯源", "forward": "向后追踪"}
+    branches = (report or {}).get("branch_summaries") or []
+    options = []
+    items = []
+    first_continuable = None
+    for row in branches:
+        instance = row.get("molecule_instance") or {}
+        branch_id = str(row.get("branch_id") or "")
+        can_continue = bool(row.get("can_continue"))
+        if can_continue and first_continuable is None:
+            first_continuable = branch_id
+        direction = directions.get(
+            str(row.get("direction") or ""),
+            str(row.get("direction") or "方向未知"),
+        )
+        label = (
+            f"{direction} · {instance.get('species') or '-'} · "
+            f"frame {instance.get('frame', '-')} · {row.get('stop_reason_label') or '-'}"
+        )
+        options.append(
+            {
+                "label": label,
+                "value": branch_id,
+                "disabled": not can_continue,
+            }
+        )
+        queried = row.get("queried_range") or {}
+        range_text = (
+            f"frame {queried.get('frame_min', '-')}–{queried.get('frame_max', '-')}"
+        )
+        items.append(
+            html.Li(
+                [
+                    html.Code(branch_id),
+                    f" · {label} · 已查 {range_text}",
+                    " · 可继续" if can_continue else " · 不能越过此证据边界",
+                ]
+            )
+        )
+    summary = (
+        html.Ul(items, className="mb-0 ps-3")
+        if items
+        else "当前证据内没有停止分支。"
+    )
+    return options, first_continuable, first_continuable is None, summary
+
+
+
+
+
+
+
+
+
+
+
+
 def _batch_empty_state(
     title: str = "选择条件组开始对比",
     hint: str = "可直接选择已管理数据集，也可扫描目录并选择自动识别的重复实验组。",
@@ -9648,6 +10047,8 @@ def _batch_managed_dataset_catalog(
                 "label": str(current.get("label") or Path(current_base).name),
                 "current": True,
                 "reaction_ready": bool((current.get("artifacts") or {}).get("reaction")),
+                "dataset_id": str(current.get("dataset_id") or ""),
+                "source_revision": current.get("source_revision") or {},
             }
         )
     for record in svc.normalise_recent_datasets(recent_records or []):
@@ -9670,6 +10071,8 @@ def _batch_managed_dataset_catalog(
                 "label": str(candidate.get("label") or Path(base).name),
                 "current": bool(candidate.get("current")),
                 "reaction_ready": candidate.get("reaction_ready"),
+                "dataset_id": str(candidate.get("dataset_id") or ""),
+                "source_revision": candidate.get("source_revision") or {},
             }
         )
     options = []
@@ -9692,6 +10095,9 @@ def _build_batch_group_requests(
     managed_payload: dict[str, Any] | None,
     scanned_selected: list[str] | None,
     scanned_payload: dict[str, Any] | None,
+    *,
+    reviewed_sources: list[dict[str, Any]] | None = None,
+    inferred_metadata_confirmed: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve UI selections only from their corresponding server payloads."""
     requests: list[dict[str, Any]] = []
@@ -9719,13 +10125,19 @@ def _build_batch_group_requests(
         requests.append(
             {
                 "group_name": unique_group_name(label),
+                "metadata_status": "unknown",
                 "conditions": [
                     {
                         "name": label,
                         "label": label,
                         "folder": dataset.get("folder"),
                         "base": dataset.get("base"),
-                        "replicate": 1,
+                        "dataset_id": dataset.get("dataset_id"),
+                        "source_revision": dataset.get("source_revision") or {},
+                        "replicate": None,
+                        "metadata_status": "unknown",
+                        "simulation_condition_status": "unknown",
+                        "replicate_status": "unknown",
                     }
                 ],
             }
@@ -9742,6 +10154,7 @@ def _build_batch_group_requests(
         for item in scan_data.get("groups") or []
         if isinstance(item, dict) and str(item.get("group_name") or "")
     }
+    selected_condition_names: list[str] = []
     for selected_group in scanned_selected or []:
         group = scanned_groups.get(str(selected_group))
         if group is None:
@@ -9749,7 +10162,6 @@ def _build_batch_group_requests(
                 "扫描条件组选择已过期，请重新扫描",
                 reason="stale_scanned_selection",
             )
-        conditions = []
         for condition_name in group.get("conditions") or []:
             condition = scanned_conditions.get(str(condition_name))
             if condition is None:
@@ -9757,24 +10169,71 @@ def _build_batch_group_requests(
                     f"条件组 {selected_group} 的扫描结果不完整，请重新扫描",
                     reason="incomplete_scanned_group",
                 )
-            conditions.append(
-                {
-                    "name": condition.get("name"),
-                    "label": condition.get("name"),
-                    "folder": condition.get("folder"),
-                    "reaction_file": condition.get("reaction_file"),
-                    "temperature": condition.get("temperature"),
-                    "o2_ratio": condition.get("o2_ratio"),
-                    "pressure": condition.get("pressure"),
-                    "replicate": condition.get("replicate"),
-                }
+            selected_condition_names.append(str(condition_name))
+
+    if selected_condition_names and not inferred_metadata_confirmed:
+        raise svc.ServiceError(
+            "目录名推断只是不确定建议；请检查表格并勾选确认后再运行",
+            reason="unconfirmed_inferred_metadata",
+        )
+
+    reviewed_by_name = {
+        str(item.get("name") or ""): item
+        for item in reviewed_sources or []
+        if isinstance(item, dict) and str(item.get("name") or "")
+    }
+    confirmed_groups: dict[str, list[dict[str, Any]]] = {}
+    for condition_name in selected_condition_names:
+        original = scanned_conditions[condition_name]
+        reviewed = reviewed_by_name.get(condition_name)
+        if reviewed is None:
+            raise svc.ServiceError(
+                f"来源 {condition_name} 缺少检查记录，请重新扫描",
+                reason="incomplete_scanned_review",
             )
+        confirmed_condition = str(
+            reviewed.get("simulation_condition") or ""
+        ).strip()
+        if not confirmed_condition:
+            raise svc.ServiceError(
+                f"来源 {condition_name} 必须明确 Simulation Condition",
+                reason="missing_simulation_condition",
+            )
+        try:
+            replicate_number = int(reviewed.get("replicate"))
+        except (TypeError, ValueError) as exc:
+            raise svc.ServiceError(
+                f"来源 {condition_name} 的 Replicate 必须是正整数",
+                reason="invalid_replicate",
+            ) from exc
+        if replicate_number < 1:
+            raise svc.ServiceError(
+                f"来源 {condition_name} 的 Replicate 必须是正整数",
+                reason="invalid_replicate",
+            )
+        model_iteration = str(reviewed.get("model_iteration") or "").strip()
+        confirmed_groups.setdefault(confirmed_condition, []).append(
+            {
+                "name": original.get("name"),
+                "label": original.get("name"),
+                "folder": original.get("folder"),
+                "reaction_file": original.get("reaction_file"),
+                "model_iteration": model_iteration,
+                "model_iteration_status": (
+                    "confirmed" if model_iteration else "unknown"
+                ),
+                "simulation_condition": confirmed_condition,
+                "simulation_condition_status": "confirmed",
+                "replicate": replicate_number,
+                "replicate_status": "confirmed",
+                "metadata_status": "confirmed",
+            }
+        )
+    for condition_name, conditions in confirmed_groups.items():
         requests.append(
             {
-                "group_name": unique_group_name(str(group.get("group_name") or selected_group)),
-                "temperature": group.get("temperature"),
-                "o2_ratio": group.get("o2_ratio"),
-                "pressure": group.get("pressure"),
+                "group_name": unique_group_name(condition_name),
+                "metadata_status": "confirmed",
                 "conditions": conditions,
             }
         )

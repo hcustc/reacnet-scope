@@ -39,7 +39,13 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
     elif root.is_dir():
         candidates = sorted(root.glob("*.reactionabcd"))
         if base:
-            stem = str((root / base).resolve()) if not os.path.isabs(base) else str(Path(base).resolve())
+            # Preserve the user-visible artifact location.  Resolving a
+            # symlinked trajectory would move the dataset base to its target
+            # directory and make sibling timed-evidence files undiscoverable.
+            base_path = Path(base).expanduser()
+            if not base_path.is_absolute():
+                base_path = root / base_path
+            stem = os.path.abspath(os.fspath(base_path))
         elif len(candidates) == 1:
             stem = str(candidates[0])[: -len(".reactionabcd")]
         else:
