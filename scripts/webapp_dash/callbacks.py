@@ -508,6 +508,10 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
 
     return (
         reset("species-grid-store", "data", {"rows": []}),
+        reset("cp-request", "data", None),
+        reset("cp-raw", "data", None),
+        reset("cp-report", "data", None),
+        reset("cp-event-page", "data", None),
         reset("species-workspace-stage", "data", "results"),
         reset("rxn-grid-store", "data", {"rows": []}),
         reset("rxn-timing-distribution-store", "data", None),
@@ -1783,6 +1787,10 @@ def register_callbacks(app: Any) -> None:
         Input("species-to-channels-btn", "n_clicks"),
         Input("species-to-evolution-btn", "n_clicks"),
         Input("species-to-event-btn", "n_clicks"),
+        Input("cp-open-events", "n_clicks"),
+        Input("cp-prepare", "n_clicks"),
+        Input("cp-from-species", "n_clicks"),
+        Input("cp-to-species", "n_clicks"),
         Input("rxn-to-event-btn", "n_clicks"),
         Input("rxn-channel-to-event-btn", "n_clicks"),
         Input("rxn-timing-open-events-btn", "n_clicks"),
@@ -1848,6 +1856,7 @@ def register_callbacks(app: Any) -> None:
             "rxn-to-event-btn",
             "rxn-channel-to-event-btn",
             "rxn-timing-open-events-btn",
+            "cp-open-events",
         }:
             page_id = "events"
         elif triggered_string_id == "event-back-btn":
@@ -1859,6 +1868,8 @@ def register_callbacks(app: Any) -> None:
         elif triggered_string_id in {
             "species-to-channels-btn",
             "species-to-event-btn",
+            "cp-from-species",
+            "cp-to-species",
         }:
             page_id = "reactions"
         elif triggered_string_id == "data-open-batch-compare-btn":
@@ -1867,6 +1878,7 @@ def register_callbacks(app: Any) -> None:
             page_id = "species"
         elif triggered_string_id in {
             "nav-data-management",
+            "cp-prepare",
             "data-pick-btn",
             "open-data-modal",
             "page-capability-manage-btn",

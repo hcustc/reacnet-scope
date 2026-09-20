@@ -598,6 +598,28 @@ def cmd_verify_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidate_search(args: argparse.Namespace) -> int:
+    """Run the same indexed, single-source query as the Web workbench."""
+    from reacnet_scope import services as svc
+    artifacts = {"reactionevent": args.source, "molecules": args.molecules}
+    if args.source.endswith(".timeline.h5"):
+        artifacts["timeline"] = args.source
+    try:
+        result = svc.search_candidate_paths(
+            artifacts, args.start, target=args.target, mode=args.mode,
+            max_steps=args.max_steps, max_paths=args.max_paths,
+        )
+    except svc.ServiceError as exc:
+        print(f"[ERROR] {exc.message}", file=sys.stderr)
+        return 2
+    if args.out_json:
+        Path(args.out_json).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.out_csv:
+        Path(args.out_csv).write_text(svc.candidate_paths_csv(result), encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_candidate_paths(args: argparse.Namespace) -> int:
     """Discover bounded network Candidates with indexed Step Evidence."""
     from reacnet_scope import services as svc
@@ -1670,6 +1692,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选：完整、可审计 JSON 报告输出路径",
     )
     sp_event_paths.set_defaults(func=cmd_verify_path)
+
+    sp_candidate_search = sub.add_parser(
+        "candidate-search", help="查询已索引的候选路径（与 Web 第一版相同，无综合评分）",
+    )
+    sp_candidate_search.add_argument("--source", required=True, help="原生 .timeline.h5 或 .reactionevent.csv")
+    sp_candidate_search.add_argument("--molecules", default="", help="可选兼容分子 CSV；须与准备索引时一致")
+    sp_candidate_search.add_argument("--start", required=True, help="精确 RNG 起始 Species 标签")
+    sp_candidate_search.add_argument("--target", default="", help="精确 RNG 目标 Species 标签")
+    sp_candidate_search.add_argument("--mode", choices=["target", "explore"], default="target")
+    sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 8), default=4)
+    sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
+    sp_candidate_search.add_argument("--out-json", default="")
+    sp_candidate_search.add_argument("--out-csv", default="")
+    sp_candidate_search.set_defaults(func=cmd_candidate_search)
 
     sp_candidate_paths = sub.add_parser(
         "candidate-paths",

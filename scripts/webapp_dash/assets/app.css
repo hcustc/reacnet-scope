@@ -6915,3 +6915,23 @@ summary:focus-visible,
   letter-spacing: 0.04em;
   margin-right: 0.25rem;
 }
+
+/* Candidate search remains a task in the reaction workspace. */
+.rs-candidate-workbench { padding: 1.25rem; }
+.rs-candidate-pickers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1rem 0; }
+.rs-candidate-picker { min-width: 0; }
+.rs-candidate-picker .rs-query-row input { flex: 1; min-width: 10rem; }
+.rs-candidate-option { display: flex; align-items: center; gap: .5rem; white-space: normal; overflow-wrap: anywhere; }
+.rs-candidate-option img { width: 112px; height: 58px; flex-shrink: 0; }
+.rs-candidate-chain { display: flex; align-items: center; gap: .7rem; overflow-x: auto; padding: 1rem 0; }
+.rs-candidate-structure { min-width: 180px; max-width: 250px; display: flex; flex-direction: column; align-items: center; border: 1px solid var(--rs-border, #dce2e8); border-radius: 8px; padding: .5rem; background: white; }
+.rs-candidate-structure img { width: 180px; height: 110px; }
+.rs-candidate-structure details { max-width: 100%; font-size: .8rem; overflow-wrap: anywhere; }
+.rs-candidate-arrow { font-size: 1.5rem; }
+.rs-candidate-compare code, #cp-step-detail code { overflow-wrap: anywhere; white-space: normal; }
+.rs-candidate-workbench .rs-query-row { margin: .75rem 0; }
+.rs-candidate-workbench > .dash-dropdown { margin: .5rem 0; }
+@media (max-width: 850px) { .rs-candidate-pickers { grid-template-columns: 1fr; } }
+.rs-candidate-number { width: 145px; flex: 0 0 145px; }
+.rs-candidate-number label { display: block; margin-bottom: .25rem; }
+.rs-candidate-number input { width: 100%; }

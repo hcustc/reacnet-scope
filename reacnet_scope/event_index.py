@@ -39,6 +39,7 @@ from .rng_events import (
     net_reaction_key,
     reaction_key,
 )
+from .path_search import materialize_candidate_adjacency
 from .timed_evidence import (
     NativeHdf5EvidenceAdapter,
     TimedEvidenceDataError,
@@ -1969,6 +1970,7 @@ class EventEvidenceStore:
                                 }
                             )
                 flush_summary()
+            materialize_candidate_adjacency(connection)
             _write_meta(
                 connection,
                 {
@@ -2645,6 +2647,7 @@ class EventEvidenceStore:
                         connection,
                         replicate_id=dataset_id,
                     )
+                materialize_candidate_adjacency(connection)
                 _write_meta(
                     connection,
                     {
@@ -3257,6 +3260,7 @@ class EventEvidenceStore:
                         connection,
                         replicate_id=dataset_id,
                     )
+                    materialize_candidate_adjacency(connection)
                     _write_meta(
                         connection,
                         {
