@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReacNet 科学分析契约"
+  short_description: "统一科学分析的精确身份、证据条件、时间单位、结果与导出契约"
+  default_prompt: "使用 $reacnet-analysis-contracts 完成本次分析功能变更，并核对核心、CLI、Dash 与导出的科学语义。"

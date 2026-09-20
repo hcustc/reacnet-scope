@@ -15,6 +15,8 @@ build/
 dist/
 *.egg-info/
 .cache/
+/analysis_outputs/reacnet-workspaces/
+/analysis_outputs/matplotlib-cache/
 
 # Test/analysis artifacts
 .pytest_cache/

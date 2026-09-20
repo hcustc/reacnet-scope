@@ -1,0 +1,4 @@
+interface:
+  display_name: "RNG 证据与索引"
+  short_description: "维护 RNG 证据来源、事件身份、离线准备、续建与在线索引边界"
+  default_prompt: "使用 $reacnet-evidence-indexing 完成本次证据或索引变更，并验证来源选择、身份与在线读取边界。"
