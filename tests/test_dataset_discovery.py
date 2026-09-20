@@ -156,6 +156,26 @@ def test_prepare_discovery_accepts_timeline_path_and_directory(tmp_path):
     assert discovered["timeline"] == str(timeline)
 
 
+def test_prepare_discovery_preserves_symlinked_base_location(tmp_path) -> None:
+    selected = tmp_path / "selected"
+    target_dir = tmp_path / "target"
+    selected.mkdir()
+    target_dir.mkdir()
+    target = target_dir / "trajectory.lammpstrj"
+    target.touch()
+    base = selected / "trajectory.lammpstrj"
+    base.symlink_to(target)
+    timeline = Path(f"{base}.timeline.h5")
+    timeline.touch()
+
+    for base_arg in (base.name, str(base)):
+        discovered = discover_dataset(str(selected), base_arg)
+
+        assert discovered["base"] == str(base)
+        assert discovered["trajectory"] == str(base)
+        assert discovered["timeline"] == str(timeline)
+
+
 def test_prepare_discovery_uses_workspace_linked_trajectory(
     tmp_path, monkeypatch
 ) -> None:

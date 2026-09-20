@@ -82,6 +82,8 @@ class DftGeometryBundle:
     geometries: dict[str, str]
     atom_map_csv: str
     readme: str
+    readiness_report: dict[str, Any] = field(default_factory=dict)
+    occurrence: dict[str, Any] = field(default_factory=dict)
 
     def preview_payload(self) -> dict[str, Any]:
         return {
@@ -90,6 +92,8 @@ class DftGeometryBundle:
             "geometries": dict(self.geometries),
             "atom_map_csv": self.atom_map_csv,
             "readme": self.readme,
+            "readiness_report": dict(self.readiness_report),
+            "occurrence": dict(self.occurrence),
         }
 
     def to_zip(self) -> bytes:
@@ -106,12 +110,37 @@ class DftGeometryBundle:
             "atom_map.csv": self.atom_map_csv.encode("utf-8"),
             "README.txt": self.readme.encode("utf-8"),
         }
+        if self.occurrence:
+            payloads["occurrence.json"] = (
+                json.dumps(
+                    self.occurrence,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+        if self.readiness_report:
+            payloads["reaction_readiness.json"] = (
+                json.dumps(
+                    self.readiness_report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
         payloads.update(
             {name: value.encode("utf-8") for name, value in self.geometries.items()}
         )
         output = io.BytesIO()
         with ZipFile(output, mode="w") as archive:
             names = ["manifest.json", "atom_map.csv", "README.txt"]
+            names.extend(
+                name
+                for name in ("occurrence.json", "reaction_readiness.json")
+                if name in payloads
+            )
             names.extend(sorted(self.geometries))
             for name in names:
                 info = ZipInfo(filename=name, date_time=_ZIP_TIMESTAMP)
@@ -750,6 +779,10 @@ def _build_geometry(
         "source_timestep": int(timestep),
         "atom_count": len(atoms),
         "atom_ids": [atom["id"] for atom in atoms],
+        "element_counts": {
+            element: sum(1 for atom in atoms if atom["element"] == element)
+            for element in sorted({atom["element"] for atom in atoms})
+        },
         "participants": [
             {
                 "index": int(value["index"]),
@@ -865,7 +898,10 @@ def _readme(event_id: str) -> str:
         "centered without rotation or optimization.\n"
         "Charge and multiplicity are user-supplied when present; unspecified "
         "values were not inferred. See manifest.json and atom_map.csv before "
-        "starting a calculation.\n"
+        "starting a calculation. When reaction_readiness.json is present, "
+        "qc_handoff.status=ready means only that this occurrence package can "
+        "be handed to an external TS workflow. It does not mean that a rate "
+        "can be calculated or that TST/RRKM is applicable.\n"
     )
 
 

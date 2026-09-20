@@ -12,6 +12,7 @@ from reacnet_scope.event_paths import (
     EventPathSource,
     _analyze_event_paths as analyze_event_paths,
     _enumerate_aggregate_reaction_paths as enumerate_aggregate_reaction_paths,
+    discover_event_paths,
     normalize_reaction_sequence,
     verify_event_path,
 )
@@ -219,6 +220,31 @@ def test_event_paths_are_concrete_time_ordered_and_atom_continuous(
     assert comparison["aggregate_only_pair_count"] == 6
     assert comparison["actual_only_pair_count"] == 0
     assert comparison["realization_rate"] == 0.25
+
+
+def test_candidate_discovery_accepts_multiple_starts_and_emits_length_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    source = _write_chain_source(tmp_path, "discovery", (0,))
+
+    report = discover_event_paths(
+        [source],
+        ["missing", "A"],
+        minimum_path_length=2,
+        maximum_path_length=3,
+    )
+
+    assert report["query"]["start_species"] == ["A", "missing"]
+    assert {
+        tuple(path["reaction_keys"])
+        for path in report["paths"]
+    } == {
+        ("A->B", "B->C"),
+        ("A->B", "B->C", "C->D"),
+    }
+    assert report["summary"]["actual_path_occurrence_count"] == 2
 
 
 def test_explicit_path_verification_only_matches_the_supplied_sequence(

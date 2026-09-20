@@ -12,6 +12,7 @@ from reacnet_scope.dft_geometry import (
     DFT_GEOMETRY_SCHEMA_VERSION,
     DftGeometryError,
     DftGeometryRequest,
+    _warnings_for_geometry,
     build_dft_geometry_bundle,
 )
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
@@ -66,6 +67,50 @@ def _case(tmp_path: Path, monkeypatch) -> tuple[dict[str, str], dict]:
 
 def _xyz_x_values(text: str) -> list[float]:
     return [float(line.split()[1]) for line in text.splitlines()[2:]]
+
+
+def test_dft_geometry_warning_branches_are_auditable() -> None:
+    import numpy as np
+
+    def atom(atom_id: int, element: str, x: float) -> dict:
+        return {
+            "id": atom_id,
+            "element": element,
+            "position": np.asarray([x, 0.0, 0.0]),
+        }
+
+    stretched = _warnings_for_geometry(
+        [atom(1, "C", 0.0), atom(2, "C", 3.0)],
+        [(1, 2, "1")],
+        [{1, 2}],
+        warning_atom_count=200,
+    )
+    short_contact = _warnings_for_geometry(
+        [atom(1, "C", 0.0), atom(2, "C", 0.5)],
+        [],
+        [{1}, {2}],
+        warning_atom_count=200,
+    )
+    distant = _warnings_for_geometry(
+        [atom(1, "C", 0.0), atom(2, "C", 9.0)],
+        [],
+        [{1}, {2}],
+        warning_atom_count=200,
+    )
+    many_atoms = [atom(index, "H", float(index)) for index in range(1, 1002)]
+    limited = _warnings_for_geometry(
+        many_atoms,
+        [],
+        [{item["id"] for item in many_atoms}],
+        warning_atom_count=200,
+    )
+
+    assert {item["code"] for item in stretched} == {"stretched_evidence_bond"}
+    assert "short_nonbonded_contact" in {
+        item["code"] for item in short_contact
+    }
+    assert "distant_fragments" in {item["code"] for item in distant}
+    assert "pair_check_limited" in {item["code"] for item in limited}
 
 
 def test_dft_geometry_reconstructs_pbc_complex_and_is_deterministic(

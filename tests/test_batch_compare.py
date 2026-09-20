@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import base64
 import io
+import json
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ from reacnet_scope.batch_compare import BatchComparator, ConditionGroup, Simulat
 from reacnet_scope.network import Reaction, ReactionNetwork
 from reacnet_scope import services as svc
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash.callbacks import _build_batch_group_requests
 
 
 def _network(*reactions: Reaction) -> ReactionNetwork:
@@ -210,6 +214,7 @@ def test_recursive_scanner_groups_generic_replicate_names(tmp_path: Path) -> Non
     assert len(groups) == 1
     assert groups[0].group_name == "series/case"
     assert groups[0].n_replicates == 2
+    assert all(condition.metadata_status == "suggested" for condition in conditions)
 
 
 def test_scanner_accepts_a_dataset_directory_as_the_root(tmp_path: Path) -> None:
@@ -248,6 +253,27 @@ def test_scanner_extracts_physical_conditions_independent_of_token_order(
     assert len(groups) == 1
     assert groups[0].group_name == "T500K_O2=0.5_P=1"
     assert groups[0].n_replicates == 2
+
+
+def test_scanner_marks_nested_run_name_metadata_as_suggestions(tmp_path: Path) -> None:
+    _write_reactions(
+        tmp_path
+        / "phi1_2500K_iter32_000_seed256788_20260914"
+        / "rng_output",
+        "run",
+        ["10 [C]->[O]"],
+    )
+    comparator = BatchComparator()
+
+    conditions = comparator.scan_directory_tree(str(tmp_path))
+
+    assert len(conditions) == 1
+    condition = conditions[0]
+    assert condition.temperature == 2500
+    assert condition.model_iteration == "iter32"
+    assert condition.replicate == 256788
+    assert condition.metadata_status == "suggested"
+    assert condition.group_key == "T2500K_iter32"
 
 
 def test_replicate_statistics_include_net_flux_and_student_t_interval() -> None:
@@ -320,13 +346,16 @@ def test_grouped_service_returns_group_columns_details_and_friendly_csv(
 
     payload = svc.run_grouped_batch_comparison(requests, top_n=1)
 
-    assert payload["meta"] == {
-        "status": "ok",
-        "message": "对比完成：1 个反应，2 个条件组，3 个重复实验",
-        "n_reactions": 1,
-        "n_groups": 2,
-        "n_conditions": 3,
-    }
+    assert payload["meta"]["status"] == "ok"
+    assert payload["meta"]["message"] == "对比完成：1 个反应，2 个条件组，3 个重复实验"
+    assert payload["meta"]["n_reactions"] == 1
+    assert payload["meta"]["n_groups"] == 2
+    assert payload["meta"]["n_conditions"] == 3
+    assert payload["meta"]["n_sources"] == 3
+    assert payload["meta"]["confirmed_replicate_groups"] == 2
+    assert len(payload["source_records"]) == 3
+    assert payload["evidence_scope"]["level"] == "aggregated_reaction_network"
+    assert payload["evidence_scope"]["supports_atom_lineage_comparison"] is False
     row = payload["rows"][0]
     assert row["reaction_smiles"] == "[C] -> [O]"
     assert row["total_tp"] == 35
@@ -405,7 +434,127 @@ def test_scan_service_reports_recursive_groups_and_reaction_files(
     assert payload["total_conditions"] == 2
     assert payload["total_groups"] == 1
     assert payload["groups"][0]["n_replicates"] == 2
+    assert payload["groups"][0]["metadata_status"] == "suggested"
+    assert all(item["metadata_status"] == "suggested" for item in payload["conditions"])
     assert all(item["reaction_file"].endswith(".reactionabcd") for item in payload["conditions"])
+
+
+def test_scanned_metadata_must_be_reviewed_and_can_be_corrected() -> None:
+    scanned = {
+        "conditions": [
+            {
+                "name": "run_iter32_rep1",
+                "folder": "/data/run",
+                "reaction_file": "/data/run/a.reactionabcd",
+                "group_key": "guessed-condition",
+                "replicate": 1,
+            }
+        ],
+        "groups": [
+            {
+                "group_name": "guessed-condition",
+                "conditions": ["run_iter32_rep1"],
+            }
+        ],
+    }
+    reviewed = [
+        {
+            **scanned["conditions"][0],
+            "simulation_condition": "confirmed-condition",
+            "model_iteration": "iter32",
+            "replicate": 3,
+        }
+    ]
+
+    with pytest.raises(svc.ServiceError) as caught:
+        _build_batch_group_requests(
+            [], {}, ["guessed-condition"], scanned,
+            reviewed_sources=reviewed,
+        )
+    assert caught.value.reason == "unconfirmed_inferred_metadata"
+
+    requests = _build_batch_group_requests(
+        [], {}, ["guessed-condition"], scanned,
+        reviewed_sources=reviewed,
+        inferred_metadata_confirmed=True,
+    )
+    assert requests[0]["group_name"] == "confirmed-condition"
+    assert requests[0]["metadata_status"] == "confirmed"
+    assert requests[0]["conditions"][0]["replicate"] == 3
+    assert requests[0]["conditions"][0]["model_iteration"] == "iter32"
+
+
+def test_grouped_service_rejects_unconfirmed_directory_suggestions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_test_root(monkeypatch, tmp_path)
+    reaction = _write_reactions(tmp_path / "run", "a", ["1 [C]->[O]"])
+
+    with pytest.raises(svc.ServiceError) as caught:
+        svc.run_grouped_batch_comparison(
+            [
+                {
+                    "group_name": "guessed",
+                    "metadata_status": "suggested",
+                    "conditions": [
+                        {
+                            "folder": str(reaction.parent),
+                            "reaction_file": str(reaction),
+                            "replicate": 1,
+                            "metadata_status": "suggested",
+                        }
+                    ],
+                }
+            ]
+        )
+    assert caught.value.reason == "condition_load_failed"
+    assert "推断建议" in caught.value.message
+
+
+def test_scan_service_accepts_multiple_roots_and_merges_replicate_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_test_root(monkeypatch, tmp_path)
+    first_root = tmp_path / "condition_a"
+    second_root = tmp_path / "condition_b"
+    _write_reactions(first_root / "case_rep1", "run", ["10 [C]->[O]"])
+    _write_reactions(second_root / "case_rep2", "run", ["12 [C]->[O]"])
+
+    payload = svc.scan_batch_conditions([str(first_root), str(second_root)])
+
+    assert payload["root_count"] == 2
+    assert payload["total_conditions"] == 2
+    assert payload["total_groups"] == 1
+    assert payload["groups"][0]["n_replicates"] == 2
+    assert sorted(item["name"] for item in payload["conditions"]) == [
+        "case_rep1",
+        "case_rep2",
+    ]
+
+    multiline_payload = svc.scan_batch_conditions(f"{first_root}\n{second_root}")
+
+    assert multiline_payload["total_conditions"] == 2
+    assert multiline_payload["total_groups"] == 1
+
+
+def test_scan_service_disambiguates_duplicate_condition_names_across_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_test_root(monkeypatch, tmp_path)
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_reactions(first_root / "case_rep1", "run", ["10 [C]->[O]"])
+    _write_reactions(second_root / "case_rep1", "run", ["12 [C]->[O]"])
+
+    payload = svc.scan_batch_conditions([str(first_root), str(second_root)])
+
+    names = [item["name"] for item in payload["conditions"]]
+    assert len(names) == len(set(names)) == 2
+    assert payload["total_groups"] == 1
+    assert sorted(payload["groups"][0]["conditions"]) == sorted(names)
 
 
 def test_batch_ui_catalog_includes_current_and_recent_datasets() -> None:
@@ -447,7 +596,7 @@ def test_batch_ui_catalog_includes_current_and_recent_datasets() -> None:
     assert "可选择 2 个" in body["batch-managed-status"]["children"]
 
 
-def test_batch_ui_scan_selects_all_discovered_groups(
+def test_batch_ui_scan_requires_review_and_does_not_select_suggestions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -457,6 +606,8 @@ def test_batch_ui_scan_selects_all_discovered_groups(
                 "folder": "/data/case_rep1",
                 "reaction_file": "/data/case_rep1/run.reactionabcd",
                 "replicate": 1,
+                "model_iteration": "iter32",
+                "group_key": "case",
             }
         ],
         "groups": [
@@ -488,10 +639,86 @@ def test_batch_ui_scan_selects_all_discovered_groups(
 
     assert response.status_code == 200
     body = response.get_json()["response"]
-    assert body["batch-condition-selector"]["value"] == ["case"]
-    assert body["batch-condition-selector"]["options"][0]["label"] == "case (1 个重复)"
+    assert body["batch-condition-selector"]["value"] == []
+    assert body["batch-condition-selector"]["options"][0]["label"] == "case (1 个来源，待确认)"
     assert body["batch-conditions-store"]["data"] == payload
-    assert "已默认选择全部条件组" in str(body["batch-conditions-status"]["children"])
+    assert body["batch-scan-review"]["data"][0]["simulation_condition"] == "case"
+    assert body["batch-scan-review"]["data"][0]["model_iteration"] == "iter32"
+    assert body["batch-confirm-inferred-metadata"]["value"] == []
+    assert "尚未确认" in str(body["batch-conditions-status"]["children"])
+
+
+def test_batch_ui_scan_accepts_multiple_root_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "conditions": [
+            {
+                "name": "case_rep1",
+                "folder": "/data/a/case_rep1",
+                "reaction_file": "/data/a/case_rep1/run.reactionabcd",
+                "replicate": 1,
+                "group_key": "case",
+            }
+        ],
+        "groups": [
+            {
+                "group_name": "case",
+                "n_replicates": 1,
+                "conditions": ["case_rep1"],
+            }
+        ],
+        "total_conditions": 1,
+        "total_groups": 1,
+        "root_count": 2,
+        "warnings": [],
+    }
+    captured: dict[str, Any] = {}
+
+    def fake_scan(root_dir):
+        captured["root_dir"] = root_dir
+        return payload
+
+    monkeypatch.setattr(svc, "scan_batch_conditions", fake_scan)
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["batch-scan-btn"],
+            changed="batch-scan-btn.n_clicks",
+            input_values={"batch-scan-btn": 1},
+            state_values={"batch-root-dir": "/data/a\n/data/b"},
+            output_id="batch-condition-selector",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert captured["root_dir"] == "/data/a\n/data/b"
+    assert body["batch-condition-selector"]["value"] == []
+    assert "2 个根目录" in str(body["batch-conditions-status"]["children"])
+
+
+def test_editing_scan_review_clears_previous_confirmation() -> None:
+    app = create_app()
+    client = app.server.test_client()
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["batch-scan-review"],
+            changed="batch-scan-review.data_timestamp",
+            input_values={"batch-scan-review": 1234},
+            output_id="batch-confirm-inferred-metadata",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["response"]["batch-confirm-inferred-metadata"]["value"] == []
 
 
 def test_batch_ui_suggests_the_current_dataset_parent_as_scan_root() -> None:
@@ -552,6 +779,8 @@ def test_batch_ui_compare_renders_typed_columns_and_invalidates_stale_results(
         "batch-top-n": 25,
         "batch-managed-store": managed_store,
         "batch-conditions-store": None,
+        "batch-scan-review": [],
+        "batch-confirm-inferred-metadata": [],
     }
     input_ids = [
         "batch-compare-btn",
@@ -561,6 +790,8 @@ def test_batch_ui_compare_renders_typed_columns_and_invalidates_stale_results(
         "batch-top-n",
         "batch-managed-store",
         "batch-conditions-store",
+        "batch-scan-review",
+        "batch-confirm-inferred-metadata",
     ]
 
     response = client.post(
@@ -625,7 +856,7 @@ def test_batch_ui_detail_uses_row_ids_and_displays_replicate_statistics() -> Non
     assert response.status_code == 200
     body = response.get_json()["response"]
     figure = body["batch-reaction-chart"]["figure"]
-    assert [trace["name"] for trace in figure["data"]] == ["组平均 TP", "单次重复"]
+    assert [trace["name"] for trace in figure["data"]] == ["组平均 TP", "已确认 Replicate"]
     assert figure["data"][0]["error_y"]["array"] == [7.07]
     assert body["batch-detail-card"]["style"] == {"display": "block"}
     stats_text = str(body["batch-reaction-stats"]["children"])
@@ -633,7 +864,7 @@ def test_batch_ui_detail_uses_row_ids_and_displays_replicate_statistics() -> Non
     assert "95% CI [-48.53, 78.53]" in stats_text
 
 
-def test_batch_ui_csv_export_uses_display_headers() -> None:
+def test_batch_ui_export_packages_results_and_source_contract() -> None:
     app = create_app()
     client = app.server.test_client()
     store = _sample_grouped_payload()
@@ -652,5 +883,15 @@ def test_batch_ui_csv_export_uses_display_headers() -> None:
 
     assert response.status_code == 200
     download = response.get_json()["response"]["batch-csv-download"]["data"]
-    assert download["filename"] == "batch_comparison.csv"
-    assert download["content"].startswith("\ufeff#,反应式 (SMILES),300 K · 平均 TP")
+    assert download["filename"] == "batch_comparison.zip"
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(download["content"]))) as archive:
+        assert sorted(archive.namelist()) == [
+            "comparison_contract.json",
+            "reaction_comparison.csv",
+            "sources.csv",
+            "sources.json",
+        ]
+        results = archive.read("reaction_comparison.csv").decode()
+        contract = json.loads(archive.read("comparison_contract.json"))
+    assert results.startswith("\ufeff#,反应式 (SMILES),300 K · 平均 TP")
+    assert contract["groups"][0]["name"] == "300 K"

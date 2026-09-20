@@ -10,6 +10,7 @@ bond set.
 from __future__ import annotations
 
 import csv
+import copy
 import io
 import json
 import os
@@ -21,7 +22,22 @@ from typing import Any, Iterable, Mapping
 from .event_index import EVENT_EVIDENCE_STORE, EventNotFoundError
 
 
-MOLECULE_LINEAGE_SCHEMA_VERSION = "molecule-lineage/v1"
+MOLECULE_LINEAGE_SCHEMA_VERSION = "molecule-lineage/v2"
+
+_CONTINUABLE_STOP_REASONS = {
+    "molecule_node_limit",
+    "persistent_depth_limit",
+}
+
+LINEAGE_STOP_REASON_LABELS = {
+    "ambiguous_exact_transition": "最近事件无法唯一匹配这个分子实例",
+    "continuity_barrier": "最近事件不包含同一精确分子实例",
+    "incoming_instance_mismatch": "事件入口与所选分子实例不一致",
+    "anchor_not_retained": "后续产物不再保留所选锚点",
+    "molecule_node_limit": "达到本段分子节点预算",
+    "observation_boundary": "已到当前证据的观测边界",
+    "persistent_depth_limit": "达到本段持久变化预算",
+}
 
 
 class MoleculeLineageError(RuntimeError):
@@ -231,6 +247,7 @@ class _LineageBuilder:
         depth_forward: int,
         max_molecule_nodes: int,
         recrossing_window: int,
+        directions: Iterable[str] = ("backward", "forward"),
     ) -> None:
         self.reactionevent_file = reactionevent_file
         self.molecules_file = molecules_file
@@ -249,6 +266,7 @@ class _LineageBuilder:
         }
         self.max_molecule_nodes = max_molecule_nodes
         self.recrossing_window = recrossing_window
+        self.directions = tuple(directions)
         self.molecules: dict[str, dict[str, Any]] = {}
         self.events: dict[str, dict[str, Any]] = {}
         self.edges: dict[str, dict[str, Any]] = {}
@@ -385,6 +403,17 @@ class _LineageBuilder:
         )
         candidates = query["rows"]
         if not candidates:
+            self.truncations.append(
+                {
+                    "reason": "observation_boundary",
+                    "direction": state.direction,
+                    "from_node_id": state.node_id,
+                    "nearest_timestep_index": query.get(
+                        "nearest_timestep_index"
+                    ),
+                    "candidate_event_ids": [],
+                }
+            )
             return None
         incoming_side = (
             "reactant" if state.direction == "forward" else "product"
@@ -711,7 +740,7 @@ class _LineageBuilder:
             participants[self.root_participant_index]
         )
         queue: deque[_TraversalState] = deque()
-        for direction in ("backward", "forward"):
+        for direction in self.directions:
             pending = ""
             if (
                 direction == "forward" and self.root_side == "reactant"
@@ -935,6 +964,275 @@ def _persistent_graph_elements(
     return elements
 
 
+def _queried_range(report: Mapping[str, Any]) -> dict[str, int | None]:
+    event_steps = [
+        int(row["timestep_index"])
+        for row in report.get("event_nodes") or []
+        if row.get("timestep_index") is not None
+    ]
+    molecule_frames = [
+        int(row["frame"])
+        for row in report.get("molecule_nodes") or []
+        if row.get("frame") is not None
+    ]
+    root_step = (report.get("root") or {}).get("timestep_index")
+    if root_step is not None:
+        event_steps.append(int(root_step))
+    return {
+        "timestep_index_min": min(event_steps) if event_steps else None,
+        "timestep_index_max": max(event_steps) if event_steps else None,
+        "frame_min": min(molecule_frames) if molecule_frames else None,
+        "frame_max": max(molecule_frames) if molecule_frames else None,
+    }
+
+
+def _source_context(
+    source_signatures: Mapping[str, Any],
+    *,
+    dataset_id: str = "",
+    source_revision: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    revision = source_revision or {}
+    fingerprint = str(revision.get("fingerprint") or "").strip()
+    if not fingerprint:
+        payload = json.dumps(
+            source_signatures,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint = "sources::" + sha1(payload.encode()).hexdigest()
+    identity = str(dataset_id or "").strip() or f"source::{fingerprint[-16:]}"
+    return {
+        "dataset_id": identity,
+        "source_revision": {"fingerprint": fingerprint},
+    }
+
+
+def _molecule_instance(node: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "event_id": str(node.get("event_id") or ""),
+        "side": str(node.get("side") or ""),
+        "participant_index": int(node.get("participant_index") or 0),
+        "species": str(node.get("species") or ""),
+        "atom_ids": [int(value) for value in node.get("atom_ids") or []],
+        "anchor_atom_ids": [
+            int(value) for value in node.get("anchor_atom_ids") or []
+        ],
+        "frame": (
+            int(node["frame"]) if node.get("frame") is not None else None
+        ),
+    }
+
+
+def _truncation_id(row: Mapping[str, Any], segment_id: str) -> str:
+    payload = {
+        key: value
+        for key, value in row.items()
+        if key
+        not in {
+            "branch_id",
+            "continued_by_segment_id",
+            "segment_id",
+            "truncation_id",
+        }
+    }
+    identity = json.dumps(
+        [segment_id, payload],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"stop::{sha1(identity.encode()).hexdigest()[:16]}"
+
+
+def _refresh_lineage_contract(report: dict[str, Any]) -> None:
+    """Rebuild derived views, summaries and active branch handoff records."""
+
+    molecules = sorted(
+        report.get("molecule_nodes") or [],
+        key=lambda row: (
+            int(row["frame"]),
+            0 if row["side"] == "reactant" else 1,
+            str(row["node_id"]),
+        ),
+    )
+    events = sorted(
+        report.get("event_nodes") or [],
+        key=lambda row: (int(row["timestep_index"]), str(row["event_id"])),
+    )
+    edges = sorted(
+        report.get("edges") or [], key=lambda row: str(row["edge_id"])
+    )
+    episodes = sorted(
+        report.get("recrossing_episodes") or [],
+        key=lambda row: (int(row["interval_gap"]), str(row["episode_id"])),
+    )
+    report["molecule_nodes"] = molecules
+    report["event_nodes"] = events
+    report["edges"] = edges
+    report["recrossing_episodes"] = episodes
+    report["views"] = {
+        "raw": {"elements": _graph_elements(molecules, events, edges)},
+        "persistent": {
+            "elements": _persistent_graph_elements(
+                molecules, events, edges, episodes
+            )
+        },
+    }
+
+    root = report.get("root") or {}
+    root_heavy = root.get("heavy_atom_count")
+    terminal_heavy = [
+        row["heavy_atom_count"]
+        for row in molecules
+        if row["role"] in {"root", "active"}
+        and row.get("heavy_atom_count") is not None
+        and not any(
+            edge["source"] == row["node_id"] and edge["active"]
+            for edge in edges
+        )
+    ]
+    trend = "undetermined"
+    if root_heavy is not None and terminal_heavy:
+        changes = {int(value) - int(root_heavy) for value in terminal_heavy}
+        if changes == {0}:
+            trend = "structurally stable"
+        elif min(changes) >= 0 and max(changes) > 0:
+            trend = "growth"
+        elif max(changes) <= 0 and min(changes) < 0:
+            trend = "degradation"
+        else:
+            trend = "mixed"
+
+    segment_by_id = {
+        str(row.get("segment_id") or ""): row
+        for row in report.get("segments") or []
+    }
+    molecule_by_id = {
+        str(row.get("node_id") or ""): row for row in molecules
+    }
+    unique_truncations: dict[str, dict[str, Any]] = {}
+    for raw in report.get("truncations") or []:
+        row = dict(raw)
+        segment_id = str(row.get("segment_id") or "segment-001")
+        row["segment_id"] = segment_id
+        row["truncation_id"] = str(row.get("truncation_id") or "") or (
+            _truncation_id(row, segment_id)
+        )
+        unique_truncations.setdefault(row["truncation_id"], row)
+    truncations = list(unique_truncations.values())
+    report["truncations"] = truncations
+
+    branch_summaries = []
+    for row in truncations:
+        if row.get("continued_by_segment_id"):
+            continue
+        node = molecule_by_id.get(str(row.get("from_node_id") or ""))
+        segment = segment_by_id.get(str(row.get("segment_id") or ""), {})
+        reason = str(row.get("reason") or "")
+        can_continue = bool(
+            reason in _CONTINUABLE_STOP_REASONS
+            and node
+            and node.get("anchor_atom_ids")
+        )
+        branch_id = f"branch::{row['truncation_id']}"
+        row["branch_id"] = branch_id
+        branch_summaries.append(
+            {
+                "branch_id": branch_id,
+                "truncation_id": row["truncation_id"],
+                "segment_id": row["segment_id"],
+                "direction": str(row.get("direction") or ""),
+                "molecule_instance": _molecule_instance(node or {}),
+                "stop_reason": reason,
+                "stop_reason_label": LINEAGE_STOP_REASON_LABELS.get(
+                    reason, reason or "未知停止原因"
+                ),
+                "status": (
+                    "incomplete_budget"
+                    if can_continue
+                    else (
+                        "observation_boundary"
+                        if reason == "observation_boundary"
+                        else "evidence_barrier"
+                    )
+                ),
+                "can_continue": can_continue,
+                "next_event_id": str(
+                    row.get("next_event_id") or row.get("event_id") or ""
+                ),
+                "trajectory_event_id": str(
+                    (node or {}).get("event_id") or ""
+                ),
+                "queried_range": dict(segment.get("queried_range") or {}),
+                "budget": dict(segment.get("budget") or {}),
+            }
+        )
+    report["branch_summaries"] = sorted(
+        branch_summaries,
+        key=lambda row: (
+            str(row["direction"]),
+            int(
+                (row.get("molecule_instance") or {}).get("frame")
+                if (row.get("molecule_instance") or {}).get("frame") is not None
+                else -1
+            ),
+            str(row["branch_id"]),
+        ),
+    )
+    active_truncations = [
+        row for row in truncations if not row.get("continued_by_segment_id")
+    ]
+    report["queried_range"] = _queried_range(report)
+    report["summary"] = {
+        "molecule_node_count": len(molecules),
+        "event_count": len(events),
+        "recrossing_episode_count": len(episodes),
+        "truncation_count": len(active_truncations),
+        "historical_stop_count": len(truncations) - len(active_truncations),
+        "continuable_branch_count": sum(
+            bool(row["can_continue"]) for row in branch_summaries
+        ),
+        "segment_count": len(report.get("segments") or []),
+        "aggregate_trend": trend,
+    }
+
+
+def _install_initial_segment(
+    report: dict[str, Any],
+    *,
+    directions: Iterable[str],
+) -> None:
+    segment_id = "segment-001"
+    for row in report.get("truncations") or []:
+        row["segment_id"] = segment_id
+    query = report.get("query") or {}
+    segment = {
+        "segment_id": segment_id,
+        "parent_branch_id": None,
+        "root_molecule_instance": _molecule_instance(report.get("root") or {}),
+        "directions": list(directions),
+        "source_context": copy.deepcopy(report.get("context") or {}),
+        "budget": {
+            "depth_backward": int(query.get("depth_backward") or 0),
+            "depth_forward": int(query.get("depth_forward") or 0),
+            "max_molecule_nodes": int(query.get("max_molecule_nodes") or 0),
+            "recrossing_window": int(query.get("recrossing_window") or 0),
+        },
+        "queried_range": _queried_range(report),
+        "stop_truncation_ids": [],
+    }
+    report["segments"] = [segment]
+    _refresh_lineage_contract(report)
+    segment["stop_truncation_ids"] = [
+        str(row["truncation_id"])
+        for row in report.get("truncations") or []
+        if row.get("segment_id") == segment_id
+    ]
+
+
 def _resolve_anchor_ids(
     participant: Mapping[str, Any],
     *,
@@ -1010,6 +1308,9 @@ def build_molecule_lineage(
     depth_forward: int = 3,
     max_molecule_nodes: int = 100,
     recrossing_window: int = 5,
+    directions: Iterable[str] = ("backward", "forward"),
+    dataset_id: str = "",
+    source_revision: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a bounded lineage around one concrete event participant."""
 
@@ -1040,6 +1341,11 @@ def build_molecule_lineage(
         minimum=0,
         maximum=10_000,
     )
+    requested_directions = tuple(dict.fromkeys(str(value) for value in directions))
+    if not requested_directions or any(
+        value not in {"backward", "forward"} for value in requested_directions
+    ):
+        raise ValueError("directions must contain backward and/or forward")
     try:
         root_event = EVENT_EVIDENCE_STORE.get_event(
             reactionevent_file,
@@ -1079,6 +1385,7 @@ def build_molecule_lineage(
         depth_forward=forward,
         max_molecule_nodes=node_limit,
         recrossing_window=window,
+        directions=requested_directions,
     )
     report = builder.build()
     report["query"] = {
@@ -1108,7 +1415,263 @@ def build_molecule_lineage(
             else {}
         ),
     }
+    report["context"] = _source_context(
+        report["source_signatures"],
+        dataset_id=dataset_id,
+        source_revision=source_revision,
+    )
+    _install_initial_segment(report, directions=requested_directions)
     return report
+
+
+def _validate_continuation_context(
+    report: Mapping[str, Any],
+    reactionevent_file: str,
+    molecules_file: str,
+    *,
+    dataset_id: str,
+    source_revision: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    source_label = (
+        "timeline"
+        if str(reactionevent_file).lower().endswith(".timeline.h5")
+        else "reactionevent"
+    )
+    current_signatures = {
+        source_label: _source_signature(reactionevent_file),
+        **(
+            {"molecules": _source_signature(molecules_file)}
+            if str(molecules_file or "").strip()
+            else {}
+        ),
+    }
+    expected_signatures = dict(report.get("source_signatures") or {})
+    if any(
+        expected_signatures.get(label) != signature
+        for label, signature in current_signatures.items()
+    ):
+        raise MoleculeLineageError(
+            "Lineage sources changed; rebuild the branch tracking result"
+        )
+    expected = report.get("context") or {}
+    current = _source_context(
+        current_signatures,
+        dataset_id=dataset_id or str(expected.get("dataset_id") or ""),
+        source_revision=(
+            source_revision
+            if source_revision and source_revision.get("fingerprint")
+            else expected.get("source_revision") or {}
+        ),
+    )
+    if str(expected.get("dataset_id") or "") != str(
+        current.get("dataset_id") or ""
+    ) or str((expected.get("source_revision") or {}).get("fingerprint") or "") != str(
+        (current.get("source_revision") or {}).get("fingerprint") or ""
+    ):
+        raise MoleculeLineageError(
+            "Lineage dataset identity or source revision changed; rebuild the result"
+        )
+    return current
+
+
+def _merge_lineage_rows(
+    existing: list[dict[str, Any]],
+    incoming: Iterable[Mapping[str, Any]],
+    *,
+    key: str,
+) -> list[dict[str, Any]]:
+    merged = {str(row[key]): copy.deepcopy(row) for row in existing}
+    for source in incoming:
+        row = copy.deepcopy(dict(source))
+        identity = str(row[key])
+        current = merged.get(identity)
+        if current is None:
+            merged[identity] = row
+            continue
+        if key == "node_id" and row.get("kind") == "molecule":
+            current["anchor_atom_ids"] = sorted(
+                set(current.get("anchor_atom_ids") or [])
+                | set(row.get("anchor_atom_ids") or [])
+            )
+            role_rank = {"context": 0, "active": 1, "root": 2}
+            incoming_rank = role_rank.get(
+                str(row.get("role") or "context"), 0
+            )
+            current_rank = role_rank.get(
+                str(current.get("role") or "context"), 0
+            )
+            if incoming_rank > current_rank:
+                current["role"] = row["role"]
+        elif key == "event_id":
+            current["directions"] = sorted(
+                set(current.get("directions") or [])
+                | set(row.get("directions") or [])
+            )
+            current["recrossing_episode_ids"] = sorted(
+                set(current.get("recrossing_episode_ids") or [])
+                | set(row.get("recrossing_episode_ids") or [])
+            )
+        elif key == "edge_id":
+            current["active"] = bool(current.get("active") or row.get("active"))
+    return list(merged.values())
+
+
+def continue_molecule_lineage(
+    reactionevent_file: str,
+    molecules_file: str,
+    report: Mapping[str, Any],
+    *,
+    branch_id: str,
+    persistent_depth: int = 3,
+    max_molecule_nodes: int = 100,
+    recrossing_window: int | None = None,
+    atom_elements: Mapping[int, str] | None = None,
+    dataset_id: str = "",
+    source_revision: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Continue one budget-stopped branch and merge it by stable identities."""
+
+    if str(report.get("schema_version") or "") != MOLECULE_LINEAGE_SCHEMA_VERSION:
+        raise MoleculeLineageError(
+            "Lineage result version cannot be continued; rebuild the result"
+        )
+    current_context = _validate_continuation_context(
+        report,
+        reactionevent_file,
+        molecules_file,
+        dataset_id=dataset_id,
+        source_revision=source_revision,
+    )
+    selected = next(
+        (
+            row
+            for row in report.get("branch_summaries") or []
+            if str(row.get("branch_id") or "") == str(branch_id or "")
+        ),
+        None,
+    )
+    if selected is None:
+        raise MoleculeLineageError("The selected branch is no longer active")
+    if not selected.get("can_continue"):
+        raise MoleculeLineageError(
+            "The selected branch stopped at an evidence boundary and cannot be continued"
+        )
+    direction = str(selected.get("direction") or "")
+    if direction not in {"backward", "forward"}:
+        raise MoleculeLineageError("The selected branch has no valid direction")
+    instance = selected.get("molecule_instance") or {}
+    anchors = [int(value) for value in instance.get("anchor_atom_ids") or []]
+    if not anchors:
+        raise MoleculeLineageError("The selected branch has no retained anchor atoms")
+    depth = _bounded_integer(
+        persistent_depth,
+        "persistent_depth",
+        minimum=1,
+        maximum=20,
+    )
+    node_limit = _bounded_integer(
+        max_molecule_nodes,
+        "max_molecule_nodes",
+        minimum=1,
+        maximum=10_000,
+    )
+    query = report.get("query") or {}
+    window = _bounded_integer(
+        recrossing_window
+        if recrossing_window is not None
+        else query.get("recrossing_window", 5),
+        "recrossing_window",
+        minimum=0,
+        maximum=10_000,
+    )
+    continuation = build_molecule_lineage(
+        reactionevent_file,
+        molecules_file,
+        event_id=str(instance.get("event_id") or ""),
+        side=str(instance.get("side") or ""),
+        participant_index=int(instance.get("participant_index") or 0),
+        atom_elements=atom_elements,
+        anchor_mode="atom_ids",
+        anchor_atom_ids=anchors,
+        depth_backward=depth if direction == "backward" else 0,
+        depth_forward=depth if direction == "forward" else 0,
+        max_molecule_nodes=node_limit,
+        recrossing_window=window,
+        directions=(direction,),
+        dataset_id=str(current_context.get("dataset_id") or ""),
+        source_revision=current_context.get("source_revision") or {},
+    )
+
+    merged = copy.deepcopy(dict(report))
+    next_segment_id = f"segment-{len(merged.get('segments') or []) + 1:03d}"
+    for row in merged.get("truncations") or []:
+        if str(row.get("truncation_id") or "") == str(
+            selected.get("truncation_id") or ""
+        ):
+            row["continued_by_segment_id"] = next_segment_id
+
+    continuation_root_id = str((continuation.get("root") or {}).get("node_id") or "")
+    for row in continuation.get("molecule_nodes") or []:
+        if str(row.get("node_id") or "") == continuation_root_id:
+            row["role"] = "active"
+    merged["molecule_nodes"] = _merge_lineage_rows(
+        list(merged.get("molecule_nodes") or []),
+        continuation.get("molecule_nodes") or [],
+        key="node_id",
+    )
+    merged["event_nodes"] = _merge_lineage_rows(
+        list(merged.get("event_nodes") or []),
+        continuation.get("event_nodes") or [],
+        key="event_id",
+    )
+    merged["edges"] = _merge_lineage_rows(
+        list(merged.get("edges") or []),
+        continuation.get("edges") or [],
+        key="edge_id",
+    )
+    merged["recrossing_episodes"] = _merge_lineage_rows(
+        list(merged.get("recrossing_episodes") or []),
+        continuation.get("recrossing_episodes") or [],
+        key="episode_id",
+    )
+
+    new_truncations = []
+    for raw in continuation.get("truncations") or []:
+        row = copy.deepcopy(dict(raw))
+        row["segment_id"] = next_segment_id
+        row.pop("truncation_id", None)
+        row.pop("branch_id", None)
+        new_truncations.append(row)
+    merged["truncations"] = list(merged.get("truncations") or []) + new_truncations
+
+    new_segment = copy.deepcopy((continuation.get("segments") or [{}])[0])
+    new_segment.update(
+        {
+            "segment_id": next_segment_id,
+            "parent_branch_id": str(selected.get("branch_id") or ""),
+            "directions": [direction],
+            "source_context": copy.deepcopy(current_context),
+            "stop_truncation_ids": [],
+        }
+    )
+    merged["segments"] = list(merged.get("segments") or []) + [new_segment]
+    merged["warnings"] = list(
+        dict.fromkeys(
+            list(merged.get("warnings") or [])
+            + list(continuation.get("warnings") or [])
+        )
+    )
+    merged["context"] = current_context
+    merged.setdefault("query", {})["continuation_count"] = len(
+        merged["segments"]
+    ) - 1
+    _refresh_lineage_contract(merged)
+    new_segment["stop_truncation_ids"] = [
+        str(row["truncation_id"])
+        for row in merged.get("truncations") or []
+        if row.get("segment_id") == next_segment_id
+    ]
+    return merged
 
 
 def molecule_lineage_to_csv(report: Mapping[str, Any]) -> str:
@@ -1145,6 +1708,36 @@ def molecule_lineage_to_csv(report: Mapping[str, Any]) -> str:
         )
 
     write("query", report.get("query") or {}, record_id="query")
+    write("context", report.get("context") or {}, record_id="context")
+    for label, signature in (report.get("source_signatures") or {}).items():
+        write(
+            "source_signature",
+            signature,
+            record_id=str(label),
+            source=(signature or {}).get("path"),
+        )
+    for row in report.get("segments") or []:
+        write(
+            "segment",
+            row,
+            record_id=row.get("segment_id"),
+        )
+    for row in report.get("branch_summaries") or []:
+        instance = row.get("molecule_instance") or {}
+        write(
+            "branch_summary",
+            row,
+            record_id=row.get("branch_id"),
+            event_id=(
+                row.get("trajectory_event_id")
+                or instance.get("event_id")
+            ),
+            frame=instance.get("frame"),
+            side=instance.get("side"),
+            species=instance.get("species"),
+            atom_ids=";".join(map(str, instance.get("atom_ids") or [])),
+            reason=row.get("stop_reason"),
+        )
     for row in report.get("molecule_nodes") or []:
         write(
             "molecule",
@@ -1186,7 +1779,7 @@ def molecule_lineage_to_csv(report: Mapping[str, Any]) -> str:
         write(
             "truncation",
             row,
-            record_id=f"truncation-{index}",
+            record_id=row.get("truncation_id") or f"truncation-{index}",
             event_id=row.get("event_id") or row.get("next_event_id"),
             reason=row.get("reason"),
         )

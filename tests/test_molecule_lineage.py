@@ -10,7 +10,9 @@ from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
 from reacnet_scope.molecule_lineage import (
     LineageElementMappingError,
+    MoleculeLineageError,
     build_molecule_lineage,
+    continue_molecule_lineage,
     molecule_lineage_to_csv,
 )
 from reacnet_scope import services as svc
@@ -173,11 +175,130 @@ def test_lineage_csv_contains_query_evidence_and_truncation_records(
 
     rows = list(csv.DictReader(io.StringIO(molecule_lineage_to_csv(report))))
     record_types = {row["record_type"] for row in rows}
-    assert {"query", "molecule", "event", "edge", "truncation"}.issubset(
-        record_types
-    )
+    assert {
+        "query",
+        "context",
+        "source_signature",
+        "segment",
+        "branch_summary",
+        "molecule",
+        "event",
+        "edge",
+        "truncation",
+    }.issubset(record_types)
     assert any(row["reason"] == "persistent_depth_limit" for row in rows)
     assert all(row["payload_json"] for row in rows)
+
+
+def test_lineage_continues_one_budget_stopped_branch_without_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules, event_id = _write_lineage_fixture(tmp_path)
+    initial = build_molecule_lineage(
+        str(reactionevent),
+        str(molecules),
+        event_id=event_id,
+        side="reactant",
+        participant_index=0,
+        anchor_mode="atom_ids",
+        anchor_atom_ids=[1],
+        depth_backward=1,
+        depth_forward=1,
+        dataset_id="fixture-dataset",
+        source_revision={"fingerprint": "fixture-revision"},
+    )
+    branch = next(
+        row
+        for row in initial["branch_summaries"]
+        if row["direction"] == "forward" and row["can_continue"]
+    )
+
+    continued = continue_molecule_lineage(
+        str(reactionevent),
+        str(molecules),
+        initial,
+        branch_id=branch["branch_id"],
+        persistent_depth=2,
+        max_molecule_nodes=100,
+        dataset_id="fixture-dataset",
+        source_revision={"fingerprint": "fixture-revision"},
+    )
+
+    assert initial["summary"]["segment_count"] == 1
+    assert continued["summary"]["segment_count"] == 2
+    assert continued["summary"]["event_count"] == 4
+    assert len({row["event_id"] for row in continued["event_nodes"]}) == len(
+        continued["event_nodes"]
+    )
+    assert len({row["node_id"] for row in continued["molecule_nodes"]}) == len(
+        continued["molecule_nodes"]
+    )
+    old_stop = next(
+        row
+        for row in continued["truncations"]
+        if row["truncation_id"] == branch["truncation_id"]
+    )
+    assert old_stop["continued_by_segment_id"] == "segment-002"
+    assert continued["segments"][1]["parent_branch_id"] == branch["branch_id"]
+
+
+def test_lineage_continuation_rejects_a_changed_source_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules, event_id = _write_lineage_fixture(tmp_path)
+    report = build_molecule_lineage(
+        str(reactionevent),
+        str(molecules),
+        event_id=event_id,
+        side="reactant",
+        participant_index=0,
+        anchor_mode="atom_ids",
+        anchor_atom_ids=[1],
+        depth_forward=1,
+        dataset_id="fixture-dataset",
+        source_revision={"fingerprint": "fixture-revision"},
+    )
+    branch = next(row for row in report["branch_summaries"] if row["can_continue"])
+
+    with pytest.raises(MoleculeLineageError, match="source revision changed"):
+        continue_molecule_lineage(
+            str(reactionevent),
+            str(molecules),
+            report,
+            branch_id=branch["branch_id"],
+            dataset_id="fixture-dataset",
+            source_revision={"fingerprint": "new-revision"},
+        )
+
+
+def test_lineage_reports_observation_boundary_as_a_noncontinuable_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules, event_id = _write_lineage_fixture(tmp_path)
+
+    report = build_molecule_lineage(
+        str(reactionevent),
+        str(molecules),
+        event_id=event_id,
+        side="reactant",
+        participant_index=0,
+        anchor_mode="atom_ids",
+        anchor_atom_ids=[1],
+        directions=("backward",),
+    )
+
+    assert report["summary"]["event_count"] == 0
+    assert len(report["branch_summaries"]) == 1
+    branch = report["branch_summaries"][0]
+    assert branch["stop_reason"] == "observation_boundary"
+    assert branch["status"] == "observation_boundary"
+    assert branch["can_continue"] is False
 
 
 def test_lineage_service_reads_confirmed_elements_from_one_indexed_frame(

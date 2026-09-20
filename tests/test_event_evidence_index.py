@@ -11,6 +11,10 @@ from reacnet_scope.event_index import (
     EVENT_EVIDENCE_STORE,
     EventNotFoundError,
 )
+from reacnet_scope.evidence_services import (
+    create_event_bookmark,
+    restore_event_bookmark,
+)
 from reacnet_scope.indexes import (
     IndexInvalidError,
     IndexStaleError,
@@ -18,6 +22,7 @@ from reacnet_scope.indexes import (
     resolve_dataset_paths,
 )
 from reacnet_scope.rng_events import RngEventDataError
+from reacnet_scope.service_types import ServiceError
 
 
 REACTION_KEY = "[H]+[O]->[H][O]"
@@ -147,6 +152,89 @@ def test_event_store_publishes_dataset_local_index_and_pages(
         EVENT_EVIDENCE_STORE.get_event(
             str(reactionevent), str(molecules), "missing-event"
         )
+
+
+def test_event_bookmark_restores_only_the_same_dataset_revision(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    event = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent),
+        str(molecules),
+        REACTION_KEY,
+        limit=1,
+    )["rows"][0]
+    context = {
+        "dataset_id": "dataset-1",
+        "source_revision": {"fingerprint": "revision-1"},
+    }
+
+    bookmark = create_event_bookmark(
+        context,
+        event,
+        before_frames=0,
+        after_frames=4,
+    )
+    restored = restore_event_bookmark(
+        {
+            "reactionevent": str(reactionevent),
+            "molecules": str(molecules),
+        },
+        bookmark,
+        dataset_id="dataset-1",
+        source_revision={"fingerprint": "revision-1"},
+    )
+
+    assert restored["row"]["event_id"] == event["event_id"]
+    assert restored["selection"]["config"] == {
+        "reaction_text": event["reaction_smiles"],
+        "before_frames": 0,
+        "after_frames": 4,
+    }
+    assert bookmark["display_window"]["before_frames"] == 0
+
+    with pytest.raises(ServiceError) as caught:
+        restore_event_bookmark(
+            {
+                "reactionevent": str(reactionevent),
+                "molecules": str(molecules),
+            },
+            bookmark,
+            dataset_id="dataset-1",
+            source_revision={"fingerprint": "revision-2"},
+        )
+    assert caught.value.reason == "event_bookmark_revision_mismatch"
+
+
+def test_event_bookmark_rejects_an_event_missing_from_the_published_index(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    reactionevent, molecules = write_rng_fixture(tmp_path)
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    bookmark = {
+        "schema_version": "reacnet-scope/event-bookmark/v1",
+        "dataset_id": "dataset-1",
+        "source_revision": {"fingerprint": "revision-1"},
+        "event_id": "rngevt-does-not-exist",
+        "reaction_key": "",
+        "reaction_smiles": "[H] + [O] -> [H][O]",
+        "display_window": {"before_frames": 3, "after_frames": 3},
+    }
+
+    with pytest.raises(ServiceError) as caught:
+        restore_event_bookmark(
+            {
+                "reactionevent": str(reactionevent),
+                "molecules": str(molecules),
+            },
+            bookmark,
+            dataset_id="dataset-1",
+            source_revision={"fingerprint": "revision-1"},
+        )
+    assert caught.value.reason == "event_bookmark_not_found"
 
 
 def test_event_index_matches_net_component_after_spectator_cancellation(
@@ -387,7 +475,7 @@ def test_event_index_versions_semantic_identity_and_association_data(
     connection = sqlite3.connect(built["index_path"])
     try:
         metadata = dict(connection.execute("SELECT key,value FROM meta"))
-        assert metadata["schema_version"] == "4"
+        assert metadata["schema_version"] == "5"
         assert metadata["association_algorithm_version"] == "3"
         connection.execute(
             "UPDATE meta SET value='1' "

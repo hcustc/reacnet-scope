@@ -32,6 +32,8 @@ class SimulationCondition:
     o2_ratio: Optional[float] = None
     pressure: Optional[float] = None
     replicate: int = 1
+    model_iteration: Optional[str] = None
+    metadata_status: str = "unknown"
     artifacts: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -44,6 +46,8 @@ class SimulationCondition:
             parts.append(f"O2={self.o2_ratio}")
         if self.pressure is not None:
             parts.append(f"P={self.pressure}")
+        if self.model_iteration:
+            parts.append(str(self.model_iteration))
         return "_".join(parts) if parts else _fallback_group_name(self.name)
 
 
@@ -55,6 +59,7 @@ class ConditionGroup:
     temperature: Optional[float] = None
     o2_ratio: Optional[float] = None
     pressure: Optional[float] = None
+    metadata_status: str = "unknown"
     conditions: List[SimulationCondition] = field(default_factory=list)
 
     @property
@@ -103,11 +108,13 @@ class ReplicateStatistic:
 # ---------------------------------------------------------------------------
 
 _CONDITION_FIELD_PATTERNS: Dict[str, str] = {
-    "temperature": r"(?:^|[_-])T(?:EMP)?[=_-]?(\d+(?:\.\d+)?)K?(?=$|[_-])",
+    "temperature": r"(?:^|[_-])(?:T(?:EMP)?[=_-]?)?(\d+(?:\.\d+)?)K(?=$|[_-])",
     "o2_ratio": r"(?:^|[_-])O2[=_-]?(\d+(?:\.\d+)?)(?=$|[_-])",
     "pressure": r"(?:^|[_-])P(?:RESSURE)?[=_-]?(\d+(?:\.\d+)?)(?:ATM)?(?=$|[_-])",
     "replicate": r"(?:^|[_-])(?:REP(?:LICATE)?|RUN|SEED)[=_-]?(\d+)(?=$|[_-])",
 }
+
+_MODEL_ITERATION_PATTERN = r"(?:^|[_-])ITER(?:ATION)?[=_-]?(\d+)(?=$|[_-])"
 
 _REPLICATE_SUFFIX_RE = re.compile(
     r"(?i)(?:[_-](?:rep(?:licate)?|run|seed)[=_-]?\d+)$"
@@ -120,7 +127,7 @@ def _parse_condition_name(dirname: str) -> Dict[str, Any]:
 
     Returns a dict with keys that were successfully parsed.
     """
-    name = os.path.basename(str(dirname).rstrip(os.sep))
+    name = str(dirname).rstrip(os.sep).replace("/", "_").replace("\\", "_")
     result: Dict[str, Any] = {}
     for field_name, pattern in _CONDITION_FIELD_PATTERNS.items():
         match = re.search(pattern, name, re.IGNORECASE)
@@ -133,6 +140,9 @@ def _parse_condition_name(dirname: str) -> Dict[str, Any]:
         if value == int(value):
             value = int(value)
         result[field_name] = value
+    iteration_match = re.search(_MODEL_ITERATION_PATTERN, name, re.IGNORECASE)
+    if iteration_match is not None:
+        result["model_iteration"] = f"iter{int(iteration_match.group(1))}"
     return result
 
 
@@ -371,7 +381,7 @@ class BatchComparator:
                 entry = os.path.basename(root.rstrip(os.sep)) or root
             else:
                 entry = relative.replace(os.sep, "/")
-            parsed = _parse_condition_name(os.path.basename(entry_path))
+            parsed = _parse_condition_name(entry)
             cond = SimulationCondition(
                 name=entry,
                 folder=entry_path,
@@ -379,6 +389,8 @@ class BatchComparator:
                 o2_ratio=parsed.get("o2_ratio"),
                 pressure=parsed.get("pressure"),
                 replicate=int(parsed.get("replicate", 1)),
+                model_iteration=parsed.get("model_iteration"),
+                metadata_status="suggested",
                 artifacts={"reaction": reaction_path},
             )
             conditions.append(cond)
@@ -430,6 +442,7 @@ class BatchComparator:
                     temperature=cond.temperature,
                     o2_ratio=cond.o2_ratio,
                     pressure=cond.pressure,
+                    metadata_status=cond.metadata_status,
                 )
             groups[key].conditions.append(cond)
 

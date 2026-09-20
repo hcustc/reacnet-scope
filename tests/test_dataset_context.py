@@ -7,6 +7,7 @@ import pytest
 from reacnet_scope import dataset_context
 from reacnet_scope import dir_browser
 from reacnet_scope import services as svc
+from reacnet_scope.indexes import dataset_id_for_source
 
 
 def _candidate(root: Path, name: str = "run") -> dict[str, str]:
@@ -45,6 +46,35 @@ def test_validation_captures_one_stable_source_revision_without_preparing(
     ] == ["reaction", "species"]
     assert validated["base"] == candidate["base"]
     assert not (tmp_path / ".reacnet-scope").exists()
+
+
+def test_validation_binds_symlinked_base_to_rng_evidence_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    raw = tmp_path / "raw"
+    selected = tmp_path / "rng"
+    raw.mkdir()
+    selected.mkdir()
+    trajectory = raw / "trajectory.lammpstrj"
+    trajectory.write_text("trajectory\n", encoding="utf-8")
+    base = selected / "trajectory.lammpstrj"
+    base.symlink_to(trajectory)
+    reaction = Path(f"{base}.reactionabcd")
+    species = Path(f"{base}.species")
+    reaction.write_text("[H] -> [H] 1\n", encoding="utf-8")
+    species.write_text("Timestep 0: [H] 1\n", encoding="utf-8")
+
+    validated = dataset_context.validate_dataset_candidate(
+        str(selected),
+        str(base),
+    )
+
+    assert validated["dataset_id"] == dataset_id_for_source(str(reaction))
+    assert validated["dataset_id"] != dataset_id_for_source(str(trajectory))
+    assert validated["base"] == str(base)
 
 
 def test_switch_result_only_succeeds_for_the_active_request_before_deadline() -> None:

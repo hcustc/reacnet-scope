@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from contextlib import redirect_stdout
 from functools import lru_cache
 from bisect import bisect_left, bisect_right
@@ -59,6 +60,7 @@ from reacnet_scope.composition import (  # noqa: E402
 from reacnet_scope import prepare as preparation  # noqa: E402
 from reacnet_scope.event_index import (  # noqa: E402
     EVENT_EVIDENCE_STORE,
+    EventNotFoundError,
 )
 from reacnet_scope.event_package import (  # noqa: E402
     build_event_package,
@@ -74,6 +76,7 @@ from reacnet_scope.molecule_lineage import (  # noqa: E402
     LineageElementMappingError,
     MoleculeLineageError,
     build_molecule_lineage,
+    continue_molecule_lineage,
     molecule_lineage_to_csv,
 )
 from reacnet_scope.species_fate import (  # noqa: E402
@@ -140,6 +143,169 @@ from reacnet_scope.analysis_services import (
     _reaction_min_tp,
 )
 from reacnet_scope.workspace_services import _event_artifact_paths
+
+
+# ---------------------------------------------------------------------------
+# Event bookmark
+# ---------------------------------------------------------------------------
+
+
+EVENT_BOOKMARK_SCHEMA_VERSION = "reacnet-scope/event-bookmark/v1"
+
+
+def create_event_bookmark(
+    dataset_context: Mapping[str, Any],
+    event_row: Mapping[str, Any],
+    *,
+    before_frames: int = 3,
+    after_frames: int = 3,
+) -> dict[str, Any]:
+    """Bind one stable RNG event ID to an exact validated source revision."""
+
+    dataset_id = str(dataset_context.get("dataset_id") or "").strip()
+    revision = dataset_context.get("source_revision") or {}
+    fingerprint = (
+        str(revision.get("fingerprint") or "").strip()
+        if isinstance(revision, Mapping)
+        else ""
+    )
+    event_id = str(event_row.get("event_id") or "").strip()
+    if not dataset_id or not fingerprint:
+        raise ServiceError(
+            "当前数据集缺少已验证的身份或来源修订，不能保存事件书签。",
+            reason="missing_event_bookmark_context",
+        )
+    if not event_id:
+        raise ServiceError(
+            "事件没有稳定 event_id，不能保存事件书签。",
+            reason="missing_event_bookmark_id",
+        )
+    try:
+        before = max(0, int(before_frames))
+        after = max(0, int(after_frames))
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            "事件书签的轨迹展示窗口无效。",
+            reason="invalid_event_bookmark_window",
+        ) from exc
+    return {
+        "schema_version": EVENT_BOOKMARK_SCHEMA_VERSION,
+        "dataset_id": dataset_id,
+        "source_revision": {"fingerprint": fingerprint},
+        "event_id": event_id,
+        "display_window": {
+            "before_frames": before,
+            "after_frames": after,
+        },
+    }
+
+
+def restore_event_bookmark(
+    artifacts: Mapping[str, str],
+    bookmark: Mapping[str, Any],
+    *,
+    dataset_id: str,
+    source_revision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Revalidate and resolve an event bookmark through the published index."""
+
+    if not isinstance(bookmark, Mapping):
+        raise ServiceError(
+            "事件书签格式无效或版本不受支持。",
+            reason="invalid_event_bookmark",
+        )
+    if str(bookmark.get("schema_version") or "") != EVENT_BOOKMARK_SCHEMA_VERSION:
+        raise ServiceError(
+            "事件书签格式无效或版本不受支持。",
+            reason="invalid_event_bookmark",
+        )
+    expected_dataset_id = str(bookmark.get("dataset_id") or "").strip()
+    current_dataset_id = str(dataset_id or "").strip()
+    if not expected_dataset_id or expected_dataset_id != current_dataset_id:
+        raise ServiceError(
+            "事件书签属于另一个数据集，未恢复旧事件。",
+            reason="event_bookmark_dataset_mismatch",
+        )
+    bookmark_revision = bookmark.get("source_revision") or {}
+    expected_fingerprint = (
+        str(bookmark_revision.get("fingerprint") or "").strip()
+        if isinstance(bookmark_revision, Mapping)
+        else ""
+    )
+    current_fingerprint = (
+        str(source_revision.get("fingerprint") or "").strip()
+        if isinstance(source_revision, Mapping)
+        else ""
+    )
+    if not expected_fingerprint or expected_fingerprint != current_fingerprint:
+        raise ServiceError(
+            "数据来源修订已经变化，旧事件书签已拒绝恢复；请重新查询事件。",
+            reason="event_bookmark_revision_mismatch",
+        )
+    event_id = str(bookmark.get("event_id") or "").strip()
+    if not event_id:
+        raise ServiceError(
+            "事件书签缺少稳定 event_id。",
+            reason="invalid_event_bookmark",
+        )
+    window = bookmark.get("display_window") or {}
+    if not isinstance(window, Mapping):
+        raise ServiceError(
+            "事件书签的轨迹展示窗口无效。",
+            reason="invalid_event_bookmark_window",
+        )
+    try:
+        before_frames = max(0, int(window.get("before_frames", 3)))
+        after_frames = max(0, int(window.get("after_frames", 3)))
+    except (TypeError, ValueError) as exc:
+        raise ServiceError(
+            "事件书签的轨迹展示窗口无效。",
+            reason="invalid_event_bookmark_window",
+        ) from exc
+
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        raise ServiceError(
+            "当前数据集缺少 RNG 事件源，不能恢复事件书签。",
+            reason="missing_reactionevent",
+        )
+    try:
+        row = EVENT_EVIDENCE_STORE.get_event(
+            reactionevent_file,
+            molecules_file,
+            event_id,
+        )
+    except EventNotFoundError as exc:
+        raise ServiceError(
+            "已发布事件索引中不再包含书签事件；请重新查询。",
+            reason="event_bookmark_not_found",
+        ) from exc
+    except IndexStaleError as exc:
+        raise ServiceError(str(exc), reason="event_index_stale") from exc
+    except IndexInvalidError as exc:
+        raise ServiceError(str(exc), reason="event_index_invalid") from exc
+    except (IndexNotReadyError, IndexBuildInProgressError) as exc:
+        raise ServiceError(str(exc), reason="event_index_not_ready") from exc
+    except (OSError, ValueError) as exc:
+        raise ServiceError(str(exc), reason="rng_event_data_error") from exc
+
+    return {
+        "bookmark": dict(bookmark),
+        "row": row,
+        "selection": {
+            "row": row,
+            "kind": "rng_event",
+            "config": {
+                "reaction_text": str(row.get("reaction_smiles") or ""),
+                "before_frames": before_frames,
+                "after_frames": after_frames,
+            },
+        },
+        "message": (
+            f"已按当前数据集与来源修订重新核验事件 {event_id}；"
+            "轨迹尚未自动读取，请点击“打开轨迹查看”。"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +987,36 @@ def locate_rng_events(
         raise ServiceError(str(exc), reason="rng_event_data_error") from exc
 
     rows = payload.get("rows") or []
+    conversion = None
+    if payload.get("time_basis") == "physical_timestep":
+        for candidate in (
+            str(artifacts.get("species") or ""),
+            str(artifacts.get("trajectory") or ""),
+            reactionevent_file,
+        ):
+            if candidate:
+                conversion = load_timestep_ps(candidate)
+                if conversion is not None:
+                    break
+    unit = (
+        "ps" if conversion is not None else
+        "source_timestep" if payload.get("time_basis") == "physical_timestep"
+        else "analyzed_frame"
+    )
+    for row in rows:
+        row["time_unit"] = unit
+        row["raw_time_unit"] = (
+            "source_timestep" if payload.get("time_basis") == "physical_timestep"
+            else "analyzed_frame"
+        )
+        row["time_basis"] = payload.get("time_basis")
+        row["timestep_ps"] = conversion
+        row["before_time_ps"] = (
+            round(row["before_timestep"] * conversion, 9) if conversion is not None else None
+        )
+        row["after_time_ps"] = (
+            round(row["after_timestep"] * conversion, 9) if conversion is not None else None
+        )
     matched = sum(
         row.get("association_status") == "matched" for row in rows
     )
@@ -945,6 +1141,8 @@ def build_molecule_lineage_analysis(
     depth_forward: int = 3,
     max_molecule_nodes: int = 100,
     recrossing_window: int = 5,
+    dataset_id: str = "",
+    source_revision: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one UI-ready molecule lineage from prepared event evidence."""
 
@@ -975,6 +1173,8 @@ def build_molecule_lineage_analysis(
             depth_forward=depth_forward,
             max_molecule_nodes=max_molecule_nodes,
             recrossing_window=recrossing_window,
+            dataset_id=dataset_id,
+            source_revision=source_revision,
         )
     except LineageElementMappingError as exc:
         raise ServiceError(
@@ -1002,6 +1202,98 @@ def build_molecule_lineage_analysis(
             "mtime_ns": int(stat.st_mtime_ns),
         }
     return report
+
+
+def continue_molecule_lineage_analysis(
+    artifacts: dict[str, str],
+    report: Mapping[str, Any],
+    *,
+    branch_id: str,
+    persistent_depth: int = 3,
+    max_molecule_nodes: int = 100,
+    recrossing_window: int | None = None,
+    dataset_id: str = "",
+    source_revision: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Continue one selected lineage branch against the current revision."""
+
+    reactionevent_file, molecules_file = _event_artifact_paths(artifacts)
+    if not reactionevent_file or not Path(reactionevent_file).is_file():
+        raise ServiceError(
+            "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
+            reason="missing_reactionevent",
+        )
+    atom_elements: dict[int, str] = {}
+    mapping_warning = ""
+    selected_branch = next(
+        (
+            row
+            for row in report.get("branch_summaries") or []
+            if str(row.get("branch_id") or "") == str(branch_id or "")
+        ),
+        None,
+    )
+    branch_event_id = str(
+        ((selected_branch or {}).get("molecule_instance") or {}).get(
+            "event_id"
+        )
+        or ""
+    )
+    trajectory = str(artifacts.get("trajectory") or "").strip()
+    if branch_event_id and trajectory and Path(trajectory).is_file():
+        try:
+            branch_event = EVENT_EVIDENCE_STORE.get_event(
+                reactionevent_file,
+                molecules_file,
+                branch_event_id,
+            )
+            atom_elements = _lineage_atom_elements(
+                artifacts, branch_event, viewer=None
+            )
+        except (
+            ServiceError,
+            EventNotFoundError,
+            IndexInvalidError,
+            IndexNotReadyError,
+            IndexStaleError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            mapping_warning = (
+                "继续追踪已完成，但无法读取锚点帧元素映射；"
+                f"新增分支的重原子趋势可能未判定：{exc}"
+            )
+    try:
+        continued = continue_molecule_lineage(
+            reactionevent_file,
+            molecules_file,
+            report,
+            branch_id=branch_id,
+            persistent_depth=persistent_depth,
+            max_molecule_nodes=max_molecule_nodes,
+            recrossing_window=recrossing_window,
+            atom_elements=atom_elements,
+            dataset_id=dataset_id,
+            source_revision=source_revision,
+        )
+    except (
+        MoleculeLineageError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ServiceError(str(exc), reason="molecule_lineage_continuation") from exc
+    if mapping_warning:
+        continued["warnings"] = list(
+            dict.fromkeys(
+                list(continued.get("warnings") or []) + [mapping_warning]
+            )
+        )
+    return continued
 
 
 def species_fate_catalog_for_dataset(
@@ -1767,3 +2059,66 @@ def batch_comparison_to_csv(payload: Mapping[str, Any] | None) -> str:
         writer.writerow([safe_row.get(field, "") for field, _ in field_headers])
     # UTF-8 BOM keeps Chinese headers readable in common spreadsheet tools.
     return "\ufeff" + buffer.getvalue()
+
+
+def batch_comparison_package(payload: Mapping[str, Any] | None) -> bytes:
+    """Export reaction results together with source and evidence contracts."""
+
+    safe_payload = payload if isinstance(payload, Mapping) else {}
+    results = batch_comparison_to_csv(safe_payload)
+    source_rows: list[dict[str, Any]] = []
+    for record in safe_payload.get("source_records") or []:
+        if not isinstance(record, Mapping):
+            continue
+        metadata = record.get("metadata") or {}
+        time_basis = record.get("time_basis") or {}
+        evidence = record.get("evidence") or {}
+        row: dict[str, Any] = {
+            "label": record.get("label"),
+            "dataset_id": record.get("dataset_id"),
+            "source_revision": (record.get("source_revision") or {}).get(
+                "fingerprint"
+            ),
+            "reaction_file": (record.get("artifacts") or {}).get("reaction"),
+            "identity_basis": record.get("identity_basis"),
+            "timestep_ps": time_basis.get("timestep_ps"),
+            "physical_time_status": time_basis.get("physical_time_status"),
+            "reaction_network": evidence.get("reaction_network"),
+            "timed_molecular_evidence": evidence.get(
+                "timed_molecular_evidence"
+            ),
+            "timed_molecular_evidence_kind": evidence.get(
+                "timed_molecular_evidence_kind"
+            ),
+        }
+        for name in ("model_iteration", "simulation_condition", "replicate"):
+            field = metadata.get(name) or {}
+            row[name] = field.get("value")
+            row[f"{name}_status"] = field.get("status")
+        source_rows.append(row)
+
+    source_csv = rows_to_csv(source_rows)
+    comparison_contract = {
+        "schema_version": safe_payload.get("schema_version"),
+        "identity_basis": safe_payload.get("identity_basis"),
+        "evidence_scope": safe_payload.get("evidence_scope") or {},
+        "groups": safe_payload.get("groups") or [],
+        "meta": safe_payload.get("meta") or {},
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("reaction_comparison.csv", results)
+        archive.writestr("sources.csv", "\ufeff" + source_csv)
+        archive.writestr(
+            "sources.json",
+            json.dumps(
+                safe_payload.get("source_records") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        archive.writestr(
+            "comparison_contract.json",
+            json.dumps(comparison_contract, ensure_ascii=False, indent=2),
+        )
+    return buffer.getvalue()
