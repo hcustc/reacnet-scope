@@ -1,4 +1,4 @@
-"""Shared page and top-navigation configuration for the Dash workbench."""
+"""Shared page, workflow and navigation configuration for the Dash workbench."""
 
 from __future__ import annotations
 
@@ -10,51 +10,32 @@ PAGE_IDS: Final[tuple[str, ...]] = (
     "reactions",
     "evolution",
     "events",
-    "species-fate",
     "trajectory",
-    "pathway",
     "element-distribution",
     "data-management",
     "batch-compare",
 )
 
 PAGE_LABELS: Final[dict[str, str]] = {
-    "species": "物种检索",
-    "reactions": "反应式检索",
+    "species": "物种与趋势",
+    "reactions": "反应与事件",
     "evolution": "时间演化",
     "events": "反应事件",
-    "species-fate": "物种命运分析",
-    "trajectory": "轨迹查看",
-    "pathway": "路径验证",
+    "trajectory": "轨迹与谱系",
     "element-distribution": "元素分布演化",
-    "data-management": "管理数据",
-    "batch-compare": "批量对比",
+    "data-management": "数据集",
+    "batch-compare": "对比",
 }
 
 PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
-    "species": "按分子式、SMILES 或精确质量定位物种，并继续查看结构与反应通道。",
-    "reactions": "检索反应式、比较净通量，并把可信通道交给路径或事件工作流。",
+    "species": "检索精确物种与结构，并从同一工作区进入丰度趋势和元素分布。",
+    "reactions": "查看直接生成/消耗通道、反应式和具体事件，不把计数解释为速率或机理。",
     "evolution": "绘制单个或多组物种的时间演化曲线，比较生成与消耗趋势。",
     "events": "从反应通道定位 RNG 事件，建立可复核的轨迹证据入口。",
-    "species-fate": "从目标 Species 的形成事件出发，追踪锚点后代直至用户定义终点或证据删失。",
-    "trajectory": "检查局部反应轨迹、关键帧和原子环境，并导出外部分析脚本。",
-    "pathway": "输入明确的 Reaction Type 序列，用时间、分子实例和原子 ID 核查完整事件链。",
+    "trajectory": "检查局部反应轨迹、键变化与原子谱系，并导出可复核证据。",
     "element-distribution": "按数据集中发现的元素分组和筛选物种，追踪分布随时间的变化。",
-    "data-management": "选择当前数据集、检查文件就绪状态，并准备 Dataset Workspace 派生索引。",
-    "batch-compare": "跨多个数据集比较反应检出、通量与条件差异。",
-}
-
-PAGE_SECTIONS: Final[dict[str, str]] = {
-    "species": "检索与趋势",
-    "reactions": "检索与趋势",
-    "evolution": "检索与趋势",
-    "events": "事件证据",
-    "species-fate": "事件证据",
-    "trajectory": "事件证据",
-    "pathway": "事件证据",
-    "element-distribution": "检索与趋势",
-    "data-management": "数据工作区",
-    "batch-compare": "数据工作区",
+    "data-management": "选择当前数据集、查看可用分析功能，并按需维护派生索引。",
+    "batch-compare": "在不切换当前数据集的前提下，比较多个来源的物种、反应与条件差异。",
 }
 
 # Compact, font-independent marks keep navigation legible without another
@@ -67,40 +48,97 @@ PAGE_ICONS: Final[dict[str, str]] = {
     "reactions": "/assets/icons/reactions.svg",
     "evolution": "/assets/icons/evolution.svg",
     "events": "/assets/icons/events.svg",
-    "species-fate": "/assets/icons/events.svg",
     "trajectory": "/assets/icons/trajectory.svg",
-    "pathway": "/assets/icons/pathway.svg",
     "element-distribution": "/assets/icons/element-distribution.svg",
     "data-management": "/assets/icons/data-management.svg",
     "batch-compare": "/assets/icons/batch-compare.svg",
 }
 
 PAGE_CLASS_NAMES: Final[dict[str, str]] = {
-    "pathway": "rs-page rs-pathway-page",
     "element-distribution": "rs-page rs-element-distribution-minimal",
     "data-management": "rs-page rs-data-page",
 }
 
+# The product surface is deliberately small.  Only pages owned by the five
+# supported workspaces are mounted in Dash.
 NAV_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
-    (
-        "检索与趋势",
-        (
-            "species",
-            "reactions",
-            "evolution",
-            "element-distribution",
-        ),
-    ),
-    (
-        "事件证据",
-        (
-            "events",
-            "species-fate",
-            "trajectory",
-            "pathway",
-        ),
-    ),
+    ("分析工作区", ("species", "reactions", "trajectory")),
 )
+
+WORKSPACE_PAGE_IDS: Final[tuple[str, ...]] = (
+    "data-management",
+    "species",
+    "reactions",
+    "trajectory",
+    "batch-compare",
+)
+
+WORKSPACE_TOOL_PAGES: Final[dict[str, tuple[str, ...]]] = {
+    "data-management": ("data-management",),
+    "species": ("species", "evolution", "element-distribution"),
+    "reactions": ("reactions", "events"),
+    "trajectory": ("trajectory",),
+    "batch-compare": ("batch-compare",),
+}
+
+WORKSPACE_TASK_LABELS: Final[dict[str, str]] = {
+    "data-management": "选择与准备数据集",
+    "species": "物种检索",
+    "evolution": "时间演化",
+    "element-distribution": "元素分布",
+    "reactions": "直接通道与反应式",
+    "events": "具体事件",
+    "trajectory": "局部轨迹与分子谱系",
+    "batch-compare": "来源比较",
+}
+
+PAGE_WORKSPACES: Final[dict[str, str]] = {
+    page_id: workspace_id
+    for workspace_id, page_ids in WORKSPACE_TOOL_PAGES.items()
+    for page_id in page_ids
+}
+
+# Session storage from P0-P4 may still name a retired Dash page.  Keep only
+# this redirect table—not the old page layouts or callbacks—so restoration
+# lands in the workspace that owns the surviving evidence workflow.
+LEGACY_PAGE_REDIRECTS: Final[dict[str, str]] = {
+    "candidate-paths": "reactions",
+    "pathway": "reactions",
+    "species-fate": "trajectory",
+}
+
+PAGE_SECTIONS: Final[dict[str, str]] = {
+    page_id: PAGE_LABELS[workspace_id]
+    for page_id, workspace_id in PAGE_WORKSPACES.items()
+}
+
+# Entry-level capabilities only. Individual operations (e.g. continuous MD
+# support or DFT geometry) still check their own evidence in the core service.
+PAGE_CAPABILITY_REQUIREMENTS: Final[dict[str, str]] = {
+    "species": "reaction_search",
+    "reactions": "reaction_search",
+    "evolution": "species_abundance",
+    "element-distribution": "element_distribution",
+    "events": "event_search",
+    "trajectory": "trajectory_evidence",
+}
+
+# Question, required input, useful next step. Guidance never transfers a
+# display label as evidence or advertises an unimplemented tool as available.
+PAGE_WORKFLOWS: Final[dict[str, tuple[str, str, str]]] = {
+    "data-management": ("要分析哪一个数据集？", "数据集目录、来源修订与能力状态", "加载成功后再进入分析工作区；检查候选不会改变当前数据集。"),
+    "species": ("体系中有哪些目标物种及其趋势？", "分子式、SMILES、质量范围或丰度证据", "先确认精确结构，再查看直接反应通道或时间演化。"),
+    "reactions": ("目标物种如何生成或消耗？", "精确物种或有方向的 Reaction Type", "选中直接通道并下钻具体事件；计数和净通量不等于速率常数。"),
+    "evolution": ("物种丰度如何随时间变化？", "物种列表与丰度证据", "用趋势定位观察窗口，再检查相应反应事件。"),
+    "element-distribution": ("元素在不同物种间如何分布？", "目标元素、筛选条件与丰度证据", "从分布变化回到具体物种与反应证据。"),
+    "events": ("哪些具体事件支持这个反应？", "反应通道与观察窗口", "选中事件后提取局部轨迹，检查参与分子与原子。"),
+    "trajectory": ("这次反应在原子层面发生了什么？", "一个具体事件与可用轨迹", "先检查局部几何和键变化，再按需展开分子谱系或导出事件几何。"),
+    "batch-compare": ("不同模拟条件或模型迭代的观测有何差异？", "独立来源、目标映射、模拟条件与重复定义", "先核对身份、时间和证据是否可比；选择来源不会切换当前数据集。"),
+}
+
+GROUP_DESCRIPTIONS: Final[dict[str, str]] = {
+    "分析工作区": "从物种、反应和具体事件逐步下钻到轨迹与原子证据。",
+}
 
 TOP_NAV_PAGE_IDS: Final[tuple[str, ...]] = tuple(
     page_id
@@ -111,5 +149,13 @@ TOP_NAV_PAGE_IDS: Final[tuple[str, ...]] = tuple(
 DEFAULT_PAGE: Final[str] = "species"
 
 # A fresh session has no Current Dataset, so it starts where that prerequisite
-# can be satisfied. DEFAULT_PAGE remains the first analysis page after loading.
+# can be satisfied.  Successful loads stay on the dataset overview.
 START_PAGE: Final[str] = "data-management"
+
+
+def resolve_page_id(value: object, *, default: str = DEFAULT_PAGE) -> str:
+    """Resolve mounted pages and safely migrate retired session page IDs."""
+
+    page_id = str(value or "")
+    page_id = LEGACY_PAGE_REDIRECTS.get(page_id, page_id)
+    return page_id if page_id in PAGE_IDS else default
