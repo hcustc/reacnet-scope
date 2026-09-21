@@ -54,7 +54,7 @@ def _picker(side, label):
 def layout():
     return html.Div([
         html.H5('候选反应路径'),
-        html.P('各步由独立事件支持，通过精确物种衔接；不要求同一个分子走完整条路线。'),
+        html.P('每步主线产物需继承主线反应物的原子；相邻步骤不要求是同一个具体分子。'),
         html.Div(id='cp-capability', role='status'),
         dbc.Button('前往数据集准备', id='cp-prepare', size='sm', outline=True),
         dcc.RadioItems(id='cp-mode', options=[{'label': '起点到目标', 'value': 'target'},
@@ -90,7 +90,8 @@ def layout():
         html.Div(id='cp-event-status', role='status'),
         dash_table.DataTable(id='cp-events', columns=[{'name': '事件 ID', 'id': 'event_id'},
             {'name': 'Transition', 'id': 'timestep_index'},
-            {'name': '分子关联', 'id': 'association_status'}], data=[], page_action='none',
+            {'name': '分子关联', 'id': 'association_status'},
+            {'name': '共享原子数', 'id': 'shared_atom_count'}], data=[], page_action='none',
             style_table={'overflowX': 'auto'}, style_cell={'textAlign': 'left'}),
         *[dcc.Store(id=name) for name in ['cp-request', 'cp-raw', 'cp-report', 'cp-event-page', 'cp-context']],
     ], className='rs-card rs-candidate-workbench')
@@ -114,7 +115,10 @@ def route_summary(report):
     miso = (fields.get('miso') or {}).get('value')
     identity = ('miso=1：按 RNG 代表标签连接，未核查连接处每帧的精确键级。' if miso == 1 else
                 '按精确 RNG 标签连接；miso 未知，不从结构外观推断。' if miso is None else f'已记录 miso={miso}；按 RNG 标签连接。')
-    return dbc.Alert([html.Div(status), html.Div(identity), html.Small(
+    transfer = ('主线规则：每个事件中，只沿继承当前反应物原子数最多的产物继续（并列均保留）。'
+                if report.get('carrier_policy') == 'event_local_dominant_atom_descendant'
+                else '当前仅有物种名称连通性，不得解读为物质转化路线。')
+    return dbc.Alert([html.Div(status), html.Div(transfer), html.Div(identity), html.Small(
         f"最大 {report['query']['max_steps']} 步；搜索顺序不代表主通道、产率或机理可信度。")],
         color='warning' if not report['query_complete'] else 'info')
 
@@ -152,7 +156,8 @@ def register_callbacks(app):
     @app.callback(Output('cp-capability', 'children'), Input('app-store', 'data'))
     def capability(store):
         status = svc.candidate_search_status((store or {}).get('artifacts') or {})
-        return dbc.Alert(status['message'], color='success' if status['available'] else 'warning')
+        return dbc.Alert(status['message'], color=('success' if status['available']
+            and not status.get('degraded') else 'warning'))
 
     @app.callback(Output('cp-direct-panel', 'style'), Output('cp-path-panel', 'style'), Input('reaction-task-tabs', 'value'))
     def task(tab):
@@ -250,7 +255,7 @@ def register_callbacks(app):
         paths = (report or {}).get('paths') or []
         rows = [dict(id=p['signature_id'], route=i, steps=p['step_count'],
                      species=' → '.join(smiles_to_formula_fast(s) or s for s in p['species']),
-                     counts=' / '.join(str(s['event_count']) for s in p['steps']), continuity='未检查')
+                     counts=' / '.join(str(s.get('transfer_event_count', s['event_count'])) for s in p['steps']), continuity='未检查')
                 for i, p in enumerate(paths, 1)]
         options = [{'label': f"路线 {i} · {p['step_count']} 步", 'value': p['signature_id']}
                    for i, p in enumerate(paths, 1)]
@@ -276,7 +281,7 @@ def register_callbacks(app):
             if i:
                 chain.append(html.Span('→', className='rs-candidate-arrow'))
             chain.append(structure(species))
-        options = [{'label': f"第 {i+1} 步 · {s['event_count']} 个事件", 'value': i} for i, s in enumerate(path['steps'])]
+        options = [{'label': f"第 {i+1} 步 · {s.get('transfer_event_count', s['event_count'])} 个支持事件", 'value': i} for i, s in enumerate(path['steps'])]
         return html.Div(chain, className='rs-candidate-chain'), options, 0
 
     @app.callback(Output('cp-step-detail', 'children'), Output('cp-event-page', 'data'),
@@ -300,9 +305,14 @@ def register_callbacks(app):
         evidence = html.Div([html.H6('完整反应式'), html.Code(step['reaction_key']),
             html.Div([*map(structure, step['reactants']), html.Span('→'), *map(structure, step['products'])], className='rs-candidate-chain'),
             html.P(f"主线载体：{step['carried_from']} → {step['carried_to']}"),
+            html.P(('局部原子传递：本步只列出主线产物继承当前反应物原子数最多的事件；'
+                    f"本路线记录的最大共享原子数为 {step.get('max_shared_atoms')}。")
+                   if step.get('transfer_basis') == 'event_local_dominant_atom_descendant'
+                   else '仅物种名称连通：未核查当前反应物的原子是否进入主线产物。'),
             html.P('以下各事件只支持本步骤；它们不自动与其他步骤组成连续历史。')])
         return evidence, page, f"事件 {offset+1 if page['rows'] else 0}–{offset+len(page['rows'])} / {page['total']}；Transition 是分析帧之间的区间，不是 ps。", [
-            {k: row.get(k) for k in ('event_id', 'timestep_index', 'association_status')} for row in page['rows']], offset == 0, not page['has_more'], not bool(page['rows'])
+            {k: row.get(k) for k in ('event_id', 'timestep_index', 'association_status',
+                                      'shared_atom_count')} for row in page['rows']], offset == 0, not page['has_more'], not bool(page['rows'])
 
     @app.callback(Output('event-grid-store', 'data', allow_duplicate=True),
                   Output('event-grid', 'data', allow_duplicate=True), Output('event-grid', 'columns', allow_duplicate=True),

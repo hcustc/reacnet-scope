@@ -36,9 +36,11 @@ ADR-0013's separation of discovery and Continuous MD Support remains binding.
   remain eligible for target checks after the expansion budget is spent. Target
   probes have their own bounded count (the `max_expansions` limit), and SQLite
   work shares the query deadline. Exports report probe and matching-row counts.
-  These are execution changes and do not require rebuilding the version 1 index.
-- Return each carried-product branch separately. Repeated carried Species are
-  excluded from ordinary paths; bounded cycle-closure records remain in JSON.
+  These execution changes did not require rebuilding the version 1 index;
+  ADR-0016 subsequently advances the carrier evidence and index contract.
+- Return each event-local dominant atom-descendant branch separately, retaining
+  ties. Repeated carried Species are excluded from ordinary paths; bounded
+  cycle-closure records remain in JSON. See ADR-0016.
 - Step counts are individual event counts, never a full-route occurrence count.
   Side participants and repeated stoichiometric terms remain in every step.
 - Known miso settings are sourced explicitly. With miso=1, labels are presented
@@ -46,7 +48,7 @@ ADR-0013's separation of discovery and Continuous MD Support remains binding.
 - Continuous MD Support is `not_evaluated`; no unfinished verification control
   or composite/energy score is exposed. Event and trajectory inspection reuse
   existing tools with stable identities and revision checks.
-- The new schema `reacnet-scope/indexed-candidates/v1`, Python service and
+- The schema is now `reacnet-scope/indexed-candidates/v2`; Python service and
   `candidate-search` CLI share one implementation. Existing `candidate-paths`
   CLI/schema remain compatibility surfaces; their semantics are not relabeled.
 - Requests and results carry dataset and request identity. Cancelled or

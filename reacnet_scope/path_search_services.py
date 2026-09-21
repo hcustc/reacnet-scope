@@ -12,7 +12,11 @@ from typing import Any, Mapping
 
 from .event_index import EVENT_EVIDENCE_STORE
 from .indexes import IndexNotReadyError
-from .path_search import CandidateReader, discover_indexed_candidates
+from .path_search import (
+    ATOM_TRANSFER_POLICY,
+    CandidateReader,
+    discover_indexed_candidates,
+)
 from .service_types import ServiceError
 from .workspace_services import _event_artifact_paths
 
@@ -36,8 +40,15 @@ def _reader(artifacts: Mapping[str, Any]):
 
 def candidate_search_status(artifacts: Mapping[str, Any]) -> dict[str, Any]:
     try:
-        with _reader(artifacts):
-            return {'available': True, 'message': '候选搜索已就绪；无需分子连续性证据即可搜索。'}
+        with _reader(artifacts) as reader:
+            if reader.carrier_policy == ATOM_TRANSFER_POLICY:
+                message = '候选路径已就绪；每步主线产物均有局部原子继承证据。'
+            else:
+                message = ('仅有物种网络连通性，缺少分子原子关联；'
+                           '结果可用于网络探索，不能解读为物质转化路线。')
+            return {'available': True, 'message': message,
+                    'carrier_policy': reader.carrier_policy,
+                    'degraded': reader.carrier_policy != ATOM_TRANSFER_POLICY}
     except ServiceError as exc:
         return {'available': False, 'message': exc.message}
 
@@ -77,9 +88,16 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
     if path is None or not 0 <= step_index < len(path['steps']) or offset < 0:
         raise ServiceError('所选路线或步骤已失效。', reason='bad_candidate_selection')
     source, molecules = _event_artifact_paths(artifacts)
-    key = path['steps'][step_index]['reaction_key']
+    step = path['steps'][step_index]
+    key = step['reaction_key']
     try:
-        payload = EVENT_EVIDENCE_STORE.query_events(source, molecules, key, limit=25, offset=offset)
+        if step.get('transfer_basis') == ATOM_TRANSFER_POLICY:
+            payload = EVENT_EVIDENCE_STORE.query_candidate_transfer_events(
+                source, molecules, key, step['carried_from'], step['carried_to'],
+                limit=25, offset=offset)
+        else:
+            payload = EVENT_EVIDENCE_STORE.query_events(
+                source, molecules, key, limit=25, offset=offset)
     except (IndexNotReadyError, sqlite3.Error, OSError, ValueError) as exc:
         raise ServiceError(str(exc), reason='candidate_events_unavailable') from exc
     if candidate_source_revision(artifacts) != report.get('source_revision'):
@@ -93,7 +111,8 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
 def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     output = io.StringIO()
     fields = ['signature_id', 'step', 'carried_from', 'carried_to', 'reaction_key',
-              'reactants', 'products', 'event_count', 'continuous_md', 'query_complete',
+              'reactants', 'products', 'event_count', 'transfer_event_count',
+              'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
               'query', 'source_revision', 'truncation_reasons']
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
@@ -103,6 +122,9 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 carried_from=step['carried_from'], carried_to=step['carried_to'],
                 reaction_key=step['reaction_key'], reactants=json.dumps(step['reactants']),
                 products=json.dumps(step['products']), event_count=step['event_count'],
+                transfer_event_count=step.get('transfer_event_count'),
+                max_shared_atoms=step.get('max_shared_atoms'),
+                transfer_basis=step.get('transfer_basis'),
                 continuous_md=path['continuous_md'], query_complete=report['query_complete'],
                 query=json.dumps(report['query']), source_revision=json.dumps(report['source_revision']),
                 truncation_reasons=json.dumps(report['truncation_reasons'])))

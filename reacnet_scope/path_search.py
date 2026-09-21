@@ -19,8 +19,10 @@ from .indexes import IndexInvalidError
 from .network import smiles_to_formula_fast
 from .rng_events import reaction_key
 
-SCHEMA = 'reacnet-scope/indexed-candidates/v1'
-ADJACENCY_VERSION = '1'
+SCHEMA = 'reacnet-scope/indexed-candidates/v2'
+ADJACENCY_VERSION = '2'
+ATOM_TRANSFER_POLICY = 'event_local_dominant_atom_descendant'
+NETWORK_ONLY_POLICY = 'species_connectivity_only'
 
 
 @lru_cache(maxsize=4096)
@@ -37,6 +39,8 @@ def candidate_formula(species: str) -> str:
 def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
     """Offline, streaming derivation inside the unpublished event-index build."""
     connection.executescript('''
+        DROP TABLE IF EXISTS candidate_transfer_events;
+        DROP TABLE IF EXISTS candidate_transfers;
         DROP TABLE IF EXISTS candidate_adjacency;
         DROP TABLE IF EXISTS candidate_reactions;
         DROP TABLE IF EXISTS candidate_species;
@@ -49,6 +53,21 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
         CREATE TABLE candidate_adjacency(
             species TEXT NOT NULL, reaction_key TEXT NOT NULL,
             PRIMARY KEY(species,reaction_key));
+        CREATE TABLE candidate_transfers(
+            source_species TEXT NOT NULL, product_species TEXT NOT NULL,
+            reaction_key TEXT NOT NULL, supporting_events INTEGER NOT NULL,
+            max_shared_atoms INTEGER NOT NULL,
+            PRIMARY KEY(source_species,product_species,reaction_key));
+        CREATE INDEX candidate_transfers_target
+            ON candidate_transfers(source_species,product_species,reaction_key);
+        CREATE TABLE candidate_transfer_events(
+            source_species TEXT NOT NULL, product_species TEXT NOT NULL,
+            reaction_key TEXT NOT NULL, event_id TEXT NOT NULL,
+            shared_atoms INTEGER NOT NULL,
+            PRIMARY KEY(source_species,product_species,reaction_key,event_id));
+        CREATE INDEX candidate_transfer_events_lookup
+            ON candidate_transfer_events(
+                source_species,product_species,reaction_key,event_id);
     ''')
     # Iterate the published-direction summaries, never infer a reverse edge.
     for key, count in connection.execute(
@@ -63,8 +82,76 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
                                (species, candidate_formula(species)))
         connection.executemany('INSERT INTO candidate_adjacency VALUES(?,?)',
                                ((species, key) for species in set(reactants)))
+    event_columns = {
+        str(row[1]) for row in connection.execute('PRAGMA table_info(events)')
+    }
+    required = {'event_id', 'reaction_key', 'association_status',
+                'reactant_participants_json', 'product_participants_json'}
+    matched_events = 0
+    if required <= event_columns:
+        cursor = connection.execute('''
+            SELECT event_id,reaction_key,reactant_participants_json,
+                   product_participants_json
+            FROM events WHERE association_status='matched'
+            ORDER BY event_id
+        ''')
+        for event_id, key, reactant_json, product_json in cursor:
+            try:
+                reactants = json.loads(reactant_json)
+                products = json.loads(product_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(reactants, list) or not isinstance(products, list):
+                continue
+            event_transfers: dict[tuple[str, str, str], int] = {}
+            for reactant in reactants:
+                if not isinstance(reactant, dict):
+                    continue
+                source = str(reactant.get('species') or '')
+                source_atoms = {
+                    int(value) for value in reactant.get('atom_ids') or []
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+                if not source or not source_atoms:
+                    continue
+                overlaps: list[tuple[str, int]] = []
+                for product in products:
+                    if not isinstance(product, dict):
+                        continue
+                    target = str(product.get('species') or '')
+                    target_atoms = {
+                        int(value) for value in product.get('atom_ids') or []
+                        if isinstance(value, int) and not isinstance(value, bool)
+                    }
+                    if target:
+                        overlaps.append((target, len(source_atoms & target_atoms)))
+                maximum = max((count for _, count in overlaps), default=0)
+                if maximum <= 0:
+                    continue
+                for target, count in overlaps:
+                    if count == maximum:
+                        transfer = (source, target, str(key))
+                        event_transfers[transfer] = max(
+                            event_transfers.get(transfer, 0), count
+                        )
+            if event_transfers:
+                matched_events += 1
+            for (source, target, reaction), shared in event_transfers.items():
+                connection.execute('''
+                    INSERT INTO candidate_transfers VALUES(?,?,?,1,?)
+                    ON CONFLICT(source_species,product_species,reaction_key)
+                    DO UPDATE SET
+                        supporting_events=supporting_events+1,
+                        max_shared_atoms=MAX(max_shared_atoms,excluded.max_shared_atoms)
+                ''', (source, target, reaction, shared))
+                connection.execute('''
+                    INSERT INTO candidate_transfer_events VALUES(?,?,?,?,?)
+                ''', (source, target, reaction, str(event_id), shared))
+    policy = ATOM_TRANSFER_POLICY if matched_events else NETWORK_ONLY_POLICY
     connection.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
                        ('candidate_adjacency_version', ADJACENCY_VERSION))
+    connection.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
+                       ('candidate_carrier_policy', policy))
 
 
 class CandidateReader:
@@ -80,11 +167,17 @@ class CandidateReader:
                 raise IndexInvalidError('候选路径索引尚未准备；请在数据集中重建事件索引。')
             self.connection.execute('SELECT species FROM candidate_species LIMIT 0')
             self.connection.execute('SELECT reaction_key FROM candidate_adjacency LIMIT 0')
+            self.connection.execute('SELECT reaction_key FROM candidate_transfers LIMIT 0')
+            self.connection.execute('SELECT event_id FROM candidate_transfer_events LIMIT 0')
             self.connection.execute('SELECT reaction_key,reactants,products,total_events FROM candidate_reactions LIMIT 0')
             if not self.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name='candidate_species_formula'"
             ).fetchone():
                 raise IndexInvalidError('候选结构检索索引缺失；请重建事件索引。')
+            policy = self.connection.execute(
+                "SELECT value FROM meta WHERE key='candidate_carrier_policy'"
+            ).fetchone()
+            self.carrier_policy = str(policy[0]) if policy else NETWORK_ONLY_POLICY
         except Exception:
             self.connection.close()
             raise
@@ -109,6 +202,19 @@ class CandidateReader:
                                        (species,)).fetchone() is not None
 
     def outgoing(self, species: str, limit: int) -> list[dict[str, Any]]:
+        if self.carrier_policy == ATOM_TRANSFER_POLICY:
+            rows = self.connection.execute('''
+                SELECT r.reaction_key,r.reactants,r.products,r.total_events,
+                       t.product_species,t.supporting_events,t.max_shared_atoms
+                FROM candidate_transfers t JOIN candidate_reactions r
+                ON r.reaction_key=t.reaction_key WHERE t.source_species=?
+                ORDER BY r.reaction_key,t.product_species LIMIT ?
+            ''', (species, limit)).fetchall()
+            return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
+                         event_count=n, carried_products=[product],
+                         transfer_event_count=support, max_shared_atoms=shared,
+                         transfer_basis=ATOM_TRANSFER_POLICY)
+                    for k, a, b, n, product, support, shared in rows]
         rows = self.connection.execute('''
             SELECT r.reaction_key,r.reactants,r.products,r.total_events
             FROM candidate_adjacency a JOIN candidate_reactions r
@@ -116,7 +222,9 @@ class CandidateReader:
             ORDER BY a.reaction_key LIMIT ?
         ''', (species, limit)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
-                     event_count=n) for k, a, b, n in rows]
+                     event_count=n, carried_products=sorted(set(json.loads(b))),
+                     transfer_event_count=n, max_shared_atoms=None,
+                     transfer_basis=NETWORK_ONLY_POLICY) for k, a, b, n in rows]
 
     def outgoing_to(self, species: str, target: str, limit: int) -> list[dict[str, Any]]:
         """Probe an exact final step within one indexed reactant neighborhood.
@@ -124,6 +232,20 @@ class CandidateReader:
         Filtering precedes LIMIT so a target after a hub's first page is eligible.
         The search installs a SQLite deadline handler, including JSON filtering.
         """
+        if self.carrier_policy == ATOM_TRANSFER_POLICY:
+            rows = self.connection.execute('''
+                SELECT r.reaction_key,r.reactants,r.products,r.total_events,
+                       t.product_species,t.supporting_events,t.max_shared_atoms
+                FROM candidate_transfers t JOIN candidate_reactions r
+                ON r.reaction_key=t.reaction_key
+                WHERE t.source_species=? AND t.product_species=?
+                ORDER BY r.reaction_key LIMIT ?
+            ''', (species, target, limit)).fetchall()
+            return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
+                         event_count=n, carried_products=[product],
+                         transfer_event_count=support, max_shared_atoms=shared,
+                         transfer_basis=ATOM_TRANSFER_POLICY)
+                    for k, a, b, n, product, support, shared in rows]
         rows = self.connection.execute('''
             SELECT r.reaction_key,r.reactants,r.products,r.total_events
             FROM candidate_adjacency a JOIN candidate_reactions r
@@ -132,7 +254,9 @@ class CandidateReader:
             ORDER BY a.reaction_key LIMIT ?
         ''', (species, target, limit)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
-                     event_count=n) for k, a, b, n in rows]
+                     event_count=n, carried_products=[target], transfer_event_count=n,
+                     max_shared_atoms=None, transfer_basis=NETWORK_ONLY_POLICY)
+                for k, a, b, n in rows]
 
 
 def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: str = '',
@@ -170,7 +294,7 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
         if len(paths) >= max_paths:
             reasons.add('result_limit')
             return False
-        identity = {'version': 1, 'species': species,
+        identity = {'version': 2, 'species': species,
                     'reactions': [s['reaction_key'] for s in steps]}
         signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
         paths.append(dict(signature_id=signature, species=species, steps=steps,
@@ -222,7 +346,7 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
                 cache[focal] = neighbors[:allowance]
                 edges_read += len(cache[focal])
             for reaction in cache[focal]:
-                for product in sorted(set(reaction['products'])):
+                for product in reaction['carried_products']:
                     if product in species:
                         cycle_count += 1
                         if len(cycles) < 100:
@@ -251,5 +375,10 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
                 target_probes=len(target_cache), target_rows_read=target_rows_read,
                 cycle_closures=cycles, cycle_closures_limit=100,
                 cycle_closures_seen=cycle_count, cycle_closures_truncated=cycle_count > len(cycles),
+                carrier_policy=reader.carrier_policy,
                 ordering='step_count_then_exact_identity',
-                semantics='Each step independently observed; no continuous chain claimed.')
+                semantics=(
+                    'Each step follows an event-local dominant atom descendant; '
+                    'the steps remain independent and no continuous chain is claimed.'
+                    if reader.carrier_policy == ATOM_TRANSFER_POLICY else
+                    'Species connectivity only; atom transfer and a continuous chain are not claimed.'))

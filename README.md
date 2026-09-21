@@ -326,7 +326,7 @@ uv run reacnet-scope species --reac /path/to/xxx.reactionabcd --formula C6H4
 ## 有界候选路径发现
 
 `reacnet-scope candidate-paths` 从一个或多个精确起始 Species 出发，在当前数据集观测到的
-有向 Reaction Type 网络上执行有界局部展开，以精确 Carried Species 连接步骤，再对候选涉及的
+有向 Reaction Type 网络上执行有界局部展开，以具有单步局部原子继承证据的精确 Carried Species 连接步骤，再对候选涉及的
 Reaction Types 查询逐步事件证据。原子连续 Event Path 留给独立的路径验证。
 
 ```bash

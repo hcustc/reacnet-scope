@@ -42,7 +42,7 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
 
-Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从一个或多个精确 Species 出发，以明确的 Carried Species 连接相邻 Reaction Type；每个方向必须有至少一次 normalized Reaction Occurrence 和具体 Reaction Evidence，但不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是排名后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
+Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从一个或多个精确 Species 出发，以具有 event-local dominant atom-descendant 证据的 Carried Species 连接相邻 Reaction Type；每一步至少有一次 matched Reaction Occurrence 支持局部原子传递，但不同步骤不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是排名后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
 
 围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它本身不递归扩展路径。
 
@@ -283,8 +283,8 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 ### 11.5 Candidate Path Discovery
 
 - Discovery graph 只包含当前发布 revision 中至少有一次 normalized Reaction Occurrence 和具体 Reaction Evidence 支持的记录方向；聚合网络、推导反向或 `count=0` 不能创建方向。`count >= 1` 只表示 eligible，不代表 mechanistically significant。
-- 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
-- 多产物 Reaction Type 对每个实际继续传播的 product Species 分别产生 carried branch；ranker 不得猜测 Carried Species。默认不按分子式、结构相似度或人工类别自动连接。
+- 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。至少一个 matched Reaction Occurrence 必须证明该产物是 focal reactant 的 event-local dominant atom descendant，即与 focal reactant 具有所有产物 participant 中最大的正 atom-ID 交集。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
+- 多产物 Reaction Type 只对满足上述局部原子传递规则的 product Species 产生 carried branch；最大交集并列时分别保留。ranker 不得按分子式、结构相似度或人工类别猜测 Carried Species。不同步骤仍可来自不同事件和 Molecule Instance；这一局部规则不等于 Continuous MD Support。
 - 普通 Candidate 使用 Carried-Species-simple path；已访问 Carried Species 的 expansion 不进入普通 Candidate，而记录为可审计 cycle closure evidence。到达 `max_steps` 是正常 discovery horizon termination，不是 cycle 或 execution truncation。
 - `max_steps` 是 declarative query horizon。`max_expansions`、`max_frontier_states`、`max_candidates_examined`、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
 

@@ -3435,6 +3435,87 @@ class EventEvidenceStore:
             "source_signatures": source_signatures,
         }
 
+    def query_candidate_transfer_events(
+        self,
+        reactionevent_file: str,
+        molecules_file: str,
+        reaction_key: str,
+        source_species: str,
+        product_species: str,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Page only occurrences that support one event-local carrier edge."""
+        opened = self.open_required(reactionevent_file, molecules_file)
+        safe_limit = max(1, min(int(limit), 10_000))
+        safe_offset = max(0, int(offset))
+        connection = _readonly_connection(Path(opened["index_path"]))
+        parameters = (
+            str(source_species), str(product_species), str(reaction_key)
+        )
+        try:
+            total = int(connection.execute('''
+                SELECT COUNT(*) FROM candidate_transfer_events
+                WHERE source_species=? AND product_species=? AND reaction_key=?
+            ''', parameters).fetchone()[0])
+            records = connection.execute(f'''
+                SELECT {_EVENT_SELECT_COLUMNS_E},t.shared_atoms
+                FROM candidate_transfer_events t JOIN events e
+                ON e.event_id=t.event_id
+                WHERE t.source_species=? AND t.product_species=?
+                  AND t.reaction_key=?
+                ORDER BY e.timestep_index,e.source_row,e.event_id
+                LIMIT ? OFFSET ?
+            ''', (*parameters, safe_limit, safe_offset)).fetchall()
+        except sqlite3.Error as exc:
+            raise IndexInvalidError(
+                f"Candidate transfer evidence index is corrupt: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+        rows: list[dict[str, Any]] = []
+        try:
+            for page_index, record in enumerate(records, safe_offset + 1):
+                row = _event_payload_from_record(
+                    record[:-1], event_index=page_index
+                )
+                row["shared_atom_count"] = int(record[-1])
+                rows.append(row)
+        except (TypeError, ValueError) as exc:
+            raise IndexInvalidError(
+                f"Candidate transfer evidence payload is invalid: {exc}"
+            ) from exc
+        source_label = (
+            "timeline"
+            if opened.get("source_kind") == "native_hdf5"
+            else "reactionevent"
+        )
+        source_signatures = {
+            source_label: {
+                "path": os.path.abspath(reactionevent_file),
+                "size": os.path.getsize(reactionevent_file),
+                "mtime_ns": os.stat(reactionevent_file).st_mtime_ns,
+            },
+        }
+        if str(molecules_file or "").strip():
+            source_signatures["molecules"] = {
+                "path": os.path.abspath(molecules_file),
+                "size": os.path.getsize(molecules_file),
+                "mtime_ns": os.stat(molecules_file).st_mtime_ns,
+            }
+        return {
+            "rows": rows,
+            "total": total,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "has_more": safe_offset + len(rows) < total,
+            "evidence_status": "atom_transfer_linked",
+            "association_available": opened["association_available"],
+            "time_basis": opened["time_basis"],
+            "source_signatures": source_signatures,
+        }
+
     def reaction_time_summary(
         self,
         reactionevent_file: str,

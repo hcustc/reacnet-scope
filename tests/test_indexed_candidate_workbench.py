@@ -134,7 +134,7 @@ def test_cli_shares_indexed_query(source, tmp_path, capsys):
     assert main(['candidate-search', '--source', source['reactionevent'], '--start', 'CCO',
                  '--target', 'CC(=O)O', '--out-json', str(out)]) == 0
     report = json.loads(out.read_text())
-    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v1')
+    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v2')
     capsys.readouterr()
 
 
@@ -196,9 +196,11 @@ def test_native_candidate_and_evidence_queries_do_not_open_hdf5(tmp_path, monkey
     artifacts = {'timeline': str(source)}
     report = svc.search_candidate_paths(artifacts, '[C]', target='[C][O]')
     assert len(report['paths']) == 1
+    assert report['carrier_policy'] == 'event_local_dominant_atom_descendant'
     assert report['paths'][0]['steps'][0]['reactants'] == ['[C]', '[O]']
     page = svc.candidate_step_events(artifacts, report, report['paths'][0]['signature_id'], 0)
     assert page['total'] == 1 and page['rows'][0]['association_status'] == 'matched'
+    assert page['rows'][0]['shared_atom_count'] == 1
 
 
 def test_target_after_first_adjacency_page_is_not_silently_excluded(tmp_path):
@@ -260,3 +262,39 @@ def test_incomplete_empty_summary_does_not_claim_no_route(source):
     rendered = json.dumps(route_summary(report), cls=PlotlyJSONEncoder, ensure_ascii=False)
     assert '搜索未完成，尚未找到' in rendered
     assert '目标连接检查预算' in rendered
+
+
+def test_carrier_follows_event_local_dominant_atom_descendant(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'atom-transfer.sqlite'
+    first = '[C][C]+[O]->[H]+[C][C][O]'
+    second = '[H]+[N]->[N][H]'
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)', [(first,), (second,)])
+        con.execute('''CREATE TABLE events(
+            event_id TEXT PRIMARY KEY, reaction_key TEXT, association_status TEXT,
+            reactant_participants_json TEXT, product_participants_json TEXT)''')
+        con.execute('INSERT INTO events VALUES(?,?,?,?,?)', ('one', first, 'matched',
+            json.dumps([{'species': '[C][C]', 'atom_ids': [1, 2]},
+                        {'species': '[O]', 'atom_ids': [3]}]),
+            json.dumps([{'species': '[H]', 'atom_ids': [4]},
+                        {'species': '[C][C][O]', 'atom_ids': [1, 2, 3]}])))
+        con.execute('INSERT INTO events VALUES(?,?,?,?,?)', ('two', second, 'matched',
+            json.dumps([{'species': '[H]', 'atom_ids': [5]},
+                        {'species': '[N]', 'atom_ids': [6]}]),
+            json.dumps([{'species': '[N][H]', 'atom_ids': [5, 6]}])))
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        result = discover_indexed_candidates(reader, '[C][C]', target='[N][H]', max_steps=2)
+        explored = discover_indexed_candidates(reader, '[C][C]', mode='explore', max_steps=1)
+    finally:
+        reader.close()
+    assert result['paths'] == []
+    assert [path['species'] for path in explored['paths']] == [['[C][C]', '[C][C][O]']]
+    step = explored['paths'][0]['steps'][0]
+    assert step['transfer_event_count'] == 1
+    assert step['max_shared_atoms'] == 2
+    assert result['carrier_policy'] == 'event_local_dominant_atom_descendant'

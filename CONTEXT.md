@@ -69,15 +69,15 @@ The network of exact Species and directed Reaction Types for which the current d
 _Avoid_: Aggregate reaction network, occurrence graph, inferred mechanism network
 
 **Candidate Path Discovery**:
-A bounded network search from an exact anchor Species through directed Reaction Types observed in the current dataset, connecting adjacent steps by an exact carried Species. It proposes routes for investigation without requiring one concrete molecule lineage to realize the whole route.
+A bounded network search from an exact anchor Species through directed Reaction Types observed in the current dataset, connecting adjacent steps by an exact carried Species with event-local dominant atom-descendant support. It proposes routes for investigation without requiring one concrete molecule lineage to realize the whole route.
 _Avoid_: Path Verification, mechanism prediction, occurrence-lineage replay
 
 **Candidate Path**:
-An ordered route from an anchor Species through observed directed Reaction Types and explicitly carried Species. Its structural identity is independent of query ranking, dataset revision, and whether Continuous MD Support has been evaluated.
+An ordered route from an anchor Species through observed directed Reaction Types and explicitly carried Species. Every step has at least one matched occurrence in which its carried product is an event-local dominant atom descendant of the focal reactant. Its structural identity is independent of query ranking, dataset revision, and whether Continuous MD Support has been evaluated.
 _Avoid_: Sampled Candidate Path, Event Path, confirmed mechanism
 
 **Carried Species**:
-The exact product Species of one Candidate Path step that is used as a reactant by the next step. Co-reactants and other products remain reaction context but do not connect the main route.
+The exact product Species of one Candidate Path step that is used as a reactant by the next step. Within a supporting occurrence it has the greatest positive atom-ID overlap with the focal reactant among all product participants; tied products form separate branches. Co-reactants and other products remain reaction context but do not connect the main route.
 _Avoid_: Focal Species, inferred intermediate, ranker-selected product
 
 **Cycle Closure Evidence**:
@@ -85,7 +85,7 @@ An observed expansion that would revisit a Carried Species already present in an
 _Avoid_: Reaction Cycle Candidate, Fast Recrossing Episode
 
 **Step Evidence**:
-The Reaction Occurrences that establish why one directed Reaction Type is eligible for Candidate Path Discovery. Evidence for different steps is independent and does not imply that those occurrences form one continuous sampled chain.
+The Reaction Occurrences that establish the directed Reaction Type and event-local focal-reactant-to-carried-product atom transfer for one Candidate Path step. Evidence for different steps is independent and does not imply that those occurrences form one continuous sampled chain.
 _Avoid_: Continuous Support Evidence, sampled pathway
 
 **Continuous MD Support**:
