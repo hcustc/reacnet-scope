@@ -30,6 +30,13 @@ ADR-0013's separation of discovery and Continuous MD Support remains binding.
   identity ordering. This is presentation, not mechanistic ranking. Search,
   frontier, local adjacency, time and result limits report incomplete results;
   the maximum path length is a separate scientific query horizon.
+- Target queries check an exact final step for each breadth-first prefix before
+  expanding other products. Filtering uses the indexed reactant neighborhood;
+  target matches are not restricted to its first adjacency page. Pending prefixes
+  remain eligible for target checks after the expansion budget is spent. Target
+  probes have their own bounded count (the `max_expansions` limit), and SQLite
+  work shares the query deadline. Exports report probe and matching-row counts.
+  These are execution changes and do not require rebuilding the version 1 index.
 - Return each carried-product branch separately. Repeated carried Species are
   excluded from ordinary paths; bounded cycle-closure records remain in JSON.
 - Step counts are individual event counts, never a full-route occurrence count.

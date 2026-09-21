@@ -106,8 +106,10 @@ def route_summary(report):
     if not report['query_complete']:
         labels = {'time_budget': '时间预算', 'result_limit': '返回条数上限',
                   'expansion_budget': '展开预算', 'adjacency_budget': '局部邻接预算',
-                  'frontier_budget': '待搜索分支上限'}
-        status = f'本次仅返回 {count} 条部分结果；达到' + '、'.join(labels[r] for r in report['truncation_reasons']) + '，不能据此断言其他路线不存在。'
+                  'frontier_budget': '待搜索分支上限', 'target_probe_budget': '目标连接检查预算'}
+        status = (f'本次返回 {count} 条候选路线，搜索未完成；达到' if count else
+                  '搜索未完成，尚未找到候选路线；达到')
+        status += '、'.join(labels[r] for r in report['truncation_reasons']) + '，不能据此断言其他路线不存在。'
     fields = (report.get('processing') or {}).get('fields') or {}
     miso = (fields.get('miso') or {}).get('value')
     identity = ('miso=1：按 RNG 代表标签连接，未核查连接处每帧的精确键级。' if miso == 1 else

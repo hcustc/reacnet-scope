@@ -118,6 +118,22 @@ class CandidateReader:
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
                      event_count=n) for k, a, b, n in rows]
 
+    def outgoing_to(self, species: str, target: str, limit: int) -> list[dict[str, Any]]:
+        """Probe an exact final step within one indexed reactant neighborhood.
+
+        Filtering precedes LIMIT so a target after a hub's first page is eligible.
+        The search installs a SQLite deadline handler, including JSON filtering.
+        """
+        rows = self.connection.execute('''
+            SELECT r.reaction_key,r.reactants,r.products,r.total_events
+            FROM candidate_adjacency a JOIN candidate_reactions r
+            ON r.reaction_key=a.reaction_key WHERE a.species=?
+            AND EXISTS (SELECT 1 FROM json_each(r.products) WHERE value=?)
+            ORDER BY a.reaction_key LIMIT ?
+        ''', (species, target, limit)).fetchall()
+        return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
+                     event_count=n) for k, a, b, n in rows]
+
 
 def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: str = '',
                                 mode: str = 'target', max_steps: int = 4,
@@ -147,49 +163,84 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
     edges_read = 0
     horizon_limited = False
     deadline = time.monotonic() + max_seconds
-    while queue:
-        if time.monotonic() >= deadline:
-            reasons.add('time_budget'); break
-        species, steps = queue.popleft()
-        if steps and (mode == 'explore' or species[-1] == target):
-            if len(paths) >= max_paths:
-                reasons.add('result_limit'); break
-            identity = {'version': 1, 'species': species,
-                        'reactions': [s['reaction_key'] for s in steps]}
-            signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
-            paths.append(dict(signature_id=signature, species=species, steps=steps,
-                              step_count=len(steps), continuous_md='not_evaluated'))
-            if mode == 'target':
+    target_cache: dict[str, list[dict[str, Any]]] = {}
+    target_rows_read = 0
+
+    def emit(species, steps):
+        if len(paths) >= max_paths:
+            reasons.add('result_limit')
+            return False
+        identity = {'version': 1, 'species': species,
+                    'reactions': [s['reaction_key'] for s in steps]}
+        signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+        paths.append(dict(signature_id=signature, species=species, steps=steps,
+                          step_count=len(steps), continuous_md='not_evaluated'))
+        return True
+
+    reader.connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    try:
+        while queue:
+            if time.monotonic() >= deadline:
+                reasons.add('time_budget'); break
+            species, steps = queue.popleft()
+            focal = species[-1]
+            if mode == 'explore' and steps and not emit(species, steps):
+                break
+            if len(steps) >= max_steps:
+                horizon_limited = True
                 continue
-        if len(steps) >= max_steps:
-            horizon_limited = True
-            continue
-        if expansions >= max_expansions:
-            reasons.add('expansion_budget'); break
-        expansions += 1
-        focal = species[-1]
-        if focal not in cache:
-            # A hub cannot allocate an unbounded local edge list.
-            allowance = min(256, max_expansions - edges_read)
-            if allowance <= 0:
-                reasons.add('adjacency_budget'); break
-            neighbors = reader.outgoing(focal, allowance + 1)
-            if len(neighbors) > allowance:
-                reasons.add('adjacency_budget')
-            cache[focal] = neighbors[:allowance]
-            edges_read += len(cache[focal])
-        for reaction in cache[focal]:
-            for product in sorted(set(reaction['products'])):
-                if product in species:
-                    cycle_count += 1
-                    if len(cycles) < 100:
-                        cycles.append(dict(species=product, reaction_key=reaction['reaction_key'],
-                                           prefix_species=list(species), prefix_reactions=[s['reaction_key'] for s in steps]))
+            if mode == 'target':
+                # Close each BFS prefix against the target before spending the
+                # remaining expansion budget on unrelated product branches.
+                if focal not in target_cache:
+                    if len(target_cache) >= max_expansions:
+                        reasons.add('target_probe_budget')
+                        continue
+                    target_cache[focal] = reader.outgoing_to(focal, target, max_paths + 1)
+                    target_rows_read += len(target_cache[focal])
+                for reaction in target_cache[focal]:
+                    step = dict(reaction, carried_from=focal, carried_to=target)
+                    if not emit(species + [target], steps + [step]):
+                        break
+                if 'result_limit' in reasons:
+                    break
+                if len(steps) == max_steps - 1:
+                    horizon_limited = True
                     continue
-                if len(queue) >= max_frontier:
-                    reasons.add('frontier_budget'); break
-                step = dict(reaction, carried_from=focal, carried_to=product)
-                queue.append((species + [product], steps + [step]))
+            if expansions >= max_expansions:
+                reasons.add('expansion_budget')
+                continue  # Already queued prefixes may still close at the target.
+            expansions += 1
+            if focal not in cache:
+                allowance = max_expansions - edges_read
+                if allowance <= 0:
+                    reasons.add('adjacency_budget')
+                    continue
+                neighbors = reader.outgoing(focal, allowance + 1)
+                if len(neighbors) > allowance:
+                    reasons.add('adjacency_budget')
+                cache[focal] = neighbors[:allowance]
+                edges_read += len(cache[focal])
+            for reaction in cache[focal]:
+                for product in sorted(set(reaction['products'])):
+                    if product in species:
+                        cycle_count += 1
+                        if len(cycles) < 100:
+                            cycles.append(dict(species=product, reaction_key=reaction['reaction_key'],
+                                               prefix_species=list(species), prefix_reactions=[s['reaction_key'] for s in steps]))
+                        continue
+                    if mode == 'target' and product == target:
+                        continue  # Already emitted by the exact final-step probe.
+                    if len(queue) >= max_frontier:
+                        reasons.add('frontier_budget'); break
+                    step = dict(reaction, carried_from=focal, carried_to=product)
+                    queue.append((species + [product], steps + [step]))
+    except sqlite3.OperationalError as exc:
+        if getattr(exc, 'sqlite_errorcode', None) != sqlite3.SQLITE_INTERRUPT:
+            raise
+        reasons.add('time_budget')
+    finally:
+        reader.connection.set_progress_handler(None, 0)
     return dict(schema_version=SCHEMA, query=dict(start=start, target=target, mode=mode,
                 max_steps=max_steps, max_paths=max_paths, max_expansions=max_expansions,
                 max_frontier=max_frontier, max_seconds=max_seconds), paths=paths,
@@ -197,6 +248,7 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
                 query_complete=not reasons, graph_exhaustive=not reasons and not horizon_limited,
                 horizon_limited=horizon_limited, truncation_reasons=sorted(reasons),
                 expansions=expansions, adjacency_rows_read=edges_read,
+                target_probes=len(target_cache), target_rows_read=target_rows_read,
                 cycle_closures=cycles, cycle_closures_limit=100,
                 cycle_closures_seen=cycle_count, cycle_closures_truncated=cycle_count > len(cycles),
                 ordering='step_count_then_exact_identity',

@@ -199,3 +199,64 @@ def test_native_candidate_and_evidence_queries_do_not_open_hdf5(tmp_path, monkey
     assert report['paths'][0]['steps'][0]['reactants'] == ['[C]', '[O]']
     page = svc.candidate_step_events(artifacts, report, report['paths'][0]['signature_id'], 0)
     assert page['total'] == 1 and page['rows'][0]['association_status'] == 'matched'
+
+
+def test_target_after_first_adjacency_page_is_not_silently_excluded(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'hub.sqlite'
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)',
+                        ((f'[C]->[C:{i}]',) for i in range(256)))
+        con.execute("INSERT INTO reaction_summary VALUES('[C]->[O]',1)")
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        result = discover_indexed_candidates(reader, '[C]', target='[O]', max_steps=1)
+    finally:
+        reader.close()
+    assert [p['species'] for p in result['paths']] == [['[C]', '[O]']]
+
+
+def test_queued_target_connections_survive_exhausted_adjacency_budget(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'budget.sqlite'
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)',
+                        [(key,) for key in ['[C]->[C:1]', '[C]->[C:2]', '[C]->[C:3]',
+                                            '[C:1]->[N:1]', '[C:1]->[N:2]', '[C:2]->[O]']])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        result = discover_indexed_candidates(reader, '[C]', target='[O]', max_expansions=4)
+    finally:
+        reader.close()
+    assert [p['species'] for p in result['paths']] == [['[C]', '[C:2]', '[O]']]
+    assert not result['query_complete']
+    assert 'adjacency_budget' in result['truncation_reasons']
+    assert result['target_probes'] <= 4
+
+
+def test_target_results_stay_shortest_first_and_do_not_duplicate_direct_steps(tmp_path):
+    path = tmp_path / 'lengths.reactionevent.csv'
+    path.write_text('Timestep_Index,Reactant,Product\n'
+                    '0,CCO,CC=O\n1,CCO,COC\n2,COC,CC=O\n')
+    EVENT_EVIDENCE_STORE.build(str(path))
+    artifacts = {'reactionevent': str(path)}
+    report = svc.search_candidate_paths(artifacts, 'CCO', target='CC=O', max_steps=4)
+    assert [p['species'] for p in report['paths']] == [['CCO', 'CC=O'], ['CCO', 'COC', 'CC=O']]
+    report = svc.search_candidate_paths(artifacts, 'CCO', target='CC=O', max_steps=1)
+    assert [p['species'] for p in report['paths']] == [['CCO', 'CC=O']]
+    assert report['query_complete'] and report['horizon_limited']
+
+
+def test_incomplete_empty_summary_does_not_claim_no_route(source):
+    from scripts.webapp_dash.candidate_workbench import route_summary
+    from plotly.utils import PlotlyJSONEncoder
+    report = svc.search_candidate_paths(source, 'CCO', target='CC(=O)O', max_expansions=1)
+    rendered = json.dumps(route_summary(report), cls=PlotlyJSONEncoder, ensure_ascii=False)
+    assert '搜索未完成，尚未找到' in rendered
+    assert '目标连接检查预算' in rendered
