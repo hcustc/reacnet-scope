@@ -132,7 +132,9 @@ def test_source_records_keep_explicit_metadata_unknowns_and_evidence_levels(
         assert "comparability.json" in archive.namelist()
 
 
-def _post_callback(client, output_contains, changed, values, states=None):
+def _post_callback(
+    client, output_contains, changed, values, states=None, expected_status=200
+):
     dependency = next(item for item in client.get("/_dash-dependencies").get_json()
                       if output_contains in item["output"])
     output = dependency["output"]
@@ -150,8 +152,28 @@ def _post_callback(client, output_contains, changed, values, states=None):
         "inputs": data(dependency["inputs"], values),
         "state": data(dependency["state"], states or {}),
     })
-    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.status_code == expected_status, response.get_data(as_text=True)
+    if expected_status == 204:
+        return None
     return response.get_json()["response"]
+
+
+def _find_pattern_component(node, component_type):
+    if isinstance(node, dict):
+        props = node.get("props") or {}
+        component_id = props.get("id")
+        if isinstance(component_id, dict) and component_id.get("type") == component_type:
+            return node
+        for value in node.values():
+            found = _find_pattern_component(value, component_type)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_pattern_component(value, component_type)
+            if found is not None:
+                return found
+    return None
 
 
 def test_dash_compare_discards_result_when_target_or_sources_change(tmp_path, monkeypatch):
@@ -180,7 +202,7 @@ def test_dash_compare_discards_result_when_target_or_sources_change(tmp_path, mo
     assert cleared["species-compare-export"]["disabled"] is True
     removed = _post_callback(client, "species-compare-sources-store.data",
                              json.dumps({"path": second, "type": "species-compare-remove"}, sort_keys=True, separators=(",", ":")) + ".n_clicks",
-                             {"species-compare-add-managed": None, "species-compare-add-path": None,
+                             {"species-compare-managed": [], "species-compare-add-path": None,
                               '{"path":["ALL"],"type":"species-compare-remove"}': [None, 1]},
                              {"species-compare-sources-store": sources,
                               target_pattern + ".value": ["O", "C"], target_pattern + ".id": values[target_pattern + ".id"],
@@ -198,14 +220,14 @@ def test_dash_adds_sources_and_offers_each_exact_catalog(tmp_path, monkeypatch):
     target_pattern = '{"path":["ALL"],"type":"species-compare-target"}'
     label_pattern = '{"path":["ALL"],"type":"species-compare-label"}'
     first_result = _post_callback(client, "species-compare-sources-store.data", "species-compare-add-path.n_clicks",
-        {"species-compare-add-managed": None, "species-compare-add-path": 1, empty_pattern: []},
+        {"species-compare-managed": [], "species-compare-add-path": 1, empty_pattern: []},
         {"species-compare-managed": [], "batch-managed-store": {"datasets": []}, "species-compare-path": first,
          "species-compare-new-label": "water A", "species-compare-sources-store": [],
          target_pattern + ".value": [], target_pattern + ".id": [],
          label_pattern + ".value": [], label_pattern + ".id": []})
     sources = first_result["species-compare-sources-store"]["data"]
     second_result = _post_callback(client, "species-compare-sources-store.data", "species-compare-add-path.n_clicks",
-        {"species-compare-add-managed": None, "species-compare-add-path": 2, empty_pattern: [None]},
+        {"species-compare-managed": [], "species-compare-add-path": 2, empty_pattern: [None]},
         {"species-compare-managed": [], "batch-managed-store": {"datasets": []}, "species-compare-path": second,
          "species-compare-new-label": "water B", "species-compare-sources-store": sources,
          target_pattern + ".value": ["[H][O][H]"],
@@ -218,5 +240,211 @@ def test_dash_adds_sources_and_offers_each_exact_catalog(tmp_path, monkeypatch):
     rendered = _post_callback(client, "species-compare-sources.children", "species-compare-sources-store.data",
                               {"species-compare-sources-store": sources})
     children = rendered["species-compare-sources"]["children"]
-    options = [next(child for child in row["props"]["children"] if child["props"].get("id", {}).get("type") == "species-compare-choice")["props"]["options"] for row in children]
+    options = [
+        _find_pattern_component(row, "species-compare-target")["props"]["options"]
+        for row in children
+    ]
     assert [[option["value"] for option in group] for group in options] == [["[H][O][H]"], ["[H][O]([H])"]]
+
+
+def test_managed_selection_immediately_reuses_imported_sources_and_deselects(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    first = _source(tmp_path, "first", ["Timestep 0: C 1"])
+    second = _source(tmp_path, "second", ["Timestep 0: O 2"])
+    bases = [str(Path(path).with_suffix("")) for path in (first, second)]
+    managed = {
+        "datasets": [
+            {"id": base, "base": base, "label": f"已导入 {index}"}
+            for index, base in enumerate(bases, 1)
+        ]
+    }
+    client = create_app().server.test_client()
+    remove_pattern = '{"path":["ALL"],"type":"species-compare-remove"}'
+    target_pattern = '{"path":["ALL"],"type":"species-compare-target"}'
+
+    selected = _post_callback(
+        client,
+        "species-compare-sources-store.data",
+        "species-compare-managed.value",
+        {"species-compare-managed": bases, remove_pattern: []},
+        {"batch-managed-store": managed, "species-compare-sources-store": []},
+    )
+    sources = selected["species-compare-sources-store"]["data"]
+    assert [item["species_file"] for item in sources] == [first, second]
+    assert [item["source_origin"] for item in sources] == ["managed", "managed"]
+
+    compared = _post_callback(
+        client,
+        "species-compare-result-store.data",
+        "species-compare-run.n_clicks",
+        {
+            "species-compare-run": 1,
+            "species-compare-sources-store": sources,
+            target_pattern + ".value": ["C", "O"],
+            target_pattern + ".id": [
+                {"type": "species-compare-target", "path": path}
+                for path in (first, second)
+            ],
+            "species-compare-axis": "step",
+        },
+    )
+    payload = compared["species-compare-result-store"]["data"]
+    assert len(payload["curves"]) == 2
+    assert all("source_origin" not in row for row in payload["summary"])
+
+    restored = _post_callback(
+        client,
+        "species-compare-managed.options",
+        "batch-managed-store.data",
+        {"batch-managed-store": managed},
+        {"species-compare-sources-store": sources},
+    )
+    assert restored["species-compare-managed"]["value"] == bases
+
+    manual = {**_entry(str(tmp_path / "manual.species"), "手工来源", "N"), "source_origin": "manual"}
+    reduced = _post_callback(
+        client,
+        "species-compare-sources-store.data",
+        "species-compare-managed.value",
+        {
+            "species-compare-managed": [bases[0]],
+            remove_pattern: [None],
+        },
+        {
+            "batch-managed-store": managed,
+            "species-compare-sources-store": [*sources, manual],
+            target_pattern + ".value": ["C", "O", "N"],
+            target_pattern + ".id": [
+                {"type": "species-compare-target", "path": path}
+                for path in (first, second, manual["species_file"])
+            ],
+        },
+    )
+    remaining = reduced["species-compare-sources-store"]["data"]
+    assert [item["species_file"] for item in remaining] == [first, manual["species_file"]]
+    assert remaining[0]["target_smiles"] == "C"
+
+
+def test_dynamic_remove_controls_do_not_drop_sources_without_click(tmp_path):
+    first = str(tmp_path / "first.species")
+    second = str(tmp_path / "second.species")
+    sources = [_entry(first, "first", "C"), _entry(second, "second", "O")]
+    client = create_app().server.test_client()
+    remove_pattern = '{"path":["ALL"],"type":"species-compare-remove"}'
+    changed = (
+        json.dumps(
+            {"path": first, "type": "species-compare-remove"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + ".n_clicks"
+    )
+
+    result = _post_callback(
+        client,
+        "species-compare-sources-store.data",
+        changed,
+        {
+            "species-compare-managed": [],
+            "species-compare-add-path": None,
+            "evolution-open-compare-btn": None,
+            remove_pattern: [None, None],
+        },
+        {"species-compare-sources-store": sources},
+        expected_status=204,
+    )
+
+    assert result is None
+
+
+def test_dash_compare_preflight_requires_two_ready_exact_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    first = _source(tmp_path, "first", ["Timestep 0: C 1"])
+    second = _source(tmp_path, "second", ["Timestep 0: O 2"])
+    sources = [_entry(first, "first", "C"), _entry(second, "second", "O")]
+    client = create_app().server.test_client()
+    target_pattern = '{"path":["ALL"],"type":"species-compare-target"}'
+    target_ids = [
+        {"path": first, "type": "species-compare-target"},
+        {"path": second, "type": "species-compare-target"},
+    ]
+    values = {
+        "species-compare-sources-store": sources,
+        target_pattern + ".value": ["C", "O"],
+        target_pattern + ".id": target_ids,
+        "species-compare-catalog-store": {
+            first: svc.species_compare_catalog(first),
+            second: svc.species_compare_catalog(second),
+        },
+        "species-compare-axis": "step",
+    }
+
+    ready = _post_callback(
+        client,
+        "species-compare-readiness.children",
+        target_pattern + ".value",
+        values,
+    )
+    assert ready["species-compare-run"]["disabled"] is False
+    assert "2/2 个来源已就绪" in str(ready["species-compare-readiness"]["children"])
+
+    values[target_pattern + ".value"] = ["C", "N"]
+    blocked = _post_callback(
+        client,
+        "species-compare-readiness.children",
+        target_pattern + ".value",
+        values,
+    )
+    assert blocked["species-compare-run"]["disabled"] is True
+    assert "索引中没有该精确 Species" in str(
+        blocked["species-compare-readiness"]["children"]
+    )
+
+
+def test_evolution_handoff_adds_current_source_and_exact_species(tmp_path):
+    species_file = tmp_path / "current.species"
+    species_file.write_text("Timestep 0: C 1\n", encoding="utf-8")
+    client = create_app().server.test_client()
+    remove_pattern = '{"path":["ALL"],"type":"species-compare-remove"}'
+
+    result = _post_callback(
+        client,
+        "species-compare-sources-store.data",
+        "evolution-open-compare-btn.n_clicks",
+        {
+            "species-compare-managed": [],
+            "species-compare-add-path": None,
+            "evolution-open-compare-btn": 1,
+            remove_pattern: [],
+        },
+        {
+            "species-compare-sources-store": [],
+            "app-store": {
+                "label": "current run",
+                "dataset_id": "dataset-1",
+                "source_revision": {"fingerprint": "revision-1"},
+                "selected_smiles": "C",
+                "artifacts": {"species": str(species_file)},
+            },
+        },
+    )
+
+    source = result["species-compare-sources-store"]["data"][0]
+    assert source["species_file"] == str(species_file.resolve())
+    assert source["target_smiles"] == "C"
+    assert source["dataset_id"] == "dataset-1"
+    assert "已加入当前RNG 数据" in str(result["species-compare-entry-note"]["children"])
+
+
+def test_comparison_pages_belong_to_their_analysis_workspaces():
+    from scripts.webapp_dash.navigation import PAGE_WORKSPACES
+    client = create_app().server.test_client()
+    assert PAGE_WORKSPACES['batch-compare'] == 'species'
+    assert PAGE_WORKSPACES['reaction-compare'] == 'reactions'
+    for page, nav in [('batch-compare', 'species'), ('reaction-compare', 'reactions')]:
+        response = _post_callback(client, 'page-title.children@', 'page-store.data',
+                                  {'page-store': {'page': page}})
+        assert response[f'page-{page}']['className'].endswith(' active')
+        assert response[f'nav-{nav}']['aria-current'] == 'page'

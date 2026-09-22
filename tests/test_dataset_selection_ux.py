@@ -42,24 +42,18 @@ def test_dataset_navigation_and_layout_use_confirmed_product_language() -> None:
     layout_text = json.dumps(layout, ensure_ascii=False)
     ids = _layout_ids(layout)
 
-    assert PAGE_LABELS["data-management"] == "数据集"
+    assert PAGE_LABELS["data-management"] == "RNG 数据"
     assert {
-        "data-selection-view",
-        "data-review-view",
-        "data-review-summary",
-        "data-review-capabilities",
-        "data-review-artifacts",
-        "dir-browser-select-btn",
-        "data-overview-actions",
-        "dataset-switch-request",
-        "dataset-switch-validation",
+        "import-selection", "import-files", "import-group", "import-filter",
+        "import-add-folder", "data-apply-btn", "data-overview-actions",
+        "dataset-switch-request", "dataset-switch-validation",
     } <= ids
-    assert "选择其他位置" in layout_text
-    assert "输入或粘贴数据集文件夹路径" in layout_text
-    assert "检查当前文件夹" in layout_text
-    assert "使用此数据集" in layout_text
+    assert "选择数据" in layout_text
+    assert "开始分析" in layout_text
+    assert "dir-browser-select-btn" not in ids
+    assert "data-review-view" not in ids
     assert "启动目录" not in layout_text
-    assert "数据集公共前缀" not in layout_text
+    assert "RNG 数据公共前缀" not in layout_text
     assert "开始物种检索" not in layout_text
 
 
@@ -97,53 +91,3 @@ def test_dataset_folder_rejects_zero_or_multiple_datasets(
     with pytest.raises(svc.ServiceError) as ambiguous:
         svc.resolve_dataset_folder_candidate(str(tmp_path))
     assert ambiguous.value.reason == "ambiguous_dataset_folder"
-
-
-def test_dataset_review_uses_folder_identity_and_shows_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    base = tmp_path / "internal-run.lammpstrj"
-    Path(f"{base}.reactionabcd").touch()
-    candidate = svc.resolve_dataset_folder_candidate(str(tmp_path))
-    client = create_app().server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "data-review-summary.children" in item["output"]
-    )
-
-    response = client.post(
-        "/_dash-update-component",
-        json={
-            "output": dependency["output"],
-            "outputs": _multi_outputs(dependency["output"]),
-            "changedPropIds": ["dataset-browser-candidate.data"],
-            "inputs": [
-                {
-                    "id": "dataset-browser-candidate",
-                    "property": "data",
-                    "value": candidate,
-                }
-            ],
-            "state": [],
-        },
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    summary = json.dumps(result["data-review-summary"]["children"], ensure_ascii=False)
-    capabilities = json.dumps(
-        result["data-review-capabilities"]["children"],
-        ensure_ascii=False,
-    )
-    artifacts = json.dumps(
-        result["data-review-artifacts"]["children"],
-        ensure_ascii=False,
-    )
-    assert tmp_path.name in summary
-    assert "internal-run.lammpstrj" not in summary
-    assert "反应检索" in capabilities
-    assert "源文件与路径" in artifacts

@@ -29,8 +29,9 @@ from reacnet_scope.queries import build_dataset_status_payload
 from reacnet_scope.service_types import ServiceError
 from reacnet_scope.file_collections import (
     browse_import_files, collect_files, preview_file_collection, collection_candidate,
-    read_collection, is_collection_path, ROLE_LABELS,
+    read_collection, is_collection_path, ROLE_LABELS, artifact_role,
 )
+from reacnet_scope.path_search import candidate_formula
 from reacnet_scope.reaction_timing import (
     reaction_time_distribution,
     reaction_time_events,
@@ -191,7 +192,7 @@ from reacnet_scope.path_search_services import (
 
 __all__ = [
     "browse_import_files", "collect_files", "preview_file_collection", "collection_candidate",
-    "read_collection", "is_collection_path", "ROLE_LABELS",
+    "read_collection", "is_collection_path", "ROLE_LABELS", "artifact_role", "candidate_formula",
     "validate_file_collection_candidate", "commit_file_collection",
     "check_candidate_continuity",
     "candidate_paths_csv",

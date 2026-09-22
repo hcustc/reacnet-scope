@@ -118,3 +118,9 @@ checkpoints.
   dominate total runtime even with more CPU cores.
 - Use the time-evolution `下采样` setting to reduce browser payload size while
   retaining the full calculation on the server.
+
+## 数据访问
+
+服务器部署通过浏览器选择服务器上的文件；本地数据则在本地运行软件，使用同一个“选择数据”入口。
+文件始终由软件运行所在机器直接读取，无需 tusd、上传目录或额外传输服务。
+远程部署继续使用 `REACNET_SCOPE_ALLOWED_ROOTS` 限定可浏览位置。

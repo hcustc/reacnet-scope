@@ -14,6 +14,7 @@ PAGE_IDS: Final[tuple[str, ...]] = (
     "element-distribution",
     "data-management",
     "batch-compare",
+    "reaction-compare",
 )
 
 PAGE_LABELS: Final[dict[str, str]] = {
@@ -21,10 +22,11 @@ PAGE_LABELS: Final[dict[str, str]] = {
     "reactions": "反应与事件",
     "evolution": "时间演化",
     "events": "反应事件",
-    "trajectory": "轨迹与谱系",
+    "trajectory": "结构与轨迹",
     "element-distribution": "元素分布演化",
-    "data-management": "数据集",
-    "batch-compare": "对比",
+    "data-management": "RNG 数据",
+    "batch-compare": "物种多来源对比",
+    "reaction-compare": "反应多来源对比",
 }
 
 PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
@@ -32,10 +34,11 @@ PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
     "reactions": "查看直接生成/消耗通道、反应式和具体事件，不把计数解释为速率或机理。",
     "evolution": "绘制单个或多组物种的时间演化曲线，比较生成与消耗趋势。",
     "events": "从反应通道定位 RNG 事件，建立可复核的轨迹证据入口。",
-    "trajectory": "检查局部反应轨迹、键变化与原子谱系，并导出可复核证据。",
-    "element-distribution": "按数据集中发现的元素分组和筛选物种，追踪分布随时间的变化。",
-    "data-management": "选择当前数据集、查看可用分析功能，并按需维护派生索引。",
-    "batch-compare": "在不切换当前数据集的前提下，比较多个来源的物种、反应与条件差异。",
+    "trajectory": "核查具体反应实例的前后结构、局部轨迹与几何导出，并按需追踪参与分子的变化。",
+    "element-distribution": "按RNG 数据中发现的元素分组和筛选物种，追踪分布随时间的变化。",
+    "data-management": "管理已导入的RNG 数据，添加来源、选择当前RNG 数据；在独立页签准备当前数据。",
+    "reaction-compare": "比较多个来源的反应与条件统计，保持当前RNG 数据不变。",
+    "batch-compare": "选择多个来源，逐来源确认精确物种后比较丰度趋势；保持当前RNG 数据不变。",
 }
 
 # Compact, font-independent marks keep navigation legible without another
@@ -52,6 +55,7 @@ PAGE_ICONS: Final[dict[str, str]] = {
     "element-distribution": "/assets/icons/element-distribution.svg",
     "data-management": "/assets/icons/data-management.svg",
     "batch-compare": "/assets/icons/batch-compare.svg",
+    "reaction-compare": "/assets/icons/reactions.svg",
 }
 
 PAGE_CLASS_NAMES: Final[dict[str, str]] = {
@@ -70,26 +74,25 @@ WORKSPACE_PAGE_IDS: Final[tuple[str, ...]] = (
     "species",
     "reactions",
     "trajectory",
-    "batch-compare",
 )
 
 WORKSPACE_TOOL_PAGES: Final[dict[str, tuple[str, ...]]] = {
     "data-management": ("data-management",),
-    "species": ("species", "evolution", "element-distribution"),
-    "reactions": ("reactions", "events"),
+    "species": ("species", "evolution", "element-distribution", "batch-compare"),
+    "reactions": ("reactions", "events", "reaction-compare"),
     "trajectory": ("trajectory",),
-    "batch-compare": ("batch-compare",),
 }
 
 WORKSPACE_TASK_LABELS: Final[dict[str, str]] = {
-    "data-management": "选择与准备数据集",
+    "data-management": "选择与准备RNG 数据",
     "species": "物种检索",
     "evolution": "时间演化",
     "element-distribution": "元素分布",
     "reactions": "直接通道与反应式",
     "events": "具体事件",
-    "trajectory": "局部轨迹与分子谱系",
-    "batch-compare": "来源比较",
+    "trajectory": "反应结构、轨迹与变化追踪",
+    "batch-compare": "多来源对比",
+    "reaction-compare": "多来源对比",
 }
 
 PAGE_WORKSPACES: Final[dict[str, str]] = {
@@ -120,20 +123,20 @@ PAGE_CAPABILITY_REQUIREMENTS: Final[dict[str, str]] = {
     "evolution": "species_abundance",
     "element-distribution": "element_distribution",
     "events": "event_search",
-    "trajectory": "trajectory_evidence",
+    "trajectory": "event_search",
 }
 
 # Question, required input, useful next step. Guidance never transfers a
 # display label as evidence or advertises an unimplemented tool as available.
 PAGE_WORKFLOWS: Final[dict[str, tuple[str, str, str]]] = {
-    "data-management": ("要分析哪一个数据集？", "数据集目录、来源修订与能力状态", "加载成功后再进入分析工作区；检查候选不会改变当前数据集。"),
+    "data-management": ("要分析哪一个RNG 数据？", "RNG 数据目录、来源修订与能力状态", "加载成功后再进入分析工作区；检查候选不会改变当前RNG 数据。"),
     "species": ("体系中有哪些目标物种及其趋势？", "分子式、SMILES、质量范围或丰度证据", "先确认精确结构，再查看直接反应通道或时间演化。"),
     "reactions": ("目标物种如何生成或消耗？", "精确物种或有方向的 Reaction Type", "选中直接通道并下钻具体事件；计数和净通量不等于速率常数。"),
     "evolution": ("物种丰度如何随时间变化？", "物种列表与丰度证据", "用趋势定位观察窗口，再检查相应反应事件。"),
     "element-distribution": ("元素在不同物种间如何分布？", "目标元素、筛选条件与丰度证据", "从分布变化回到具体物种与反应证据。"),
     "events": ("哪些具体事件支持这个反应？", "反应通道与观察窗口", "选中事件后提取局部轨迹，检查参与分子与原子。"),
-    "trajectory": ("这次反应在原子层面发生了什么？", "一个具体事件与可用轨迹", "先检查局部几何和键变化，再按需展开分子谱系或导出事件几何。"),
-    "batch-compare": ("不同模拟条件或模型迭代的观测有何差异？", "独立来源、目标映射、模拟条件与重复定义", "先核对身份、时间和证据是否可比；选择来源不会切换当前数据集。"),
+    "trajectory": ("这次具体反应的结构如何变化？", "一个具体反应实例；坐标任务另需可用轨迹", "先核查前后结构和键变化，再按需查看局部轨迹、导出几何或使用分子变化追踪。"),
+    "batch-compare": ("不同模拟条件或模型迭代的观测有何差异？", "独立来源、目标映射、模拟条件与重复定义", "先核对身份、时间和证据是否可比；选择来源不会切换当前RNG 数据。"),
 }
 
 GROUP_DESCRIPTIONS: Final[dict[str, str]] = {

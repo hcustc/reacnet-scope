@@ -203,3 +203,37 @@ def test_topology_return_is_not_exact_bond_return(tmp_path):
         key = A + '->' + B
         assert quality_summary(con, A, B, key, 3, 'topology')['folded_events'] == 1
         assert quality_summary(con, A, B, key, 3, 'exact')['folded_events'] == 0
+
+
+def test_validation_late_result_does_not_replace_new_search(tmp_path):
+    from scripts.webapp_dash.app import create_app
+    from scripts.webapp_dash.candidate_workbench import context_key
+    from dash import no_update
+    app = create_app()
+    key = next(k for k, v in app.callback_map.items() if k.startswith('cp-report.data@')
+               and any(i['id'] == 'cp-validation-raw' for i in v['inputs']))
+    callback = app.callback_map[key]['callback'].__wrapped__
+    store = {'dataset_id': 'one', 'artifacts': {}}
+    raw = dict(request_id='validation', context=context_key(store), search_request_id='old', signature='route',
+               validation={'status': 'chain_found'})
+    request = dict(raw)
+    report = dict(query_request_id='new', paths=[{'signature_id': 'route'}])
+    assert callback(raw, request, {'request_id': 'new'}, report, store) is no_update
+    background = app.callback_map['cp-validation-raw.data']
+    assert any(item['id'] == 'cp-check-cancel' for item in background['background']['cancel'])
+    dependency = next(item for item in app.server.test_client().get('/_dash-dependencies').get_json()
+                      if item['output'] == 'cp-validation-raw.data')
+    assert dependency['running']['running']['cp-check-cancel.disabled'] is False
+
+
+def test_actual_event_view_renders_recorded_bond_order(tmp_path):
+    from plotly.utils import PlotlyJSONEncoder
+    from scripts.webapp_dash.candidate_workbench import actual_event_view
+
+    artifacts = source(tmp_path)
+    raw = svc.search_candidate_paths(artifacts, A, target=C, quality_view='raw')
+    page = svc.candidate_step_events(artifacts, raw, raw['paths'][0]['signature_id'], 0)
+    rendered = json.dumps(actual_event_view(page['rows'][0]), cls=PlotlyJSONEncoder,
+                          ensure_ascii=False)
+    assert '1–2：RNG 键级 2' in rendered
+    assert '1–2：RNG 键级 1' in rendered
