@@ -85,11 +85,12 @@ def test_segment_preparation_merges_ranges_across_blocks_and_splits_sources(tmp_
     class Native:
         def iter_frame_references(self):
             return ((frame, frame * 10, 1 if frame < 5 else 2, frame)
-                    for frame in range(16))
+                    for frame in range(40))
 
         def iter_molecular_state_blocks(self):
             yield np.array([0, 8]), np.array([2, 10]), row
             yield np.array([1, 4]), np.array([5, 6]), row
+            yield np.array([32]), np.array([34]), row
 
     with sqlite3.connect(tmp_path / 'segments.sqlite') as con:
         con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
@@ -99,17 +100,46 @@ def test_segment_preparation_merges_ranges_across_blocks_and_splits_sources(tmp_
             participant_index INTEGER,instance_id TEXT)''')
         con.execute('CREATE TABLE events(event_id TEXT,timestep_index INTEGER,association_status TEXT)')
         con.executemany('INSERT INTO molecule_instances VALUES(?,?,?,?,?)',
-                        [(f'instance-{frame}', frame, '[C]', '[1]', '[]') for frame in (2, 5, 9)])
+                        [(f'instance-{frame}', frame, '[C]', '[1]', '[]') for frame in (2, 5, 9, 32)])
         segments.materialize_segments(con, replicate_id='fixture', native=Native())
         rows = con.execute('''SELECT m.instance_id,s.start_frame,s.end_frame
             FROM lineage_instance_segments m JOIN lineage_segments s USING(segment_id)
             ORDER BY m.instance_id''').fetchall()
-        assert rows == [('instance-2', 0, 4), ('instance-5', 5, 6),
-                        ('instance-9', 8, 10)]
-        assert con.execute('SELECT segment_count FROM lineage_state_occupancy').fetchone()[0] == 3
-        chunks = con.execute('SELECT packed_frames FROM lineage_occupancy_chunks ORDER BY block_start').fetchall()
-        assert len(chunks) == 2
-        assert b''.join(zlib.decompress(chunk) for (chunk,) in chunks) == bytes((0b01111111, 0b00000111))
+        assert rows == [('instance-2', 0, 4), ('instance-32', 32, 34),
+                        ('instance-5', 5, 6), ('instance-9', 8, 10)]
+        assert con.execute('SELECT segment_count FROM lineage_state_occupancy').fetchone()[0] == 4
+        chunks = con.execute('SELECT block_start,packed_frames FROM lineage_occupancy_chunks ORDER BY block_start').fetchall()
+        assert [start for start, _ in chunks] == [0, 8, 32]
+        assert b''.join(zlib.decompress(chunk) for _, chunk in chunks) == bytes((0b01111111, 0b00000111, 0b00000111))
+
+
+def test_segment_preparation_skips_empty_blocks_after_boundary_end(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
+    import reacnet_scope.lineage_segments as segments
+
+    monkeypatch.setattr(segments, 'FRAME_BLOCK', 8)
+    row = SimpleNamespace(species='[C]', atom_ids=[0], bond_ids=[])
+
+    class Native:
+        def iter_frame_references(self):
+            return ((frame, frame, 1, frame) for frame in range(40))
+
+        def iter_molecular_state_blocks(self):
+            yield np.array([0, 32]), np.array([7, 34]), row
+
+    with sqlite3.connect(tmp_path / 'sparse-segments.sqlite') as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('''CREATE TABLE molecule_instances(instance_id TEXT,analyzed_frame INTEGER,
+            species_smiles TEXT,atom_ids_json TEXT,bonds_json TEXT)''')
+        con.execute('''CREATE TABLE event_participants(event_id TEXT,side TEXT,
+            participant_index INTEGER,instance_id TEXT)''')
+        con.execute('CREATE TABLE events(event_id TEXT,timestep_index INTEGER,association_status TEXT)')
+        con.execute("INSERT INTO molecule_instances VALUES('later',33,'[C]','[1]','[]')")
+        segments.materialize_segments(con, replicate_id='sparse', native=Native())
+        assert con.execute('''SELECT start_frame,end_frame FROM lineage_segments''').fetchall() == [(32, 34)]
+        assert con.execute('SELECT segment_count FROM lineage_state_occupancy').fetchone()[0] == 2
+        assert [row[0] for row in con.execute('SELECT block_start FROM lineage_occupancy_chunks ORDER BY block_start')] == [0, 32]
 
 
 def test_stale_revision_and_missing_segment_index(case):

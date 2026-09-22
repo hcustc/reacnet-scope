@@ -6,7 +6,7 @@ Species 检索用于定位事件，候选 Species 路径不参与 Explorer 的�
 
 ## 准备与入口
 
-1. 在数据集准备中重建事件索引。新增 `lineage_segments_version=1` 是独立能力要求，旧索引
+1. 在数据集准备中重建事件索引。`lineage_segments_version=2` 是独立能力要求，旧索引
    仍可用于其他已有工具；打开 Explorer 不会自动重建。
 2. 在事件工作区选择具体 occurrence。Explorer 的“打开所选 instance”列表包括其反应物和产物。
 3. 选择具体分子与路径锚点并打开，即可看到根 segment 的帧区间、Species、原子与键状态。默认锚点为起点全部原子；可选碳、全部非氢原子或指定 Atom IDs。

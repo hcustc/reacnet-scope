@@ -29,8 +29,9 @@ The complete exact-state occupancy is stored as compressed frame bitmaps with
 logical segment counts. Explicit segment IDs/ranges are materialized for the
 concrete occurrence participants that the Explorer can select. This avoids one
 SQLite row per short source range while preserving every gap. Version 2 stores
-the compressed bitmaps in bounded frame chunks and requires rebuilding earlier
-draft indexes. Bitmaps are built in bounded range blocks; disk-backed packed atom occupancy checks conflicting
+the compressed bitmaps in bounded frame chunks, omitting all-zero chunks, and
+requires rebuilding earlier draft indexes. Bitmaps are built in bounded range
+blocks; disk-backed packed atom occupancy checks conflicting
 assignments even outside occurrence endpoint frames. No temporal smoothing is
 performed by this storage compression.
 

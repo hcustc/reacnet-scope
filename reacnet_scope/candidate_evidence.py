@@ -62,9 +62,14 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
                 'reactant_bonds_json', 'product_bonds_json'}
     if required <= columns:
         connection.execute('CREATE INDEX IF NOT EXISTS candidate_events_transition ON events(timestep_index,event_id)')
-        # Only the most recent occurrence for each atom remains in memory.
+        # Keep atom history and same-transition ambiguity on staging disk.
         # Same-transition overlaps become barriers, never an internal ordering.
-        last = {}
+        connection.executescript('''
+            DROP TABLE IF EXISTS temp.candidate_last_atom;
+            CREATE TEMP TABLE candidate_last_atom(atom_id INTEGER PRIMARY KEY,event_id TEXT);
+            DROP TABLE IF EXISTS temp.candidate_touched_atom;
+            CREATE TEMP TABLE candidate_touched_atom(atom_id INTEGER PRIMARY KEY,event_id TEXT);
+        ''')
         cursor = connection.execute('''SELECT event_id,timestep_index,association_status,
             reactant_participants_json,product_participants_json,
             reactant_bonds_json,product_bonds_json,atom_ids_json
@@ -74,12 +79,17 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
                 WHERE timestep_index=? AND association_status IS NOT 'matched'
                 AND json_array_length(atom_ids_json)=0 LIMIT 1''', (transition,)).fetchone() is not None
             if unresolved:
-                last.clear()
-            touched = {}
+                connection.execute('DELETE FROM candidate_last_atom')
+            connection.execute('DELETE FROM candidate_touched_atom')
             for row in batch:
-                atoms = json.loads(row[7])
-                old_ids = {last.get(atom, (None,))[0] for atom in atoms}
-                previous = last.get(atoms[0]) if atoms and len(old_ids) == 1 else None
+                old = connection.execute('''SELECT DISTINCT previous.event_id
+                    FROM json_each(?) atoms LEFT JOIN candidate_last_atom previous
+                    ON previous.atom_id=CAST(atoms.value AS INTEGER) LIMIT 2''',
+                    (row[7],)).fetchall()
+                previous = (connection.execute('''SELECT event_id,timestep_index,association_status,
+                    reactant_participants_json,product_participants_json,
+                    reactant_bonds_json,product_bonds_json FROM events WHERE event_id=?''',
+                    (old[0][0],)).fetchone() if len(old) == 1 and old[0][0] else None)
                 kind = 'unknown'
                 if previous and previous[0] and row[2] == previous[2] == 'matched':
                     kind = _reverse_kind(previous, row)
@@ -90,10 +100,16 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
                     connection.execute('''UPDATE candidate_event_history SET
                         return_event_id=?,return_gap=?,return_kind=? WHERE event_id=?''',
                         (row[0], gap, kind, previous[0]))
-                for atom in atoms:
-                    touched[atom] = row if atom not in touched else (None, transition)
+                if not unresolved:
+                    connection.execute('''INSERT INTO candidate_touched_atom(atom_id,event_id)
+                        SELECT CAST(value AS INTEGER),? FROM json_each(?) WHERE true
+                        ON CONFLICT(atom_id) DO UPDATE SET event_id=NULL''', (row[0],row[7]))
             if not unresolved:
-                last.update(touched)
+                connection.execute('''DELETE FROM candidate_last_atom WHERE atom_id IN
+                    (SELECT atom_id FROM candidate_touched_atom)''')
+                connection.execute('INSERT INTO candidate_last_atom SELECT * FROM candidate_touched_atom')
+        connection.execute('DROP TABLE temp.candidate_touched_atom')
+        connection.execute('DROP TABLE temp.candidate_last_atom')
     # Queries accept windows of at most 100 analyzed-frame intervals. Collapse
     # longer gaps so one edge has a fixed number of quality buckets regardless
     # of how many occurrences support it.

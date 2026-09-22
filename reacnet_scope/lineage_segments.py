@@ -102,6 +102,8 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         CREATE TEMP TABLE lineage_instance_states(instance_id TEXT,frame INTEGER,state_key TEXT);
         DROP TABLE IF EXISTS temp.lineage_boundaries;
         CREATE TEMP TABLE lineage_boundaries(frame INTEGER PRIMARY KEY);
+        DROP TABLE IF EXISTS temp.lineage_active_blocks;
+        CREATE TEMP TABLE lineage_active_blocks(block_start INTEGER PRIMARY KEY);
     ''')
 
     def tick(n):
@@ -172,6 +174,7 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         for count,(key, rows) in enumerate(groupby(connection.execute(
                 'SELECT state_key,ranges FROM lineage_chunks ORDER BY state_key'),lambda r:r[0]),1):
             tick(count)
+            connection.execute('DELETE FROM lineage_active_blocks')
             # A disk-backed difference vector accepts overlapping ranges in any
             # chunk order. Only one fixed-size frame block enters process memory.
             delta=np.memmap(Path(directory)/'state-delta',mode='w+',dtype=np.int64,
@@ -180,13 +183,28 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
                 intervals=np.frombuffer(zlib.decompress(blob),dtype='<i8').reshape((-1,2))
                 np.add.at(delta,intervals[:,0],1)
                 np.add.at(delta,intervals[:,1]+1,-1)
+                first=intervals[:,0]//FRAME_BLOCK
+                last=intervals[:,1]//FRAME_BLOCK
+                single=first==last
+                connection.executemany('INSERT OR IGNORE INTO lineage_active_blocks VALUES(?)',
+                    ((int(block)*FRAME_BLOCK,) for block in np.unique(first[single])))
+                connection.executemany('INSERT OR IGNORE INTO lineage_active_blocks VALUES(?)',
+                    ((block*FRAME_BLOCK,) for start,end in zip(first[~single],last[~single])
+                     for block in range(int(start),int(end)+1)))
             packed=np.memmap(Path(directory)/'state-packed',mode='w+',dtype=np.uint8,
                              shape=(max(1,width),))
             atoms=json.loads(connection.execute('SELECT atoms FROM lineage_states WHERE state_key=?',(key,)).fetchone()[0])
             segment_count=0
             carry=0
             previous_present=False
-            for block_start in range(0,frame_count,FRAME_BLOCK):
+            previous_end=0
+            for (block_start,) in connection.execute(
+                    'SELECT block_start FROM lineage_active_blocks ORDER BY block_start'):
+                if block_start>previous_end:
+                    # A range ending at the preceding block's last frame has
+                    # its closing delta in the skipped empty block.
+                    carry=0
+                    previous_present=False
                 block_end=min(frame_count,block_start+FRAME_BLOCK)
                 counts=np.cumsum(delta[block_start:block_end],dtype=np.int64)
                 counts+=carry
@@ -203,14 +221,15 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
                 bits=np.packbits(present,bitorder='little')
                 byte_start=block_start//8
                 packed[byte_start:byte_start+len(bits)]=bits
-                connection.execute('INSERT INTO lineage_occupancy_chunks VALUES(?,?,?)',
-                                   (key,block_start,zlib.compress(bits.tobytes(),1)))
                 if np.any(bits):
+                    connection.execute('INSERT INTO lineage_occupancy_chunks VALUES(?,?,?)',
+                                       (key,block_start,zlib.compress(bits.tobytes(),1)))
                     for atom in atoms:
                         i=atom_index[atom]
                         end=byte_start+len(bits)
                         conflicts[i,byte_start:end] |= occupied[i,byte_start:end] & bits
                         occupied[i,byte_start:end] |= bits
+                previous_end=block_end
             logical_segments+=segment_count
             connection.execute('INSERT INTO lineage_state_occupancy VALUES(?,?,?)',
                                (key,frame_count,segment_count))
@@ -239,11 +258,17 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
             del packed
         for count,(atom,sid,start,end) in enumerate(connection.execute('SELECT * FROM lineage_segment_atoms'),1):
             tick(count)
-            bits=np.unpackbits(conflicts[atom_index[atom],start//8:end//8+1],bitorder='little')
-            if bits[start%8:start%8+end-start+1].any():
-                connection.execute('UPDATE lineage_segments SET conflict=1 WHERE segment_id=?',(sid,))
+            for byte_start in range(start//8,end//8+1,FRAME_BLOCK//8):
+                byte_end=min(end//8+1,byte_start+FRAME_BLOCK//8)
+                bits=np.unpackbits(conflicts[atom_index[atom],byte_start:byte_end],bitorder='little')
+                first=max(start,byte_start*8)-byte_start*8
+                last=min(end+1,byte_end*8)-byte_start*8
+                if bits[first:last].any():
+                    connection.execute('UPDATE lineage_segments SET conflict=1 WHERE segment_id=?',(sid,))
+                    break
         del occupied,conflicts
     connection.execute('DROP TABLE temp.lineage_boundaries')
+    connection.execute('DROP TABLE temp.lineage_active_blocks')
     connection.execute('DELETE FROM lineage_instance_segments WHERE segment_id IN (SELECT segment_id FROM lineage_segments WHERE conflict=1)')
     connection.execute('DROP TABLE temp.lineage_chunks')
     connection.execute('DROP TABLE temp.lineage_instance_states')
