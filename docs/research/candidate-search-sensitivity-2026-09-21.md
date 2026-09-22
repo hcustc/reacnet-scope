@@ -4,7 +4,7 @@
 
 ## 方法与来源
 
-只读打开实际已发布索引 `/home/huangchen/cal_proc/production_md/runs/phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915/.reacnet-scope/datasets/1044f75c314b4383a040/events.sqlite3`，使用当前 [CandidateReader 与 discover_indexed_candidates](../../reacnet_scope/path_search.py)。固定截图的精确起终点、`max_steps=6`、`max_paths=20`。基线时间预算 5 秒，其余为 30 秒；实测每次均不足 0.3 秒，没有触发 time_budget。数据库以 SQLite `mode=ro` 打开，查询前后文件大小与 mtime_ns 不变。未修改代码、原始 RNG 或索引。
+只读打开该运行的实际已发布 `events.sqlite3` 索引，使用当前 [CandidateReader 与 discover_indexed_candidates](../../reacnet_scope/path_search.py)。固定截图的精确起终点、`max_steps=6`、`max_paths=20`。基线时间预算 5 秒，其余为 30 秒；实测每次均不足 0.3 秒，没有触发 time_budget。数据库以 SQLite `mode=ro` 打开，查询前后文件大小与 mtime_ns 不变。未修改代码、原始 RNG 或索引。
 
 本地生成的 `candidate-search-sensitivity-2026-09-21.json` 保存全部返回路径、精确身份、逐步事件数、预算、结果状态、软件版本及复现脚本，不随仓库分发。循环闭合列表从 JSON 中省略，保留总数与截断状态。初步实验在临时索引上执行后，本最终记录已对实际发布索引重新执行全部 12 组查询，结果数量、步数和截断原因一致。索引 meta 收录于本地 JSON，源工件一致性核对见父报告。
 

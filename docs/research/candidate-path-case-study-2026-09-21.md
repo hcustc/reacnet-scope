@@ -13,8 +13,8 @@
 ## 数据、复现与身份
 
 - 数据集：`phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915`。本机检索到后，以精确起终点、两条签名、`2 / 77 / 1` 事件数及截断原因复现截图；未依赖目录名推断实验条件。
-- 参数来源：[rng_run.json](/home/huangchen/cal_proc/production_md/runs/phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915/rng_run.json)。记录为 2500 K、`miso=1`、`runHMM=false`、每 100 MD steps 保存一帧、每 step 为 0.0001 ps，即 10 fs/采样帧。RNG 来源提交记录为 `4a80a268518a703066f4a68f5849b0d783ab854d`。
-- 原始证据：[trajectory.lammpstrj.timeline.h5](/home/huangchen/cal_proc/production_md/runs/phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915/trajectory.lammpstrj.timeline.h5)。完整状态，250001 帧。
+- 参数来源：该运行的 `rng_run.json`。记录为 2500 K、`miso=1`、`runHMM=false`、每 100 MD steps 保存一帧、每 step 为 0.0001 ps，即 10 fs/采样帧。RNG 来源提交记录为 `4a80a268518a703066f4a68f5849b0d783ab854d`。
+- 原始证据：该运行的 `trajectory.lammpstrj.timeline.h5`，完整状态，250001 帧。
 - 使用实际发布的 `.../.reacnet-scope/datasets/1044f75c314b4383a040/events.sqlite3`，源大小与纳秒 mtime 均与索引 meta 一致。早期定位使用临时副本，最终数据审计和预算实验全部在实际发布索引重复。
 - 调用 Scope 的 `CandidateReader` / `discover_indexed_candidates`，与 Dash 共用检索核心；未重新构建索引。默认参数 `max_steps=6, max_paths=20, max_expansions=2000, max_frontier=5000, max_seconds=5`。
 - 路线签名：`ac4ec5075bbcd829ab474ac0` 与 `e64f1b495ef5ecc1acb91603`。物种序列一致，完整末步反应不同：分别由 Cl 夺氢生成 HCl、由 O₂ 夺氢生成 HOO，因此不是重复结果。
@@ -116,7 +116,7 @@
 
 ```bash
 .venv/bin/python docs/research/candidate-case-audit-2026-09-21.py \
-  --index /home/huangchen/cal_proc/production_md/runs/phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915/.reacnet-scope/datasets/1044f75c314b4383a040/events.sqlite3 \
+  --index /path/to/events.sqlite3 \
   --out docs/research/candidate-case-evidence-2026-09-21.json
 ```
 

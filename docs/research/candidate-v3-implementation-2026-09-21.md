@@ -26,8 +26,7 @@
 默认折叠视图未返回路径，但搜索截断，不能推断不存在其他路线。
 真实末步事件 `rngevt_179552_73968832c073` 的图确认显示 31–38 键级 2。
 
-源数据目录为：
-`/home/huangchen/cal_proc/production_md/runs/phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915`。
+源数据运行：`phi1_2500K_iter32_000_seed256788_20260914/rng_timed_hdf5_perf_20260915`。
 其 `.reacnet-scope/datasets/1044f75c314b4383a040/events.sqlite3` 已离线更新候选派生表并原子发布，
 旧索引保存在同目录 `events.before-candidate-v3-0708e32179.sqlite3`。
 发布前检查源文件指纹未变化及 SQLite 完整性；原始 RNG 工件未修改。
