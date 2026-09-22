@@ -134,7 +134,7 @@ def test_cli_shares_indexed_query(source, tmp_path, capsys):
     assert main(['candidate-search', '--source', source['reactionevent'], '--start', 'CCO',
                  '--target', 'CC(=O)O', '--out-json', str(out)]) == 0
     report = json.loads(out.read_text())
-    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v2')
+    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v3')
     capsys.readouterr()
 
 
@@ -298,3 +298,49 @@ def test_carrier_follows_event_local_dominant_atom_descendant(tmp_path):
     assert step['transfer_event_count'] == 1
     assert step['max_shared_atoms'] == 2
     assert result['carrier_policy'] == 'event_local_dominant_atom_descendant'
+
+
+def test_target_search_does_not_spend_budget_on_reconvergent_prefixes(tmp_path):
+    """Five reconverging layers hide a six-step route behind 243 prefixes."""
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'reconvergent.sqlite'
+    layers = [['[C]']] + [[f'[C:{10*d+i}]' for i in range(3)] for d in range(1, 6)] + [['[O]']]
+    edges = [(f'{a}->{b}',) for left, right in zip(layers, layers[1:]) for a in left for b in right]
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)', edges)
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, '[C]', target='[O]', max_steps=6,
+                                             max_expansions=39, max_frontier=50, max_paths=1)
+    finally:
+        reader.close()
+    assert len(report['paths']) == 1
+    assert report['paths'][0]['step_count'] == 6
+    assert report['adjacency_rows_read'] <= 39
+
+
+def test_target_local_graph_enumerates_distinct_prefixes_and_excludes_cycles(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'all-routes.sqlite'
+    # Two prefixes reach N, but only the one through C:2 may next visit C:1.
+    edges = ['[C]->[C:1]', '[C]->[C:2]', '[C:1]->[N]', '[C:2]->[N]',
+             '[N]->[C:1]', '[C:1]->[O]', '[N]->[O]', '[C:2]->[H]']
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)', [(e,) for e in edges])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, '[C]', target='[O]', max_steps=4)
+    finally:
+        reader.close()
+    assert report['query_complete']
+    assert {tuple(p['species']) for p in report['paths']} == {
+        ('[C]', '[C:1]', '[O]'), ('[C]', '[C:1]', '[N]', '[O]'),
+        ('[C]', '[C:2]', '[N]', '[O]'), ('[C]', '[C:2]', '[N]', '[C:1]', '[O]')}
+    assert [p['step_count'] for p in report['paths']] == [2, 3, 3, 4]
+    assert report['cycle_closures']

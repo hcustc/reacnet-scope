@@ -282,6 +282,9 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 ### 11.5 Candidate Path Discovery
 
+- ADR-0017 增加离线 Candidate Return Evidence，区分精确键级返回与仅拓扑返回；同 Transition 无内部先后，相关原子上的中间事件或 unresolved 屏障不能跳过。
+- 默认 `quality_view=persistent`、`return_window_frames=3`、`return_basis=topology`；可选 raw、1–100 分析帧间隔及 exact。只在全部支持事件均满足折叠条件时不展开该边；未分类、低频或单纯短寿命证据不自动删除。结构身份和原始计数保持不变，过滤在邻接分页限制之前进行。
+
 - Discovery graph 只包含当前发布 revision 中至少有一次 normalized Reaction Occurrence 和具体 Reaction Evidence 支持的记录方向；聚合网络、推导反向或 `count=0` 不能创建方向。`count >= 1` 只表示 eligible，不代表 mechanistically significant。
 - 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。至少一个 matched Reaction Occurrence 必须证明该产物是 focal reactant 的 event-local dominant atom descendant，即与 focal reactant 具有所有产物 participant 中最大的正 atom-ID 交集。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
 - 多产物 Reaction Type 只对满足上述局部原子传递规则的 product Species 产生 carried branch；最大交集并列时分别保留。ranker 不得按分子式、结构相似度或人工类别猜测 Carried Species。不同步骤仍可来自不同事件和 Molecule Instance；这一局部规则不等于 Continuous MD Support。
@@ -299,10 +302,13 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 - 正式数据流是 `raw MD evidence → offline indexed substrate → online bounded local discovery → selective Continuous MD Support → paged evidence drill-down`。
 - Online Candidate Discovery 只读已发布的 hypergraph adjacency、aggregate metrics 和 canonical identity indexes，围绕 exact Carried Species 局部展开。
+- 目标检索先按唯一 Species 读取有界局部邻接，再在已读取子图中按到目标的最少剩余步数剪枝、枚举 simple routes。不得让汇合到同一 Species 的重复前缀反复占用邻接展开预算；不同前缀的已访问集合仍独立保留。邻接、目标探测和 frontier 均受原预算限制，路线枚举另受 `max_expansions * max_steps` 前缀预算及同一时间预算限制，截断原因保留。结果记录 `search_algorithm` 和实际前缀预算/消耗；结构身份不变。
 - 在线请求不得扫描 raw event source、加载全部 occurrences 或 continuity segments、构造全局 occurrence graph，也不得预枚举或持久化全部 Candidate Paths。
 - `reacnet_scope/event_paths.py` 当前从完整事件集合构建 occurrence graph 的 Candidate discovery 只能作为原型/兼容实现保留。正式 production endpoint 上线并完成兼容迁移前不删除；上线后不得作为默认或百万级发布路径。
 
 ### 11.6 Continuous MD Support 与 Candidate Evidence
+
+ADR-0017 首版选择性检查使用显式 `all_atoms` 锚策略和默认 1000 状态/5 秒预算，输出 `chain_found`、`not_observed_within_evidence` 或 `inconclusive`、实例链、断点及原子保留事实。它尚不实现下文完整可配置 retention-policy 接口；缺少间隔内逐帧键状态证明时必须报告不确定，不能凭相同端点跨越间隔。此实现边界不降低下文的完整连续性契约。
 
 Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之后，只验证 Top-M 或用户显式选择的 Candidate。它不参与 Candidate identity，不决定 Candidate 是否存在，不得反向修改稳定的 `network_score` 或 `network_rank`；`not_evaluated` 不等于 unsupported 或零分。
 
@@ -344,6 +350,10 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 - 书签恢复只重建事件选择和展示窗口，不自动读取轨迹；用户显式打开后才按预建轨迹索引读取有界帧。
 
 #### 11.7.1 Molecule Lineage
+
+事件准备另外发布精确 Molecule Continuity Segment 索引。新的 Molecular Lineage Explorer 按具体 Reaction Occurrence 与 segment 构造有向谱系图；起点、展开和导出绑定来源修订，分支与汇合保留全部参与者及计量，不以相同端点代替逐帧连续证据。Observed Path 是已展开图中的具体投影，连续锚点取逐段交集，原始原子返回不恢复连续性。身份、证据边界与兼容规则见 [ADR-0018](adr/0018-explore-segment-occurrence-lineage.md) 和 [ADR-0019](adr/0019-separate-anchor-continuity-and-atom-provenance.md)。Dash 入口在后续 PR 中接入。
+
+以下规则适用于兼容的 `molecule-lineage/v2` 端点工具；Explorer 的默认锚点和预算以 ADR-0018/19 为准：
 
 - 输入必须是某个 Reaction Occurrence 一侧的具体 Molecule Instance，不接受只有 Species 的起点。
 - 连续性使用精确 Species、atom-ID 集合和最近可解析事件；结构回穿还要求分子内键集合完全相同。

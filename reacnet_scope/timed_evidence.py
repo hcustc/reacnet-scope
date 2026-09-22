@@ -181,6 +181,21 @@ class TransitionEvidence:
     after_molecules: tuple[MoleculeRow, ...] = ()
 
 
+def iter_csv_molecular_frames(path):
+    """Offline frame stream using the event builder's strict legacy parser."""
+    from .event_index import _read_molecule_group
+    with open(path, 'rb') as handle:
+        fields = tuple(next(csv.reader([handle.readline().decode('utf-8-sig').strip()])))
+        frame, previous = 0, None
+        while True:
+            group = _read_molecule_group(handle, fields, frame_index=frame, previous_timestep=previous)
+            if group is None:
+                break
+            yield group[0], group[1], group[2]
+            frame += 1
+            previous = group[1]
+
+
 class NativeHdf5EvidenceAdapter:
     """Strict streaming adapter for one supported native timeline source."""
 
@@ -725,6 +740,46 @@ class NativeHdf5EvidenceAdapter:
                 + sum(96 + len(value) for value in old.bond_ids)
             )
         return row
+
+    def iter_molecular_state_spans(self):
+        """Inclusive analyzed-frame ranges of exact source states, offline only.
+
+        Molecule definitions and ranges are authored RNG evidence. Do not expand
+        ranges to molecule-frame rows or derive bonds from coordinates.
+        """
+        for starts, ends, molecule in self.iter_molecular_state_blocks():
+            for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+                yield start, end, molecule
+
+    def iter_molecular_state_blocks(self):
+        """Bounded vector ranges; preserve genuine gaps without per-range SQL."""
+        group = self.handle['molecule_ranges']
+        count = len(group['molecule_id'])
+        previous = None
+        for offset in range(0, count, _MEMBERSHIP_RANGE_CHUNK_SIZE):
+            stop = offset + _MEMBERSHIP_RANGE_CHUNK_SIZE
+            ids = np.asarray(group['molecule_id'][offset:stop], dtype=np.uint64)
+            starts = np.asarray(group['start_frame'][offset:stop], dtype=np.int64)
+            ends = np.asarray(group['end_frame'][offset:stop], dtype=np.int64)
+            if (np.any(starts < 0) or np.any(ends < starts) or np.any(ends >= len(self.timesteps))
+                    or np.any(ids == 0) or np.any(ids[1:] < ids[:-1])
+                    or previous is not None and int(ids[0]) < previous):
+                raise TimedEvidenceDataError('Invalid or unordered molecular state ranges', state='incompatible')
+            previous = int(ids[-1])
+            boundaries = np.r_[0, np.flatnonzero(ids[1:] != ids[:-1]) + 1, len(ids)]
+            for left, right in zip(boundaries, boundaries[1:]):
+                merged_starts, merged_ends = _merge_inclusive_ranges(starts[left:right], ends[left:right])
+                molecule = self._molecule(int(ids[left]))
+                # Adjacent spans crossing chunks are coalesced by the staging
+                # segment builder. A whole molecule's range list is never loaded.
+                yield merged_starts, merged_ends, molecule
+
+    def iter_frame_references(self):
+        for offset in range(0, len(self.timesteps), 4096):
+            sources = self.handle['frames/source_id'][offset:offset + 4096]
+            frames = self.handle['frames/source_frame'][offset:offset + 4096]
+            for i, (source, frame) in enumerate(zip(sources, frames, strict=True), offset):
+                yield i, int(self.timesteps[i]), int(source), int(frame)
 
     def _definition_states(self) -> np.ndarray[Any, Any]:
         """Map occurrence-specific molecule IDs to stable structural states."""

@@ -2647,6 +2647,9 @@ class EventEvidenceStore:
                         connection,
                         replicate_id=dataset_id,
                     )
+                    from .lineage_segments import materialize_segments
+                    materialize_segments(connection, replicate_id=dataset_id,
+                                         native=adapter, progress=progress_callback)
                 materialize_candidate_adjacency(connection)
                 _write_meta(
                     connection,
@@ -3260,6 +3263,9 @@ class EventEvidenceStore:
                         connection,
                         replicate_id=dataset_id,
                     )
+                    from .lineage_segments import materialize_segments
+                    materialize_segments(connection, replicate_id=dataset_id,
+                                         molecules_file=molecule_source[0], progress=progress_callback)
                     materialize_candidate_adjacency(connection)
                     _write_meta(
                         connection,

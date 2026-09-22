@@ -608,7 +608,14 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
         result = svc.search_candidate_paths(
             artifacts, args.start, target=args.target, mode=args.mode,
             max_steps=args.max_steps, max_paths=args.max_paths,
+            quality_view=args.quality_view, return_window_frames=args.return_window_frames,
+            return_basis=args.return_basis, max_expansions=args.max_expansions,
+            max_frontier=args.max_frontier,
         )
+        for path in result['paths'][:args.check_top]:
+            checked = svc.check_candidate_continuity(artifacts, result, path['signature_id'])
+            path['continuous_support'] = checked
+            path['continuous_md'] = checked['status']
     except svc.ServiceError as exc:
         print(f"[ERROR] {exc.message}", file=sys.stderr)
         return 2
@@ -1703,6 +1710,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--mode", choices=["target", "explore"], default="target")
     sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 8), default=4)
     sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
+    sp_candidate_search.add_argument("--quality-view", choices=['persistent', 'raw'], default='persistent', help='默认折叠有证据的短暂往返；raw 保留全部事件')
+    sp_candidate_search.add_argument("--return-window-frames", type=_bounded_int('return-window-frames', 1, 100), default=3)
+    sp_candidate_search.add_argument("--return-basis", choices=['topology', 'exact'], default='topology', help='连接关系返回或精确键级返回')
+    sp_candidate_search.add_argument("--max-expansions", type=_bounded_int('max-expansions', 1, 20000), default=2000)
+    sp_candidate_search.add_argument("--max-frontier", type=_bounded_int('max-frontier', 1, 20000), default=5000)
+    sp_candidate_search.add_argument("--check-top", type=_bounded_int('check-top', 0, 10), default=0, help='独立检查前 N 条路线的连续历史，每条最多 1000 状态/5 秒')
     sp_candidate_search.add_argument("--out-json", default="")
     sp_candidate_search.add_argument("--out-csv", default="")
     sp_candidate_search.set_defaults(func=cmd_candidate_search)
