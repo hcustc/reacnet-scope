@@ -16,7 +16,6 @@ from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
 from reacnet_scope import services as svc
-from reacnet_scope.path_search import candidate_formula as smiles_to_formula_fast
 from . import candidate_graph
 
 
@@ -35,7 +34,7 @@ def structure(species):
     return html.Div([
         html.Img(src='/api/structure.svg?' + urlencode({'smiles': species, 'width': 180, 'height': 110}),
                  alt=species),
-        html.Strong(smiles_to_formula_fast(species) or species),
+        html.Strong(svc.candidate_formula(species) or species),
         html.Details([html.Summary('精确 RNG 标签'), html.Code(species)]),
     ], className='rs-candidate-structure')
 
@@ -223,6 +222,8 @@ def layout():
                 html.P('这项检查不改变候选路线身份。未找到、证据不足或尚未检查都不表示路线不成立。',
                        className='text-muted'),
                 dbc.Button('开始检查', id='cp-check', size='sm', outline=True),
+                dbc.Button('取消检查', id='cp-check-cancel', size='sm', outline=True, disabled=True),
+                html.Div(id='cp-check-progress', role='status'),
                 html.Div(id='cp-check-result', role='status'),
             ], className='rs-candidate-continuity-details'),
         ], className='rs-candidate-evidence-workspace'),
@@ -491,9 +492,10 @@ def register_callbacks(app):
         return None
 
     @app.callback(Output('cp-validation-request', 'data'), Input('cp-check', 'n_clicks'),
+                  Input('cp-check-cancel', 'n_clicks'),
                   Input('cp-request', 'data'), Input('cp-focus', 'value'), Input('app-store', 'data'),
                   State('cp-report', 'data'), prevent_initial_call=True)
-    def validation_request(_click, search_request, signature, store, report):
+    def validation_request(_click, _cancel, search_request, signature, store, report):
         if ctx.triggered_id != 'cp-check' or not report or report.get('context') != context_key(store):
             return None
         if not search_request or report.get('query_request_id') != search_request.get('request_id'):
@@ -503,8 +505,11 @@ def register_callbacks(app):
                     artifacts=(store or {}).get('artifacts') or {})
 
     @app.callback(Output('cp-validation-raw', 'data'), Input('cp-validation-request', 'data'),
-                  background=True, running=[(Output('cp-check', 'disabled'), True, False)],
-                  cancel=[Input('cp-search', 'n_clicks'), Input('cp-cancel', 'n_clicks')], prevent_initial_call=True)
+                  background=True, running=[(Output('cp-check', 'disabled'), True, False),
+                                            (Output('cp-check-cancel', 'disabled'), False, True),
+                                            (Output('cp-check-progress', 'children'), '正在检查连续历史…', '')],
+                  cancel=[Input('cp-check-cancel', 'n_clicks'), Input('cp-search', 'n_clicks'),
+                          Input('cp-cancel', 'n_clicks'), Input('app-store', 'data')], prevent_initial_call=True)
     def validate(request):
         if not request:
             return None
@@ -566,7 +571,7 @@ def register_callbacks(app):
             report = None
         paths = (report or {}).get('paths') or []
         rows = [dict(id=p['signature_id'], route=i, steps=p['step_count'],
-                     species=' → '.join(smiles_to_formula_fast(s) or s for s in p['species']),
+                     species=' → '.join(svc.candidate_formula(s) or s for s in p['species']),
                      counts=' / '.join(str(s.get('transfer_event_count', s['event_count'])) for s in p['steps']),
                      returns=' / '.join(str(s.get('quality', {}).get('folded_events', '未知')) for s in p['steps']),
                      continuity=CONTINUITY_LABELS.get(p.get('continuous_md'), '未检查'))
@@ -621,7 +626,10 @@ def register_callbacks(app):
         if step_index is None or not report or report.get('context') != context_key(store):
             return empty
         same_page = bool(previous and previous.get('signature_id') == signature
-                         and previous.get('step_index') == step_index)
+                         and previous.get('step_index') == step_index
+                         and previous.get('context') == report.get('context')
+                         and previous.get('query_request_id') == report.get('query_request_id')
+                         and previous.get('source_revision') == report.get('source_revision'))
         page = previous if same_page else None
         offset = int((page or {}).get('offset') or 0)
         trigger = ctx.triggered_id
@@ -651,6 +659,9 @@ def register_callbacks(app):
             try:
                 page = svc.candidate_step_events((store or {}).get('artifacts') or {}, report,
                                                  signature, step_index, offset)
+                page = dict(page, context=report.get('context'),
+                            query_request_id=report.get('query_request_id'),
+                            source_revision=report.get('source_revision'))
             except (svc.ServiceError, ValueError, OSError) as exc:
                 return '', None, str(exc), [], True, True, [], None, True, True, '', True, True
         step = next(p for p in report['paths'] if p['signature_id'] == signature)['steps'][step_index]

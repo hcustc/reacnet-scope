@@ -219,6 +219,11 @@ def test_validation_late_result_does_not_replace_new_search(tmp_path):
     request = dict(raw)
     report = dict(query_request_id='new', paths=[{'signature_id': 'route'}])
     assert callback(raw, request, {'request_id': 'new'}, report, store) is no_update
+    background = app.callback_map['cp-validation-raw.data']
+    assert any(item['id'] == 'cp-check-cancel' for item in background['background']['cancel'])
+    dependency = next(item for item in app.server.test_client().get('/_dash-dependencies').get_json()
+                      if item['output'] == 'cp-validation-raw.data')
+    assert dependency['running']['running']['cp-check-cancel.disabled'] is False
 
 
 def test_actual_event_view_renders_recorded_bond_order(tmp_path):

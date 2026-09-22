@@ -25,6 +25,12 @@ not a library action or a separate top-level workspace. Current dataset preparat
 tab, reached directly by preparation shortcuts. Utility pages hide analysis task
 navigation.
 
+This four-workspace navigation supersedes ADR-0020's statement that the earlier
+five-workspace navigation is retained. Its Candidate, occurrence, lineage, and
+scientific evidence decisions remain in force. It also supersedes the
+five-workspace navigation assumption in the earlier target-species development
+plan; that plan's workflow and evidence requirements remain applicable.
+
 A global selector uses the existing two-phase switch with fresh permission and
 source validation and retains the originating analysis page. Both species and
 reaction/condition comparison selectors use the library; multi-selection remains

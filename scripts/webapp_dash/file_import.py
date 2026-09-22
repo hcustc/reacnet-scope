@@ -11,7 +11,6 @@ from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
 from reacnet_scope import services as svc
-from reacnet_scope.file_collections import artifact_role
 from . import dataset_library
 
 
@@ -237,14 +236,14 @@ def register_callbacks(app):
 
         files = [html.Button([
             html.Span([html.Span("☑" if item["value"] in selected else "☐", **{"aria-hidden": "true"}), html.Span(item["label"])]),
-            html.Small(svc.ROLE_LABELS.get(artifact_role(item["value"])[0], "")),
+            html.Small(svc.ROLE_LABELS.get(svc.artifact_role(item["value"])[0], "")),
             html.Small(_file_size(item["size"])),
         ], id={"type": "import-toggle", "path": item["value"]}, n_clicks=(selection or {}).get("click_counts", {}).get(item["value"], 0),
             role="checkbox", disabled=locked, **{"aria-checked": str(item["value"] in selected).lower()},
             title=item["value"], className="rs-picker-row" + (" is-selected" if item["value"] in selected else ""))
             for item in files_on_page]
         if not manual:
-            files = [html.Div([html.Span(item["label"]), html.Small(svc.ROLE_LABELS.get(artifact_role(item["value"])[0], "")),
+            files = [html.Div([html.Span(item["label"]), html.Small(svc.ROLE_LABELS.get(svc.artifact_role(item["value"])[0], "")),
                               html.Small(_file_size(item["size"]))], className="rs-picker-row rs-picker-detected", title=item["value"])
                      for item in files_on_page]
         return (directories, files or ([html.P("没有匹配的文件", className="rs-picker-no-files")] if query and not items else []),

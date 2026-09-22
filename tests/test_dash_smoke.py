@@ -765,6 +765,7 @@ def _candidate_instance_state() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def _candidate_instance_page(offset: int) -> dict[str, Any]:
+    store, report = _candidate_instance_state()
     stop = min(offset + 25, 26)
     rows = [
         {
@@ -783,6 +784,9 @@ def _candidate_instance_page(offset: int) -> dict[str, Any]:
     return {
         "signature_id": "route-1",
         "step_index": 0,
+        "context": context_key(store),
+        "query_request_id": report["query_request_id"],
+        "source_revision": report["source_revision"],
         "offset": offset,
         "total": 26,
         "has_more": stop < 26,
@@ -846,6 +850,42 @@ def test_candidate_instances_navigate_across_evidence_pages(monkeypatch) -> None
     assert result["cp-instance-next"]["disabled"] is True
     assert result["cp-open-events"]["disabled"] is False
     assert result["cp-track-instance"]["disabled"] is False
+
+
+def test_new_candidate_query_rereads_page_with_same_route_signature(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_events(_artifacts, _report, _signature, _step_index, offset=0):
+        calls.append(offset)
+        page = _candidate_instance_page(offset)
+        page["rows"][0]["event_id"] = "fresh-event"
+        return page
+
+    monkeypatch.setattr(svc, "candidate_step_events", fake_events)
+    client = create_app().server.test_client()
+    store, report = _candidate_instance_state()
+    report["query_request_id"] = "candidate-query-2"
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["cp-step", "cp-focus", "cp-report", "cp-prev", "cp-next",
+                       "cp-instance-prev", "cp-instance-next", "app-store"],
+            changed="cp-report.data",
+            input_values={"cp-step": 0, "cp-focus": "route-1", "cp-report": report,
+                          "cp-prev": 0, "cp-next": 0, "cp-instance-prev": 0,
+                          "cp-instance-next": 0, "app-store": store},
+            state_values={"cp-event-page": _candidate_instance_page(0),
+                          "cp-actual-event": "event-1"},
+            output_id="cp-event-page",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert calls == [0]
+    assert result["cp-event-page"]["data"]["query_request_id"] == "candidate-query-2"
+    assert result["cp-actual-event"]["value"] == "fresh-event"
 
 
 def test_candidate_instance_handoff_rereads_exact_event_and_clears_stale_views(

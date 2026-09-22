@@ -10,7 +10,7 @@ from dash import Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from reacnet_scope import services as svc
-from .candidate_workbench import context_key, bond_graph
+from .candidate_workbench import context_key, bond_graph, accept_result as accept_payload
 
 
 def layout():
@@ -32,9 +32,11 @@ def layout():
             html.P('默认读取已索引原始轨迹的起点精确帧。也可提供 Atom ID → 元素 JSON；不会从分子式推测。'),
             dcc.Textarea(id='lx-atom-elements', placeholder='例如 {"301":"C","310":"Cl"}', style={'width':'100%'})]),
         dbc.Button('开始追踪所选分子', id='lx-start', className='mt-2 me-2'),
+        dbc.Button('取消当前追踪', id='lx-cancel', outline=True, disabled=True, className='mt-2 me-2'),
         dbc.Button('回到起始分子', id='lx-home', outline=True, className='mt-2 me-2'),
         dbc.Button('导出当前变化图与历史', id='lx-export', outline=True, className='mt-2'),
         html.Div(id='lx-message', role='status', className='my-2'),
+        html.Div(id='lx-progress', role='status'),
         dcc.RadioItems(id='lx-view', options=[{'label':'变化关系图', 'value':'lineage'},
                                             {'label':'单条变化历史', 'value':'path'}], value='lineage', inline=True),
         html.Div([
@@ -158,11 +160,6 @@ def path_details(path):
                       html.Pre(json.dumps({'steps':path['steps'], 'return_episodes':path['return_episodes']},ensure_ascii=False,indent=2))])])
 
 
-def accept_payload(raw, request, store):
-    return bool(raw and request and raw.get('request_id')==request.get('request_id')
-                and raw.get('context')==request.get('context')==context_key(store))
-
-
 def register_callbacks(app):
     @app.callback(Output('lx-instance','options'), Output('lx-instance','value'),
                   Output('lx-capability','children'), Input('event-selected-store','data'), Input('app-store','data'))
@@ -176,13 +173,13 @@ def register_callbacks(app):
         return options, options[0]['value'] if options else None, status['message']
 
     @app.callback(Output('lx-request','data'),
-                  *[Input('lx-'+key,'n_clicks') for key in ['start','prev','next','all','continue','paths','frame-show','event']],
+                  *[Input('lx-'+key,'n_clicks') for key in ['start','prev','next','all','continue','paths','frame-show','event','cancel']],
                   Input('app-store','data'), State('event-selected-store','data'), State('lx-instance','value'),
                   State('lx-state','data'), State('lx-focus','data'), State('lx-target','value'), State('lx-frame','value'),
                   State('lx-anchor-mode','value'), State('lx-anchor-ids','value'), State('lx-atom-elements','value'))
     def request(*args):
-        store, selected, instance, state, focus, target, frame, anchor_mode, anchor_ids, atom_elements = args[8:]
-        if ctx.triggered_id == 'app-store' or not ctx.triggered_id:
+        store, selected, instance, state, focus, target, frame, anchor_mode, anchor_ids, atom_elements = args[9:]
+        if ctx.triggered_id in {'app-store', 'lx-cancel'} or not ctx.triggered_id:
             return None
         action = ctx.triggered_id.removeprefix('lx-')
         report = (state or {}).get('report')
@@ -194,7 +191,11 @@ def register_callbacks(app):
                     anchor_mode=anchor_mode, anchor_ids=anchor_ids, atom_elements=atom_elements)
 
     @app.callback(Output('lx-raw','data'), Input('lx-request','data'), background=True,
-                  running=[(Output('lx-start','disabled'), True, False), (Output('lx-all','disabled'),True,False)],
+                  cancel=[Input('lx-cancel','n_clicks'), Input('app-store','data')],
+                  running=[(Output('lx-'+key,'disabled'), True, False)
+                           for key in ['start','prev','next','all','continue','paths','frame-show','event']]
+                          + [(Output('lx-cancel','disabled'), False, True),
+                             (Output('lx-progress','children'), '正在处理追踪请求…', '')],
                   prevent_initial_call=True)
     def run(request):
         if not request:
@@ -246,7 +247,7 @@ def register_callbacks(app):
                   Input('app-store','data'), State('lx-state','data'))
     def commit(raw, request, store, current):
         if not request:
-            return None
+            return no_update if current and current.get('context')==context_key(store) else None
         if not accept_payload(raw, request, store):
             return no_update if current and current.get('context')==context_key(store) else None
         result = dict(current or {}) if raw['action']!='start' else {}

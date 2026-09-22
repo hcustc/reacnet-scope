@@ -10,7 +10,7 @@ import dash_bootstrap_components as dbc
 import dash_cytoscape as cyto
 from dash import dcc, html
 
-from reacnet_scope.path_search import candidate_formula
+from reacnet_scope import services as svc
 
 
 STYLESHEET = [
@@ -67,7 +67,7 @@ def elements(report):
                 ranks[sid] = depth * 2
                 nodes[sid] = {'data': {
                     'id': sid, 'kind': 'species', 'species': species,
-                    'label': f'S{species_number} · {candidate_formula(species) or species}',
+                    'label': f'S{species_number} · {svc.candidate_formula(species) or species}',
                     'image': '/api/structure.svg?' + urlencode({'smiles': species, 'width': 180, 'height': 110}),
                     'members': [],
                 }}

@@ -246,7 +246,14 @@ def test_explorer_callbacks_keep_revision_and_request_identity(case):
     assert detail_view(state['report'],state['focus'])[0]
     request.update(action='event',report=state['report'],focus=state['focus'])
     assert run(request)['occurrence']['event_id']==event
-    assert commit(second,None,store,state) is None
+    from dash import no_update
+    assert commit(second,None,store,state) is no_update
+    assert commit(second,None,dict(store,dataset_id='different'),state) is None
+    background = app.callback_map['lx-raw.data']
+    assert any(item['id'] == 'lx-cancel' for item in background['background']['cancel'])
+    dependencies = app.server.test_client().get('/_dash-dependencies').get_json()
+    dependency = next(item for item in dependencies if item['output'] == 'lx-raw.data')
+    assert dependency['running']['running']['lx-cancel.disabled'] is False
 
 
 def test_original_frame_is_exact_and_read_only(case,tmp_path):
