@@ -61,6 +61,7 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
                 'reactant_participants_json', 'product_participants_json',
                 'reactant_bonds_json', 'product_bonds_json'}
     if required <= columns:
+        connection.execute('CREATE INDEX IF NOT EXISTS candidate_events_transition ON events(timestep_index,event_id)')
         # Only the most recent occurrence for each atom remains in memory.
         # Same-transition overlaps become barriers, never an internal ordering.
         last = {}
@@ -69,8 +70,9 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
             reactant_bonds_json,product_bonds_json,atom_ids_json
             FROM events ORDER BY timestep_index,event_id''')
         for transition, batch in groupby(cursor, key=lambda row: row[1]):
-            batch = list(batch)
-            unresolved = any(row[2] != 'matched' and not json.loads(row[7]) for row in batch)
+            unresolved = connection.execute('''SELECT 1 FROM events
+                WHERE timestep_index=? AND association_status IS NOT 'matched'
+                AND json_array_length(atom_ids_json)=0 LIMIT 1''', (transition,)).fetchone() is not None
             if unresolved:
                 last.clear()
             touched = {}
@@ -92,13 +94,20 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
                     touched[atom] = row if atom not in touched else (None, transition)
             if not unresolved:
                 last.update(touched)
+    # Queries accept windows of at most 100 analyzed-frame intervals. Collapse
+    # longer gaps so one edge has a fixed number of quality buckets regardless
+    # of how many occurrences support it.
     connection.execute('''INSERT INTO candidate_quality_counts
-        SELECT t.source_species,t.product_species,t.reaction_key,
-            h.prior_gap,COALESCE(h.prior_kind,'unknown'),h.return_gap,
-            COALESCE(h.return_kind,'unknown'),COUNT(*)
-        FROM candidate_transfer_events t LEFT JOIN candidate_event_history h USING(event_id)
-        GROUP BY t.source_species,t.product_species,t.reaction_key,
-            h.prior_gap,h.prior_kind,h.return_gap,h.return_kind''')
+        SELECT source_species,product_species,reaction_key,prior_gap,prior_kind,
+            return_gap,return_kind,COUNT(*) FROM (
+            SELECT t.source_species,t.product_species,t.reaction_key,
+                CASE WHEN h.prior_gap BETWEEN 1 AND 100 THEN h.prior_gap END AS prior_gap,
+                COALESCE(h.prior_kind,'unknown') AS prior_kind,
+                CASE WHEN h.return_gap BETWEEN 1 AND 100 THEN h.return_gap END AS return_gap,
+                COALESCE(h.return_kind,'unknown') AS return_kind
+            FROM candidate_transfer_events t LEFT JOIN candidate_event_history h USING(event_id)
+        ) GROUP BY source_species,product_species,reaction_key,
+            prior_gap,prior_kind,return_gap,return_kind''')
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not {'event_participants', 'molecule_instances'} <= tables:
         return
@@ -118,21 +127,24 @@ def materialize_candidate_evidence(connection: sqlite3.Connection) -> None:
 
 
 def quality_summary(connection, source, product, reaction, window, basis):
-    rows = connection.execute('''SELECT prior_gap,prior_kind,return_gap,return_kind,event_count
+    kinds = "('exact','topology')" if basis == 'topology' else "('exact')"
+    row = connection.execute(f'''SELECT
+        COALESCE(SUM(event_count),0),
+        COALESCE(SUM(CASE WHEN (prior_kind IN {kinds} AND prior_gap BETWEEN 1 AND ?)
+            OR (return_kind IN {kinds} AND return_gap BETWEEN 1 AND ?)
+            THEN event_count ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN return_kind IN {kinds} AND return_gap BETWEEN 1 AND ?
+            THEN event_count ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN prior_kind IN {kinds} AND prior_gap BETWEEN 1 AND ?
+            THEN event_count ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN return_kind='exact' AND return_gap BETWEEN 1 AND ?
+            THEN event_count ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN return_kind='topology' AND return_gap BETWEEN 1 AND ?
+            THEN event_count ELSE 0 END),0)
         FROM candidate_quality_counts WHERE source_species=? AND product_species=? AND reaction_key=?''',
-        (source, product, reaction)).fetchall()
-    allowed = {'exact', 'topology'} if basis == 'topology' else {'exact'}
-    summary = dict(evaluated_events=0, folded_events=0, rapid_return_events=0,
-                   reclosure_events=0, exact_return_events=0, topology_return_events=0)
-    for prior_gap, prior_kind, gap, kind, count in rows:
-        reverse = prior_kind in allowed and prior_gap is not None and 0 < prior_gap <= window
-        forward = kind in allowed and gap is not None and 0 < gap <= window
-        summary['evaluated_events'] += count
-        summary['folded_events'] += count if reverse or forward else 0
-        summary['rapid_return_events'] += count if forward else 0
-        summary['reclosure_events'] += count if reverse else 0
-        summary['exact_return_events'] += count if (kind == 'exact' and gap is not None and gap <= window) else 0
-        summary['topology_return_events'] += count if (kind == 'topology' and gap is not None and gap <= window) else 0
+        (window, window, window, window, window, window, source, product, reaction)).fetchone()
+    summary = dict(zip(('evaluated_events','folded_events','rapid_return_events',
+                        'reclosure_events','exact_return_events','topology_return_events'), row))
     summary.update(window_frames=window, return_basis=basis,
                    semantics='recorded_return_not_noise_classification')
     return summary

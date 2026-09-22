@@ -7,8 +7,10 @@ date: 2026-09-21
 
 The user authorized implementation following the chlorophenol case study.
 This refines ADR-0013/15/16: discovery and continuous history remain separate;
-candidate structural identity stays version 2, while report schema and prepared
-candidate adjacency advance to version 3. Existing event indexes remain valid
+candidate structural identity stays version 2 and report schema advances to
+version 3. The prepared candidate adjacency advances to version 4 because
+return gaps beyond the supported 100-frame window are grouped into bounded
+buckets. Existing event indexes remain valid
 for other tools; candidate discovery needs an explicit event-index rebuild.
 Online requests never migrate or rebuild an index.
 

@@ -153,6 +153,31 @@ def test_unresolved_same_transition_blocks_return_independent_of_row_order(tmp_p
         assert con.execute("SELECT COUNT(*) FROM candidate_event_history WHERE return_kind IN ('exact','topology')").fetchone()[0] == 0
 
 
+def test_return_quality_buckets_stay_bounded_for_many_distinct_gaps(tmp_path):
+    from reacnet_scope.candidate_evidence import materialize_candidate_evidence, quality_summary
+
+    with sqlite3.connect(tmp_path / 'many-gaps.sqlite') as con:
+        con.execute('''CREATE TABLE events(event_id TEXT PRIMARY KEY,timestep_index INTEGER,
+            association_status TEXT,reactant_participants_json TEXT,product_participants_json TEXT,
+            reactant_bonds_json TEXT,product_bonds_json TEXT,atom_ids_json TEXT)''')
+        con.execute('''CREATE TABLE candidate_transfer_events(source_species TEXT,
+            product_species TEXT,reaction_key TEXT,event_id TEXT,shared_atoms INTEGER)''')
+        transition = 0
+        for gap in range(1, 202):
+            transition += gap
+            event_id = f'event-{gap}'
+            con.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)',
+                        (event_id, transition, 'matched', '[]', '[]', '[]', '[]', '[1]'))
+            con.execute('INSERT INTO candidate_transfer_events VALUES(?,?,?,?,1)',
+                        ('[C]', '[O]', '[C]->[O]', event_id))
+        materialize_candidate_evidence(con)
+        buckets = con.execute('SELECT COUNT(*) FROM candidate_quality_counts').fetchone()[0]
+        assert buckets <= 102
+        summary = quality_summary(con, '[C]', '[O]', '[C]->[O]', 100, 'exact')
+        assert summary['evaluated_events'] == 201
+        assert summary['exact_return_events'] == 99
+
+
 def test_matching_endpoints_do_not_certify_unindexed_intervening_frames(tmp_path):
     artifacts = source(tmp_path, real_chain=True)
     report = svc.search_candidate_paths(artifacts, A, target=C)

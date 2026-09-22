@@ -13,9 +13,33 @@ from itertools import groupby
 from pathlib import Path
 
 import numpy as np
-from .timed_evidence import iter_csv_molecular_frames, _merge_inclusive_ranges, _inclusive_range_frames
+from .timed_evidence import iter_csv_molecular_frames, _merge_inclusive_ranges
 
-VERSION = '1'
+VERSION = '2'
+FRAME_BLOCK = 262144
+
+
+def _segment_bounds(packed, frame, lower, upper):
+    """Find the exact occupied run around one occurrence frame in bounded blocks."""
+    cursor = frame
+    while cursor > lower:
+        start = max(lower, cursor - FRAME_BLOCK)
+        bits = np.unpackbits(packed[start // 8:(cursor + 7) // 8], bitorder='little')
+        absent = np.flatnonzero(bits[start % 8:start % 8 + cursor - start] == 0)
+        if absent.size:
+            lower = start + int(absent[-1]) + 1
+            break
+        cursor = start
+    cursor = frame + 1
+    while cursor < upper:
+        stop = min(upper, cursor + FRAME_BLOCK)
+        bits = np.unpackbits(packed[cursor // 8:(stop + 7) // 8], bitorder='little')
+        absent = np.flatnonzero(bits[cursor % 8:cursor % 8 + stop - cursor] == 0)
+        if absent.size:
+            upper = cursor + int(absent[0])
+            break
+        cursor = stop
+    return lower, upper - 1
 
 
 def state_record(species, atoms, bonds):
@@ -56,7 +80,10 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         CREATE TABLE lineage_frames(frame INTEGER PRIMARY KEY,timestep INTEGER,source_id INTEGER,source_frame INTEGER);
         CREATE TABLE lineage_states(state_key TEXT PRIMARY KEY,species TEXT,atoms TEXT,bonds TEXT);
         CREATE TABLE lineage_state_occupancy(state_key TEXT PRIMARY KEY,frame_count INTEGER,
-            segment_count INTEGER,packed_frames BLOB);
+            segment_count INTEGER);
+        DROP TABLE IF EXISTS lineage_occupancy_chunks;
+        CREATE TABLE lineage_occupancy_chunks(state_key TEXT,block_start INTEGER,packed_frames BLOB,
+            PRIMARY KEY(state_key,block_start));
         CREATE TABLE lineage_segments(segment_id TEXT PRIMARY KEY,state_key TEXT,start_frame INTEGER,end_frame INTEGER,
             conflict INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX lineage_segments_state ON lineage_segments(state_key,start_frame,end_frame);
@@ -73,6 +100,8 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         CREATE TEMP TABLE lineage_chunks(state_key TEXT,ranges BLOB);
         DROP TABLE IF EXISTS temp.lineage_instance_states;
         CREATE TEMP TABLE lineage_instance_states(instance_id TEXT,frame INTEGER,state_key TEXT);
+        DROP TABLE IF EXISTS temp.lineage_boundaries;
+        CREATE TEMP TABLE lineage_boundaries(frame INTEGER PRIMARY KEY);
     ''')
 
     def tick(n):
@@ -119,9 +148,9 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
             tick(frame)
         flush()
     connection.execute('CREATE INDEX temp.lineage_chunks_order ON lineage_chunks(state_key)')
-    # Break ranges at source boundaries; no continuity is asserted between files.
-    boundaries = [r[0] for r in connection.execute('''SELECT a.frame FROM lineage_frames a
-        JOIN lineage_frames b ON b.frame=a.frame-1 WHERE a.source_id<>b.source_id''')]
+    # Source boundaries are indexed on disk; a dataset may contain many files.
+    connection.execute('''INSERT INTO lineage_boundaries SELECT a.frame FROM lineage_frames a
+        JOIN lineage_frames b ON b.frame=a.frame-1 WHERE a.source_id<>b.source_id''')
 
     for count, (instance, frame, species, atoms, bonds) in enumerate(connection.execute('''SELECT instance_id,analyzed_frame,
             species_smiles,atom_ids_json,bonds_json FROM molecule_instances'''), 1):
@@ -143,44 +172,78 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         for count,(key, rows) in enumerate(groupby(connection.execute(
                 'SELECT state_key,ranges FROM lineage_chunks ORDER BY state_key'),lambda r:r[0]),1):
             tick(count)
-            starts=np.asarray([],dtype=np.int64)
-            ends=np.asarray([],dtype=np.int64)
+            # A disk-backed difference vector accepts overlapping ranges in any
+            # chunk order. Only one fixed-size frame block enters process memory.
+            delta=np.memmap(Path(directory)/'state-delta',mode='w+',dtype=np.int64,
+                            shape=(frame_count+1,))
             for _,blob in rows:
                 intervals=np.frombuffer(zlib.decompress(blob),dtype='<i8').reshape((-1,2))
-                starts,ends=_merge_inclusive_ranges(np.r_[starts,intervals[:,0]],np.r_[ends,intervals[:,1]])
-            present=np.zeros(frame_count,dtype=bool)
-            present[_inclusive_range_frames(starts,ends)]=True
-            for boundary in boundaries:
-                i=int(np.searchsorted(starts,boundary,side='right'))-1
-                if i>=0 and starts[i]<boundary<=ends[i]:
-                    old_end=ends[i]; ends[i]=boundary-1
-                    starts=np.insert(starts,i+1,boundary); ends=np.insert(ends,i+1,old_end)
-            packed=np.packbits(present,bitorder='little')
-            logical_segments+=len(starts)
-            connection.execute('INSERT INTO lineage_state_occupancy VALUES(?,?,?,?)',
-                               (key,frame_count,len(starts),zlib.compress(packed.tobytes(),1)))
+                np.add.at(delta,intervals[:,0],1)
+                np.add.at(delta,intervals[:,1]+1,-1)
+            packed=np.memmap(Path(directory)/'state-packed',mode='w+',dtype=np.uint8,
+                             shape=(max(1,width),))
             atoms=json.loads(connection.execute('SELECT atoms FROM lineage_states WHERE state_key=?',(key,)).fetchone()[0])
-            for atom in atoms:
-                i=atom_index[atom]
-                conflicts[i,:width] |= occupied[i,:width] & packed
-                occupied[i,:width] |= packed
-            instances=connection.execute('SELECT instance_id,frame FROM lineage_instance_states WHERE state_key=?',(key,))
+            segment_count=0
+            carry=0
+            previous_present=False
+            for block_start in range(0,frame_count,FRAME_BLOCK):
+                block_end=min(frame_count,block_start+FRAME_BLOCK)
+                counts=np.cumsum(delta[block_start:block_end],dtype=np.int64)
+                counts+=carry
+                carry=int(counts[-1])
+                present=counts>0
+                starts=present & ~np.r_[previous_present,present[:-1]]
+                boundaries=[r[0]-block_start for r in connection.execute(
+                    'SELECT frame FROM lineage_boundaries WHERE frame>=? AND frame<?',
+                    (block_start,block_end))]
+                if boundaries:
+                    starts[boundaries] |= present[boundaries]
+                segment_count+=int(np.count_nonzero(starts))
+                previous_present=bool(present[-1])
+                bits=np.packbits(present,bitorder='little')
+                byte_start=block_start//8
+                packed[byte_start:byte_start+len(bits)]=bits
+                connection.execute('INSERT INTO lineage_occupancy_chunks VALUES(?,?,?)',
+                                   (key,block_start,zlib.compress(bits.tobytes(),1)))
+                if np.any(bits):
+                    for atom in atoms:
+                        i=atom_index[atom]
+                        end=byte_start+len(bits)
+                        conflicts[i,byte_start:end] |= occupied[i,byte_start:end] & bits
+                        occupied[i,byte_start:end] |= bits
+            logical_segments+=segment_count
+            connection.execute('INSERT INTO lineage_state_occupancy VALUES(?,?,?)',
+                               (key,frame_count,segment_count))
+            del delta
+            current_segment=None
+            instances=connection.execute('''SELECT instance_id,frame FROM lineage_instance_states
+                WHERE state_key=? ORDER BY frame''',(key,))
             for instance,frame in instances:
-                pos=int(np.searchsorted(starts,frame,side='right'))-1
-                if pos<0 or frame>ends[pos]:
+                if frame<0 or frame>=frame_count or not packed[frame//8] & (1 << (frame%8)):
                     continue
-                start,end=int(starts[pos]),int(ends[pos])
-                sid='seg_'+hashlib.sha256(f'{replicate_id}:{key}:{start}:{end}'.encode()).hexdigest()[:32]
-                added=connection.execute('INSERT OR IGNORE INTO lineage_segments VALUES(?,?,?,?,0)',(sid,key,start,end)).rowcount
-                if added:
-                    connection.executemany('INSERT INTO lineage_segment_atoms VALUES(?,?,?,?)',((a,sid,start,end) for a in atoms))
+                if current_segment is None or not current_segment[0]<=frame<=current_segment[1]:
+                    lower=connection.execute('SELECT MAX(frame) FROM lineage_boundaries WHERE frame<=?',
+                                             (frame,)).fetchone()[0] or 0
+                    upper=connection.execute('SELECT MIN(frame) FROM lineage_boundaries WHERE frame>?',
+                                             (frame,)).fetchone()[0] or frame_count
+                    start,end=_segment_bounds(packed,frame,lower,upper)
+                    sid='seg_'+hashlib.sha256(f'{replicate_id}:{key}:{start}:{end}'.encode()).hexdigest()[:32]
+                    added=connection.execute('INSERT OR IGNORE INTO lineage_segments VALUES(?,?,?,?,0)',
+                                             (sid,key,start,end)).rowcount
+                    if added:
+                        connection.executemany('INSERT INTO lineage_segment_atoms VALUES(?,?,?,?)',
+                                               ((a,sid,start,end) for a in atoms))
+                    current_segment=(start,end,sid)
+                sid=current_segment[2]
                 connection.execute('INSERT INTO lineage_instance_segments VALUES(?,?)',(instance,sid))
+            del packed
         for count,(atom,sid,start,end) in enumerate(connection.execute('SELECT * FROM lineage_segment_atoms'),1):
             tick(count)
             bits=np.unpackbits(conflicts[atom_index[atom],start//8:end//8+1],bitorder='little')
             if bits[start%8:start%8+end-start+1].any():
                 connection.execute('UPDATE lineage_segments SET conflict=1 WHERE segment_id=?',(sid,))
         del occupied,conflicts
+    connection.execute('DROP TABLE temp.lineage_boundaries')
     connection.execute('DELETE FROM lineage_instance_segments WHERE segment_id IN (SELECT segment_id FROM lineage_segments WHERE conflict=1)')
     connection.execute('DROP TABLE temp.lineage_chunks')
     connection.execute('DROP TABLE temp.lineage_instance_states')

@@ -16,7 +16,7 @@ identity and independent support checks; the Explorer does not relabel Candidate
 
 ## Prepared substrate
 
-Event preparation additionally publishes `lineage_segments_version=1`. Exact
+Event preparation additionally publishes `lineage_segments_version=2`. Exact
 state keys contain Species, source Atom IDs normalized to Scope's one-based
 convention, and intramolecular bond orders. Native molecule ranges are streamed
 without expansion into every molecule-frame record; CSV molecular frames use
@@ -28,8 +28,9 @@ Native sources may contain hundreds of millions of genuinely disjoint ranges.
 The complete exact-state occupancy is stored as compressed frame bitmaps with
 logical segment counts. Explicit segment IDs/ranges are materialized for the
 concrete occurrence participants that the Explorer can select. This avoids one
-SQLite row per short source range while preserving every gap. Bitmaps are built
-in bounded range blocks; disk-backed packed atom occupancy checks conflicting
+SQLite row per short source range while preserving every gap. Version 2 stores
+the compressed bitmaps in bounded frame chunks and requires rebuilding earlier
+draft indexes. Bitmaps are built in bounded range blocks; disk-backed packed atom occupancy checks conflicting
 assignments even outside occurrence endpoint frames. No temporal smoothing is
 performed by this storage compression.
 

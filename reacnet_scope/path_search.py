@@ -21,7 +21,7 @@ from .rng_events import reaction_key
 from .candidate_evidence import materialize_candidate_evidence, quality_summary
 
 SCHEMA = 'reacnet-scope/indexed-candidates/v3'
-ADJACENCY_VERSION = '3'
+ADJACENCY_VERSION = '4'
 ATOM_TRANSFER_POLICY = 'event_local_dominant_atom_descendant'
 NETWORK_ONLY_POLICY = 'species_connectivity_only'
 
