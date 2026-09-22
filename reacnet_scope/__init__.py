@@ -34,7 +34,16 @@ from .species_compare import (
     species_comparison_zip,
 )
 
+from .path_search_services import (
+    search_candidate_paths,
+    search_candidate_species,
+    candidate_step_events,
+)
+
 __all__ = [
+    "search_candidate_paths",
+    "search_candidate_species",
+    "candidate_step_events",
     "IndexBuildInProgressError",
     "IndexInvalidError",
     "IndexNotReadyError",

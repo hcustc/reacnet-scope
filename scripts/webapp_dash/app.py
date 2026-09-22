@@ -30,6 +30,7 @@ if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
 from scripts.webapp_dash.chart_presentation import empty_chart_figure as _empty_chart_figure
+from scripts.webapp_dash import candidate_workbench
 from scripts.webapp_dash import callbacks as cb  # noqa: E402
 from reacnet_scope import services as svc  # noqa: E402
 from scripts.webapp_dash.navigation import (  # noqa: E402
@@ -357,6 +358,8 @@ def _detail_panel() -> html.Div:
                                 disabled=True,
                             ),
                             dbc.Button("经反应通道定位事件", id="species-to-event-btn", color="secondary", size="sm", outline=True, disabled=True),
+                            dbc.Button("从该物种探索", id="cp-from-species", size="sm", outline=True, disabled=True),
+                            dbc.Button("寻找生成路线", id="cp-to-species", size="sm", outline=True, disabled=True),
                         ],
                         className="rs-detail-actions",
                     ),
@@ -1063,7 +1066,12 @@ def _reactions_page() -> html.Div:
         ]), className="rs-card", id="rxn-timing-card", style={"display": "none"},
     )
     return html.Div(
-        [query_card, grid_card, channel_view, timing_card],
+        [dcc.Tabs(id="reaction-task-tabs", value="direct", children=[
+            dcc.Tab(label="直接反应", value="direct"),
+            dcc.Tab(label="候选路径", value="candidates"),
+        ]),
+         html.Div([query_card, grid_card, channel_view, timing_card], id="cp-direct-panel"),
+         html.Div(candidate_workbench.layout(), id="cp-path-panel", style={"display": "none"})],
         className="rs-page",
         id="page-reactions",
     )
@@ -3524,6 +3532,7 @@ def create_app() -> dash.Dash:
     )
     app.layout = build_layout()
     cb.register_callbacks(app)
+    candidate_workbench.register_callbacks(app)
 
     @app.server.get("/api/structure.svg")
     def _structure_svg():

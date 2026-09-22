@@ -326,7 +326,7 @@ uv run reacnet-scope species --reac /path/to/xxx.reactionabcd --formula C6H4
 ## 有界候选路径发现
 
 `reacnet-scope candidate-paths` 从一个或多个精确起始 Species 出发，在当前数据集观测到的
-有向 Reaction Type 网络上执行有界局部展开，以精确 Carried Species 连接步骤，再对候选涉及的
+有向 Reaction Type 网络上执行有界局部展开，以具有单步局部原子继承证据的精确 Carried Species 连接步骤，再对候选涉及的
 Reaction Types 查询逐步事件证据。原子连续 Event Path 留给独立的路径验证。
 
 ```bash
@@ -371,6 +371,34 @@ uv run reacnet-scope verify-path \
 普通 Dash 不再挂载独立路径验证页；请使用上述 CLI 或对应 Python API。旧
 `pathway` 会话只返回“反应与事件”工作区，不自动重跑验证。结果仍明确区分
 “有证据 / 未观察到 / 证据不足”，并保留 JSON/CSV 兼容导出。
+
+## 候选路径工作区（第一版）
+
+在 **反应与事件 → 候选路径** 中选择“起点到目标”或“从起点探索”。输入分子式或精确 RNG
+SMILES 检索后选择具体结构；多个同分子式结构不会自动合并。物种详情也提供“从该物种探索”
+和“寻找生成路线”。
+
+结果按步数优先展示，可勾选 2–3 条路线比较，查看完整计量与每步独立事件，分页后送入现有事件
+工作区核查轨迹。不同分子分别支持的步骤允许连接；连续 MD 历史标为“未检查”，次数不代表产率
+或整条路线出现次数。已知 miso=1 时按 RNG 代表标签解释，不声称精确键级已经核查。
+
+候选搜索要求事件索引包含新增邻接目录，不要求分子关联。旧事件索引仍能支持原有功能；请在
+“数据集”中显式重建事件索引以启用本功能。缺证据、需准备、约束内无结果和预算截断分别提示。
+查询不会扫描原始大文件或自动建索引。
+
+同一第一版核心可通过 Python `reacnet_scope.search_candidate_paths` 或 CLI 使用：
+
+```bash
+uv run --locked reacnet-scope candidate-search \
+  --source /data/run.lammpstrj.timeline.h5 \
+  --start '精确起始 RNG SMILES' --target '精确目标 RNG SMILES' \
+  --max-steps 4 --max-paths 20 \
+  --out-json candidate-paths.json --out-csv candidate-steps.csv
+```
+
+这里的路径与 SMILES 是占位符。探索模式使用 `--mode explore` 并省略 `--target`。
+CSV 事件源可加 `--molecules`，须与准备索引时的来源一致。
+旧 `candidate-paths` 命令保留兼容，和本版 `candidate-search` 的 schema/排序口径不同。
 
 ## 依赖
 

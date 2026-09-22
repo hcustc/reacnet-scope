@@ -166,7 +166,24 @@ def evaluate_reaction_readiness(*args: Any, **kwargs: Any) -> ReactionReadinessR
     )
 
 
+# Versioned candidate workbench: indexed discovery, without legacy scoring.
+from reacnet_scope.path_search_services import (
+    candidate_paths_csv,
+    candidate_search_status,
+    candidate_source_revision,
+    candidate_step_events,
+    search_candidate_paths,
+    search_candidate_species,
+)
+
+
 __all__ = [
+    "candidate_paths_csv",
+    "candidate_search_status",
+    "candidate_source_revision",
+    "candidate_step_events",
+    "search_candidate_paths",
+    "search_candidate_species",
     "ALLOWED_ROOTS",
     "ServiceError",
     "EVENT_BOOKMARK_SCHEMA_VERSION",

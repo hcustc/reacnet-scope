@@ -49,3 +49,9 @@ This decision replaces the navigation and ordinary-product-surface portion of
 the earlier software design baseline. It does not supersede the scientific
 contracts in ADRs for occurrence identity, Candidate Path Discovery,
 Continuous MD Support, apparent rates, Species Fate, or DFT geometry.
+
+## Partial supersession
+
+[ADR-0015](0015-add-indexed-candidate-task-to-reaction-workspace.md) reintroduces
+Candidate Discovery as a task within Reactions & Events following explicit user
+approval. The five-workspace organization and the other exclusions above remain.

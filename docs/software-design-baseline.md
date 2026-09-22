@@ -42,7 +42,7 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
 
-Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从一个或多个精确 Species 出发，以明确的 Carried Species 连接相邻 Reaction Type；每个方向必须有至少一次 normalized Reaction Occurrence 和具体 Reaction Evidence，但不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是排名后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
+Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从一个或多个精确 Species 出发，以具有 event-local dominant atom-descendant 证据的 Carried Species 连接相邻 Reaction Type；每一步至少有一次 matched Reaction Occurrence 支持局部原子传递，但不同步骤不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是排名后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
 
 围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它本身不递归扩展路径。
 
@@ -186,12 +186,16 @@ Constant Estimate、Path Verification、Candidate Path Discovery 及 QC 交接�
 工作区；工作区内的任务导航只列出当前普通任务。能力不足时仍显示受影响能力、原因和恢复动作，
 不能通过隐藏按钮把“缺证据”“需准备”或“尚未验证”伪装为有效空结果。
 
-Candidate Path Discovery、Path Verification 与 Species Fate Analysis 不挂载独立 Dash 页面；
-其页面专用 Store、回调、控件和样式也不属于普通产品。旧 `page-store` 中的
-`candidate-paths`、`pathway`、`species-fate` 分别归一到“反应与事件”“反应与事件”和
-“轨迹与谱系”，只恢复所属工作区，不自动运行分析。候选综合评分、能量 CSV 排名、未完成的
-Continuous MD Support 控件以及 Species Fate 普通任务卡均不进入普通界面。公共 CLI/API、
-已有导出契约和共用的事件/连续性证据核心不因 Dash 页面退役而删除。
+Candidate Path Discovery 作为“反应与事件”内的“候选路径”任务提供第一版入口，不新增一级导航。
+支持单数据集的单起点探索、起点到目标搜索、精确结构选择、路线比较、逐步事件分页与 JSON/CSV 导出。
+已知 `miso=1` 显示 RNG 代表身份与键级限制。按步数优先展示，不提供综合评分、能量 CSV 排名或
+未完成的 Continuous MD Support 按钮。每步可以来自不同分子；连续历史始终单独标为未检查。
+
+Path Verification 与 Species Fate Analysis 不挂载普通 Dash 页面。旧 `page-store` 中的
+`candidate-paths`、`pathway`、`species-fate` 仍分别归一到“反应与事件”“反应与事件”和
+“轨迹与谱系”，只恢复所属工作区，不自动运行分析。公共 CLI/API 与兼容导出继续保留。
+第一版候选任务的范围与 ADR-0014 局部替代关系见
+[ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
 
 Apparent Rate Constant Estimate 不由普通 Direct Reaction Channel 查询隐式计算；普通界面保留
 显式物理时间换算、事件计数和观察窗口，但不提供默认 k 设置或“显示速率列”开关。已有结果字段、
@@ -279,8 +283,8 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 ### 11.5 Candidate Path Discovery
 
 - Discovery graph 只包含当前发布 revision 中至少有一次 normalized Reaction Occurrence 和具体 Reaction Evidence 支持的记录方向；聚合网络、推导反向或 `count=0` 不能创建方向。`count >= 1` 只表示 eligible，不代表 mechanistically significant。
-- 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
-- 多产物 Reaction Type 对每个实际继续传播的 product Species 分别产生 carried branch；ranker 不得猜测 Carried Species。默认不按分子式、结构相似度或人工类别自动连接。
+- 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。至少一个 matched Reaction Occurrence 必须证明该产物是 focal reactant 的 event-local dominant atom descendant，即与 focal reactant 具有所有产物 participant 中最大的正 atom-ID 交集。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
+- 多产物 Reaction Type 只对满足上述局部原子传递规则的 product Species 产生 carried branch；最大交集并列时分别保留。ranker 不得按分子式、结构相似度或人工类别猜测 Carried Species。不同步骤仍可来自不同事件和 Molecule Instance；这一局部规则不等于 Continuous MD Support。
 - 普通 Candidate 使用 Carried-Species-simple path；已访问 Carried Species 的 expansion 不进入普通 Candidate，而记录为可审计 cycle closure evidence。到达 `max_steps` 是正常 discovery horizon termination，不是 cycle 或 execution truncation。
 - `max_steps` 是 declarative query horizon。`max_expansions`、`max_frontier_states`、`max_candidates_examined`、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
 
@@ -289,7 +293,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 - `target-constrained` 查询从 anchor Species 寻找一个或多个 target Species。只有 carried endpoint 到达 target 才形成结果；target 仅作为其他 product 出现不算到达，首次到达任一 target 后停止扩展该分支，未到达的中间状态不输出，且普通路径拒绝 `target_species == anchor_species`。
 - `exploratory` 查询不要求 target；`min_steps <= length <= max_steps` 的每个 simple prefix 都可成为 Candidate，短 Candidate 输出后仍可继续扩展。`max_steps` 不宣称 endpoint 是稳定产物或化学终点。
 - target-constrained 状态为 `found`、`not_found_within_constraints` 或 `truncated/inconclusive`。所有模式分别报告 `query_complete`、`graph_exhaustive` 和 `horizon_limited`；在完整搜索 `length <= max_steps` 后未命中只能说明约束内未找到，不能声明任意长度均不存在。
-- exploratory 输出由确定性、版本化 ranking 和 Top-K 有界化。prefix redundancy、长度偏好、hub Species 处理和最终 ranking 公式尚未决定，在形成独立决策前不得成为隐式默认值。
+- exploratory 输出由确定性、版本化 ranking 和 Top-K 有界化。第一版依 ADR-0015 采用按步数优先、同层按精确身份确定性展开的展示顺序，不计算综合评分。hub 邻接、frontier 和结果数预算均显式报告；它们不是化学重要性过滤。
 
 #### 11.5.2 Discovery execution boundary
 

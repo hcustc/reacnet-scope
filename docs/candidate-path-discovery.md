@@ -1,5 +1,12 @@
 # 有界候选路径发现
 
+Web 第一版使用“反应与事件 → 候选路径”、`candidate-search` CLI 与
+`reacnet_scope.search_candidate_paths`。它们从事件索引的已发布邻接目录局部搜索，
+支持目标约束，按步数优先展示，不使用下文旧综合评分。见
+[ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
+
+以下内容描述保留兼容的 `candidate-paths` 命令及其 `v3` 结果，不是新 Web 的执行边界。
+
 “候选路径发现”接收一个或多个精确 RNG SMILES。系统在当前数据集观测到的有向 Reaction Type 网络上执行确定性的有界局部展开：
 
 - 第一个 Reaction Type 的反应物侧包含任一起始 Species；

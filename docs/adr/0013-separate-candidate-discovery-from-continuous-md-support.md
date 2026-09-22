@@ -4,6 +4,10 @@ status: accepted
 
 # Separate Candidate Path Discovery from Continuous MD Support
 
+ADR-0016 refines the per-step carried branch: ordinary Candidate routes now
+require event-local dominant atom-descendant evidence. This ADR's separation
+from whole-route Continuous MD Support remains in force.
+
 Candidate Path Discovery operates on the current dataset's MD-observed directed reaction hypergraph: a direction is eligible only when at least one normalized Reaction Occurrence and concrete Reaction Evidence support that direction. Adjacent steps connect through an explicit exact Carried Species, while co-reactants and other products retain the full reaction context. A Candidate Path is therefore a network-level route and does not claim that one sampled Molecule Instance or atom lineage traversed the whole sequence.
 
 Continuous MD Support is a separate, selective validation stage applied after network filtering and ranking. It uses indexed Reaction Occurrences, Molecule Continuity Segments, first-consuming Transitions, and anchor provenance to determine whether a concrete molecular carrier chain realizes a selected Candidate. Validation evidence, status, retention policy, query rank, and dataset revision do not change the Candidate's structural identity; unevaluated validation is not negative evidence, and factual provenance results remain distinct from any explicitly requested binary retention-policy evaluation.
