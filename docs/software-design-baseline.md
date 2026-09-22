@@ -389,7 +389,7 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 - Explorer v2 采用 [ADR-0019](adr/0019-separate-anchor-continuity-and-atom-provenance.md)：默认以起始 instance 全部原子为锚点，也允许指定元素、全部非氢原子或显式 Atom IDs。元素选择要求可靠映射；起点完整原子集合与锚点集合分别保存。segment 的 retained/lost/gained 以所选锚点为参考，不等于沿路径连续保留；不计算骨架保留阈值。merge 保留每个输入来源到各输出的原子映射和完整反应计量。
 - Lineage View 展示当前已展开的分支/汇合子图，允许选择 segment、上一/下一事件、展开全部边界分支、沿分支继续及返回起始实例。第一版每图至多 500 segments/250 occurrences，每请求至多展开 20 次且共用 5 秒查询预算；不得以预算裁掉某个事件的一半参与者。
 - Observed Path View 只在当前已展开的 lineage 中，从具体起始 instance 到所选目标 segment 提取时间严格向前、相邻 segment 边界一致且具有非空连续锚点来源的 Event Paths。逐步记录连续保留锚点、离开/加入 IDs、起点原子返回和外来原子加入；不把重新加入恢复为连续保留，也不拼接不同 split 分支的保留集合。完整计量与共同参与者不因路径投影被隐藏。原 Cl 返回与外来 Cl 加入分开标注，元素未知时不得推断；返回原子的支路未展开时标记追溯未完成。未展开部分不属于否定结论的范围。
-- 多事件状态返回报告相同原子集合上的 exact Species/键状态或仅拓扑匹配，以及离开至返回 transition 的分析帧间隔；不设短时阈值删事件，不自动判为噪声、净生成或主机理。图和路径导出按当前修订重新读取事实。Explorer report 升为 `molecular-lineage-explorer/v2`，旧会话需重新打开；segment 索引版本仍为 1。
+- 多事件状态返回报告相同原子集合上的 exact Species/键状态或仅拓扑匹配，以及离开至返回 transition 的分析帧间隔；不设短时阈值删事件，不自动判为噪声、净生成或主机理。图和路径导出按当前修订重新读取事实。Explorer report 升为 `molecular-lineage-explorer/v2`，旧会话需重新打开；segment 索引版本为 2，旧索引需重建。
 - 图、请求和导出绑定 Dataset/源修订及请求身份；迟到响应不得覆盖新请求或新数据集。segment 可回查其任意分析帧的 RNG 状态，原始坐标读取要求精确 timestep 命中已准备轨迹索引，不能取最近帧替代。
 
 以下规则适用于兼容的 `molecule-lineage/v2` 端点工具，其默认值与 Explorer 分开：
