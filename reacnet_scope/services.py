@@ -38,6 +38,16 @@ from reacnet_scope.trajectory import (
     save_coordinate_length_unit,
     save_timestep_ps,
 )
+from reacnet_scope.lineage_explorer import (
+    lineage_explorer_status,
+    start_lineage_explorer,
+    expand_lineage_explorer,
+    observed_lineage_paths,
+    lineage_frame_reference,
+    lineage_frame_data,
+    lineage_occurrence_record,
+    export_lineage_explorer,
+)
 from reacnet_scope.workspace_services import (
     ALLOWED_ROOTS,
     artifacts_from_status,
@@ -168,6 +178,7 @@ def evaluate_reaction_readiness(*args: Any, **kwargs: Any) -> ReactionReadinessR
 
 # Versioned candidate workbench: indexed discovery, without legacy scoring.
 from reacnet_scope.path_search_services import (
+    check_candidate_continuity,
     candidate_paths_csv,
     candidate_search_status,
     candidate_source_revision,
@@ -178,6 +189,15 @@ from reacnet_scope.path_search_services import (
 
 
 __all__ = [
+    "lineage_explorer_status",
+    "start_lineage_explorer",
+    "expand_lineage_explorer",
+    "observed_lineage_paths",
+    "lineage_frame_reference",
+    "lineage_frame_data",
+    "lineage_occurrence_record",
+    "export_lineage_explorer",
+    "check_candidate_continuity",
     "candidate_paths_csv",
     "candidate_search_status",
     "candidate_source_revision",

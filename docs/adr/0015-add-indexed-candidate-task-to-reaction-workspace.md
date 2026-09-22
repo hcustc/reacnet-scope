@@ -5,6 +5,9 @@ date: 2026-09-21
 
 # Add an indexed Candidate task to Reactions & Events
 
+ADR-0017 supersedes the first-version prohibition on selected-history controls
+and adds explicit return-evidence views and candidate schema/index version 3.
+
 The user approved a first-version Web workflow for selecting exact Species,
 searching target-constrained or exploratory routes, comparing routes, inspecting
 Step Evidence, and exporting results. Add this as a task within Reactions &

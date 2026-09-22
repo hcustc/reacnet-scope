@@ -5,6 +5,10 @@ date: 2026-09-21
 
 # Require event-local atom transfer for ordinary Candidate routes
 
+ADR-0017 adds return-evidence qualification, raw/persistent views, selected
+history checks and candidate schema/index version 3; this local-transfer rule
+remains in force.
+
 Connecting Reaction Types only because one produces and another consumes the
 same Species can create misleading shortcuts through ubiquitous H, Cl, or O2.
 In the reported C6H5ClO case, the selected H product inherited no atoms from

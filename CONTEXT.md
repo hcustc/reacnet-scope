@@ -88,6 +88,10 @@ _Avoid_: Reaction Cycle Candidate, Fast Recrossing Episode
 The Reaction Occurrences that establish the directed Reaction Type and event-local focal-reactant-to-carried-product atom transfer for one Candidate Path step. Evidence for different steps is independent and does not imply that those occurrences form one continuous sampled chain.
 _Avoid_: Continuous Support Evidence, sampled pathway
 
+**Candidate Return Evidence**:
+Preparation-derived records that complete Species/atom partitions reverse between successive observed occurrences and restore bond connectivity, distinguishing exact bond-order return from topology-only return. An explicitly parameterized candidate view may fold these occurrences without deleting raw evidence or classifying them as noise.
+_Avoid_: Noise filter, lifetime threshold, automatically validated mechanism
+
 **Continuous MD Support**:
 A separate evidence validation of whether a concrete molecular provenance can realize a selected Candidate Path in order. It neither creates the Candidate nor contributes to the Candidate's structural identity.
 _Avoid_: Candidate Path Discovery, Step Evidence, implicit pass/fail score
@@ -96,12 +100,16 @@ _Avoid_: Candidate Path Discovery, Step Evidence, implicit pass/fail score
 The maximal interval within one Replicate over consecutive Analyzed Frames in which a carrier retains the same Species, atom-ID set, and intramolecular bond set. Reappearance after an interruption begins a new segment even when all three are identical again.
 _Avoid_: Molecule Instance, Species lifetime, remotely joined occurrence
 
+**Molecular Lineage Graph**:
+A time-directed graph of concrete Molecule Continuity Segments connected by complete Reaction Occurrences, retaining splitting, merging, and atom provenance. An Event Path is one temporally ordered projection through this graph; Species recurrence does not merge distinct segments.
+_Avoid_: Species network, preferred main path, mechanism graph
+
 **Carrier Chain**:
 The ordered Molecule Continuity Segments and compatible Reaction Occurrences that carry a selected Candidate Path through one Replicate. It cannot skip an earlier consumption, a continuity gap, or an unresolved evidence barrier.
 _Avoid_: Carried Species sequence, Step Evidence list
 
 **Anchor Provenance**:
-The history of selected atoms from the anchor Molecule Instance through a Carrier Chain, including where any selected atoms cease to remain continuous. Anchor selection and a retention judgment are separate decisions.
+The history of selected atoms from the anchor Molecule Instance through a Carrier Chain, including where any selected atoms cease to remain continuous. Anchor selection and a retention judgment are separate decisions. In an observed lineage projection, uninterrupted retention is the intersection through every carried segment; return of an original atom does not restore it. Root-atom return and entry of an atom outside the root instance are separate provenance facts. A returned atom may be identified even when its intervening side branch is not resolved in the expanded graph.
 _Avoid_: Carrier identity, inferred atom mapping
 
 **Continuous Support Evidence**:
