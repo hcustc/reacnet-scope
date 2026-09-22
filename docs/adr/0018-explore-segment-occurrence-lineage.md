@@ -6,9 +6,10 @@ date: 2026-09-21
 # Explore concrete segment/occurrence lineage
 
 The user selected Molecular Lineage recovery as the development mainline and
-requested an interactive Explorer. This PR establishes the substrate,
-traversal, identity and evidence contracts; the Dash entry point is delivered
-separately.
+requested an interactive Explorer. [ADR-0020](0020-center-dash-on-candidate-step-occurrences.md)
+later supersedes that product-priority statement: the Explorer is now an
+optional drill-down from a selected Reaction Occurrence. The substrate,
+traversal, identity and evidence decisions in this ADR remain accepted.
 Candidate species-network discovery cannot create the observed pathways shown here.
 This adds a segment-backed interface alongside the existing endpoint-based
 `molecule-lineage/v2` compatibility workflow. ADR-0013 still defines Candidate

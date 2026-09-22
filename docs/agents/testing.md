@@ -32,6 +32,18 @@ uv run --locked pytest -q
 设计基准的 Python 3.10+ 与 macOS/Windows 支持目标需单独验证，不能从这一项 CI 推导。
 仓库没有配置统一 lint、formatter 或 typecheck 命令。
 
+## Dash 浏览器验收
+
+UI 的共享组件约定见 [工作台 UI](../ui-workbench.md)。浏览器工具是可选的 `browser` 依赖组，常规全量测试会跳过浏览器模块；CI 另有 Chromium job。
+
+```bash
+uv sync --locked --group browser
+uv run --locked --group browser playwright install chromium
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser
+```
+
+Linux CI 安装浏览器系统库时使用 `playwright install --with-deps chromium`。可设置 `REACNET_SCOPE_SCREENSHOTS=/tmp/reacnet-ui-screenshots` 保存截图。测试服务器绑定本机临时端口，数据源和 Dataset Workspace 均位于 pytest 临时目录；页面请求必须保持本机来源。
+
 ## 可观察的验收
 
 - CLI 改动通过安装入口 `uv run --locked reacnet-scope ...` 验证参数、错误和导出；

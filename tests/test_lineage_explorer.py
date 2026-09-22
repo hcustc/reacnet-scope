@@ -219,6 +219,36 @@ def test_lineage_graph_budget_never_publishes_half_split(case, monkeypatch):
     assert limited['last_action']['status']=='graph_budget'
 
 
+def test_explorer_callbacks_keep_revision_and_request_identity(case):
+    from scripts.webapp_dash.app import create_app
+    from scripts.webapp_dash.candidate_workbench import context_key
+    from scripts.webapp_dash.lineage_explorer import graph_elements, accept_payload, detail_view
+    artifacts,event=case
+    app=create_app()
+    assert app.server.test_client().get('/_dash-layout').status_code==200
+    assert app.server.test_client().get('/_dash-dependencies').status_code==200
+    store={'dataset_id':'fixture','artifacts':artifacts}
+    request={'request_id':'one','context':context_key(store),'artifacts':artifacts,'action':'start',
+             'report':None,'focus':{},'instance':'reactant:0','selected':{'row':{'event_id':event}}}
+    run=app.callback_map['lx-raw.data']['callback'].__wrapped__
+    raw=run(request)
+    assert 'error' not in raw
+    assert accept_payload(raw,request,store)
+    assert not accept_payload(raw,dict(request,request_id='two'),store)
+    assert not accept_payload(raw,request,dict(store,dataset_id='different'))
+    commit=app.callback_map['lx-state.data']['callback'].__wrapped__
+    state=commit(raw,request,store,None)
+    request.update(action='next',request_id='two',report=state['report'],focus=raw['focus'])
+    second=run(request)
+    state=commit(second,request,store,state)
+    assert len(state['report']['segments'])==3
+    assert len(graph_elements(state['report']))==7  # 3 segments + event + 3 ports
+    assert detail_view(state['report'],state['focus'])[0]
+    request.update(action='event',report=state['report'],focus=state['focus'])
+    assert run(request)['occurrence']['event_id']==event
+    assert commit(second,None,store,state) is None
+
+
 def test_original_frame_is_exact_and_read_only(case,tmp_path):
     from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
     artifacts,event=case
@@ -280,6 +310,7 @@ def chlorine_case(tmp_path, monkeypatch):
 
 
 def test_carbon_anchor_keeps_merge_stoichiometry_and_original_chlorine(chlorine_case):
+    from scripts.webapp_dash.lineage_explorer import graph_elements, path_details
     artifacts, event = chlorine_case
     report = svc.start_lineage_explorer(artifacts, event_id=event, anchor_mode='elements',
         anchor_elements=['C'], atom_elements={1:'C', 2:'Cl', 3:'O'})
@@ -298,6 +329,9 @@ def test_carbon_anchor_keeps_merge_stoichiometry_and_original_chlorine(chlorine_
     assert path['return_episodes'][0]['basis'] == 'exact_bonds'
     assert path['steps'][2]['reaction_stoichiometry']['reactants'] == [
         {'species':'[C][Cl]', 'coefficient':1}, {'species':'[O]', 'coefficient':1}]
+    nodes = [e['data']['id'] for e in graph_elements(report, path) if 'source' not in e['data']]
+    assert set(path['steps'][2]['input_segments']) <= set(nodes)
+    assert path_details(path)
     # Export re-reads complete occurrence facts instead of browser annotations.
     report['occurrences'][event]['reaction_type'] = 'invented'
     exported = svc.export_lineage_explorer(artifacts, report, target_segment=target)

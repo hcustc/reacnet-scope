@@ -1,5 +1,9 @@
 # ReacNet Scope 收敛开发计划
 
+本文件是已完成的历史计划。当前开发安排见
+[目标物种、路径步骤与反应实例开发计划](target-species-workflow-development-plan.md)；
+下文保留原轮次的范围、阶段和验收记录，不作为后来候选任务的冻结依据。
+
 日期：2026-09-19。
 状态：已完成；2026-09-19 完成 P0–P4，2026-09-20 完成 P5。实施与验证记录见
 [P0–P1 收敛实施记录](development-convergence-p0-p1-record.md)和

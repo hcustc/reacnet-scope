@@ -258,9 +258,9 @@ def test_visible_loading_state_disables_apply_and_explains_progress() -> None:
         ),
     ).get_json()["response"]
 
-    assert actions["data-apply-btn"]["children"] == "正在加载…"
+    assert actions["data-apply-btn"]["children"] == "正在检查…"
     assert actions["data-apply-btn"]["disabled"] is True
-    assert "正在验证候选数据集" in reason["data-apply-reason"]["children"]
+    assert "正在检查文件" in reason["data-apply-reason"]["children"]
 
 
 def test_empty_data_workspace_is_an_onboarding_state_not_an_error_report() -> None:
@@ -281,7 +281,7 @@ def test_empty_data_workspace_is_an_onboarding_state_not_an_error_report() -> No
 
     assert response.status_code == 200
     rendered = json.dumps(response.get_json()["response"], ensure_ascii=False)
-    assert "尚未加载数据集" in rendered
+    assert "尚未加载RNG 数据" in rendered
     assert "missing-source" not in rendered
     assert "缺少源数据" not in rendered
 
@@ -388,7 +388,7 @@ def test_validation_failure_retains_candidate_and_old_current() -> None:
                     "request_id": transaction["request_id"],
                     "ok": False,
                     "reason": "candidate_missing",
-                    "message": "所选数据集已不存在。当前数据集未改变；请重新选择。",
+                    "message": "所选RNG 数据已不存在。当前RNG 数据未改变；请重新选择。",
                     "completed_ns": time.time_ns(),
                 },
             },
@@ -400,7 +400,7 @@ def test_validation_failure_retains_candidate_and_old_current() -> None:
     result = response.get_json()["response"]["dataset-switch-transaction"]["data"]
     assert result["state"] == "failed"
     assert result["candidate"] == candidate
-    assert "当前数据集未改变" in result["message"]
+    assert "当前RNG 数据未改变" in result["message"]
     assert "app-store" not in response.get_json()["response"]
 
 
@@ -573,7 +573,7 @@ def test_successful_switch_commits_context_resets_results_and_opens_overview(
     assert result["recent-datasets"]["data"][0]["base"] == "/data/new"
     assert result["dataset-switch-navigation"]["data"]["page"] == "data-management"
     assert result["dataset-context-commit"]["data"]["request_id"] == "request-1"
-    assert "当前数据集已切换为" in json.dumps(
+    assert "当前RNG 数据已切换为" in json.dumps(
         result["data-load-feedback"]["children"],
         ensure_ascii=False,
     )
@@ -668,7 +668,7 @@ def test_same_identity_and_revision_commit_is_a_visible_noop(monkeypatch) -> Non
     assert "app-store" not in result
     assert result["dataset-browser-candidate"]["data"] == transaction["candidate"]
     assert result["dataset-context-commit"]["data"] == {}
-    assert "当前使用的数据集" in json.dumps(
+    assert "当前使用的RNG 数据" in json.dumps(
         result["data-load-feedback"]["children"], ensure_ascii=False
     )
     assert "global-dataset-notice" not in result
@@ -779,7 +779,7 @@ def test_revision_changed_without_candidate_has_one_primary_update_action() -> N
 
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["data-current-refresh-btn"]["children"] == "更新当前数据集状态"
+    assert result["data-current-refresh-btn"]["children"] == "更新当前RNG 数据状态"
     assert result["data-current-refresh-btn"]["color"] == "primary"
     assert result["data-current-refresh-btn"]["outline"] is False
     assert result["data-apply-btn"]["disabled"] is True
@@ -813,7 +813,7 @@ def test_different_candidate_makes_switch_primary_during_revision_change() -> No
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["data-apply-btn"]["disabled"] is False
-    assert result["data-apply-btn"]["children"] == "使用此数据集"
+    assert result["data-apply-btn"]["children"] == "开始分析"
     assert result["data-current-refresh-btn"]["color"] == "secondary"
     assert result["data-current-refresh-btn"]["outline"] is True
 
@@ -855,5 +855,5 @@ def test_unchanged_candidate_is_labelled_noop_before_submit(monkeypatch) -> None
 
     assert response.status_code == 200
     result = response.get_json()["response"]
-    assert result["data-apply-btn"]["children"] == "当前数据集"
+    assert result["data-apply-btn"]["children"] == "当前RNG 数据"
     assert result["data-apply-btn"]["disabled"] is True

@@ -25,6 +25,12 @@
         });
         targetNav.classList.add("active");
         targetNav.setAttribute("aria-current", "page");
+        // Keep the canonical context and visible heading aligned with the
+        // immediate page transition, even while a server response is pending.
+        if (window.dash_clientside && window.dash_clientside.set_props) {
+            window.dash_clientside.set_props("page-store", {data: {page: pageId}});
+            window.dash_clientside.set_props("page-title", {children: targetNav.textContent.trim()});
+        }
         return true;
     }
 

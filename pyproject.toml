@@ -36,6 +36,7 @@ web = [
   "dash-cytoscape>=1,<2",
   "matplotlib>=3.8",
   "scipy>=1.11",
+  "dash-ag-grid>=35.2,<36",
 ]
 trajectory = [
   "ase>=3.23,<4",
@@ -66,6 +67,9 @@ package = true
 default-groups = ["dev"]
 
 [dependency-groups]
+browser = [
+    "playwright>=1.55,<2",
+]
 dev = [
   { include-group = "test" },
 ]
@@ -77,4 +81,5 @@ test = [
   "matplotlib>=3.8",
   "scipy>=1.11",
   "ase>=3.23,<4",
+  "dash-ag-grid>=35.2,<36",
 ]

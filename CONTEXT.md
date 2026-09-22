@@ -188,6 +188,12 @@ _Avoid_: Fate result, dataset revision
 A revision- and algorithm-bound report produced for one Fate Query, including complete statistics when available and explicit partial evidence otherwise.
 _Avoid_: Fate query, timeless conclusion
 
+**Dataset Library（已导入 RNG 数据列表）**:
+界面统一称为“RNG 数据”或“RNG 文件夹”，不使用“数据集”。内部 Dataset 身份、API 名称与索引契约不变。
+当前浏览器持久保存的独立 RNG 数据集引用列表，与最近使用记录分开。批量导入逐项验证，
+不会合并来源或改变 Current Dataset。普通分析从列表选择一个数据集；对比可选择多个，
+各来源保持自身身份。引用在使用时重新验证，导入成功不意味着全部 Analysis Capability 就绪。
+
 **Current Dataset**:
 The one ReacNetGenerator dataset whose evidence is available to the ordinary analysis tools at a time. Selecting datasets for a cross-condition comparison does not make them current.
 _Avoid_: Loaded dataset, managed dataset
