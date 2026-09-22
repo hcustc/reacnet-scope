@@ -24,6 +24,19 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
     root = Path(directory).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"dataset folder not found: {root}")
+    from .file_collections import collection_root, read_collection, COLLECTION_SUFFIX
+    if root == collection_root():
+        candidates = []
+        for number, reference in enumerate(root.glob(f"*{COLLECTION_SUFFIX}")):
+            if number >= 500:
+                break
+            record = read_collection(str(reference))
+            if record:
+                candidates.append({"folder": str(root), "base": str(reference),
+                    "label": record["label"], "collection_id": record["dataset_id"],
+                    "artifact_paths": record["artifact_paths"], "kinds": sorted(record["artifact_paths"]),
+                    "score": len(record["artifact_paths"]), "mtime": reference.stat().st_mtime})
+        return sorted(candidates, key=lambda item: item["label"])
     groups: dict[str, dict[str, tuple[Path, float]]] = defaultdict(dict)
     with os.scandir(root) as entries:
         for entry in entries:

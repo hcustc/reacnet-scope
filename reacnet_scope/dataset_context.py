@@ -32,7 +32,46 @@ from reacnet_scope.workspace_services import (
 DEFAULT_VALIDATION_TIMEOUT_SECONDS = 30
 
 
+def validate_file_collection_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a draft without publishing it or mutating an existing collection."""
+    from .file_collections import collection_candidate, read_collection, definition_revision
+    checked = collection_candidate(
+        candidate.get("artifact_paths") or {}, str(candidate.get("label") or ""),
+        existing_base=str(candidate.get("base") or ""),
+    )
+    if checked["expected_definition"] != str(candidate.get("expected_definition") or ""):
+        raise ServiceError("文件关联已变化，请重新检查。", reason="collection_changed")
+    before = capture_dataset_revision(checked)
+    status = scan_dataset(checked["folder"], base=checked["base"],
+                          artifact_paths=checked["artifact_paths"], label=checked["label"])
+    after = capture_dataset_revision(checked)
+    if before != after or definition_revision(read_collection(checked["base"])) != checked["expected_definition"]:
+        raise ServiceError("验证期间来源已变化，请重试。", reason="source_revision_changed")
+    return {**checked, "dataset_id": checked["collection_id"], "source_revision": after,
+            "artifacts": artifacts_from_status(status), "capabilities": dataset_capabilities(status),
+            "readiness": dataset_readiness(status), "analysis_capabilities": dataset_analysis_capabilities(status),
+            "collection_definition": checked}
+
+
+def commit_file_collection(validation: Mapping[str, Any]) -> None:
+    """Publish only after the active request has passed the existing switch reducer."""
+    from .file_collections import publish_collection
+    candidate = validation.get("collection_definition")
+    if not candidate:
+        return
+    if capture_dataset_revision(candidate) != validation.get("source_revision"):
+        raise ServiceError("提交前源文件已变化，请重试。", reason="source_revision_changed")
+    publish_collection(candidate)
+
+
 def _candidate_at(folder: str, base: str) -> dict[str, Any]:
+    from .file_collections import is_collection_path, read_collection
+    if is_collection_path(base):
+        record = read_collection(base, validate_sources=True)
+        if record is None:
+            raise ServiceError("数据集关联记录不存在", reason="candidate_missing")
+        return {"folder": str(Path(base).parent), "base": base, "label": record["label"],
+                "collection_id": record["dataset_id"], "artifact_paths": record["artifact_paths"]}
     root = validate_browse_path(folder)
     expected = str(Path(base).expanduser().resolve(strict=False))
     try:
@@ -86,6 +125,11 @@ def capture_dataset_revision(candidate: Mapping[str, Any]) -> dict[str, Any]:
                 "mtime_ns": int(stat.st_mtime_ns),
             }
         )
+    if candidate.get("collection_id"):
+        for item in descriptors:
+            item["path"] = str(candidate["artifact_paths"][item["kind"]])
+            # Nanosecond timestamps exceed JavaScript's exact integer range.
+            item["mtime_ns"] = str(item["mtime_ns"])
     if not descriptors:
         raise ServiceError(
             "Dataset Candidate 没有可验证的源文件。",
@@ -112,6 +156,8 @@ def _candidate_identity_source(candidate: Mapping[str, Any]) -> str:
     Dataset to the trajectory workspace instead of the RNG evidence workspace.
     """
 
+    if candidate.get("collection_id"):
+        return str(candidate["base"])
     artifacts = candidate.get("artifact_paths") or {}
     if isinstance(artifacts, Mapping):
         for kind in (
@@ -206,6 +252,8 @@ def begin_dataset_switch(
             "folder": str(candidate.get("folder") or ""),
             "base": str(candidate.get("base") or ""),
             "label": str(candidate.get("label") or ""),
+            **({key: candidate.get(key) for key in ("artifact_paths", "collection_id", "expected_definition")}
+               if candidate.get("collection_id") else {}),
         },
         "origin": dict(origin or {}),
         "started_ns": started,
@@ -334,11 +382,12 @@ def _revision_changed_context(
     current: Mapping[str, Any],
     validation: Mapping[str, Any],
 ) -> dict[str, Any]:
-    def descriptors(revision: Mapping[str, Any] | None) -> dict[str, tuple[int, int]]:
+    def descriptors(revision: Mapping[str, Any] | None) -> dict[str, tuple[int, int, str]]:
         return {
             str(item.get("kind") or ""): (
                 int(item.get("size") or 0),
                 int(item.get("mtime_ns") or 0),
+                str(item.get("path") or ""),
             )
             for item in dict(revision or {}).get("artifacts") or []
             if item.get("kind")

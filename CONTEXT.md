@@ -193,7 +193,7 @@ The one ReacNetGenerator dataset whose evidence is available to the ordinary ana
 _Avoid_: Loaded dataset, managed dataset
 
 **Dataset Candidate**:
-A ReacNetGenerator dataset identified and inspected in the dataset selector before the user explicitly makes it current. Inspecting a candidate does not change any analysis context.
+A ReacNetGenerator evidence collection identified and inspected before the user explicitly makes it current. Its artifacts may come from different directories accessible to the machine running ReacNet Scope; explicit role-to-path associations define membership. Filename-based grouping is a suggestion, not proof of a common run. Inspecting a candidate does not change any analysis context.
 _Avoid_: Pending dataset, loaded dataset
 
 **Simulation Condition**:

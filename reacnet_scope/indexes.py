@@ -729,6 +729,19 @@ def resolve_dataset_paths(
     ``base`` is its run basename.  Readers may omit ``base`` and pass a source
     file; suffixes are then stripped before calculating the dataset id.
     """
+    from .file_collections import is_collection_path, read_collection, collection_root
+    raw = Path(base).expanduser() if base else Path(source_root).expanduser()
+    if base and not raw.is_absolute():
+        raw = Path(source_root).expanduser() / raw
+    if is_collection_path(raw):
+        read_collection(str(raw))  # Reject corrupt registered definitions.
+        # A preview may resolve a future workspace without publishing anything.
+        identity = raw.name.removesuffix(".rng-dataset.json")
+        workspace = collection_root().parent / "datasets" / identity
+        return DatasetPaths(source_root=raw.parent, base=raw, dataset_id=identity,
+                            workspace_dir=workspace, manifest=workspace / "manifest.json",
+                            trajectory_index=workspace / "trajectory.sqlite3",
+                            event_index=workspace / "events.sqlite3")
     root = Path(source_root).expanduser().resolve()
     candidate = Path(base).expanduser() if base else root
     if not candidate.is_absolute():
