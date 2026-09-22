@@ -579,7 +579,7 @@ def test_batch_ui_catalog_includes_current_and_recent_datasets() -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["app-store", "recent-datasets"],
+            input_ids=["app-store", "recent-datasets", "dataset-library"],
             changed="app-store.data",
             input_values={"app-store": current, "recent-datasets": recent},
             output_id="batch-managed-selector",
@@ -642,8 +642,8 @@ def test_batch_ui_scan_requires_review_and_does_not_select_suggestions(
     assert body["batch-condition-selector"]["value"] == []
     assert body["batch-condition-selector"]["options"][0]["label"] == "case (1 个来源，待确认)"
     assert body["batch-conditions-store"]["data"] == payload
-    assert body["batch-scan-review"]["data"][0]["simulation_condition"] == "case"
-    assert body["batch-scan-review"]["data"][0]["model_iteration"] == "iter32"
+    assert body["batch-scan-review"]["rowData"][0]["simulation_condition"] == "case"
+    assert body["batch-scan-review"]["rowData"][0]["model_iteration"] == "iter32"
     assert body["batch-confirm-inferred-metadata"]["value"] == []
     assert "尚未确认" in str(body["batch-conditions-status"]["children"])
 
@@ -711,7 +711,7 @@ def test_editing_scan_review_clears_previous_confirmation() -> None:
         json=_callback_payload(
             client,
             input_ids=["batch-scan-review"],
-            changed="batch-scan-review.data_timestamp",
+            changed="batch-scan-review.rowData_timestamp",
             input_values={"batch-scan-review": 1234},
             output_id="batch-confirm-inferred-metadata",
         ),
@@ -732,7 +732,7 @@ def test_batch_ui_suggests_the_current_dataset_parent_as_scan_root() -> None:
             input_ids=["page-store", "batch-use-current-parent-btn"],
             changed="page-store.data",
             input_values={
-                "page-store": {"page": "batch-compare"},
+                "page-store": {"page": "reaction-compare"},
                 "batch-use-current-parent-btn": 0,
             },
             state_values={
@@ -809,12 +809,13 @@ def test_batch_ui_compare_renders_typed_columns_and_invalidates_stale_results(
     body = response.get_json()["response"]
     assert captured["requests"][0]["group_name"] == "managed-run"
     assert captured["kwargs"] == {"min_detection_rate": 0.25, "top_n": 25}
-    assert body["batch-matrix-grid"]["data"][0]["id"] == "reaction_1"
-    assert body["batch-matrix-grid"]["columns"] == [
-        {"id": "index", "name": "#", "type": "numeric"},
-        {"id": "reaction_smiles", "name": "反应式 (SMILES)", "type": "text"},
-        {"id": "group_1_mean_tp", "name": "300 K · 平均 TP", "type": "numeric"},
+    assert body["batch-matrix-grid"]["rowData"][0]["id"] == "reaction_1"
+    columns = body["batch-matrix-grid"]["columnDefs"]
+    assert [(col["field"], col["headerName"]) for col in columns] == [
+        ("index", "#"), ("reaction_smiles", "反应式 (SMILES)"),
+        ("group_1_mean_tp", "300 K · 平均 TP"),
     ]
+    assert columns[0]["cellDataType"] == columns[2]["cellDataType"] == "number"
     assert body["batch-grid-container"]["style"] == {}
     assert body["batch-csv-btn"]["disabled"] is False
     assert body["batch-detail-card"]["style"] == {"display": "none"}
@@ -830,7 +831,7 @@ def test_batch_ui_compare_renders_typed_columns_and_invalidates_stale_results(
         ),
     )
     stale_body = stale_response.get_json()["response"]
-    assert stale_body["batch-matrix-grid"]["data"] == []
+    assert stale_body["batch-matrix-grid"]["rowData"] == []
     assert stale_body["batch-grid-container"]["style"] == {"display": "none"}
     assert stale_body["batch-csv-btn"]["disabled"] is True
     assert "对比条件已变化" in str(stale_body["batch-alert"]["children"])
@@ -846,8 +847,8 @@ def test_batch_ui_detail_uses_row_ids_and_displays_replicate_statistics() -> Non
         json=_callback_payload(
             client,
             input_ids=["batch-matrix-grid"],
-            changed="batch-matrix-grid.selected_row_ids",
-            input_values={"batch-matrix-grid": ["reaction_1"]},
+            changed="batch-matrix-grid.selectedRows",
+            input_values={"batch-matrix-grid": [{"id": "reaction_1"}]},
             state_values={"batch-matrix-grid-store": store},
             output_id="batch-reaction-chart",
         ),

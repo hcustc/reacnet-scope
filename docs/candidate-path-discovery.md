@@ -5,6 +5,29 @@ Web 第一版使用“反应与事件 → 候选路径”、`candidate-search` C
 支持目标约束，按步数优先展示，不使用下文旧综合评分。见
 [ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
 
+当前工作台结果为 `reacnet-scope/indexed-candidates/v3`（与下面兼容命令的 v3 不同）。
+默认折叠三个分析帧间隔内、完整原子参与者返回的短暂往返。可切换原始视图、调整窗口，或只折叠
+精确键级也恢复的事件。低频和短寿命本身不触发折叠；步骤页始终保留原始事件，并可选择具体事件
+查看真实键图和首次后续消耗。见 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
+
+CLI 增加 `--quality-view raw|persistent`、`--return-window-frames`、`--return-basis topology|exact`、
+`--max-expansions`、`--max-frontier`。`--check-top N` 单独检查前 N 条路线的连续历史（最多 10 条），
+Web 可检查所选路线。找到具体链、未找到、证据不足分别展示和导出；没有间隔内逐帧键状态证明时
+不会宣称连续。旧候选索引需通过 `reacnet-scope prepare rebuild event <source>` 显式重建。
+
+目标检索使用 `local_graph_then_target_routes_v1`：先按唯一物种读取有界局部邻接，再枚举可达目标的路线。
+汇合到同一物种的不同路径保留各自身份，但不重复消耗邻接展开预算。路线枚举的前缀预算为
+`max_expansions * max_steps`，与邻接读取共用时间预算；结果和导出保留算法版本与截断原因。
+此搜索修复复用已发布的 v3 索引，无需重建。
+
+Web 默认使用路径合并图浏览本次返回的路线：结构卡片按精确 RNG 物种身份合并，
+同分子式的不同结构分别显示；菱形按完整有向反应式和主线载体对合并。
+共反应物、副产物或计量不同的步骤分别保留，点击菱形或连线可定位路线中的步骤并查看证据。
+点击物种可查看经过它的路线，通过侧栏路线按钮、下拉框或上一条／下一条切换，当前路线及步骤高亮。
+“路线表格与多路线比较”保留勾选入口，可将图切换到只显示当前与勾选路线；逐步结构链也可展开。
+共享步骤的原始事件数不因多条路线经过而累加。图仅是已返回 Candidate 的展示投影，
+不从合并后的连接重新组合路线，也不代表连续分子历史；搜索截断与连续历史检查仍单独报告。
+
 以下内容描述保留兼容的 `candidate-paths` 命令及其 `v3` 结果，不是新 Web 的执行边界。
 
 “候选路径发现”接收一个或多个精确 RNG SMILES。系统在当前数据集观测到的有向 Reaction Type 网络上执行确定性的有界局部展开：

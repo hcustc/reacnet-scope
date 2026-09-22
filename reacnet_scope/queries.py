@@ -545,7 +545,10 @@ def _scan_rng_dataset_directory(
     return str(chosen["base"]), selected, visible_candidates
 
 
-def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]:
+def build_dataset_status_payload(
+    params: dict[str, list[str]], *, artifact_paths: dict[str, str] | None = None,
+    collection_base: str = "", collection_label: str = "",
+) -> dict[str, Any]:
     """Resolve a compact, shared view of a ReacNetGenerator output set."""
 
     explicit = {
@@ -556,6 +559,8 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "reactionevent": (params.get("reactionevent_file", [""])[0] or "").strip(),
         "molecules": (params.get("molecules_file", [""])[0] or "").strip(),
     }
+    if artifact_paths is not None:
+        explicit = {key: artifact_paths.get(key, "") for key in explicit}
     explicit = {
         key: str(validate_browse_path(path)) if path else ""
         for key, path in explicit.items()
@@ -564,13 +569,13 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     folder_base = ""
     folder_files: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
-    if folder:
+    if folder and artifact_paths is None:
         folder = str(validate_browse_path(folder))
         preferred_base = (params.get("dataset_base", [""])[0] or "").strip()
         folder_base, folder_files, candidates = _scan_rng_dataset_directory(folder, preferred_base=preferred_base)
     seed = next((value for value in explicit.values() if value), folder_base)
-    base = _dataset_base_path(seed)
-    linked_trajectory = load_linked_trajectory(base) if base else None
+    base = collection_base or _dataset_base_path(seed)
+    linked_trajectory = load_linked_trajectory(base) if base and artifact_paths is None else None
     inferred = {
         "reaction": f"{base}.reactionabcd" if base else "",
         "species": f"{base}.species" if base else "",
@@ -604,6 +609,8 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
             if folder_files.get(key)
             else "derived"
         )
+        if artifact_paths is not None:
+            selected, source = explicit[key], "collection"
         artifacts[key] = _dataset_file_descriptor(selected, source=source)
 
     capabilities = {
@@ -618,7 +625,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
     manifest_payload: dict[str, Any] = {}
     manifest_path = ""
     configured_cache = os.environ.get("REACNET_SCOPE_CACHE_DIR", "").strip()
-    if base and configured_cache:
+    if base and (configured_cache or artifact_paths is not None):
         candidate = resolve_dataset_paths(
             Path(base).parent,
             Path(base).name,
@@ -670,7 +677,7 @@ def build_dataset_status_payload(params: dict[str, list[str]]) -> dict[str, Any]
         "ok": True,
         "dataset": {
             "base": base,
-            "label": Path(base).name if base else "未选择数据集",
+            "label": collection_label or (Path(base).name if base else "未选择数据集"),
             "folder": folder,
             "selected_base": folder_base or base,
             "candidates": candidates,

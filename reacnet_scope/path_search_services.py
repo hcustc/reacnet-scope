@@ -19,6 +19,7 @@ from .path_search import (
 )
 from .service_types import ServiceError
 from .workspace_services import _event_artifact_paths
+from .candidate_evidence import event_details, validate_carrier_chain
 
 
 @contextmanager
@@ -105,7 +106,28 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
     payload['reaction_key'] = key
     payload['signature_id'] = signature
     payload['step_index'] = step_index
+    with _reader(artifacts) as reader:
+        for row in payload['rows']:
+            row['candidate_evidence'] = event_details(reader.connection, row['event_id'])
+    if candidate_source_revision(artifacts) != report.get('source_revision'):
+        raise ServiceError('事件查询期间来源版本已变化，请重新搜索。', reason='source_changed')
     return payload
+
+
+def check_candidate_continuity(artifacts: Mapping[str, Any], report: Mapping[str, Any],
+                               signature: str, *, max_states: int = 1000,
+                               max_seconds: float = 5) -> dict[str, Any]:
+    """Validate one selected route without changing identity or network order."""
+    if candidate_source_revision(artifacts) != report.get('source_revision'):
+        raise ServiceError('来源版本已变化，请重新搜索后检查。', reason='source_changed')
+    path = next((p for p in report.get('paths', []) if p['signature_id'] == signature), None)
+    if path is None:
+        raise ServiceError('所选路线不存在。', reason='bad_candidate_selection')
+    with _reader(artifacts) as reader:
+        result = validate_carrier_chain(reader.connection, path, max_states=max_states, max_seconds=max_seconds)
+    if candidate_source_revision(artifacts) != report.get('source_revision'):
+        raise ServiceError('检查期间来源版本已变化，请重新搜索。', reason='source_changed')
+    return dict(result, signature_id=signature, source_revision=report['source_revision'])
 
 
 def candidate_paths_csv(report: Mapping[str, Any]) -> str:
@@ -113,7 +135,8 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     fields = ['signature_id', 'step', 'carried_from', 'carried_to', 'reaction_key',
               'reactants', 'products', 'event_count', 'transfer_event_count',
               'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
-              'query', 'source_revision', 'truncation_reasons']
+              'quality', 'continuous_support', 'query', 'source_revision', 'truncation_reasons',
+              'search_algorithm', 'path_prefix_budget', 'path_prefixes_examined']
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for path in report.get('paths', []):
@@ -126,6 +149,11 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 max_shared_atoms=step.get('max_shared_atoms'),
                 transfer_basis=step.get('transfer_basis'),
                 continuous_md=path['continuous_md'], query_complete=report['query_complete'],
+                quality=json.dumps(step.get('quality', {})),
+                continuous_support=json.dumps(path.get('continuous_support')),
                 query=json.dumps(report['query']), source_revision=json.dumps(report['source_revision']),
-                truncation_reasons=json.dumps(report['truncation_reasons'])))
+                truncation_reasons=json.dumps(report['truncation_reasons']),
+                search_algorithm=report.get('search_algorithm'),
+                path_prefix_budget=report.get('path_prefix_budget'),
+                path_prefixes_examined=report.get('path_prefixes_examined')))
     return output.getvalue()

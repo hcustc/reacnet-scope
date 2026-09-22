@@ -481,7 +481,7 @@ def test_index_management_keeps_primary_actions_separate_from_maintenance() -> N
     assert workspace_meta is not None
     assert (task_refresh.get("props") or {}).get("disabled") is True
     cache_text = json.dumps(cache_card, ensure_ascii=False)
-    assert "当前数据集的分析索引" in cache_text
+    assert "当前RNG 数据的分析索引" in cache_text
     assert "高级维护" in cache_text
     assert "Workspace 与诊断" in cache_text
     assert "基础检索无需等待" not in cache_text
@@ -647,6 +647,7 @@ def test_task_polling_runs_only_while_a_preparation_task_is_active() -> None:
     ) -> bool:
         values = {
             "preparation-task-snapshot": tasks,
+            "import-auto-request": None,
             "data-prep-event-btn": event_clicks,
             "data-prep-trajectory-btn": 0,
             "data-prep-composition-btn": 0,

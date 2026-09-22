@@ -27,6 +27,10 @@ from reacnet_scope.event_package import build_event_package
 from reacnet_scope.event_paths import verify_event_path
 from reacnet_scope.queries import build_dataset_status_payload
 from reacnet_scope.service_types import ServiceError
+from reacnet_scope.file_collections import (
+    browse_import_files, collect_files, preview_file_collection, collection_candidate,
+    read_collection, is_collection_path, ROLE_LABELS,
+)
 from reacnet_scope.reaction_timing import (
     reaction_time_distribution,
     reaction_time_events,
@@ -37,6 +41,10 @@ from reacnet_scope.trajectory import (
     load_timestep_ps,
     save_coordinate_length_unit,
     save_timestep_ps,
+)
+from reacnet_scope.lineage_explorer import (
+    lineage_explorer_status, start_lineage_explorer, expand_lineage_explorer,
+    observed_lineage_paths, lineage_frame_reference, lineage_frame_data, lineage_occurrence_record, export_lineage_explorer,
 )
 from reacnet_scope.workspace_services import (
     ALLOWED_ROOTS,
@@ -61,6 +69,7 @@ from reacnet_scope.workspace_services import (
     scan_dataset,
     validate_browse_path,
 )
+from reacnet_scope.dataset_library import inspect_dataset_folders, normalise_dataset_library
 from reacnet_scope.analysis_services import (
     build_channel_structure_detail,
     build_event_path_occurrence_elements,
@@ -132,6 +141,8 @@ from reacnet_scope.species_compare import (
     species_comparison_zip,
 )
 from reacnet_scope.dataset_context import (
+    validate_file_collection_candidate,
+    commit_file_collection,
     begin_dataset_switch,
     current_dataset_from_validation,
     inspect_dataset_candidate,
@@ -168,6 +179,7 @@ def evaluate_reaction_readiness(*args: Any, **kwargs: Any) -> ReactionReadinessR
 
 # Versioned candidate workbench: indexed discovery, without legacy scoring.
 from reacnet_scope.path_search_services import (
+    check_candidate_continuity,
     candidate_paths_csv,
     candidate_search_status,
     candidate_source_revision,
@@ -178,6 +190,10 @@ from reacnet_scope.path_search_services import (
 
 
 __all__ = [
+    "browse_import_files", "collect_files", "preview_file_collection", "collection_candidate",
+    "read_collection", "is_collection_path", "ROLE_LABELS",
+    "validate_file_collection_candidate", "commit_file_collection",
+    "check_candidate_continuity",
     "candidate_paths_csv",
     "candidate_search_status",
     "candidate_source_revision",

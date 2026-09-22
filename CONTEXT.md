@@ -88,6 +88,10 @@ _Avoid_: Reaction Cycle Candidate, Fast Recrossing Episode
 The Reaction Occurrences that establish the directed Reaction Type and event-local focal-reactant-to-carried-product atom transfer for one Candidate Path step. Evidence for different steps is independent and does not imply that those occurrences form one continuous sampled chain.
 _Avoid_: Continuous Support Evidence, sampled pathway
 
+**Candidate Return Evidence**:
+Preparation-derived records that complete Species/atom partitions reverse between successive observed occurrences and restore bond connectivity, distinguishing exact bond-order return from topology-only return. An explicitly parameterized candidate view may fold these occurrences without deleting raw evidence or classifying them as noise.
+_Avoid_: Noise filter, lifetime threshold, automatically validated mechanism
+
 **Continuous MD Support**:
 A separate evidence validation of whether a concrete molecular provenance can realize a selected Candidate Path in order. It neither creates the Candidate nor contributes to the Candidate's structural identity.
 _Avoid_: Candidate Path Discovery, Step Evidence, implicit pass/fail score
@@ -96,12 +100,16 @@ _Avoid_: Candidate Path Discovery, Step Evidence, implicit pass/fail score
 The maximal interval within one Replicate over consecutive Analyzed Frames in which a carrier retains the same Species, atom-ID set, and intramolecular bond set. Reappearance after an interruption begins a new segment even when all three are identical again.
 _Avoid_: Molecule Instance, Species lifetime, remotely joined occurrence
 
+**Molecular Lineage Graph**:
+A time-directed graph of concrete Molecule Continuity Segments connected by complete Reaction Occurrences, retaining splitting, merging, and atom provenance. An Event Path is one temporally ordered projection through this graph; Species recurrence does not merge distinct segments.
+_Avoid_: Species network, preferred main path, mechanism graph
+
 **Carrier Chain**:
 The ordered Molecule Continuity Segments and compatible Reaction Occurrences that carry a selected Candidate Path through one Replicate. It cannot skip an earlier consumption, a continuity gap, or an unresolved evidence barrier.
 _Avoid_: Carried Species sequence, Step Evidence list
 
 **Anchor Provenance**:
-The history of selected atoms from the anchor Molecule Instance through a Carrier Chain, including where any selected atoms cease to remain continuous. Anchor selection and a retention judgment are separate decisions.
+The history of selected atoms from the anchor Molecule Instance through a Carrier Chain, including where any selected atoms cease to remain continuous. Anchor selection and a retention judgment are separate decisions. In an observed lineage projection, uninterrupted retention is the intersection through every carried segment; return of an original atom does not restore it. Root-atom return and entry of an atom outside the root instance are separate provenance facts. A returned atom may be identified even when its intervening side branch is not resolved in the expanded graph.
 _Avoid_: Carrier identity, inferred atom mapping
 
 **Continuous Support Evidence**:
@@ -180,12 +188,18 @@ _Avoid_: Fate result, dataset revision
 A revision- and algorithm-bound report produced for one Fate Query, including complete statistics when available and explicit partial evidence otherwise.
 _Avoid_: Fate query, timeless conclusion
 
+**Dataset Library（已导入 RNG 数据列表）**:
+界面统一称为“RNG 数据”或“RNG 文件夹”，不使用“数据集”。内部 Dataset 身份、API 名称与索引契约不变。
+当前浏览器持久保存的独立 RNG 数据集引用列表，与最近使用记录分开。批量导入逐项验证，
+不会合并来源或改变 Current Dataset。普通分析从列表选择一个数据集；对比可选择多个，
+各来源保持自身身份。引用在使用时重新验证，导入成功不意味着全部 Analysis Capability 就绪。
+
 **Current Dataset**:
 The one ReacNetGenerator dataset whose evidence is available to the ordinary analysis tools at a time. Selecting datasets for a cross-condition comparison does not make them current.
 _Avoid_: Loaded dataset, managed dataset
 
 **Dataset Candidate**:
-A ReacNetGenerator dataset identified and inspected in the dataset selector before the user explicitly makes it current. Inspecting a candidate does not change any analysis context.
+A ReacNetGenerator evidence collection identified and inspected before the user explicitly makes it current. Its artifacts may come from different directories accessible to the machine running ReacNet Scope; explicit role-to-path associations define membership. Filename-based grouping is a suggestion, not proof of a common run. Inspecting a candidate does not change any analysis context.
 _Avoid_: Pending dataset, loaded dataset
 
 **Simulation Condition**:

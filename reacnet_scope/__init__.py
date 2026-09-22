@@ -35,12 +35,21 @@ from .species_compare import (
 )
 
 from .path_search_services import (
+    check_candidate_continuity,
     search_candidate_paths,
     search_candidate_species,
     candidate_step_events,
 )
+from .lineage_explorer import (
+    lineage_explorer_status, start_lineage_explorer, expand_lineage_explorer,
+    observed_lineage_paths, lineage_frame_reference, lineage_frame_data, lineage_occurrence_record, export_lineage_explorer,
+)
 
 __all__ = [
+    "lineage_explorer_status", "start_lineage_explorer", "expand_lineage_explorer",
+    "observed_lineage_paths", "lineage_frame_reference", "lineage_frame_data",
+    "lineage_occurrence_record", "export_lineage_explorer",
+    "check_candidate_continuity",
     "search_candidate_paths",
     "search_candidate_species",
     "candidate_step_events",

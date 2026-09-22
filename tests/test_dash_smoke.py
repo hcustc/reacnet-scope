@@ -15,6 +15,8 @@ from reacnet_scope import dir_browser
 from scripts import rng_query_cli as cli
 from scripts.webapp_dash import callbacks as cb
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash import ui_components as ui
+from scripts.webapp_dash.candidate_workbench import context_key
 from scripts.webapp_dash.navigation import (
     LEGACY_PAGE_REDIRECTS,
     NAV_GROUPS,
@@ -177,6 +179,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "nav-species",
         "species-to-channels-btn",
         "species-to-evolution-btn",
+        "evolution-open-compare-btn",
         "species-structure-grid",
         "species-structure-results",
         "species-structure-csv-btn",
@@ -216,7 +219,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "nav-home" not in layout_ids
     assert "page-description" in layout_ids
     assert "page-eyebrow-section" in layout_ids
-    assert "选择当前数据集" in str(
+    assert "选择当前RNG 数据" in str(
         ((_layout_node_by_id(layout, "page-description") or {}).get("props") or {}).get(
             "children"
         )
@@ -239,12 +242,12 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     species_grid = _layout_node_by_id(layout, "species-grid") or {}
     structure_grid = _layout_node_by_id(layout, "species-structure-grid") or {}
     event_grid = _layout_node_by_id(layout, "event-grid") or {}
-    assert (species_grid.get("props") or {}).get("page_action") == "native"
-    assert (species_grid.get("props") or {}).get("page_size") == 20
-    assert (structure_grid.get("props") or {}).get("page_action") == "native"
-    assert (structure_grid.get("props") or {}).get("page_size") == 50
-    assert (event_grid.get("props") or {}).get("page_action") == "native"
-    assert (event_grid.get("props") or {}).get("page_size") == 25
+    assert species_grid["props"]["dashGridOptions"]["pagination"] is True
+    assert species_grid["props"]["dashGridOptions"]["paginationPageSize"] == 20
+    assert structure_grid["props"]["dashGridOptions"]["pagination"] is True
+    assert structure_grid["props"]["dashGridOptions"]["paginationPageSize"] == 50
+    assert event_grid["props"]["dashGridOptions"]["pagination"] is True
+    assert event_grid["props"]["dashGridOptions"]["paginationPageSize"] == 25
     event_results_card = _layout_node_by_id(layout, "event-results-card") or {}
     event_results_classes = str(
         (event_results_card.get("props") or {}).get("className") or ""
@@ -282,7 +285,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     ] == "session"
     species_grid = _layout_node_by_id(layout, "species-grid")
     assert species_grid is not None
-    assert (species_grid.get("props") or {}).get("row_selectable") == "single"
+    assert species_grid["props"]["dashGridOptions"]["rowSelection"]["mode"] == "singleRow"
     assert "dir-browser-modal" not in layout_ids
     assert "data-overview-view" in layout_ids
     assert "data-browser-view" in layout_ids
@@ -290,15 +293,15 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "dir-browser-breadcrumbs" not in layout_ids
     assert "dir-browser-datasets" not in layout_ids
     assert "dir-browser-recent" not in layout_ids
-    assert "dir-browser-back-btn" in layout_ids
-    assert "dir-browser-path-input" in layout_ids
-    assert "dir-browser-current" in layout_ids
-    assert "dir-browser-body" in layout_ids
-    assert "dir-browser-select-btn" in layout_ids
+    assert "import-browse-up" in layout_ids
+    assert "import-path" in layout_ids
+    assert "import-location" in layout_ids
+    assert "import-directories" in layout_ids
+    assert "import-add-folder" in layout_ids
     assert "dataset-browser-candidate" in layout_ids
     assert "recent-datasets" in layout_ids
     assert "data-recent-datasets" in layout_ids
-    assert "data-rungroup" in layout_ids
+    assert "data-rungroup" not in layout_ids
     assert "data-scan-btn" not in layout_ids
     assert "data-prep-status" in layout_ids
     assert "data-prep-refresh-btn" in layout_ids
@@ -506,21 +509,21 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "rs-advanced-menu" not in layout_text
     assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text
-    assert "使用此数据集" in layout_text
+    assert "开始分析" in layout_text
     assert "data-empty-pick-btn" in layout_ids
     assert "data-change-pick-btn" in layout_ids
     assert "data-open-species-btn" in layout_ids
-    recent_section = _layout_node_by_id(layout, "dir-browser-recent-section") or {}
-    path_locator = _layout_node_by_id(layout, "dir-browser-expert-path") or {}
-    assert recent_section.get("type") == "Section"
-    assert path_locator.get("type") == "Div"
-    assert "路径属于运行 ReacNet Scope 的当前环境" in layout_text
+    assert "dir-browser-recent-datasets" in layout_ids
+    assert "import-paths" in layout_ids
+    assert "import-browser-panel" in layout_ids
+    assert "import-local-panel" not in layout_ids
+    assert "import-upload-intake" not in layout_ids
     assert "上一级" in layout_text
     assert "直接定位" not in layout_text
     assert "返回上级目录" not in layout_text
     cache_management = _layout_node_by_id(layout, "data-cache-management") or {}
     assert cache_management.get("type") == "Section"
-    assert "当前数据集的分析索引" in layout_text
+    assert "当前RNG 数据的分析索引" in layout_text
     overview_text = json.dumps(overview, ensure_ascii=False)
     assert "data-overview-actions" in overview_text
     assert "开始物种检索" not in overview_text
@@ -546,7 +549,6 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         "species",
         "reactions",
         "trajectory",
-        "batch-compare",
     )
     assert set(LEGACY_PAGE_REDIRECTS).isdisjoint(WORKSPACE_PAGE_IDS)
     assert LEGACY_PAGE_REDIRECTS == {
@@ -574,9 +576,10 @@ def test_workspace_task_navigation_exposes_only_owned_active_tools() -> None:
                     "id": "page-store",
                     "property": "data",
                     "value": {"page": "evolution"},
-                }
+                },
+                {"id": "reaction-task-tabs", "property": "value", "value": "direct"}
             ],
-            "state": [],
+            "state": [{"id": "workspace-task-nav", "property": "children", "value": []}],
             "changedPropIds": ["page-store.data"],
         },
     )
@@ -588,6 +591,7 @@ def test_workspace_task_navigation_exposes_only_owned_active_tools() -> None:
         "species",
         "evolution",
         "element-distribution",
+        "batch-compare",
     }
 
 
@@ -671,7 +675,7 @@ def _callback_payload(
     dependency = next(
         item
         for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]] == input_ids
+        if [value["id"] for value in item["inputs"] if value["id"] != "import-auto-result"] == input_ids
         and (
             not output_id
             or f"{output_id}." in str(item.get("output") or "")
@@ -723,6 +727,328 @@ def _callback_payload(
     }
 
 
+def _candidate_instance_state() -> tuple[dict[str, Any], dict[str, Any]]:
+    store = {
+        "dataset_id": "dataset-1",
+        "source_revision": {"fingerprint": "revision-1"},
+        "artifacts": {"reactionevent": "/data/run.reactionevent.csv"},
+    }
+    report = {
+        "context": context_key(store),
+        "query_request_id": "candidate-query-1",
+        "source_revision": {"fingerprint": "revision-1"},
+        "paths": [
+            {
+                "signature_id": "route-1",
+                "steps": [
+                    {
+                        "reaction_key": "[C]+[O]->[C][O]",
+                        "reactants": ["[C]", "[O]"],
+                        "products": ["[C][O]"],
+                        "carried_from": "[C]",
+                        "carried_to": "[C][O]",
+                        "event_count": 26,
+                        "transfer_event_count": 26,
+                        "transfer_basis": "event_local_dominant_atom_descendant",
+                        "max_shared_atoms": 1,
+                        "quality": {
+                            "rapid_return_events": 0,
+                            "reclosure_events": 0,
+                            "retained_events": 26,
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    return store, report
+
+
+def _candidate_instance_page(offset: int) -> dict[str, Any]:
+    stop = min(offset + 25, 26)
+    rows = [
+        {
+            "event_id": f"event-{index + 1}",
+            "timestep_index": index,
+            "association_status": "matched",
+            "atom_id_list": [1, 2],
+            "shared_atom_count": 1,
+            "anchor_frame": index,
+            "reactant": "[C]+[O]",
+            "product": "[C][O]",
+            "candidate_evidence": {},
+        }
+        for index in range(offset, stop)
+    ]
+    return {
+        "signature_id": "route-1",
+        "step_index": 0,
+        "offset": offset,
+        "total": 26,
+        "has_more": stop < 26,
+        "reaction_key": "[C]+[O]->[C][O]",
+        "rows": rows,
+    }
+
+
+def test_candidate_instances_navigate_across_evidence_pages(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_events(_artifacts, _report, _signature, _step_index, offset=0):
+        calls.append(offset)
+        return _candidate_instance_page(offset)
+
+    monkeypatch.setattr(svc, "candidate_step_events", fake_events)
+    client = create_app().server.test_client()
+    store, report = _candidate_instance_state()
+    input_ids = [
+        "cp-step",
+        "cp-focus",
+        "cp-report",
+        "cp-prev",
+        "cp-next",
+        "cp-instance-prev",
+        "cp-instance-next",
+        "app-store",
+    ]
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="cp-instance-next.n_clicks",
+            input_values={
+                "cp-step": 0,
+                "cp-focus": "route-1",
+                "cp-report": report,
+                "cp-prev": 0,
+                "cp-next": 0,
+                "cp-instance-prev": 0,
+                "cp-instance-next": 1,
+                "app-store": store,
+            },
+            state_values={
+                "cp-event-page": _candidate_instance_page(0),
+                "cp-actual-event": "event-25",
+            },
+            output_id="cp-event-page",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert calls == [25]
+    assert result["cp-event-page"]["data"]["offset"] == 25
+    assert result["cp-actual-event"]["value"] == "event-26"
+    assert result["cp-instance-position"]["children"] == "实例 26/26"
+    assert result["cp-instance-prev"]["disabled"] is False
+    assert result["cp-instance-next"]["disabled"] is True
+    assert result["cp-open-events"]["disabled"] is False
+    assert result["cp-track-instance"]["disabled"] is False
+
+
+def test_candidate_instance_handoff_rereads_exact_event_and_clears_stale_views(
+    monkeypatch,
+) -> None:
+    fresh_page = _candidate_instance_page(0)
+    fresh_page["rows"][1]["anchor_frame"] = 999
+    calls: list[tuple[str, int, int]] = []
+
+    def fake_events(_artifacts, _report, signature, step_index, offset=0):
+        calls.append((signature, step_index, offset))
+        return fresh_page
+
+    monkeypatch.setattr(svc, "candidate_step_events", fake_events)
+    monkeypatch.setattr(
+        svc,
+        "create_event_bookmark",
+        lambda _store, row, **_kwargs: {"event_id": row["event_id"]},
+    )
+    client = create_app().server.test_client()
+    store, report = _candidate_instance_state()
+    stale_page = _candidate_instance_page(0)
+    stale_page["rows"][1]["anchor_frame"] = 2
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["cp-open-events", "cp-track-instance"],
+            changed="cp-open-events.n_clicks",
+            input_values={"cp-open-events": 1, "cp-track-instance": 0},
+            state_values={
+                "cp-event-page": stale_page,
+                "cp-actual-event": "event-2",
+                "cp-report": report,
+                "app-store": store,
+            },
+            output_id="event-selected-store",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    selected = result["event-selected-store"]["data"]
+    assert calls == [("route-1", 0, 0)]
+    assert selected["row"]["event_id"] == "event-2"
+    assert selected["row"]["anchor_frame"] == 999
+    assert selected["origin"] == {
+        "kind": "candidate_step",
+        "query_request_id": "candidate-query-1",
+        "signature_id": "route-1",
+        "step_index": 0,
+        "offset": 0,
+        "action": "cp-open-events",
+    }
+    assert result["event-bookmark-store"]["data"] == {"event_id": "event-2"}
+    assert result["event-viewer-store"]["data"] is None
+    assert result["event-dft-store"]["data"] is None
+    assert result["molecule-lineage-store"]["data"] is None
+    assert result["event-viewer-card"]["style"] == {"display": "none"}
+
+
+def test_candidate_instance_opens_trajectory_and_returns_to_route() -> None:
+    client = create_app().server.test_client()
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
+    )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["cp-track-instance"] = 1
+
+    opened_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="cp-track-instance.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "reactions"}},
+            output_id="page-species",
+        ),
+    )
+    assert opened_response.status_code == 200
+    opened = opened_response.get_json()["response"]
+    trajectory_context = {
+        "page": "trajectory",
+        "return_page": "reactions",
+        "return_label": "返回候选路线",
+        "candidate_direct_return": True,
+    }
+    assert opened["page-store"]["data"] == trajectory_context
+    assert opened["dataset-focus-request"]["data"]["target"] == "lx-card"
+
+    back_values = {item["id"]: 0 for item in dependency["inputs"]}
+    back_values["trajectory-back-events-btn"] = 1
+    returned_response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="trajectory-back-events-btn.n_clicks",
+            input_values=back_values,
+            state_values={"page-store": trajectory_context},
+            output_id="page-species",
+        ),
+    )
+    assert returned_response.status_code == 200
+    returned = returned_response.get_json()["response"]
+    assert returned["page-store"]["data"] == {"page": "reactions"}
+    assert returned["page-reactions"]["className"] == "rs-page active"
+
+
+@pytest.mark.parametrize(
+    ("artifacts", "association_status", "atom_ids", "disabled", "label"),
+    [
+        ({"trajectory": "/data/run.lammpstrj"}, "matched", [1, 2], False, "载入当前实例"),
+        ({}, "matched", [1, 2], True, "缺少轨迹坐标"),
+        ({"trajectory": "/data/run.lammpstrj"}, "unmatched", [], True, "无法定位具体分子"),
+    ],
+)
+def test_selected_instance_workspace_explains_trajectory_availability(
+    artifacts, association_status, atom_ids, disabled, label,
+) -> None:
+    client = create_app().server.test_client()
+    selected = {
+        "row": {
+            "event_id": "event-2",
+            "timestep_index": 7,
+            "association_status": association_status,
+            "atom_id_list": atom_ids,
+            "candidate_evidence": {
+                "molecular_evidence_available": False,
+            },
+        },
+        "origin": {"kind": "candidate_step", "step_index": 1},
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-selected-store", "app-store", "page-store"],
+            changed="event-selected-store.data",
+            input_values={
+                "event-selected-store": selected,
+                "app-store": {"artifacts": artifacts},
+                "page-store": {"page": "trajectory", "candidate_direct_return": True},
+            },
+            state_values={},
+            output_id="trajectory-selection-summary",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["response"]
+    assert result["trajectory-open-selected-btn"]["disabled"] is disabled
+    assert label in result["trajectory-open-selected-btn"]["children"]
+    assert result["trajectory-back-events-btn"]["children"] == "← 返回候选路线"
+    assert result["lx-card"]["open"] is False
+    assert "RNG 前后键结构" in json.dumps(
+        result["trajectory-selection-structure"]["children"], ensure_ascii=False
+    )
+    assert "候选路线步骤 2" in json.dumps(
+        result["trajectory-selection-summary"]["children"], ensure_ascii=False
+    )
+
+
+def test_tracking_action_opens_optional_molecule_change_panel() -> None:
+    client = create_app().server.test_client()
+    selected = {
+        "row": {
+            "event_id": "event-2",
+            "timestep_index": 7,
+            "association_status": "matched",
+            "atom_id_list": [1, 2],
+        },
+        "origin": {
+            "kind": "candidate_step",
+            "step_index": 1,
+            "action": "cp-track-instance",
+        },
+    }
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=["event-selected-store", "app-store", "page-store"],
+            changed="event-selected-store.data",
+            input_values={
+                "event-selected-store": selected,
+                "app-store": {"artifacts": {}},
+                "page-store": {"page": "trajectory", "candidate_direct_return": True},
+            },
+            state_values={},
+            output_id="trajectory-selection-summary",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["response"]["lx-card"]["open"] is True
+
+
 def test_reaction_timing_click_pages_and_exports_exact_events(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -744,8 +1070,8 @@ def test_reaction_timing_click_pages_and_exports_exact_events(
     chart_request = _callback_payload(
         client,
         input_ids=["rxn-grid", "rxn-channel-selection-store", "rxn-timing-apply-btn"],
-        changed="rxn-grid.selected_rows",
-        input_values={"rxn-grid": [0], "rxn-channel-selection-store": None,
+        changed="rxn-grid.selectedRows",
+        input_values={"rxn-grid": [row], "rxn-channel-selection-store": None,
                       "rxn-timing-apply-btn": None},
         state_values={"rxn-grid": [row], "rxn-timing-distribution-store": None,
                       "rxn-timing-start": None, "rxn-timing-end": None,
@@ -965,17 +1291,25 @@ def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> No
                 "species-mass-tol": 0.1,
                 "app-store": {"artifacts": artifacts},
             },
-            output_id="species-grid",
+            output_id="species-search-btn-response",
         ),
     )
     assert search_response.status_code == 200
-    search_body = search_response.get_json()["response"]
-    formula_rows = search_body["species-grid"]["data"]
+    envelope = search_response.get_json()["response"]["species-search-btn-response"]["data"]
+    assert envelope["request"] == 1
+    assert envelope["context"]["artifacts"] == artifacts
+    commit = next(item for item in client.get("/_dash-dependencies").json
+                  if item["inputs"] == [{"id": "species-search-btn-response", "property": "data"}])
+    search_body = {}
+    for output, value in zip(commit["output"].strip(".").split("..."), envelope["values"]):
+        component, prop = output.split(".")
+        search_body.setdefault(component, {})[prop.split("@")[0]] = value
+    formula_rows = search_body["species-grid"]["rowData"]
     grid_store = search_body["species-grid-store"]["data"]
     assert formula_rows[0]["formula"] == "C5H4O"
     assert formula_rows[0]["structure_count"] == 3
-    assert search_body["species-grid"]["page_size"] == 20
-    formula_tooltip = search_body["species-grid"]["tooltip_data"][0]
+    assert search_body["species-grid-page-size"]["data"] == 20
+    formula_tooltip = search_body["species-grid-previews"]["data"][0]
     assert formula_tooltip["formula"]["type"] == "markdown"
     assert "/api/structure.svg?smiles=" in formula_tooltip["formula"]["value"]
     assert "width=280&height=190" in formula_tooltip["formula"]["value"]
@@ -986,10 +1320,10 @@ def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> No
         json=_callback_payload(
             client,
             input_ids=["species-grid"],
-            changed="species-grid.selected_rows",
-            input_values={"species-grid.selected_rows": [0]},
+            changed="species-grid.selectedRows",
+            input_values={"species-grid.selectedRows": [formula_rows[0]]},
             state_values={
-                "species-grid.data": formula_rows,
+                "species-grid.rowData": formula_rows,
                 "species-grid-store": grid_store,
                 "app-store": {"artifacts": artifacts},
             },
@@ -998,15 +1332,13 @@ def test_mass_formula_selection_restores_structure_results(tmp_path: Path) -> No
     )
     assert structure_response.status_code == 200
     structure_body = structure_response.get_json()["response"]
-    structure_rows = structure_body["species-structure-grid"]["data"]
+    structure_rows = structure_body["species-structure-grid"]["rowData"]
     assert structure_body["species-structure-results"]["style"] == {
         "display": "block"
     }
     assert len(structure_rows) == 3
     assert [row["smiles"] for row in structure_rows] == structures
-    structure_tooltip = structure_body["species-structure-grid"][
-        "tooltip_data"
-    ][0]
+    structure_tooltip = structure_body["species-structure-grid-previews"]["data"][0]
     assert "%5BH%5D" in structure_tooltip["smiles"]["value"]
     assert "共 3 个结构" in structure_body["species-structure-alert"]["children"]
     assert "每页显示 50 条" in structure_body["species-structure-alert"]["children"]
@@ -1026,8 +1358,8 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
     ]
     base_values = {
         "species-search-btn.n_clicks": 1,
-        "species-grid.selected_rows": [0],
-        "species-structure-grid.selected_rows": [],
+        "species-grid.selectedRows": [0],
+        "species-structure-grid.selectedRows": [],
         "species-stage-results-btn.n_clicks": 0,
         "species-stage-structures-btn.n_clicks": 0,
         "species-stage-detail-btn.n_clicks": 0,
@@ -1040,7 +1372,7 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
         json=_callback_payload(
             client,
             input_ids=stage_inputs,
-            changed="species-grid.selected_rows",
+            changed="species-grid.selectedRows",
             input_values=base_values,
             state_values={
                 "species-workspace-stage": "results",
@@ -1072,9 +1404,9 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
             input_values={
                 "species-workspace-stage.data": "structures",
                 "species-grid-store.data": grid_store,
-                "species-structure-grid.data": structure_rows,
-                "species-grid.selected_rows": [0],
-                "species-structure-grid.selected_rows": [],
+                "species-structure-grid.rowData": structure_rows,
+                "species-grid.selectedRows": [0],
+                "species-structure-grid.selectedRows": [],
             },
             state_values={},
             output_id="species-result-stage",
@@ -1093,14 +1425,14 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
 
     select_detail_values = {
         **base_values,
-        "species-structure-grid.selected_rows": [0],
+        "species-structure-grid.selectedRows": [0],
     }
     select_detail = client.post(
         "/_dash-update-component",
         json=_callback_payload(
             client,
             input_ids=stage_inputs,
-            changed="species-structure-grid.selected_rows",
+            changed="species-structure-grid.selectedRows",
             input_values=select_detail_values,
             state_values={
                 "species-workspace-stage": "structures",
@@ -1124,9 +1456,9 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
             input_values={
                 "species-workspace-stage.data": "detail",
                 "species-grid-store.data": grid_store,
-                "species-structure-grid.data": structure_rows,
-                "species-grid.selected_rows": [0],
-                "species-structure-grid.selected_rows": [0],
+                "species-structure-grid.rowData": structure_rows,
+                "species-grid.selectedRows": [0],
+                "species-structure-grid.selectedRows": [0],
             },
             state_values={},
             output_id="species-result-stage",
@@ -1193,10 +1525,50 @@ def test_batch_compare_opens_from_data_management() -> None:
     body = response.get_json()["response"]
     assert body["page-store"]["data"] == {"page": "batch-compare"}
     assert body["page-batch-compare"]["className"] == "rs-page active"
-    assert all(
-        body[f"nav-{page_id}"]["className"] == "rs-top-nav-item"
-        for page_id in TOP_NAV_PAGE_IDS
+    assert body["nav-species"]["aria-current"] == "page"
+    assert body["data-open-batch-compare-btn"]["aria-current"] == "false"
+
+
+def test_evolution_page_exposes_and_opens_multi_source_comparison() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    layout = client.get("/_dash-layout").get_json()
+
+    compare_button = _layout_node_by_id(layout, "evolution-open-compare-btn")
+    assert compare_button is not None
+    assert compare_button["props"]["children"] == "打开多来源对比"
+    evolution_page = _layout_node_by_id(layout, "page-evolution")
+    assert evolution_page is not None
+    rendered_page = json.dumps(evolution_page, ensure_ascii=False)
+    assert "兼容：临时多文件叠加" in rendered_page
+    assert "曲线处理设置" in rendered_page
+
+    dependency = next(
+        item
+        for item in client.get("/_dash-dependencies").get_json()
+        if "page-species.className" in str(item.get("output") or "")
     )
+    input_ids = [item["id"] for item in dependency["inputs"]]
+    input_values = {item["id"]: 0 for item in dependency["inputs"]}
+    input_values["evolution-open-compare-btn"] = 1
+
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client,
+            input_ids=input_ids,
+            changed="evolution-open-compare-btn.n_clicks",
+            input_values=input_values,
+            state_values={"page-store": {"page": "evolution"}},
+            output_id="page-species",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()["response"]
+    assert body["page-store"]["data"] == {"page": "batch-compare"}
+    assert body["page-batch-compare"]["className"] == "rs-page active"
+    assert body["nav-species"]["aria-current"] == "page"
 
 
 def test_data_management_opens_as_workspace_page() -> None:
@@ -1237,8 +1609,8 @@ def test_data_management_opens_as_workspace_page() -> None:
     assert body["nav-data-management"]["className"] == (
         "rs-top-nav-item rs-nav-utility active"
     )
-    assert body["page-title"]["children"] == "数据集"
-    assert body["page-eyebrow-section"]["children"] == "数据集"
+    assert body["page-title"]["children"] == "RNG 数据"
+    assert body["page-eyebrow-section"]["children"] == "RNG 数据"
 
 
 def test_direct_data_workspace_navigation_has_no_false_return_source() -> None:
@@ -1342,7 +1714,7 @@ def test_data_workspace_overview_card_opens_workspace(target: str) -> None:
     assert body["page-store"]["data"] == {"page": target}
     assert body[f"page-{target}"]["className"].endswith(" active")
     nav_id = (
-        "data-open-batch-compare-btn"
+        "nav-species"
         if target == "batch-compare"
         else f"nav-{target}"
     )
@@ -1502,14 +1874,14 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
         json=_callback_payload(
             client,
             input_ids=["species-grid", "species-structure-grid"],
-            changed="species-grid.selected_rows",
+            changed="species-grid.selectedRows",
             input_values={
-                "species-grid.selected_rows": [0],
-                "species-structure-grid.selected_rows": [],
+                "species-grid.selectedRows": [row],
+                "species-structure-grid.selectedRows": [],
             },
             state_values={
-                "species-grid.data": [row],
-                "species-structure-grid.data": [],
+                "species-grid.rowData": [row],
+                "species-structure-grid.rowData": [],
                 "app-store.data": {"artifacts": {"species": "/tmp/run.species"}},
                 "species-grid-store.data": {
                     "query_kind": "smiles",
@@ -1757,12 +2129,12 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
             "rxn-channel-history-store": [
                 {"kind": "species", "label": "返回物种检索"}
             ],
-            "rxn-production-grid.data": [production],
-            "rxn-production-grid.columns": [{"id": "reaction_formulas"}],
-            "rxn-production-grid.selected_rows": [0],
-            "rxn-consumption-grid.data": [consumption],
-            "rxn-consumption-grid.columns": [{"id": "reaction_formulas"}],
-            "rxn-consumption-grid.selected_rows": [],
+            "rxn-production-grid.rowData": [production],
+            "rxn-production-grid.columnDefs": [{"id": "reaction_formulas"}],
+            "rxn-production-grid.selectedRows": [0],
+            "rxn-consumption-grid.rowData": [consumption],
+            "rxn-consumption-grid.columnDefs": [{"id": "reaction_formulas"}],
+            "rxn-consumption-grid.selectedRows": [],
             "rxn-channel-selection-store": {
                 "lane": "production",
                 "row": production,
@@ -1785,12 +2157,12 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
         "top": 7,
         "include_kinetics": False,
     }
-    assert result["rxn-production-grid"]["data"] == [production]
-    assert result["rxn-consumption-grid"]["data"] == [consumption]
-    assert result["rxn-production-grid"]["selected_rows"] == []
-    assert result["rxn-consumption-grid"]["selected_rows"] == []
-    assert result["rxn-production-grid"]["active_cell"] is None
-    assert result["rxn-consumption-grid"]["active_cell"] is None
+    assert result["rxn-production-grid"]["rowData"] == [production]
+    assert result["rxn-consumption-grid"]["rowData"] == [consumption]
+    assert result["rxn-production-grid"]["selectedRows"] == []
+    assert result["rxn-consumption-grid"]["selectedRows"] == []
+    assert result["rxn-production-grid"]["cellClicked"] is None
+    assert result["rxn-consumption-grid"]["cellClicked"] is None
     assert result["rxn-channel-selection-store"]["data"] is None
     assert result["rxn-channel-history-store"]["data"] == [
         {"kind": "species", "label": "返回物种检索"},
@@ -1902,12 +2274,12 @@ def test_mounting_channel_species_cards_does_not_change_focus(monkeypatch) -> No
                 "selected_species_source": "reaction_structure",
             },
             "rxn-channel-history-store": [],
-            "rxn-production-grid.data": [],
-            "rxn-production-grid.columns": [],
-            "rxn-production-grid.selected_rows": [],
-            "rxn-consumption-grid.data": [],
-            "rxn-consumption-grid.columns": [],
-            "rxn-consumption-grid.selected_rows": [1],
+            "rxn-production-grid.rowData": [],
+            "rxn-production-grid.columnDefs": [],
+            "rxn-production-grid.selectedRows": [],
+            "rxn-consumption-grid.rowData": [],
+            "rxn-consumption-grid.columnDefs": [],
+            "rxn-consumption-grid.selectedRows": [1],
             "rxn-channel-selection-store": {
                 "lane": "consumption",
                 "row": {"reaction_formulas": "H + C6H5ClO -> HCl + C6H5O"},
@@ -2020,20 +2392,18 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "top": 12,
         "include_kinetics": False,
     }
-    assert body["rxn-production-grid"]["data"][0]["role_label"] == "生成"
-    assert body["rxn-consumption-grid"]["data"][0]["role_label"] == "消耗"
-    assert body["rxn-production-grid"]["columns"][0] == {
-        "id": "reaction_formulas",
-        "name": "反应式",
-    }
+    assert body["rxn-production-grid"]["rowData"][0]["role_label"] == "生成"
+    assert body["rxn-consumption-grid"]["rowData"][0]["role_label"] == "消耗"
+    assert body["rxn-production-grid"]["columnDefs"][0]["field"] == "reaction_formulas"
+    assert body["rxn-production-grid"]["columnDefs"][0]["headerName"] == "反应式"
     assert {
-        column["id"] for column in body["rxn-production-grid"]["columns"]
+        column["field"] for column in body["rxn-production-grid"]["columnDefs"]
     } >= {"event_frequency_per_ps", "k_app_display", "reverse_k_app_display"}
     assert body["rxn-channel-alert"]["children"] == ""
-    assert body["rxn-production-grid"]["selected_rows"] == []
-    assert body["rxn-consumption-grid"]["selected_rows"] == []
-    assert body["rxn-production-grid"]["active_cell"] is None
-    assert body["rxn-consumption-grid"]["active_cell"] is None
+    assert body["rxn-production-grid"]["selectedRows"] == []
+    assert body["rxn-consumption-grid"]["selectedRows"] == []
+    assert body["rxn-production-grid"]["cellClicked"] is None
+    assert body["rxn-consumption-grid"]["cellClicked"] is None
 
 
 def test_reaction_channel_view_exposes_inline_time_conversion() -> None:
@@ -2287,10 +2657,10 @@ def test_channel_time_conversion_saves_and_refreshes_tables(monkeypatch) -> None
         "query": (artifacts, "O", 12, False),
     }
     result = response.get_json()["response"]
-    assert result["rxn-production-grid"]["data"] == [
+    assert result["rxn-production-grid"]["rowData"] == [
         {"reaction_formulas": "H + OH -> H2O"}
     ]
-    assert result["rxn-consumption-grid"]["data"] == [
+    assert result["rxn-consumption-grid"]["rowData"] == [
         {"reaction_formulas": "H2O -> H + OH"}
     ]
     assert result["rxn-channel-alert"]["children"] == "物理时间已刷新。"
@@ -2410,18 +2780,18 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
                 "rxn-production-grid",
                 "rxn-consumption-grid",
             ],
-            changed="rxn-consumption-grid.selected_rows",
+            changed="rxn-consumption-grid.selectedRows",
             input_values={
-                "rxn-production-grid.active_cell": None,
-                "rxn-consumption-grid.active_cell": None,
-                "rxn-production-grid.selected_rows": [],
-                "rxn-consumption-grid.selected_rows": [0],
+                "rxn-production-grid.cellClicked": None,
+                "rxn-consumption-grid.cellClicked": None,
+                "rxn-production-grid.selectedRows": [],
+                "rxn-consumption-grid.selectedRows": [row],
             },
             state_values={
-                "rxn-production-grid.data": [],
-                "rxn-consumption-grid.data": [row],
-                "rxn-production-grid.derived_virtual_indices": [],
-                "rxn-consumption-grid.derived_virtual_indices": [0],
+                "rxn-production-grid.rowData": [],
+                "rxn-consumption-grid.rowData": [row],
+                "rxn-production-grid.virtualRowData": [],
+                "rxn-consumption-grid.virtualRowData": [0],
             },
             output_id="rxn-channel-selection-store",
         ),
@@ -2485,8 +2855,8 @@ def test_selected_species_channel_can_be_sent_to_event_search(monkeypatch) -> No
                 "rxn-channel-to-event-btn": 1,
             },
             state_values={
-                "rxn-grid.selected_rows": [],
-                "rxn-grid.data": [],
+                "rxn-grid.selectedRows": [],
+                "rxn-grid.rowData": [],
                 "rxn-channel-selection-store": selection,
             },
             output_id="event-reaction-text",
@@ -2525,22 +2895,22 @@ def test_clicking_channel_row_switches_selection_in_place() -> None:
                 "rxn-production-grid",
                 "rxn-consumption-grid",
             ],
-            changed="rxn-consumption-grid.active_cell",
+            changed="rxn-consumption-grid.cellClicked",
             input_values={
-                "rxn-production-grid.active_cell": None,
-                "rxn-consumption-grid.active_cell": {
-                    "row": 0,
-                    "column": 0,
-                    "column_id": "reaction_formulas",
+                "rxn-production-grid.cellClicked": None,
+                "rxn-consumption-grid.cellClicked": {
+                    "rowId": ui.row_identity(consumption_rows[1]),
+                    "rowIndex": 0,
+                    "colId": "reaction_formulas",
                 },
-                "rxn-production-grid.selected_rows": [0],
-                "rxn-consumption-grid.selected_rows": [],
+                "rxn-production-grid.selectedRows": [production],
+                "rxn-consumption-grid.selectedRows": [],
             },
             state_values={
-                "rxn-production-grid.data": [production],
-                "rxn-consumption-grid.data": consumption_rows,
-                "rxn-production-grid.derived_virtual_indices": [0],
-                "rxn-consumption-grid.derived_virtual_indices": [1, 0],
+                "rxn-production-grid.rowData": [production],
+                "rxn-consumption-grid.rowData": consumption_rows,
+                "rxn-production-grid.virtualRowData": [0],
+                "rxn-consumption-grid.virtualRowData": [1, 0],
             },
             output_id="rxn-channel-selection-store",
         ),
@@ -2552,8 +2922,8 @@ def test_clicking_channel_row_switches_selection_in_place() -> None:
         "lane": "consumption",
         "row": {**consumption_rows[1], "role_label": "消耗"},
     }
-    assert result["rxn-production-grid"]["selected_rows"] == []
-    assert result["rxn-consumption-grid"]["selected_rows"] == [1]
+    assert result["rxn-production-grid"]["selectedRows"] == []
+    assert result["rxn-consumption-grid"]["selectedRows"] == [consumption_rows[1]]
 
 
 def test_event_page_returns_to_originating_reaction_channel() -> None:
@@ -2857,11 +3227,6 @@ def test_element_distribution_callback_passes_generic_filters(monkeypatch) -> No
     monkeypatch.setattr(svc, "build_elemental_composition_evolution", fake_build)
     app = create_app()
     client = app.server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]] == ["element-distribution-search-btn"]
-    )
     state_values = {
         "element-distribution-group-element": "N",
         "element-distribution-max-count": 8,
@@ -2874,21 +3239,9 @@ def test_element_distribution_callback_passes_generic_filters(monkeypatch) -> No
         "element-distribution-timestep": 0.002,
         "app-store": {"artifacts": {"species": "/tmp/example.species"}},
     }
-    payload = {
-        "output": dependency["output"],
-        "outputs": [
-            {"id": "element-distribution-alert", "property": "children"},
-            {"id": "element-distribution-highlights", "property": "children"},
-            {"id": "element-distribution-payload-store", "property": "data"},
-            {"id": "element-distribution-composition-trend", "property": "figure"},
-        ],
-        "changedPropIds": ["element-distribution-search-btn.n_clicks"],
-        "inputs": [{"id": "element-distribution-search-btn", "property": "n_clicks", "value": 1}],
-        "state": [
-            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
-            for item in dependency["state"]
-        ],
-    }
+    payload = _callback_payload(client, input_ids=["element-distribution-search-btn"],
+        changed="element-distribution-search-btn.n_clicks", input_values={"element-distribution-search-btn": 1},
+        state_values=state_values, output_id="element-distribution-payload-store")
 
     response = client.post("/_dash-update-component", json=payload)
     assert response.status_code == 200
@@ -3075,27 +3428,27 @@ def test_reaction_channel_rows_build_lazy_complete_structure_hover_cards() -> No
                 "rxn-consumption-grid",
                 "rxn-channel-show-h",
             ],
-            changed="rxn-production-grid.data",
+            changed="rxn-production-grid.rowData",
             input_values={
-                "rxn-production-grid.data": [production],
-                "rxn-consumption-grid.data": [consumption],
+                "rxn-production-grid.rowData": [production],
+                "rxn-consumption-grid.rowData": [consumption],
                 "rxn-channel-show-h.value": False,
             },
             state_values={},
-            output_id="rxn-production-grid",
+            output_id="rxn-production-grid-previews",
         ),
     )
 
     assert response.status_code == 200
     body = response.get_json()["response"]
-    production_tooltip = body["rxn-production-grid"]["tooltip_data"][0]
+    production_tooltip = body["rxn-production-grid-previews"]["data"][0]
     assert production_tooltip["reaction_formulas"]["type"] == "markdown"
     assert "完整结构反应式" in production_tooltip["reaction_formulas"]["value"]
     assert "/api/reaction.svg?reaction_smiles=" in production_tooltip[
         "reaction_formulas"
     ]["value"]
     assert "show_h=0" in production_tooltip["reaction_formulas"]["value"]
-    assert body["rxn-consumption-grid"]["tooltip_data"][0]
+    assert body["rxn-consumption-grid-previews"]["data"][0]
 
 
 def test_reaction_search_hover_preview_uses_row_fields_without_channel_detail(
@@ -3115,76 +3468,23 @@ def test_reaction_search_hover_preview_uses_row_fields_without_channel_detail(
         json=_callback_payload(
             client,
             input_ids=["rxn-grid", "rxn-structure-show-h"],
-            changed="rxn-grid.data",
+            changed="rxn-grid.rowData",
             input_values={
-                "rxn-grid.data": [row],
+                "rxn-grid.rowData": [row],
                 "rxn-structure-show-h.value": True,
             },
             state_values={},
-            output_id="rxn-grid",
+            output_id="rxn-grid-previews",
         ),
     )
 
     assert response.status_code == 200
-    tooltip = response.get_json()["response"]["rxn-grid"]["tooltip_data"][0]
+    tooltip = response.get_json()["response"]["rxn-grid-previews"]["data"][0]
     assert tooltip["reaction_formulas"]["type"] == "markdown"
     assert "show_h=1" in tooltip["reaction_formulas"]["value"]
     assert "%5BH%5D%5BH%5D" in tooltip["reaction_formulas"]["value"]
 
 
-def _browser_callback_payload(
-    client,
-    *,
-    changed: str,
-    values: dict[str, Any],
-    state_values: dict[str, Any],
-) -> dict[str, Any]:
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if any(value["id"] == "data-pick-btn" for value in item["inputs"])
-        and "dir-browser-path.data" in item["output"]
-    )
-    outputs = [
-        {"id": "dir-browser-path-input", "property": "value"},
-        {"id": "dir-browser-back-btn", "property": "disabled"},
-        {"id": "dir-browser-current", "property": "children"},
-        {"id": "dir-browser-body", "property": "children"},
-        {"id": "dir-browser-path", "property": "data"},
-        {"id": "dataset-browser-candidate", "property": "data"},
-        {"id": "data-apply-btn", "property": "disabled"},
-        {"id": "data-folder-input", "property": "value"},
-        {"id": "data-rungroup", "property": "value"},
-    ]
-
-    def value_for(item: dict[str, Any]) -> Any:
-        component_id = item["id"]
-        key = component_id if isinstance(component_id, str) else json.dumps(component_id, sort_keys=True)
-        return values.get(key, [] if not isinstance(component_id, str) else None)
-
-    return {
-        "output": dependency["output"],
-        "outputs": outputs,
-        "changedPropIds": [changed],
-        "inputs": [
-            {"id": item["id"], "property": item["property"], "value": value_for(item)}
-            for item in dependency["inputs"]
-        ],
-        "state": [
-            {
-                "id": item["id"],
-                "property": item["property"],
-                "value": state_values.get(
-                    item["id"],
-                    values.get(
-                        item["id"],
-                        {} if item["id"] == "app-store" else [],
-                    ),
-                ),
-            }
-            for item in dependency["state"]
-        ],
-    }
 
 
 def _data_view_callback_payload(
@@ -3261,7 +3561,7 @@ def test_dataset_picker_keeps_index_management_reachable() -> None:
     layout = client.get("/_dash-layout").get_json()
 
     index_button = _layout_node_by_id(layout, "data-browser-index-btn") or {}
-    assert (index_button.get("props") or {}).get("children") == "返回数据集概览"
+    assert (index_button.get("props") or {}).get("children") == "当前数据与准备任务"
 
     response = client.post(
         "/_dash-update-component",
@@ -3278,7 +3578,7 @@ def test_dataset_picker_keeps_index_management_reachable() -> None:
     assert "d-none" in result["data-browser-view"]["className"]
     index_management = _layout_node_by_id(layout, "data-cache-management") or {}
     assert index_management.get("type") == "Section"
-    assert "当前数据集的分析索引" in json.dumps(
+    assert "当前RNG 数据的分析索引" in json.dumps(
         index_management,
         ensure_ascii=False,
     )
@@ -3357,36 +3657,6 @@ def test_recent_dataset_mount_does_not_reopen_browser() -> None:
     assert response.status_code == 204
 
 
-def test_empty_workspace_picker_initializes_without_selecting_dataset(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _discovered_candidate(tmp_path)
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    client = create_app().server.test_client()
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-empty-pick-btn.n_clicks",
-            values={"data-empty-pick-btn": 1},
-            state_values={
-                "dir-browser-path": "",
-                "data-folder-input": "",
-                "dataset-browser-candidate": None,
-                "recent-datasets": [],
-                "app-store": cb.initial_store(),
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(tmp_path)
-    assert result["dataset-browser-candidate"]["data"] is None
-    assert result["data-apply-btn"]["disabled"] is True
 
 
 def _load_dataset_callback_payload(
@@ -3837,7 +4107,7 @@ def test_running_index_task_keeps_clear_action_clickable_and_explains_next_step(
         json=_preparation_status_callback_payload(
             client,
             candidate=candidate,
-            store={},
+            store=candidate,
         ),
     )
 
@@ -3851,7 +4121,7 @@ def test_running_index_task_keeps_clear_action_clickable_and_explains_next_step(
         json=_clear_confirmation_callback_payload(
             client,
             candidate=candidate,
-            store={},
+            store=candidate,
             kind="event",
         ),
     )
@@ -3947,7 +4217,7 @@ def test_preparation_refresh_uses_local_sidecar_workspace_by_default(
         json=_preparation_status_callback_payload(
             client,
             candidate=candidate,
-            store={},
+            store=candidate,
         ),
     )
 
@@ -4142,7 +4412,7 @@ def test_load_selected_dataset_updates_store_returns_to_overview_and_remembers_i
     assert result["dataset-browser-candidate"]["data"] is None
     assert result["topbar-folder"]["children"] == candidate["label"]
     assert str(tmp_path) not in result["topbar-folder"]["children"]
-    assert "当前数据集已切换为" in json.dumps(
+    assert "当前RNG 数据已切换为" in json.dumps(
         result["data-load-feedback"]["children"], ensure_ascii=False
     )
     assert result["recent-datasets"]["data"][0]["folder"] == str(tmp_path)
@@ -4196,621 +4466,32 @@ def test_browser_validation_commit_applies_selected_candidate_atomically(
     assert "d-none" in result["data-browser-view"]["className"]
 
 
-def test_browser_path_bar_selects_single_dataset_folder(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    (tmp_path / "rp4.lammpstrj.reactionabcd").touch()
-    (tmp_path / "rp4.lammpstrj.species").touch()
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-path-input.n_submit",
-            values={"dir-browser-path-input": str(tmp_path)},
-            state_values={
-                "dir-browser-path": str(tmp_path),
-                "data-folder-input": "",
-                "recent-datasets": [],
-                "dataset-browser-candidate": None,
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] == {
-        "folder": str(tmp_path),
-        "base": str(tmp_path / "rp4.lammpstrj"),
-        "label": tmp_path.name,
-    }
-    assert result["dir-browser-path"]["data"] == str(tmp_path)
-    assert result["data-apply-btn"]["disabled"] is False
 
 
-def test_directory_browser_ignores_corrupt_recent_store_payload(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    app = create_app()
-    client = app.server.test_client()
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-pick-btn.n_clicks",
-            values={"data-pick-btn": 1},
-            state_values={
-                "dir-browser-path": "",
-                "data-folder-input": str(tmp_path),
-                "recent-datasets": {"unexpected": "mapping"},
-                "dataset-browser-candidate": None,
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(tmp_path)
 
 
-def test_directory_browser_go_subdir_parent_recent_and_revalidates_selection(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    dataset = tmp_path / "case"
-    dataset.mkdir()
-    reaction = dataset / "rp3.lammpstrj.reactionabcd"
-    species = dataset / "rp3.lammpstrj.species"
-    reaction.touch()
-    species.touch()
-    candidate = {
-        "folder": str(dataset),
-        "base": str(dataset / "rp3.lammpstrj"),
-        "label": "rp3.lammpstrj",
-    }
-    app = create_app()
-    client = app.server.test_client()
-    state = {
-        "dir-browser-path": str(tmp_path),
-        "data-folder-input": str(tmp_path),
-        "recent-datasets": [{**candidate, "loaded_at": 1}],
-        "dataset-browser-candidate": None,
-    }
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-go-btn.n_clicks",
-            values={
-                "dir-browser-go-btn": 1,
-                "dir-browser-path-input": str(dataset),
-            },
-            state_values=state,
-        ),
-    )
-    assert response.status_code == 200
-    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
-
-    entry = {"type": "dir-browser-entry", "name": "case"}
-    payload = _browser_callback_payload(
-        client,
-        changed=f"{json.dumps(entry, sort_keys=True, separators=(',', ':'))}.n_clicks",
-        values={'{"name":["ALL"],"type":"dir-browser-entry"}': [1]},
-        state_values=state,
-    )
-    for item in payload["inputs"]:
-        if item["id"] == '{"name":["ALL"],"type":"dir-browser-entry"}':
-            item["id"] = entry
-    response = client.post("/_dash-update-component", json=payload)
-    assert response.status_code == 200
-    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-back-btn.n_clicks",
-            values={"dir-browser-back-btn": 1},
-            state_values={**state, "dir-browser-path": str(dataset)},
-        ),
-    )
-    assert response.status_code == 200
-    assert response.get_json()["response"]["dir-browser-path"]["data"] == str(tmp_path)
-
-    recent = {"type": "dir-browser-recent-entry", "index": 0}
-    payload = _browser_callback_payload(
-        client,
-        changed=f"{json.dumps(recent, sort_keys=True, separators=(',', ':'))}.n_clicks",
-        values={'{"index":["ALL"],"type":"dir-browser-recent-entry"}': [1]},
-        state_values=state,
-    )
-    for item in payload["inputs"]:
-        if item["id"] == '{"index":["ALL"],"type":"dir-browser-recent-entry"}':
-            item["id"] = recent
-    response = client.post("/_dash-update-component", json=payload)
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] == candidate
 
 
-def test_missing_recent_candidate_preserves_browser_draft(tmp_path, monkeypatch) -> None:
-    current_folder = tmp_path / "current"
-    recent_folder = tmp_path / "recent"
-    current_folder.mkdir()
-    recent_folder.mkdir()
-    current = _discovered_candidate(current_folder, "current.lammpstrj")
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    client = create_app().server.test_client()
-    recent = {
-        "folder": str(recent_folder),
-        "base": str(recent_folder / "vanished.lammpstrj"),
-        "label": "vanished.lammpstrj",
-        "loaded_at": 1,
-    }
-    recent_id = {"type": "dir-browser-recent-entry", "index": 0}
-    payload = _browser_callback_payload(
-        client,
-        changed=f"{json.dumps(recent_id, sort_keys=True, separators=(',', ':'))}.n_clicks",
-        values={'{"index":["ALL"],"type":"dir-browser-recent-entry"}': [1]},
-        state_values={
-            "dir-browser-path": str(current_folder),
-            "data-folder-input": "",
-            "recent-datasets": [recent],
-            "dataset-browser-candidate": current,
-            "app-store": {},
-        },
-    )
-    for item in payload["inputs"]:
-        if item["id"] == '{"index":["ALL"],"type":"dir-browser-recent-entry"}':
-            item["id"] = recent_id
-
-    response = client.post("/_dash-update-component", json=payload)
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(current_folder)
-    assert result["dataset-browser-candidate"]["data"] == current
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "最近记录已失效" in rendered
 
 
-def test_directory_browser_open_does_not_select_dataset(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    dataset = tmp_path / "dataset"
-    dataset.mkdir()
-    (dataset / "rp3.lammpstrj.reactionabcd").touch()
-    (dataset / "rp3.lammpstrj.species").touch()
-    app = create_app()
-    client = app.server.test_client()
-    payload = _browser_callback_payload(
-        client,
-        changed="data-pick-btn.n_clicks",
-        values={
-        "data-pick-btn": 1,
-        },
-        state_values={
-            "dir-browser-path": "",
-            "data-folder-input": str(dataset),
-            "recent-datasets": [],
-            "dataset-browser-candidate": None,
-        },
-    )
-
-    response = client.post("/_dash-update-component", json=payload)
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(dataset.resolve())
-    assert result["dir-browser-back-btn"]["disabled"] is False
-    assert result["dataset-browser-candidate"]["data"] is None
-    assert result["data-apply-btn"]["disabled"] is True
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "已识别到 ReacNetGenerator 数据" in rendered
-    assert "rp3.lammpstrj" not in rendered
 
 
-def test_directory_browser_reopens_at_applied_dataset_when_manual_path_blank(
-    tmp_path, monkeypatch
-) -> None:
-    """A normal load supplies the next browser start path without hidden input state."""
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    dataset = tmp_path / "campaign" / "run"
-    dataset.mkdir(parents=True)
-    (dataset / "rp3.lammpstrj.reactionabcd").touch()
-    (dataset / "rp3.lammpstrj.species").touch()
-    candidate = {
-        "folder": str(dataset),
-        "base": str(dataset / "rp3.lammpstrj"),
-        "label": "rp3.lammpstrj",
-    }
-
-    def fake_scan(folder: str, *, base: str = "") -> dict[str, Any]:
-        assert folder == str(dataset)
-        assert base == candidate["base"]
-        return {
-            "dataset": {
-                "selected_base": base,
-                "label": candidate["label"],
-                "ready_count": 2,
-                "artifacts": {},
-                "capabilities": {},
-                "readiness": {},
-            }
-        }
-
-    monkeypatch.setattr(svc, "scan_dataset", fake_scan)
-    app = create_app()
-    client = app.server.test_client()
-    loaded = client.post(
-        "/_dash-update-component",
-        json=_load_dataset_callback_payload(
-            client,
-            candidate=candidate,
-            store={"folder": "", "base": "", "label": ""},
-            recent_records=[],
-        ),
-    )
-    assert loaded.status_code == 200
-    applied = loaded.get_json()["response"]["app-store"]["data"]
-
-    reopened = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-pick-btn.n_clicks",
-            values={"data-pick-btn": 1},
-            state_values={
-                "dir-browser-path": "",
-                "data-folder-input": "",
-                "dataset-browser-candidate": None,
-                "recent-datasets": [],
-                "app-store": applied,
-            },
-        ),
-    )
-    assert reopened.status_code == 200
-    assert reopened.get_json()["response"]["dir-browser-path"]["data"] == str(dataset)
 
 
-def test_directory_browser_navigation_does_not_output_applied_data(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    dataset = tmp_path / "dataset"
-    dataset.mkdir()
-    nested = dataset / "nested"
-    nested.mkdir()
-    (dataset / "rp3.lammpstrj.reactionabcd").touch()
-    (dataset / "rp3.lammpstrj.species").touch()
-    app = create_app()
-    client = app.server.test_client()
-    common_state = {
-        "dir-browser-path": str(dataset),
-        "data-folder-input": str(dataset),
-        "recent-datasets": [],
-        "dataset-browser-candidate": None,
-    }
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-path-input.n_submit",
-            values={"dir-browser-path-input": str(dataset)},
-            state_values={**common_state, "dir-browser-path": str(tmp_path)},
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(dataset)
-    assert "app-store" not in result
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-back-btn.n_clicks",
-            values={"dir-browser-back-btn": 1},
-            state_values=common_state,
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(tmp_path)
-    assert "app-store" not in result
 
 
-def test_directory_browser_requires_explicit_choice_for_multiple_datasets(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    for name in ("rp3.lammpstrj", "rp4.lammpstrj"):
-        (tmp_path / f"{name}.reactionabcd").touch()
-        (tmp_path / f"{name}.species").touch()
-    app = create_app()
-    client = app.server.test_client()
-    state = {
-        "dir-browser-path": "",
-        "data-folder-input": str(tmp_path),
-        "recent-datasets": [],
-        "dataset-browser-candidate": None,
-    }
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-pick-btn.n_clicks",
-            values={"data-pick-btn": 1},
-            state_values=state,
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] is None
-    assert result["data-apply-btn"]["disabled"] is True
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "此文件夹包含多组数据" in rendered
-    assert "rp3.lammpstrj" not in rendered
-    assert "rp4.lammpstrj" not in rendered
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-select-btn.n_clicks",
-            values={"dir-browser-select-btn": 1},
-            state_values={**state, "dir-browser-path": str(tmp_path)},
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] is None
-    assert result["data-apply-btn"]["disabled"] is True
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "请为每组数据使用独立文件夹" in rendered
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-filter-input.value",
-            values={"dir-browser-filter-input": ""},
-            state_values={**state, "dir-browser-path": str(tmp_path)},
-        ),
-    )
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(tmp_path)
 
 
-def test_check_current_folder_selects_single_dataset(
-    tmp_path, monkeypatch
-) -> None:
-    candidate = _discovered_candidate(tmp_path)
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    real_browse = svc.browse_dataset_location
-    browse_calls: list[str] = []
-
-    def counted_browse(folder: str) -> dict[str, Any]:
-        browse_calls.append(folder)
-        return real_browse(folder)
-
-    monkeypatch.setattr(svc, "browse_dataset_location", counted_browse)
-    app = create_app()
-    client = app.server.test_client()
-    payload = _browser_callback_payload(
-        client,
-        changed="dir-browser-select-btn.n_clicks",
-        values={"dir-browser-select-btn": 1},
-        state_values={
-            "dir-browser-path": str(tmp_path),
-            "data-folder-input": "",
-            "recent-datasets": [],
-            "dataset-browser-candidate": None,
-        },
-    )
-    response = client.post("/_dash-update-component", json=payload)
-
-    assert response.status_code == 200
-    assert browse_calls == [str(tmp_path)]
-    selected = response.get_json()["response"]["dataset-browser-candidate"]["data"]
-    assert selected == {**candidate, "label": tmp_path.name}
 
 
-def test_expert_path_navigates_only_on_submit_or_go() -> None:
-    client = create_app().server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "dir-browser-path.data" in item["output"]
-        and any(value["id"] == "data-pick-btn" for value in item["inputs"])
-    )
-
-    path_inputs = [
-        item["property"]
-        for item in dependency["inputs"]
-        if item["id"] == "dir-browser-path-input"
-    ]
-    path_states = [
-        item["property"]
-        for item in dependency["state"]
-        if item["id"] == "dir-browser-path-input"
-    ]
-
-    assert path_inputs == ["n_submit"]
-    assert path_states == ["value"]
-    assert any(
-        item["id"] == "dir-browser-go-btn" and item["property"] == "n_clicks"
-        for item in dependency["inputs"]
-    )
 
 
-def test_browser_opens_ambiguous_current_folder_without_internal_selection(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    for name in ("alpha.lammpstrj", "beta.lammpstrj"):
-        (tmp_path / f"{name}.reactionabcd").touch()
-    current = {
-        "folder": str(tmp_path),
-        "base": str(tmp_path / "beta.lammpstrj"),
-        "label": "beta.lammpstrj",
-    }
-    client = create_app().server.test_client()
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-pick-btn.n_clicks",
-            values={"data-pick-btn": 1},
-            state_values={
-                "dir-browser-path": "",
-                "data-folder-input": "",
-                "dataset-browser-candidate": None,
-                "recent-datasets": [],
-                "app-store": current,
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dataset-browser-candidate"]["data"] is None
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert '"role": "radio"' not in rendered
-    assert "此文件夹包含多组数据" in rendered
-    assert "beta.lammpstrj" not in rendered
 
 
-def test_invalid_expert_path_preserves_browser_candidate_and_hides_attempted_path(
-    tmp_path, monkeypatch
-) -> None:
-    allowed = tmp_path / "allowed"
-    outside = tmp_path / "private-server-path"
-    allowed.mkdir()
-    outside.mkdir()
-    candidate = _discovered_candidate(allowed)
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [allowed])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [allowed])
-    client = create_app().server.test_client()
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-go-btn.n_clicks",
-            values={
-                "dir-browser-go-btn": 1,
-                "dir-browser-path-input": str(outside),
-            },
-            state_values={
-                "dir-browser-path": str(allowed),
-                "data-folder-input": "",
-                "dataset-browser-candidate": candidate,
-                "recent-datasets": [],
-                "app-store": {},
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    result = response.get_json()["response"]
-    assert result["dir-browser-path"]["data"] == str(allowed)
-    assert result["dataset-browser-candidate"]["data"] == candidate
-    rendered = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    assert "不可浏览" in rendered
-    assert str(outside) not in rendered
-    assert "当前位置" in rendered
 
 
-def test_large_browser_rendering_is_bounded_counted_and_filterable(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    for index in range(150):
-        (tmp_path / f"folder-{index:03d}").mkdir()
-    for index in range(200):
-        (tmp_path / f"candidate-{index:03d}.lammpstrj.reactionabcd").touch()
-    client = create_app().server.test_client()
-    state = {
-        "dir-browser-path": str(tmp_path),
-        "data-folder-input": str(tmp_path),
-        "dataset-browser-candidate": None,
-        "recent-datasets": [],
-        "app-store": {},
-    }
-
-    opened = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="data-pick-btn.n_clicks",
-            values={"data-pick-btn": 1},
-            state_values=state,
-        ),
-    )
-    assert opened.status_code == 200
-    result = opened.get_json()["response"]
-    current = json.dumps(result["dir-browser-current"]["children"], ensure_ascii=False)
-    directories = json.dumps(result["dir-browser-body"]["children"], ensure_ascii=False)
-    assert "candidate-000.lammpstrj" not in current
-    assert directories.count("rs-browser-directory-entry") == 100
-    assert "显示 100 / 共 150" in directories
-
-    filtered = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-filter-input.value",
-            values={"dir-browser-filter-input": "folder-149"},
-            state_values=state,
-        ),
-    )
-    assert filtered.status_code == 200
-    result = filtered.get_json()["response"]
-    directories = json.dumps(result["dir-browser-body"]["children"], ensure_ascii=False)
-    assert directories.count("rs-browser-directory-entry") == 1
-    assert "folder-149" in directories
-    assert "显示 1 / 匹配 1 / 共 150" in directories
 
 
-def test_filter_keeps_one_visible_subfolder(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
-    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
-    (tmp_path / "alpha").mkdir()
-    (tmp_path / "beta").mkdir()
-    client = create_app().server.test_client()
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_browser_callback_payload(
-            client,
-            changed="dir-browser-filter-input.value",
-            values={"dir-browser-filter-input": "beta"},
-            state_values={
-                "dir-browser-path": str(tmp_path),
-                "data-folder-input": "",
-                "dataset-browser-candidate": None,
-                "recent-datasets": [],
-                "app-store": {},
-            },
-        ),
-    )
-
-    assert response.status_code == 200
-    rendered = json.dumps(
-        response.get_json()["response"]["dir-browser-body"]["children"],
-        ensure_ascii=False,
-    )
-    assert "beta" in rendered
-    assert "alpha" not in rendered
-    assert rendered.count("rs-browser-directory-entry") == 1
 
 
 def test_dataset_browser_has_no_candidate_radio_asset() -> None:
@@ -4869,7 +4550,7 @@ def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
     assert "rs-browser-recent-path" in payload
     assert '"disabled": true' in payload
     assert "dir-browser-recent-remove" in payload
-    assert "从最近数据集中移除 old run" in payload
+    assert "从最近RNG 数据中移除 old run" in payload
 
 
 def test_starting_location_switcher_uses_friendly_names_and_full_paths(
@@ -4913,6 +4594,21 @@ def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_ca
     assert ".rs-browser-path-control { flex-wrap: wrap; }" in css
     assert 'body:has([data-dash-is-loading="true"]) .rs-global-operation-progress' not in css
     assert ".rs-analysis-progress.is-running::after" in css
+
+
+def test_evolution_advanced_controls_have_visible_expand_affordances() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "webapp_dash"
+        / "assets"
+        / "app.css"
+    ).read_text(encoding="utf-8")
+
+    assert '.rs-evolution-advanced .accordion-button::after {' in css
+    assert 'content: "＋  展开";' in css
+    assert 'content: "−  收起";' in css
+    assert ".rs-evolution-advanced .accordion-button:focus-visible" in css
 
 
 def test_species_tooltips_can_overflow_their_grid_wrappers() -> None:
@@ -5021,12 +4717,6 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> Non
     EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
     app = create_app()
     client = app.server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if [value["id"] for value in item["inputs"]] == ["event-rxn-btn"]
-    )
-    input_values = {"event-rxn-btn": 1}
     state_values = {
         "event-reaction-text": "[O] + [C] -> [C][O]",
         "event-rxn-before": 3,
@@ -5039,29 +4729,14 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> Non
             }
         },
     }
-    payload = {
-        "output": dependency["output"],
-        "outputs": [
-            {"id": "event-grid", "property": "data"},
-            {"id": "event-grid", "property": "columns"},
-            {"id": "event-alert", "property": "children"},
-            {"id": "event-grid-store", "property": "data"},
-        ],
-        "changedPropIds": ["event-rxn-btn.n_clicks"],
-        "inputs": [
-            {"id": item["id"], "property": item["property"], "value": input_values[item["id"]]}
-            for item in dependency["inputs"]
-        ],
-        "state": [
-            {"id": item["id"], "property": item["property"], "value": state_values[item["id"]]}
-            for item in dependency["state"]
-        ],
-    }
+    payload = _callback_payload(client, input_ids=["event-rxn-btn"],
+        changed="event-rxn-btn.n_clicks", input_values={"event-rxn-btn": 1},
+        state_values=state_values, output_id="event-grid-store")
 
     response = client.post("/_dash-update-component", json=payload)
     assert response.status_code == 200
     result = response.get_json()["response"]
-    table_row = result["event-grid"]["data"][0]
+    table_row = result["event-grid"]["rowData"][0]
     raw_row = result["event-grid-store"]["data"]["rows"][0]
     assert table_row["atom_ids"] == "1,2"
     assert table_row["id"] == raw_row["event_id"]
@@ -5079,9 +4754,9 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> Non
         json=_callback_payload(
             client,
             input_ids=["event-grid"],
-            changed="event-grid.selected_row_ids",
+            changed="event-grid.selectedRows",
             input_values={
-                "event-grid.selected_row_ids": [table_row["id"]],
+                "event-grid.selectedRows": [table_row],
             },
             state_values={
                 "event-grid-store": result["event-grid-store"]["data"],
@@ -5183,9 +4858,9 @@ def test_unresolved_event_selection_does_not_open_a_blank_trajectory() -> None:
         json=_callback_payload(
             client,
             input_ids=["event-grid"],
-            changed="event-grid.selected_row_ids",
+            changed="event-grid.selectedRows",
             input_values={
-                "event-grid.selected_row_ids": [row["event_id"]],
+                "event-grid.selectedRows": [{"id": row["event_id"]}],
             },
             state_values={
                 "event-grid-store": {
@@ -5569,7 +5244,7 @@ def test_lineage_event_click_updates_selection_and_drilldown_request() -> None:
                     "kind": "event",
                     "event_id": "rngevt-next",
                 },
-                "molecule-lineage-event-grid.selected_row_ids": [],
+                "molecule-lineage-event-grid.selectedRows": [],
             },
             state_values={
                 "molecule-lineage-event-grid": [],
@@ -5640,18 +5315,20 @@ def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-                input_ids=[
-                    "event-extract-btn",
-                    "trajectory-refresh-btn",
-                    "event-type-map-clear-btn",
-                    "molecule-lineage-drilldown-store",
-                ],
+            input_ids=[
+                "event-extract-btn",
+                "trajectory-open-selected-btn",
+                "trajectory-refresh-btn",
+                "event-type-map-clear-btn",
+                "molecule-lineage-drilldown-store",
+            ],
             changed="trajectory-refresh-btn.n_clicks",
             input_values={
                 "event-extract-btn": 1,
+                "trajectory-open-selected-btn": 0,
                 "trajectory-refresh-btn": 1,
-                    "event-type-map-clear-btn": 0,
-                    "molecule-lineage-drilldown-store": None,
+                "event-type-map-clear-btn": 0,
+                "molecule-lineage-drilldown-store": None,
             },
             state_values={
                 "event-selected-store": {
@@ -5701,18 +5378,20 @@ def test_trajectory_refresh_reextracts_the_selected_event(monkeypatch) -> None:
         "/_dash-update-component",
         json=_callback_payload(
             client,
-                input_ids=[
-                    "event-extract-btn",
-                    "trajectory-refresh-btn",
-                    "event-type-map-clear-btn",
-                    "molecule-lineage-drilldown-store",
-                ],
+            input_ids=[
+                "event-extract-btn",
+                "trajectory-open-selected-btn",
+                "trajectory-refresh-btn",
+                "event-type-map-clear-btn",
+                "molecule-lineage-drilldown-store",
+            ],
             changed="event-type-map-clear-btn.n_clicks",
             input_values={
                 "event-extract-btn": 1,
+                "trajectory-open-selected-btn": 0,
                 "trajectory-refresh-btn": 1,
-                    "event-type-map-clear-btn": 1,
-                    "molecule-lineage-drilldown-store": None,
+                "event-type-map-clear-btn": 1,
+                "molecule-lineage-drilldown-store": None,
             },
             state_values={
                 "event-selected-store": {
@@ -5904,7 +5583,7 @@ def test_species_detail_reports_only_explicit_rng_identity_context(tmp_path) -> 
 
 
 @pytest.mark.parametrize("store, expected", [
-    ({}, "先选择数据集"),
+    ({}, "先选择RNG 数据"),
     ({"dataset_id": "test", "analysis_capabilities": {
         "reaction_search": {"state": "ready", "reason": "Reaction Evidence available"},
         "event_search": {"state": "needs-preparation", "reason": "Prepare event index"},
@@ -5936,7 +5615,7 @@ def test_workflow_guide_tracks_page_restore_and_clears_on_dataset_page():
         ("reactions", "计数和净通量不等于速率常数"),
         ("candidate-paths", "计数和净通量不等于速率常数"),
         ("pathway", "计数和净通量不等于速率常数"),
-        ("species-fate", "分子谱系"),
+        ("species-fate", "变化追踪"),
         ("data-management", None),
     ]:
         response = client.post("/_dash-update-component", json={
@@ -6017,7 +5696,7 @@ def test_channel_display_controls_only_change_presentation(mode, rates):
     body = response.get_json()["response"]
     assert body["rxn-channel-lanes"]["className"] == f"rs-channel-lanes is-{mode}"
     for grid in ("rxn-production-grid", "rxn-consumption-grid"):
-        assert set(body[grid]) == {"hidden_columns"}
-        assert body[grid]["hidden_columns"] == [
+        assert set(body[grid]) == {"columnState"}
+        assert [item["colId"] for item in body[grid]["columnState"] if item["hide"]] == [
             "event_frequency_per_ps", "k_app_display", "reverse_k_app_display",
         ]

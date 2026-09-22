@@ -30,3 +30,27 @@ jobs:
 
       - name: Run complete test suite
         run: uv run --locked pytest -q
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v4
+      - name: Sync optional browser tools
+        run: uv sync --locked --group browser
+      - name: Install Chromium
+        run: uv run --locked --group browser playwright install --with-deps chromium
+      - name: Exercise the offline workbench
+        env:
+          REACNET_SCOPE_BROWSER_TESTS: "1"
+          REACNET_SCOPE_SCREENSHOTS: /tmp/reacnet-ui-screenshots
+        run: uv run --locked --group browser pytest -q tests/browser
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-screenshots
+          path: /tmp/reacnet-ui-screenshots

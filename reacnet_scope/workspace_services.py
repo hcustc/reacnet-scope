@@ -121,26 +121,31 @@ from reacnet_scope.capabilities import (
 # ---------------------------------------------------------------------------
 
 
-def scan_dataset(folder: str, *, base: str = "") -> dict[str, Any]:
+def scan_dataset(folder: str, *, base: str = "", artifact_paths: dict[str, str] | None = None, label: str = "") -> dict[str, Any]:
     """Scan a data folder and return the dataset status payload.
 
     The adapter accepts plain strings and returns the shared core status model.
     """
+    from .file_collections import is_collection_path, read_collection
+    if is_collection_path(base) and artifact_paths is None:
+        record = read_collection(base, validate_sources=True)
+        if record is None:
+            raise ServiceError("数据集关联记录不存在", reason="candidate_missing")
+        artifact_paths = record["artifact_paths"]
+        label = record["label"]
     folder_text = (folder or "").strip()
     if not folder_text:
         raise ServiceError("请先选择或输入数据目录", reason="missing_folder")
     folder_path = Path(folder_text).expanduser()
-    if not folder_path.exists():
+    if artifact_paths is None and not folder_path.exists():
         raise ServiceError(f"数据目录不存在: {folder_path}", reason="missing_folder")
-    if not folder_path.is_dir():
+    if artifact_paths is None and not folder_path.is_dir():
         raise ServiceError(f"路径不是目录: {folder_path}", reason="missing_folder")
     try:
-        payload = build_dataset_status_payload(
-            {
-                "dataset_dir": [folder_text],
-                "dataset_base": [base or ""],
-            }
-        )
+        params = {"dataset_dir": [folder_text], "dataset_base": [base or ""]}
+        payload = (build_dataset_status_payload(params, artifact_paths=artifact_paths,
+                   collection_base=base, collection_label=label)
+                   if artifact_paths is not None else build_dataset_status_payload(params))
         dataset = payload.get("dataset", {}) or {}
         artifacts = dataset.get("artifacts", {}) or {}
         timeline = str(
@@ -234,6 +239,13 @@ from reacnet_scope.dir_browser import (  # noqa: E402
 
 def validate_browse_path(path_str: str) -> Path:
     """Normalise *path_str* and verify it lies inside an allowed root."""
+    from .file_collections import collection_root, is_collection_path, read_collection
+    path = Path(path_str).expanduser().absolute()
+    if path == collection_root():
+        return path
+    if is_collection_path(path):
+        read_collection(str(path), validate_sources=True)
+        return path
     try:
         return _core_validate_browse_path(path_str)
     except DirBrowserError as exc:
@@ -382,7 +394,9 @@ def browse_dataset_location(path: str) -> dict[str, Any]:
     """Build a read-only directory and dataset-discovery browser snapshot."""
     current = validate_browse_path(path)
     try:
-        listing = _core_list_directory(str(current))
+        from .file_collections import collection_root
+        listing = ({"current_path": str(current), "parent_path": None, "can_go_up": False, "subdirs": []}
+                   if current == collection_root() else _core_list_directory(str(current)))
         candidates = discover_dataset_candidates(current)
     except DirBrowserError as exc:
         raise ServiceError(exc.message, reason=exc.reason) from exc
@@ -655,7 +669,8 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         if value is not None
     ]
     workspace_path = str(paths.workspace_dir) if paths else ""
-    for item in (events, trajectory, composition):
+    from .file_collections import is_collection_path
+    for item in (() if is_collection_path(base) else (events, trajectory, composition)):
         if item.get("workspace_path"):
             workspace_path = str(item["workspace_path"])
             break
@@ -800,6 +815,7 @@ def prepare_dataset_workspace(
     *,
     base: str,
     kind: str,
+    automatic: bool = False,
 ) -> dict[str, Any]:
     """Build or rebuild one derived index in its Dataset Workspace."""
     normalized_kind = str(kind or "").strip().lower()
@@ -810,10 +826,11 @@ def prepare_dataset_workspace(
     if not folder_path.is_dir():
         raise ServiceError("数据集目录不存在", reason="missing_folder")
     base_path = validate_browse_path(base)
-    candidate_bases = {
-        str(Path(item.get("base") or "").resolve())
-        for item in discover_dataset_candidates(folder_path)
-    }
+    from .file_collections import is_collection_path, read_collection
+    candidate_bases = (
+        {str(base_path)} if is_collection_path(base_path) and read_collection(str(base_path), validate_sources=True)
+        else {str(Path(item.get("base") or "").resolve()) for item in discover_dataset_candidates(folder_path)}
+    )
     if str(base_path) not in candidate_bases:
         raise ServiceError(
             "所选数据集已不存在，请重新选择。",
@@ -847,7 +864,9 @@ def prepare_dataset_workspace(
         )
 
     previous_state = str(item.get("state") or "missing")
-    rebuild = previous_state in {"ready", "stale", "invalid"}
+    if automatic and previous_state == "ready":
+        return {"ok": True, "kind": normalized_kind, "reused": True, "status": item}
+    rebuild = not automatic and previous_state in {"ready", "stale", "invalid"}
     capability = (
         "element-distribution"
         if normalized_kind == "composition"
@@ -952,10 +971,11 @@ def cancel_dataset_preparation(
         raise ServiceError("无效准备能力", reason="invalid_preparation_kind")
     folder_path = validate_browse_path(folder)
     base_path = validate_browse_path(base)
-    candidate_bases = {
-        str(Path(item.get("base") or "").resolve())
-        for item in discover_dataset_candidates(folder_path)
-    }
+    from .file_collections import is_collection_path, read_collection
+    candidate_bases = (
+        {str(base_path)} if is_collection_path(base_path) and read_collection(str(base_path), validate_sources=True)
+        else {str(Path(item.get("base") or "").resolve()) for item in discover_dataset_candidates(folder_path)}
+    )
     if str(base_path) not in candidate_bases:
         raise ServiceError(
             "所选数据集已不存在，请重新选择。",

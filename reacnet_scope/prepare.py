@@ -33,6 +33,16 @@ from .trajectory import load_linked_trajectory
 
 
 def discover_dataset(case: str, base: str = "") -> dict[str, str]:
+    from .file_collections import is_collection_path, read_collection, ROLES
+    reference = Path(base) if base else Path(case)
+    if base and not reference.is_absolute():
+        reference = Path(case) / reference
+    if is_collection_path(reference):
+        record = read_collection(str(reference), validate_sources=True)
+        if record is None:
+            raise FileNotFoundError(f"collection not found: {reference}")
+        return {"base": str(reference), "table": "", **dict.fromkeys(ROLES, ""),
+                **record["artifact_paths"]}
     root = Path(case).expanduser().resolve()
     if root.is_file():
         stem = str(root)
@@ -202,6 +212,12 @@ def _capability_source_revision(
         paths = [dataset["species"]]
     else:
         paths = []
+    from .file_collections import is_collection_path, read_collection
+    if is_collection_path(dataset["base"]):
+        current = read_collection(dataset["base"])
+        roles = ("timeline", "reactionevent", "molecules") if capability == "event" else (("species",) if capability == "composition" else ("trajectory",))
+        if current is None or any(current["artifact_paths"].get(role, "") != dataset.get(role, "") for role in roles):
+            return {"fingerprint": "collection_changed", "artifacts": []}
     artifacts = [_source_revision(path) for path in paths]
     encoded = json.dumps(
         artifacts,
@@ -375,10 +391,12 @@ def _run_preparation_task(
         Path(dataset["base"]).name,
     )
     bound_revision = _capability_source_revision(dataset, capability)
+    from .file_collections import read_collection
+    collection = read_collection(dataset["base"])
     task: dict[str, Any] = {
         "task_version": 2,
         "dataset_id": paths.dataset_id,
-        "dataset_label": Path(dataset["base"]).name,
+        "dataset_label": str((collection or {}).get("label") or Path(dataset["base"]).name),
         "folder": str(Path(dataset["base"]).parent),
         "base": str(Path(dataset["base"])),
         "capability": capability,
