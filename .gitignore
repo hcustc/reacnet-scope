@@ -28,6 +28,9 @@ htmlcov/
 .pyright/
 .ruff_cache/
 
+# Local research and acceptance dumps
+/docs/research/*.json
+
 # Local tool state and review artifacts
 .claude/settings.local.json
 .playwright-cli/
