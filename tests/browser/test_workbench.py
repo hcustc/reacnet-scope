@@ -169,6 +169,35 @@ def test_late_query_responses_do_not_replace_current_results(page):
         expect(page.locator("#species-grid .ag-center-cols-container .ag-row")).to_have_count(3)
 
 
+def test_late_qc_preview_is_not_displayed_after_event_changes(page):
+    with page.expect_response(
+        lambda response: response.request.post_data is not None
+        and '"event-dft-response.data"' in response.request.post_data
+    ) as captured:
+        page.evaluate("window.dash_clientside.set_props('event-dft-preview-btn', {n_clicks: 1})")
+    request_data = captured.value.request.post_data_json
+    preview_request = next(item["value"] for item in request_data["inputs"]
+                           if item["id"] == "event-dft-request")
+    expect(page.locator("#event-dft-validation")).not_to_be_empty(timeout=15000)
+    stale = {
+        "request_id": preview_request["id"],
+        "payload": {"readiness_report": {"qc_handoff": {"status": "ready"}}},
+        "validation": "QC OLD PREVIEW",
+        "summary": [],
+        "options": [],
+        "file": None,
+        "panel": {"display": "block"},
+        "disabled": False,
+    }
+    page.evaluate("response => window.dash_clientside.set_props('event-dft-response', {data: response})", stale)
+    expect(page.locator("#event-dft-validation")).to_contain_text("QC OLD PREVIEW")
+    page.evaluate("window.dash_clientside.set_props('event-selected-store', {data: {row: {event_id: 'new-event'}}})")
+    expect(page.locator("#event-dft-validation")).not_to_contain_text("QC OLD PREVIEW")
+    page.evaluate("response => window.dash_clientside.set_props('event-dft-response', {data: response})", stale)
+    expect(page.locator("#event-dft-validation")).not_to_contain_text("QC OLD PREVIEW")
+    expect(page.locator("#event-dft-download-btn")).to_be_disabled()
+
+
 def test_five_workspaces_and_reaction_query_states(page):
     expect(page.locator("#data-pick-btn")).to_be_visible()
     page.locator("#nav-reactions").click()

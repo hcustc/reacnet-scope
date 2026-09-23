@@ -2002,12 +2002,7 @@ def _dft_geometry_card() -> dbc.Card:
                         html.Div(id="event-dft-validation", className="mt-2"),
                         dcc.Checklist(
                             id="event-dft-review-confirmation",
-                            options=[
-                                {
-                                    "label": "我已逐项复核 review_required 警告",
-                                    "value": "acknowledged",
-                                }
-                            ],
+                            options=[],
                             value=[],
                             className="rs-dft-unit-confirmation mt-2",
                         ),
@@ -3257,6 +3252,8 @@ def build_layout() -> html.Div:
                 data=None,
             ),
             dcc.Store(id="event-viewer-store", storage_type="memory", data=None),
+            dcc.Store(id="event-dft-request", storage_type="memory", data=None),
+            dcc.Store(id="event-dft-response", storage_type="memory", data=None),
             dcc.Store(id="event-dft-store", storage_type="memory", data=None),
             dcc.Store(id="molecule-lineage-store", storage_type="memory", data=None),
             dcc.Store(

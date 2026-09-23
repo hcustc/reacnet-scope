@@ -283,6 +283,44 @@ def test_possible_spin_crossing_requires_review_without_guessing_state(
     assert result.bundle is not None
 
 
+def test_charged_open_shell_handoff_checks_parity_and_charge_conservation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifacts, event = _case(tmp_path, monkeypatch)
+    # C + O has 14 electrons before charge; +1 leaves 13, allowing a doublet.
+    valid = evaluate_reaction_readiness(
+        artifacts, event,
+        _request(electronic_states={"reactants": (1, 2), "products": (1, 2)}),
+        dataset_id="dataset-01", replicate="replicate-01",
+    )
+
+    assert valid.report["qc_handoff"]["status"] == "ready"
+    assert valid.bundle is not None
+    with ZipFile(io.BytesIO(valid.bundle.to_zip())) as archive:
+        report = json.loads(archive.read("reaction_readiness.json"))
+        checks = {item["id"]: item for item in report["qc_handoff"]["checks"]}
+        assert checks["electron_multiplicity_parity"]["status"] == "pass"
+        assert checks["charge_conservation"]["status"] == "pass"
+        assert checks["electron_multiplicity_parity"]["evidence"]["states"] == {
+            "product": {"charge": 1, "multiplicity": 2, "electron_count": 13},
+            "reactant": {"charge": 1, "multiplicity": 2, "electron_count": 13},
+        }
+
+    for states, failed_check in (
+        ({"reactants": (1, 1), "products": (1, 1)}, "electron_multiplicity_parity"),
+        ({"reactants": (1, 2), "products": (0, 1)}, "charge_conservation"),
+    ):
+        invalid = evaluate_reaction_readiness(
+            artifacts, event, _request(electronic_states=states),
+            dataset_id="dataset-01", replicate="replicate-01",
+        )
+        assert invalid.report["qc_handoff"]["status"] == "blocked"
+        assert invalid.bundle is None
+        assert next(item for item in invalid.report["qc_handoff"]["checks"]
+                    if item["id"] == failed_check)["status"] == "blocked"
+
+
 def test_changed_source_revision_blocks_handoff(
     tmp_path: Path,
     monkeypatch,
@@ -306,3 +344,23 @@ def test_changed_source_revision_blocks_handoff(
         if item["id"] == "source_revision_current"
     )
     assert check["status"] == "blocked"
+
+
+def test_collection_revision_keeps_official_fingerprint_when_evidence_matches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from reacnet_scope.dataset_context import capture_dataset_revision
+
+    artifacts, event = _case(tmp_path, monkeypatch)
+    revision = capture_dataset_revision(
+        {"artifact_paths": artifacts, "collection_id": "registered-collection"}
+    )
+    result = evaluate_reaction_readiness(
+        artifacts, event, _request(), dataset_id="dataset-01",
+        source_revision=revision, replicate="replicate-01",
+    )
+
+    assert result.report["qc_handoff"]["status"] == "ready"
+    assert result.report["subject"]["source_revision_fingerprint"] == revision["fingerprint"]
+    assert result.bundle is not None

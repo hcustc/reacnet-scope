@@ -96,6 +96,34 @@ def _derived_source_revision(artifacts: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def _revision_evidence(revision: Mapping[str, Any]) -> list[tuple[str, int, int]] | None:
+    """Compare source metadata independent of collection path serialization."""
+
+    values = revision.get("artifacts")
+    if not isinstance(values, list) or not values:
+        return None
+    try:
+        rows = [
+            (str(item["kind"]), int(item["size"]), int(item["mtime_ns"]))
+            for item in values
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return sorted(rows) if len({row[0] for row in rows}) == len(rows) else None
+
+
+def _revision_paths_match(
+    revision: Mapping[str, Any], artifacts: Mapping[str, str]
+) -> bool:
+    """Preserve file-collection path identity when its revision records paths."""
+
+    return all(
+        not item.get("path")
+        or str(item["path"]) == str(artifacts.get(str(item["kind"])) or "")
+        for item in revision.get("artifacts") or []
+    )
+
+
 def _check(
     check_id: str,
     status: str,
@@ -484,16 +512,20 @@ def evaluate_reaction_readiness(
     )
     revision_current = bool(
         not source_revision
-        or str(revision.get("fingerprint") or "")
-        == str(current_revision.get("fingerprint") or "")
+        or (
+            _revision_evidence(revision) is not None
+            and _revision_evidence(revision) == _revision_evidence(current_revision)
+            and _revision_paths_match(revision, artifacts)
+        )
     )
     checks.append(
         _check(
             "source_revision_current",
             "pass" if revision_current else "blocked",
             evidence={
-                "expected_fingerprint": revision.get("fingerprint"),
-                "current_fingerprint": current_revision.get("fingerprint"),
+                "expected_revision_fingerprint": revision.get("fingerprint"),
+                "current_evidence_fingerprint": current_revision.get("fingerprint"),
+                "comparison_basis": "kind_size_mtime_ns",
             },
             remediation=(
                 "源数据版本已变化；重新验证 Current Dataset 后再运行预检。"
