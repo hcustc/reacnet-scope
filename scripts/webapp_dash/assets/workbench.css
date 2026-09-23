@@ -271,5 +271,10 @@ body:has(#page-data-management.active) #workspace-task-nav { display: none; }
 #library-management-list .rs-library-item > div { flex: 1; min-width: 160px; overflow-wrap: anywhere; }
 #library-management-list small { display: block; color: var(--rs-muted); }
 #library-management-list button { white-space: nowrap; }
+.rs-library-index-status { display: flex; align-items: center; gap: 4px; font-size: var(--rs-font-sm); color: var(--rs-muted); margin-top: 4px; }
+.rs-index-status-label { font-weight: 500; }
+.rs-index-status-badge { font-weight: 600; font-size: var(--rs-font-md); }
+.rs-index-separator { color: var(--rs-border-strong); }
+.rs-library-build-progress { font-size: var(--rs-font-sm); color: var(--rs-muted); margin-top: 4px; }
 body:has(#page-data-management.active) #page-workflow-guide,
 body:has(#page-data-management.active) .rs-page-capability-status { display: none; }

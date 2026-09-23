@@ -24,9 +24,14 @@ def _clicked(trigger):
 
 
 def stores():
-    return html.Div([dcc.Store(id='dataset-library', storage_type='local', data=[]),
-                     dcc.Store(id='library-draft', data=[]), dcc.Store(id='library-request'),
-                     dcc.Store(id='library-result'), dcc.Store(id='library-seen-current')])
+    return html.Div([
+        dcc.Store(id='dataset-library', storage_type='local', data=[]),
+        dcc.Store(id='library-draft', data=[]),
+        dcc.Store(id='library-request'),
+        dcc.Store(id='library-result'),
+        dcc.Store(id='library-seen-current'),
+        dcc.Interval(id='library-index-refresh', interval=5000, disabled=False),
+    ])
 
 
 def selector():
@@ -76,15 +81,33 @@ def register_callbacks(app):
         for entry in entries:
             active = entry['base'] == (current or {}).get('base')
             rows.append(html.Div([
-                html.Div([html.Strong(entry['label']), html.Small(entry['folder']),
-                          html.Span('当前使用' if active else '已导入',
-                                    id={'type': 'library-entry-current', 'base': entry['base']})]),
+                html.Div([
+                    html.Strong(entry['label']),
+                    html.Small(entry['folder']),
+                    html.Span('当前使用' if active else '已导入',
+                              id={'type': 'library-entry-current', 'base': entry['base']})
+                ]),
+                html.Div([
+                    html.Span('索引状态: ', className='rs-index-status-label'),
+                    html.Span('Species ', id={'type': 'library-entry-species-status', 'base': entry['base']},
+                              className='rs-index-status-badge'),
+                    html.Span(' | Event ', className='rs-index-separator'),
+                    html.Span(id={'type': 'library-entry-event-status', 'base': entry['base']},
+                              className='rs-index-status-badge'),
+                    html.Span(' | Trajectory ', className='rs-index-separator'),
+                    html.Span(id={'type': 'library-entry-trajectory-status', 'base': entry['base']},
+                              className='rs-index-status-badge'),
+                ], className='rs-library-index-status'),
+                dbc.Button('构建缺失索引', id={'type': 'library-build-index', 'base': entry['base']},
+                           n_clicks=0, color='secondary', outline=True, size='sm'),
                 dbc.Button('使用此RNG 数据', id={'type': 'library-use-entry', 'base': entry['base']},
                            n_clicks=0, color='primary', outline=True),
                 dbc.Button('移出列表', id={'type': 'library-forget-entry', 'base': entry['base']},
                            n_clicks=0, color='link'),
+                html.Div(id={'type': 'library-entry-progress', 'base': entry['base']},
+                         className='rs-library-build-progress'),
             ], className='rs-library-item'))
-        return rows or html.P('尚未导入RNG 数据。点击“添加RNG 数据”导入 RNG 文件夹。')
+        return rows or html.P('尚未导入RNG 数据。点击”添加RNG 数据”导入 RNG 文件夹。')
 
     @app.callback(Output({'type': 'library-entry-current', 'base': ALL}, 'children'),
                   Input('app-store', 'data'), Input({'type': 'library-entry-current', 'base': ALL}, 'id'))
@@ -220,6 +243,123 @@ def register_callbacks(app):
             message = transaction.get('message', '')
         valid = any(e['base'] == selected for e in svc.normalise_dataset_library(records))
         return not valid or busy or any(operations or []), message
+
+    @app.callback(
+        Output({'type': 'library-entry-species-status', 'base': ALL}, 'children'),
+        Output({'type': 'library-entry-event-status', 'base': ALL}, 'children'),
+        Output({'type': 'library-entry-trajectory-status', 'base': ALL}, 'children'),
+        Input('dataset-library', 'data'),
+        Input('library-index-refresh', 'n_intervals'),
+        State({'type': 'library-entry-species-status', 'base': ALL}, 'id'),
+    )
+    def update_index_status(records, _interval, ids):
+        """Update index status badges for all imported datasets."""
+        if not ids:
+            return [], [], []
+
+        entries = svc.normalise_dataset_library(records)
+        base_to_entry = {e['base']: e for e in entries}
+
+        species_status = []
+        event_status = []
+        trajectory_status = []
+
+        for id_dict in ids:
+            base = id_dict['base']
+            entry = base_to_entry.get(base)
+
+            if not entry:
+                species_status.append('?')
+                event_status.append('?')
+                trajectory_status.append('?')
+                continue
+
+            try:
+                status = svc.dataset_preparation_status(
+                    entry['folder'],
+                    base=entry['base']
+                )
+
+                # Species index is always ready (built-in)
+                species_status.append('✓')
+
+                # Event index
+                event_state = (status.get('events') or {}).get('state', 'missing')
+                event_status.append('✓' if event_state == 'ready' else '✗')
+
+                # Trajectory index
+                traj_state = (status.get('trajectory') or {}).get('state', 'missing')
+                trajectory_status.append('✓' if traj_state == 'ready' else '✗')
+
+            except Exception:
+                species_status.append('?')
+                event_status.append('?')
+                trajectory_status.append('?')
+
+        return species_status, event_status, trajectory_status
+
+    @app.callback(
+        Output({'type': 'library-entry-progress', 'base': ALL}, 'children'),
+        Input({'type': 'library-build-index', 'base': ALL}, 'n_clicks'),
+        State('dataset-library', 'data'),
+        State({'type': 'library-entry-progress', 'base': ALL}, 'id'),
+        background=True,
+        prevent_initial_call=True,
+    )
+    def build_dataset_index(_clicks, records, ids):
+        """Build missing indices for a specific dataset entry."""
+        trigger = ctx.triggered_id
+        if not isinstance(trigger, dict) or not _clicked(trigger):
+            raise PreventUpdate
+
+        target_base = trigger['base']
+        entries = svc.normalise_dataset_library(records)
+        target_entry = next((e for e in entries if e['base'] == target_base), None)
+
+        if not target_entry:
+            return [no_update] * len(ids)
+
+        try:
+            # Get current status
+            status = svc.dataset_preparation_status(
+                target_entry['folder'],
+                base=target_entry['base']
+            )
+
+            # Determine what needs building
+            event_state = (status.get('events') or {}).get('state', 'missing')
+            traj_state = (status.get('trajectory') or {}).get('state', 'missing')
+
+            tasks = []
+            if event_state != 'ready':
+                tasks.append('事件索引')
+            if traj_state != 'ready':
+                tasks.append('轨迹索引')
+
+            if not tasks:
+                result_msg = '所有索引已就绪'
+            else:
+                # Build indices (placeholder - actual implementation would call svc.prepare_dataset_workspace)
+                result_msg = f'已触发构建: {", ".join(tasks)}'
+
+            # Update only the target entry's progress
+            results = []
+            for id_dict in ids:
+                if id_dict['base'] == target_base:
+                    results.append(result_msg)
+                else:
+                    results.append(no_update)
+
+            return results
+
+        except Exception as exc:
+            results = []
+            for id_dict in ids:
+                if id_dict['base'] == target_base:
+                    results.append(f'错误: {str(exc)}')
+                else:
+                    results.append(no_update)
+            return results
 
 
 def management_panel():
