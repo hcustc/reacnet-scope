@@ -5718,12 +5718,10 @@ summary:focus-visible,
 .rs-workflow-reason { font-size: var(--rs-font-sm); line-height: 1.65; color: var(--rs-muted); overflow-wrap: anywhere; }
 .rs-workflow-reason { flex: 1; }
 .rs-workflow-card .btn { margin-top: 3px; }
-.rs-workflow-guide summary { width: fit-content; padding: 4px 0; cursor: pointer; color: var(--rs-muted); }
 .rs-inline-help { margin-bottom: 12px; font-size: var(--rs-font-sm); color: var(--rs-muted); }
 .rs-inline-help summary { width: fit-content; cursor: pointer; }
 .rs-inline-help p { margin: 8px 0; line-height: 1.65; }
 .rs-inline-help summary:focus-visible { outline: 2px solid var(--rs-accent); outline-offset: 3px; }
-.rs-workflow-guide summary:focus-visible,
 .rs-workflow-card .btn:focus-visible { outline: 2px solid var(--rs-accent); outline-offset: 3px; }
 @media (min-width: 1600px) {
 .rs-workflow-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }

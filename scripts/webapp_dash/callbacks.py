@@ -40,7 +40,6 @@ from scripts.webapp_dash.chart_presentation import empty_chart_figure
 from scripts.webapp_dash.candidate_workbench import actual_event_view
 from scripts.webapp_dash.navigation import (
     DEFAULT_PAGE,
-    PAGE_WORKFLOWS,
     PAGE_CAPABILITY_REQUIREMENTS,
     PAGE_CLASS_NAMES,
     PAGE_DESCRIPTIONS,
@@ -2592,27 +2591,6 @@ def register_callbacks(app: Any) -> None:
                 html.Div(cards, className="rs-workflow-grid"),
             ], className="rs-workflow-group"),
         ], className="rs-workflow-launcher")
-
-    @app.callback(
-        Output("page-workflow-guide", "children"),
-        Input("page-store", "data"),
-    )
-    def _render_workflow_guide(page_store):
-        page = resolve_page_id((page_store or {}).get("page"))
-        if page == "data-management":
-            return []
-        workflow = PAGE_WORKFLOWS.get(page)
-        if workflow is None:
-            return []
-        question, required, next_step = workflow
-        return html.Details([
-            html.Summary("使用帮助"),
-            html.Div([
-                html.P(question),
-                html.P([html.Strong("准备："), required]),
-                html.P([html.Strong("后续："), next_step]),
-            ], className="rs-workflow-guide-body"),
-        ], className="rs-workflow-guide")
 
     @app.callback(
         Output("data-recent-datasets", "children"),

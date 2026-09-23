@@ -5899,29 +5899,6 @@ def test_workflow_launcher_explains_requirements_for_five_workspaces(store, expe
     )
 
 
-def test_workflow_guide_tracks_page_restore_and_clears_on_dataset_page():
-    client = create_app().server.test_client()
-    for page, expected in [
-        ("reactions", "计数和净通量不等于速率常数"),
-        ("candidate-paths", "计数和净通量不等于速率常数"),
-        ("pathway", "计数和净通量不等于速率常数"),
-        ("species-fate", "变化追踪"),
-        ("data-management", None),
-    ]:
-        response = client.post("/_dash-update-component", json={
-            "output": "page-workflow-guide.children",
-            "outputs": {"id": "page-workflow-guide", "property": "children"},
-            "inputs": [{"id": "page-store", "property": "data", "value": {"page": page}}],
-            "state": [], "changedPropIds": ["page-store.data"],
-        })
-        assert response.status_code == 200
-        children = response.get_json()["response"]["page-workflow-guide"]["children"]
-        if expected is None:
-            assert children == []
-        else:
-            assert expected in json.dumps(children, ensure_ascii=False)
-
-
 @pytest.mark.parametrize("payload, disabled", [(None, True), ({"curves": []}, True), ({"curves": [{"values": [1]}]}, False)])
 def test_evolution_export_requires_result(payload, disabled):
     client = create_app().server.test_client()

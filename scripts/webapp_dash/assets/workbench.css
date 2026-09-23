@@ -79,8 +79,8 @@
   display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto;
   margin: 0; padding: 0; border-bottom: 1px solid var(--rs-border);
 }
-.rs-workspace-task-nav:empty, #page-workflow-guide:empty,
-#species-query-feedback:empty, #rxn-query-feedback:empty { display: none; }
+.rs-workspace-task-nav:empty, #species-query-feedback:empty,
+#rxn-query-feedback:empty { display: none; }
 #reaction-task-tabs { display: none; }
 #cp-direct-panel { display: flex; flex-direction: column; gap: 12px; }
 .rs-task-tab {
@@ -99,10 +99,6 @@
 .rs-compare-task-tabs .tab--selected {
   border-bottom-color: var(--rs-accent) !important; color: var(--rs-accent); font-weight: 650;
 }
-.rs-workflow-guide { margin: 0; font-size: var(--rs-font-sm); }
-.rs-workflow-guide summary { color: var(--rs-muted); width: fit-content; cursor: pointer; }
-.rs-workflow-guide-body { padding: 8px 12px; max-width: 760px; line-height: 1.6; }
-.rs-workflow-guide-body p { margin: 4px 0; }
 .rs-page.active { gap: 12px; }
 .rs-root .rs-card { border: 1px solid var(--rs-border); border-radius: 8px; box-shadow: none; }
 .rs-root .rs-page > .rs-card > .card-body,
@@ -271,5 +267,4 @@ body:has(#page-data-management.active) #workspace-task-nav { display: none; }
 #library-management-list .rs-library-item > div { flex: 1; min-width: 160px; overflow-wrap: anywhere; }
 #library-management-list small { display: block; color: var(--rs-muted); }
 #library-management-list button { white-space: nowrap; }
-body:has(#page-data-management.active) #page-workflow-guide,
 body:has(#page-data-management.active) .rs-page-capability-status { display: none; }
