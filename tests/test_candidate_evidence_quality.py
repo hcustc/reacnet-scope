@@ -73,6 +73,7 @@ def test_short_lived_genuine_chain_survives_and_has_retention_witness(tmp_path, 
     assert path['steps'][0]['transfer_event_count'] == 2
     checked = svc.check_candidate_continuity(artifacts, report, path['signature_id'])
     assert checked['status'] == 'chain_found'
+    assert checked['candidate_signature'] == path['candidate_signature']
     assert checked['witness']['max_continuous_anchor_set'] == [5, 6]
     assert len(checked['witness']['carrier_chain']) == 2
     path['continuous_support'] = checked

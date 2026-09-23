@@ -20,6 +20,7 @@ from .path_search import (
 from .service_types import ServiceError
 from .workspace_services import _event_artifact_paths
 from .candidate_evidence import event_details, validate_carrier_chain
+from .candidate_identity import candidate_identity_from_route
 
 
 @contextmanager
@@ -85,9 +86,13 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
                           signature: str, step_index: int, offset: int = 0) -> dict[str, Any]:
     if candidate_source_revision(artifacts) != report.get('source_revision'):
         raise ServiceError('来源版本已变化，请重新搜索候选路径。', reason='source_changed')
-    path = next((p for p in report.get('paths', []) if p['signature_id'] == signature), None)
+    path = next((p for p in report.get('paths', [])
+                 if signature in {p.get('signature_id'), p.get('candidate_signature')}), None)
     if path is None or not 0 <= step_index < len(path['steps']) or offset < 0:
         raise ServiceError('所选路线或步骤已失效。', reason='bad_candidate_selection')
+    identity = candidate_identity_from_route(path)
+    if path.get('candidate_signature') not in {None, identity.signature}:
+        raise ServiceError('候选结构身份与路线不一致。', reason='bad_candidate_selection')
     source, molecules = _event_artifact_paths(artifacts)
     step = path['steps'][step_index]
     key = step['reaction_key']
@@ -104,7 +109,8 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
     if candidate_source_revision(artifacts) != report.get('source_revision'):
         raise ServiceError('事件查询期间来源版本已变化，请重新搜索。', reason='source_changed')
     payload['reaction_key'] = key
-    payload['signature_id'] = signature
+    payload['signature_id'] = path['signature_id']
+    payload['candidate_signature'] = identity.signature
     payload['step_index'] = step_index
     with _reader(artifacts) as reader:
         for row in payload['rows']:
@@ -120,19 +126,26 @@ def check_candidate_continuity(artifacts: Mapping[str, Any], report: Mapping[str
     """Validate one selected route without changing identity or network order."""
     if candidate_source_revision(artifacts) != report.get('source_revision'):
         raise ServiceError('来源版本已变化，请重新搜索后检查。', reason='source_changed')
-    path = next((p for p in report.get('paths', []) if p['signature_id'] == signature), None)
+    path = next((p for p in report.get('paths', [])
+                 if signature in {p.get('signature_id'), p.get('candidate_signature')}), None)
     if path is None:
         raise ServiceError('所选路线不存在。', reason='bad_candidate_selection')
+    identity = candidate_identity_from_route(path)
+    if path.get('candidate_signature') not in {None, identity.signature}:
+        raise ServiceError('候选结构身份与路线不一致。', reason='bad_candidate_selection')
     with _reader(artifacts) as reader:
         result = validate_carrier_chain(reader.connection, path, max_states=max_states, max_seconds=max_seconds)
     if candidate_source_revision(artifacts) != report.get('source_revision'):
         raise ServiceError('检查期间来源版本已变化，请重新搜索。', reason='source_changed')
-    return dict(result, signature_id=signature, source_revision=report['source_revision'])
+    return dict(result, signature_id=path['signature_id'],
+                candidate_signature=identity.signature,
+                source_revision=report['source_revision'])
 
 
 def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     output = io.StringIO()
-    fields = ['signature_id', 'step', 'carried_from', 'carried_to', 'reaction_key',
+    fields = ['signature_id', 'candidate_signature', 'candidate_evidence_key',
+              'candidate_identity_schema', 'step', 'carried_from', 'carried_to', 'reaction_key',
               'reactants', 'products', 'event_count', 'transfer_event_count',
               'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
               'quality', 'continuous_support', 'query', 'source_revision', 'truncation_reasons',
@@ -141,7 +154,11 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     writer.writeheader()
     for path in report.get('paths', []):
         for index, step in enumerate(path['steps'], 1):
-            writer.writerow(dict(signature_id=path['signature_id'], step=index,
+            writer.writerow(dict(signature_id=path['signature_id'],
+                candidate_signature=path.get('candidate_signature'),
+                candidate_evidence_key=None,
+                candidate_identity_schema=(path.get('candidate_identity') or {}).get('schema_version'),
+                step=index,
                 carried_from=step['carried_from'], carried_to=step['carried_to'],
                 reaction_key=step['reaction_key'], reactants=json.dumps(step['reactants']),
                 products=json.dumps(step['products']), event_count=step['event_count'],

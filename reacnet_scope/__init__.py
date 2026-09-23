@@ -22,6 +22,13 @@ from .candidate_paths import (
     load_energy_evidence_csv,
     rank_candidate_paths,
 )
+from .candidate_identity import (
+    CANDIDATE_IDENTITY_SCHEMA_VERSION,
+    CandidateIdentity,
+    DirectedReactionKey,
+    SpeciesKey,
+    candidate_identity_from_route,
+)
 from .reaction_readiness import (
     REACTION_READINESS_SCHEMA_VERSION,
     ReactionReadinessRequest,
@@ -65,6 +72,11 @@ __all__ = [
     "normalize_reaction_sequence",
     "verify_event_path",
     "CANDIDATE_PATH_SCHEMA_VERSION",
+    "CANDIDATE_IDENTITY_SCHEMA_VERSION",
+    "CandidateIdentity",
+    "DirectedReactionKey",
+    "SpeciesKey",
+    "candidate_identity_from_route",
     "CANDIDATE_PATH_SCORE_VERSION",
     "EnergyEvidence",
     "load_energy_evidence_csv",
