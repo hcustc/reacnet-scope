@@ -300,14 +300,22 @@ def register_callbacks(app):
 
     @app.callback(
         Output({'type': 'library-entry-progress', 'base': ALL}, 'children'),
+        Output({'type': 'library-build-index', 'base': ALL}, 'disabled'),
         Input({'type': 'library-build-index', 'base': ALL}, 'n_clicks'),
         State('dataset-library', 'data'),
         State({'type': 'library-entry-progress', 'base': ALL}, 'id'),
+        State({'type': 'library-build-index', 'base': ALL}, 'id'),
         background=True,
+        progress=[
+            Output({'type': 'library-entry-progress', 'base': ALL}, 'children'),
+        ],
+        running=[
+            (Output({'type': 'library-build-index', 'base': ALL}, 'disabled'), True, False),
+        ],
         prevent_initial_call=True,
     )
-    def build_dataset_index(_clicks, records, ids):
-        """Build missing indices for a specific dataset entry."""
+    def build_dataset_index(set_progress, _clicks, records, progress_ids, button_ids):
+        """Build missing indices for a specific dataset entry with real-time progress tracking."""
         trigger = ctx.triggered_id
         if not isinstance(trigger, dict) or not _clicked(trigger):
             raise PreventUpdate
@@ -317,9 +325,29 @@ def register_callbacks(app):
         target_entry = next((e for e in entries if e['base'] == target_base), None)
 
         if not target_entry:
-            return [no_update] * len(ids)
+            return [no_update] * len(progress_ids), [no_update] * len(button_ids)
+
+        # Helper to update progress for target entry only
+        def update_progress(message, color='info'):
+            progress_updates = []
+            for id_dict in progress_ids:
+                if id_dict['base'] == target_base:
+                    if isinstance(message, str):
+                        progress_updates.append(
+                            html.Div([
+                                html.Span(message, style={'color': f'var(--rs-text-{color})' if color != 'info' else 'var(--rs-muted)'})
+                            ])
+                        )
+                    else:
+                        progress_updates.append(message)
+                else:
+                    progress_updates.append(no_update)
+            set_progress([progress_updates])
 
         try:
+            # Initial progress update
+            update_progress(f'正在检查 {target_entry["label"]} 的索引状态...')
+
             # Get current status
             status = svc.dataset_preparation_status(
                 target_entry['folder'],
@@ -341,17 +369,26 @@ def register_callbacks(app):
 
             if not tasks_to_build:
                 # All indices ready
+                update_progress('所有索引已就绪', 'success')
                 results = []
-                for id_dict in ids:
+                for id_dict in progress_ids:
                     if id_dict['base'] == target_base:
                         results.append(html.Span('所有索引已就绪', style={'color': 'var(--rs-success)'}))
                     else:
                         results.append(no_update)
-                return results
+                return results, [no_update] * len(button_ids)
 
-            # Build each missing index
+            # Build each missing index with progress updates
             build_results = []
-            for kind in tasks_to_build:
+            label_map = {
+                'event': '事件索引',
+                'trajectory': '轨迹索引',
+                'composition': '元素分布索引',
+            }
+
+            for idx, kind in enumerate(tasks_to_build, 1):
+                update_progress(f'正在构建 {label_map[kind]} ({idx}/{len(tasks_to_build)})...')
+
                 try:
                     result = svc.prepare_dataset_workspace(
                         target_entry['folder'],
@@ -359,49 +396,59 @@ def register_callbacks(app):
                         kind=kind,
                     )
 
-                    label_map = {
-                        'event': '事件索引',
-                        'trajectory': '轨迹索引',
-                        'composition': '元素分布索引',
-                    }
-
                     if result.get('existing_task'):
                         build_results.append(f"{label_map[kind]}已在运行")
+                        update_progress(f'{label_map[kind]}已在后台运行，跳过 ({idx}/{len(tasks_to_build)})')
                     elif result.get('canceled'):
                         build_results.append(f"{label_map[kind]}已取消")
+                        update_progress(f'{label_map[kind]}已取消 ({idx}/{len(tasks_to_build)})')
                     else:
                         action = "已重建" if result.get('rebuilt') else "已建立"
-                        build_results.append(f"{label_map[kind]}{action}")
+                        # Get record count
+                        status_result = result.get('status') or {}
+                        count = (
+                            status_result.get('event_count')
+                            if kind == 'event'
+                            else status_result.get('frames')
+                            if kind == 'trajectory'
+                            else status_result.get('timepoints')
+                        )
+                        count_text = f" · {int(count):,} 条记录" if count is not None else ""
+                        build_results.append(f"{label_map[kind]}{action}{count_text}")
+                        update_progress(f'{label_map[kind]}{action}{count_text} ({idx}/{len(tasks_to_build)})')
 
                 except svc.ServiceError as exc:
                     build_results.append(f"{label_map[kind]}失败: {exc.message}")
+                    update_progress(f'{label_map[kind]}失败: {exc.message}', 'danger')
                 except Exception as exc:
                     build_results.append(f"{label_map[kind]}失败: {str(exc)}")
+                    update_progress(f'{label_map[kind]}失败: {str(exc)}', 'danger')
 
-            # Format result message
+            # Final result message
             result_msg = html.Div([
                 html.Span(' · '.join(build_results)),
-                html.Small(' (刷新查看最新状态)', style={'display': 'block', 'marginTop': '4px'})
+                html.Small(' (索引状态将在 5 秒内自动刷新)', style={'display': 'block', 'marginTop': '4px', 'color': 'var(--rs-muted)'})
             ])
 
             # Update only the target entry's progress
             results = []
-            for id_dict in ids:
+            for id_dict in progress_ids:
                 if id_dict['base'] == target_base:
                     results.append(result_msg)
                 else:
                     results.append(no_update)
 
-            return results
+            return results, [no_update] * len(button_ids)
 
         except Exception as exc:
+            update_progress(f'错误: {str(exc)}', 'danger')
             results = []
-            for id_dict in ids:
+            for id_dict in progress_ids:
                 if id_dict['base'] == target_base:
                     results.append(html.Span(f'错误: {str(exc)}', style={'color': 'var(--rs-text-danger)'}))
                 else:
                     results.append(no_update)
-            return results
+            return results, [no_update] * len(button_ids)
 
 
 def management_panel():
