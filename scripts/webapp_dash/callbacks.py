@@ -9841,10 +9841,7 @@ def _event_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     table_rows: list[dict[str, Any]] = []
     for index, raw in enumerate(rows):
         event_id = str(raw.get("event_id") or f"event-{index + 1}")
-        display = {
-            field: raw.get(field) if raw.get(field) is not None else ""
-            for field in fields
-        }
+        display = {field: raw.get(field) for field in fields}
         display["id"] = event_id
         table_rows.append(display)
     return table_rows
