@@ -12,6 +12,18 @@
   --rs-accent: #265ad1;
   --rs-accent-soft: #edf3ff;
   --rs-radius-sm: 6px;
+  /* Shared type scale: captions never drop below 11px and body text stays at 12px or above. */
+  --rs-font-xs: 11px;
+  --rs-font-sm: 12px;
+  --rs-font-md: 13px;
+  --rs-font-base: 14px;
+  --rs-text-strong: #344054;
+  --rs-text-secondary: #475467;
+  --rs-text-faint: #7b8798;
+  --rs-surface-subtle: #f6f8fb;
+  --rs-surface-sunken: #f8f9fb;
+  --rs-surface-success: #f0fdf4;
+  --rs-surface-warning: #fff7e8;
   --bs-body-font-size: 14px;
   --bs-body-color: var(--rs-text);
   --bs-primary: var(--rs-accent);
@@ -175,7 +187,7 @@
   }
   .rs-query-grid > div:last-of-type { justify-self: end; }
 }
-@media (max-width: 767px) {
+@media (max-width: 768px) {
   .rs-topbar .rs-meta {
     display: flex; order: 0; flex: 1 1 auto; min-width: 0; height: auto; padding: 0; border: 0;
   }
@@ -199,14 +211,20 @@
     flex-wrap: wrap; row-gap: 6px; padding: 6px 10px;
   }
   .rs-topbar .rs-top-actions { flex-wrap: wrap; row-gap: 6px; }
+  /* Keep the detail view in document flow once the topbar can wrap. This
+     avoids a viewport offset that would have to mirror the bar's live height. */
+  #species-detail-stage:not([style*="none"]) {
+    position: static; width: 100%; padding: 0; overflow: visible;
+    background: transparent; border: 0; box-shadow: none;
+  }
   .rs-task-tab { padding: 8px 10px; }
 }
 
 /* One reusable folder catalog is shared by every analysis workspace. */
-.rs-library-selector { display: flex; align-items: center; gap: 6px; width: min(340px, 30vw); min-width: 210px; }
+.rs-library-selector { position: relative; display: flex; align-items: center; gap: 6px; width: min(340px, 30vw); min-width: 210px; }
 #library-select { flex: 1; min-width: 0; }
 #library-switch-status:empty { display: none; }
-#library-switch-status:not(:empty) { position: absolute; top: 56px; right: 16px; max-width: min(560px, 90vw); padding: 10px; border: 1px solid var(--rs-border); border-radius: 6px; background: var(--rs-surface-warning); z-index: 1050; }
+#library-switch-status:not(:empty) { position: absolute; top: calc(100% + 6px); right: 0; max-width: min(560px, 90vw); padding: 10px; border: 1px solid var(--rs-border); border-radius: 6px; background: var(--rs-surface-warning); z-index: 1050; }
 .rs-library-import { display: grid; gap: 10px; }
 .rs-library-import h3 { font-size: var(--rs-font-base); margin: 0; }
 .rs-library-import-heading { display: flex; flex-direction: column; gap: 2px; }
@@ -221,14 +239,14 @@
 .rs-library-item .btn { flex: 0 0 auto; }
 .rs-picker-folder-entry { display: flex; align-items: center; }
 .rs-picker-folder-entry > .rs-picker-row { flex: 1; min-width: 0; }
-@media (max-width: 767px) {
+@media (max-width: 768px) {
   .rs-library-selector { order: 1; min-width: 190px; width: 32vw; }
   .rs-topbar .rs-top-actions { order: 2; }
   .rs-topbar .rs-meta { flex-basis: 100px; }
 }
 @media (max-width: 540px) {
   .rs-topbar { height: auto; flex: 0 0 auto; flex-wrap: wrap; }
-  .rs-library-selector { flex: 1; }
+  .rs-library-selector { flex: 1 1 100%; width: 100%; min-width: 0; }
   .rs-topbar .rs-top-actions { width: 100%; justify-content: flex-end; }
 }
 .rs-library-selector > .btn { flex: 0 0 auto; white-space: nowrap; min-width: 48px; }

@@ -4189,21 +4189,6 @@ summary:focus-visible,
   --rs-radius-sm: 6px;
   --rs-radius: 8px;
   --rs-shadow: 0 1px 2px rgba(31, 41, 55, .035);
-  /* Type scale: captions never drop below 11px, body text at least 12px. */
-  --rs-font-xs: 11px;
-  --rs-font-sm: 12px;
-  --rs-font-md: 13px;
-  --rs-font-base: 14px;
-  /* Text emphasis ramp. */
-  --rs-text-strong: #344054;
-  --rs-text-secondary: #475467;
-  --rs-text-faint: #7b8798;
-  /* Neutral surfaces for subtle fills between --rs-bg and --rs-card. */
-  --rs-surface-subtle: #f6f8fb;
-  --rs-surface-sunken: #f8f9fb;
-  /* Semantic surfaces. */
-  --rs-surface-success: #f0fdf4;
-  --rs-surface-warning: #fff7e8;
 }
 .rs-sidebar-brand {
   flex: 0 0 var(--rs-topbar-height);

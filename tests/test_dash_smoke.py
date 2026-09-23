@@ -506,6 +506,8 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert operation_progress is None
     assert (element_distribution_refresh.get("props") or {}).get("disabled") is True
     layout_text = json.dumps(layout, ensure_ascii=False)
+    assert "浏览软件运行机器上的文件夹" in layout_text
+    assert "浏览此电脑上的文件夹" not in layout_text
     assert "rs-advanced-menu" not in layout_text
     assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text

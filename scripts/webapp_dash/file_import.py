@@ -20,7 +20,7 @@ def layout():
         dcc.Store(id="import-preview"), dcc.Store(id="import-collect-request"),
         dcc.Store(id="import-collect-result"), dcc.Store(id="import-location"), dcc.Store(id="import-list-page", data=0),
         html.Div([html.H2("添加 RNG 数据", id="data-browser-title", tabIndex=-1),
-                  html.Span("浏览此电脑上的文件夹", className="rs-picker-kind")], className="rs-import-header"),
+                  html.Span("浏览软件运行机器上的文件夹", className="rs-picker-kind")], className="rs-import-header"),
         html.Div([
             html.Details([
                 html.Summary("位置与最近使用"),
