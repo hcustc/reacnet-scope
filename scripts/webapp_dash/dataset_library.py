@@ -40,7 +40,8 @@ def selector():
 
 def import_panel():
     return html.Section([
-        html.H3('批量导入文件夹'),
+        html.Div([html.H3('批量导入文件夹'), html.Small('可选：先把多个文件夹导入列表，再到各分析页选择使用')],
+                 className='rs-library-import-heading'),
         dbc.Button('加入当前文件夹', id='library-add-current', color='secondary', outline=True, size='sm'),
         html.Details([html.Summary('一次填写多个文件夹路径'),
                       dbc.Textarea(id='library-paths', placeholder='每行一个 RNG 输出文件夹；各自作为独立RNG 数据', rows=3),
@@ -50,7 +51,6 @@ def import_panel():
         html.Div([dbc.Button('导入所选文件夹', id='library-import', color='primary', size='sm'),
                   dbc.Button('取消导入', id='library-import-cancel', color='secondary', size='sm', disabled=True)], className='rs-result-actions'),
         html.Div(id='library-import-status', role='status'),
-        html.Small('导入后可在各分析页选择使用；需要时在分析工作区开启多来源对比。'),
         html.Details([html.Summary('已导入的RNG 数据'), html.Div(id='library-catalog-list')]),
     ], className='rs-library-import')
 

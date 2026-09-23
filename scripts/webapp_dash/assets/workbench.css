@@ -207,8 +207,10 @@
 #library-select { flex: 1; min-width: 0; }
 #library-switch-status:empty { display: none; }
 #library-switch-status:not(:empty) { position: absolute; top: 56px; right: 16px; max-width: min(560px, 90vw); padding: 10px; border: 1px solid var(--rs-border); border-radius: 6px; background: var(--rs-surface-warning); z-index: 1050; }
-.rs-library-import { display: grid; gap: 10px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--rs-border); }
-.rs-library-import h3 { font-size: 16px; margin: 0; }
+.rs-library-import { display: grid; gap: 10px; }
+.rs-library-import h3 { font-size: var(--rs-font-base); margin: 0; }
+.rs-library-import-heading { display: flex; flex-direction: column; gap: 2px; }
+.rs-library-import-heading small { color: var(--rs-muted); }
 .rs-library-import details > summary { cursor: pointer; font-size: var(--rs-font-md); }
 .rs-library-import small { color: var(--rs-muted); }
 #library-draft-list, #library-catalog-list, #library-import-status { max-height: 220px; overflow: auto; overflow-wrap: anywhere; }

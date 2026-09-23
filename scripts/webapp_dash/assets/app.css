@@ -6110,10 +6110,16 @@ summary:focus-visible,
 .rs-picker-more summary { cursor:pointer; padding:8px 0; color:var(--rs-muted); }
 .rs-picker-more[open] > :not(summary) { margin:6px 0; }
 .rs-picker-selection { border-left:1px solid var(--rs-border); background:var(--rs-surface-subtle); }
-.rs-picker-selection > .rs-import-header h3 { display:none; }
-.rs-picker-selection > .rs-import-header { justify-content:flex-end; }
-.rs-picker-empty { text-align:center; padding:40px 0; color:#8b97a9; }
-.rs-picker-empty > span { display:block; font-size:26px; margin-bottom:12px; }
+.rs-picker-selection .rs-import-header { justify-content:space-between; margin-bottom:4px; }
+.rs-picker-selection .rs-import-header h3 { margin:0; }
+/* Two stacked cards: the primary analysis selection first, batch library
+   import second. Cards keep the muted pane from blurring both workflows
+   into one long undifferentiated list. */
+.rs-selection-card,
+.rs-picker-selection .rs-library-import { background:#fff; border:1px solid var(--rs-border); border-radius:8px; padding:10px 14px 12px; }
+.rs-picker-selection .rs-library-import { margin:12px 0 0; }
+.rs-picker-empty { text-align:center; padding:26px 0; color:var(--rs-text-faint); }
+.rs-picker-empty > span { display:block; font-size:22px; margin-bottom:8px; }
 .rs-picker-empty p { font-size:var(--rs-font-md); margin-bottom:6px; }
 .rs-picker-empty small { font-size:var(--rs-font-sm); }
 .rs-import-file { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; padding:10px 0; border-bottom:1px solid #e2e7ec; align-items:start; }
