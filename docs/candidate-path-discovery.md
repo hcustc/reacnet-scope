@@ -6,6 +6,8 @@ Web 第一版使用“反应与事件 → 候选路径”、`candidate-search` C
 [ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
 
 当前工作台结果为 `reacnet-scope/indexed-candidates/v3`（与下面兼容命令的 v3 不同）。
+每条路线还提供版本化 `candidate_signature`；旧 `signature_id` 保留供 v3 交接使用。
+身份字段及证据修订边界见 [Candidate 结构身份](candidate-identity.md)。
 默认折叠三个分析帧间隔内、完整原子参与者返回的短暂往返。可切换原始视图、调整窗口，或只折叠
 精确键级也恢复的事件。低频和短寿命本身不触发折叠；步骤页始终保留原始事件，并可选择具体事件
 查看真实键图和首次后续消耗。见 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
