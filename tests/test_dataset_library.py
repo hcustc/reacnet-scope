@@ -1,9 +1,13 @@
+import json
 from pathlib import Path
 
 import pytest
 from reacnet_scope import services as svc, dir_browser
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash.callbacks import _batch_managed_dataset_catalog
+from scripts.webapp_dash.dataset_library import (
+    _build_library_index, _control_snapshot, _library_index_control,
+)
 from tests.test_dataset_switch_callbacks import _payload
 
 
@@ -148,3 +152,78 @@ def test_explicit_batch_does_not_implicitly_include_browsed_folder(folders):
     response = post(client, 'library-request.data', 'library-import.n_clicks',
                     {'library-import': 1}, {'library-draft': [folders[1]], 'import-location': {'path': folders[0]}})
     assert response.get_json()['response']['library-request']['data']['paths'] == [folders[1]]
+
+
+def test_library_build_prepares_only_selected_entry_and_capability(folders):
+    entries = svc.inspect_dataset_folders(folders)['entries']
+    result = _build_library_index({**entries[1], 'kind': 'composition'})
+
+    assert result['dataset_id'] == entries[1]['dataset_id']
+    target = svc.dataset_preparation_status(entries[1]['folder'], base=entries[1]['base'])
+    other = svc.dataset_preparation_status(entries[0]['folder'], base=entries[0]['base'])
+    assert target['composition']['state'] == 'ready'
+    assert other['composition']['state'] != 'ready'
+    assert target['events']['state'] != 'ready'
+    assert target['trajectory']['state'] != 'ready'
+
+
+def test_library_build_rejects_stale_dataset_identity_before_preparation(folders, monkeypatch):
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    monkeypatch.setattr(svc, 'prepare_dataset_workspace',
+                        lambda *_args, **_kwargs: pytest.fail('unexpected preparation'))
+
+    with pytest.raises(svc.ServiceError, match='身份已变化'):
+        _build_library_index({**entry, 'dataset_id': 'another-dataset', 'kind': 'composition'})
+
+
+def test_library_control_distinguishes_missing_source_and_task_progress():
+    entry = {'base': '/data/run', 'dataset_id': 'dataset-a'}
+    missing = _library_index_control(entry, 'trajectory',
+                                     {'state': 'missing', 'source_available': False}, None, None, None)
+    assert missing[0].children == '缺少源文件'
+    assert not any(getattr(item, 'id', None) for item in missing)
+
+    building = _library_index_control(entry, 'composition', {
+        'state': 'building', 'source_available': True,
+        'task': {'state': 'running', 'progress': 0.3, 'progress_trusted': True},
+    }, None, None, None)
+    assert building[0].children == '准备中 · 30%'
+    assert any((getattr(item, 'id', None) or {}).get('type') == 'library-cancel-index'
+               for item in building)
+    assert all(item.disabled for item in building
+               if (getattr(item, 'id', None) or {}).get('type') == 'library-build-index')
+
+
+def test_library_control_snapshot_preserves_click_count_across_idle_poll():
+    entry = {'base': '/data/run', 'dataset_id': 'dataset-a'}
+    controls = _library_index_control(entry, 'composition', {
+        'state': 'missing', 'source_available': True,
+    }, None, None, None)
+    prior = [item.to_plotly_json() for item in controls]
+    prior[1]['props']['n_clicks'] = 1
+
+    assert _control_snapshot(controls) == _control_snapshot(prior)
+
+
+def test_library_build_request_targets_imported_entry_without_current_switch(folders):
+    client = create_app().server.test_client()
+    entry = svc.inspect_dataset_folders([folders[1]])['entries'][0]
+    clicked = {'type': 'library-build-index', 'base': entry['base'], 'kind': 'composition'}
+    pattern = '{"base":["ALL"],"kind":["ALL"],"type":"library-build-index"}'
+    changed = f'{json.dumps(clicked, sort_keys=True, separators=(",", ":"))}.n_clicks'
+    payload = _payload(client, output_contains='library-build-request.data', changed=changed,
+                       inputs={pattern: [1]}, states={'dataset-library': [entry]})
+    for item in payload['inputs']:
+        if item['id'] == pattern:
+            item['id'] = clicked
+            item['value'] = 1
+
+    response = client.post('/_dash-update-component', json=payload)
+
+    assert response.status_code == 200
+    body = response.get_json()['response']
+    request = body['library-build-request']['data']
+    assert request['base'] == entry['base']
+    assert request['dataset_id'] == entry['dataset_id']
+    assert request['kind'] == 'composition'
+    assert 'app-store' not in body

@@ -383,6 +383,22 @@ def test_dataset_identity_lock_failure_never_falls_back_to_path_hash(
         resolve_dataset_paths(source)
 
 
+def test_first_persisted_identity_matches_read_only_candidate_identity(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    source = tmp_path / "run.species"
+    source.write_text("Timestep 0: [H] 1\n", encoding="utf-8")
+
+    preview = resolve_dataset_paths(source, persist_identity=False)
+    assert not (tmp_path / "workspace" / "workspace-manifest.json").exists()
+
+    prepared = resolve_dataset_paths(source)
+
+    assert prepared.dataset_id == preview.dataset_id
+    assert resolve_dataset_paths(source, persist_identity=False).dataset_id == preview.dataset_id
+
+
 def test_preparation_discovers_species_only_dataset(tmp_path) -> None:
     species = tmp_path / "species-only.lammpstrj.species"
     species.write_text("Timestep 0: [H] 2\n", encoding="utf-8")
@@ -648,6 +664,7 @@ def test_task_polling_runs_only_while_a_preparation_task_is_active() -> None:
         values = {
             "preparation-task-snapshot": tasks,
             "import-auto-request": None,
+            "library-build-request": None,
             "data-prep-event-btn": event_clicks,
             "data-prep-trajectory-btn": 0,
             "data-prep-composition-btn": 0,

@@ -20,6 +20,9 @@ single-run picker; batch import never silently merges runs. Cancelled or
 superseded results do not register references.
 
 The sidebar Dataset entry opens the imported library with add, use and remove-reference actions.
+Each imported entry also exposes per-capability index preparation, progress, and cancellation.
+Explicit preparation targets that entry without first making it the Current Dataset;
+import itself never starts preparation or builds every missing capability.
 Comparison is an optional task within the Species and Reaction workspaces,
 not a library action or a separate top-level workspace. Current dataset preparation is a separate
 tab, reached directly by preparation shortcuts. Utility pages hide analysis task

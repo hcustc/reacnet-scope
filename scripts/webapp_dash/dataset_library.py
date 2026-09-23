@@ -9,6 +9,116 @@ import dash_bootstrap_components as dbc
 from reacnet_scope import services as svc
 
 
+_INDEX_KINDS = (
+    ('composition', '物种丰度 / 元素分布', 'composition'),
+    ('event', '事件检索', 'events'),
+    ('trajectory', '轨迹证据', 'trajectory'),
+)
+_INDEX_KEYS = {kind: key for kind, _label, key in _INDEX_KINDS}
+
+
+def _verified_library_target(entry):
+    """Recheck a browser-stored reference before changing its workspace."""
+    dataset_id = str(entry.get('dataset_id') or '')
+    if not dataset_id:
+        raise svc.ServiceError('RNG 数据身份缺失，请重新导入。', reason='missing_dataset_identity')
+    validation = svc.validate_dataset_candidate(entry['folder'], entry['base'])
+    if str(validation.get('dataset_id') or '') != dataset_id:
+        raise svc.ServiceError('RNG 数据身份已变化，请重新导入。', reason='dataset_identity_changed')
+    return validation
+
+
+def _build_library_index(request):
+    """Prepare one explicitly chosen capability for one verified library entry."""
+    kind = str(request.get('kind') or '')
+    if kind not in _INDEX_KEYS:
+        raise svc.ServiceError('无效准备能力。', reason='invalid_preparation_kind')
+    _verified_library_target(request)
+    result = svc.prepare_dataset_workspace(
+        request['folder'], base=request['base'], kind=kind,
+    )
+    if str(result.get('dataset_id') or '') != str(request['dataset_id']):
+        raise svc.ServiceError('准备结果的数据身份不匹配，请重新检查。', reason='dataset_identity_changed')
+    return result
+
+
+def _library_index_control(entry, kind, item, request, result, cancel_result):
+    """Render one capability without treating missing evidence as a failed build."""
+    base = entry['base']
+    state = str(item.get('state') or 'missing')
+    task = item.get('task') or {}
+    task_state = str(task.get('state') or '')
+    source_available = bool(item.get('source_available'))
+    pending = (
+        isinstance(request, dict)
+        and request.get('base') == base
+        and request.get('kind') == kind
+        and request.get('dataset_id') == entry.get('dataset_id')
+        and request.get('token') != (result or {}).get('token')
+    )
+    progress = task.get('progress') if task.get('progress_trusted') else None
+    if not source_available:
+        state_text = '缺少源文件'
+    elif state == 'building':
+        state_text = (
+            f'准备中 · {float(progress) * 100:.0f}%'
+            if isinstance(progress, (int, float)) else '准备中'
+        )
+        if task_state == 'cancel_requested':
+            state_text = '正在取消'
+    elif state == 'ready':
+        state_text = '可用'
+    elif task_state in {'interrupted', 'canceled', 'failed', 'superseded'}:
+        state_text = {'interrupted': '已中断', 'canceled': '已取消',
+                      'failed': '构建失败', 'superseded': '来源已变化'}[task_state]
+    else:
+        state_text = {'stale': '需要重建', 'invalid': '索引无效'}.get(state, '尚未建立')
+    if pending and state != 'building':
+        state_text = '正在启动准备任务'
+
+    controls = [html.Span(state_text, className=f'rs-index-state is-{state}')]
+    if source_available and state != 'ready':
+        action = (
+            '续建索引' if task_state in {'interrupted', 'canceled', 'failed', 'superseded'}
+            else '重新构建' if state in {'stale', 'invalid'}
+            else '准备索引'
+        )
+        controls.append(dbc.Button(
+            action,
+            id={'type': 'library-build-index', 'base': base, 'kind': kind},
+            n_clicks=0, color='secondary', outline=True, size='sm',
+            disabled=state == 'building' or pending,
+        ))
+    if state == 'building':
+        controls.append(dbc.Button(
+            '取消准备',
+            id={'type': 'library-cancel-index', 'base': base, 'kind': kind},
+            n_clicks=0, color='secondary', outline=True, size='sm',
+            disabled=task_state == 'cancel_requested',
+        ))
+        if task.get('message'):
+            controls.append(html.Small(str(task['message'])))
+
+    for feedback in (result, cancel_result):
+        if (isinstance(feedback, dict) and feedback.get('base') == base
+                and feedback.get('kind') == kind
+                and feedback.get('dataset_id') == entry.get('dataset_id')
+                and feedback.get('message')):
+            controls.append(html.Small(str(feedback['message']), role='status'))
+    return controls
+
+
+def _control_snapshot(value):
+    """Compare visible control state without resetting a button's click count."""
+    if hasattr(value, 'to_plotly_json'):
+        value = value.to_plotly_json()
+    if isinstance(value, dict):
+        return {key: _control_snapshot(item) for key, item in value.items() if key != 'n_clicks'}
+    if isinstance(value, list):
+        return [_control_snapshot(item) for item in value]
+    return value
+
+
 def _clicked(trigger):
     for group in ctx.inputs_list:
         for item in group if isinstance(group, list) else [group]:
@@ -30,7 +140,10 @@ def stores():
         dcc.Store(id='library-request'),
         dcc.Store(id='library-result'),
         dcc.Store(id='library-seen-current'),
-        dcc.Interval(id='library-index-refresh', interval=5000, disabled=False),
+        dcc.Store(id='library-build-request'),
+        dcc.Store(id='library-build-result'),
+        dcc.Store(id='library-cancel-result'),
+        dcc.Interval(id='library-index-refresh', interval=5000, disabled=True),
     ])
 
 
@@ -88,26 +201,20 @@ def register_callbacks(app):
                               id={'type': 'library-entry-current', 'base': entry['base']})
                 ]),
                 html.Div([
-                    html.Span('索引状态: ', className='rs-index-status-label'),
-                    html.Span('Species ', id={'type': 'library-entry-species-status', 'base': entry['base']},
-                              className='rs-index-status-badge'),
-                    html.Span(' | Event ', className='rs-index-separator'),
-                    html.Span(id={'type': 'library-entry-event-status', 'base': entry['base']},
-                              className='rs-index-status-badge'),
-                    html.Span(' | Trajectory ', className='rs-index-separator'),
-                    html.Span(id={'type': 'library-entry-trajectory-status', 'base': entry['base']},
-                              className='rs-index-status-badge'),
+                    html.Div([
+                        html.Span(label, className='rs-index-status-label'),
+                        html.Span('正在检查…',
+                                  id={'type': 'library-index-control', 'base': entry['base'], 'kind': kind},
+                                  className='rs-library-index-control'),
+                    ], className='rs-library-index-row')
+                    for kind, label, _key in _INDEX_KINDS
                 ], className='rs-library-index-status'),
-                dbc.Button('构建缺失索引', id={'type': 'library-build-index', 'base': entry['base']},
-                           n_clicks=0, color='secondary', outline=True, size='sm'),
                 dbc.Button('使用此RNG 数据', id={'type': 'library-use-entry', 'base': entry['base']},
                            n_clicks=0, color='primary', outline=True),
                 dbc.Button('移出列表', id={'type': 'library-forget-entry', 'base': entry['base']},
                            n_clicks=0, color='link'),
-                html.Div(id={'type': 'library-entry-progress', 'base': entry['base']},
-                         className='rs-library-build-progress'),
             ], className='rs-library-item'))
-        return rows or html.P('尚未导入RNG 数据。点击”添加RNG 数据”导入 RNG 文件夹。')
+        return rows or html.P('尚未导入RNG 数据。点击“添加RNG 数据”导入 RNG 文件夹。')
 
     @app.callback(Output({'type': 'library-entry-current', 'base': ALL}, 'children'),
                   Input('app-store', 'data'), Input({'type': 'library-entry-current', 'base': ALL}, 'id'))
@@ -244,211 +351,111 @@ def register_callbacks(app):
         valid = any(e['base'] == selected for e in svc.normalise_dataset_library(records))
         return not valid or busy or any(operations or []), message
 
+    @app.callback(Output('library-index-refresh', 'disabled'),
+                  Input('page-store', 'data'), Input('library-view', 'value'))
+    def refresh_library_only_when_visible(page_store, view):
+        return (page_store or {}).get('page') != 'data-management' or view != 'library'
+
     @app.callback(
-        Output({'type': 'library-entry-species-status', 'base': ALL}, 'children'),
-        Output({'type': 'library-entry-event-status', 'base': ALL}, 'children'),
-        Output({'type': 'library-entry-trajectory-status', 'base': ALL}, 'children'),
+        Output({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
         Input('dataset-library', 'data'),
         Input('library-index-refresh', 'n_intervals'),
-        State({'type': 'library-entry-species-status', 'base': ALL}, 'id'),
+        Input('library-build-request', 'data'),
+        Input('library-build-result', 'data'),
+        Input('library-cancel-result', 'data'),
+        Input({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'id'),
+        State({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
     )
-    def update_index_status(records, _interval, ids):
-        """Update index status badges for all imported datasets."""
-        if not ids:
-            return [], [], []
-
-        entries = svc.normalise_dataset_library(records)
-        base_to_entry = {e['base']: e for e in entries}
-
-        species_status = []
-        event_status = []
-        trajectory_status = []
-
-        for id_dict in ids:
-            base = id_dict['base']
-            entry = base_to_entry.get(base)
-
-            if not entry:
-                species_status.append('?')
-                event_status.append('?')
-                trajectory_status.append('?')
+    def update_index_status(records, _interval, request, result, cancel_result, ids, previous):
+        """Read published indexes and persisted task progress for visible entries."""
+        entries = {entry['base']: entry for entry in svc.normalise_dataset_library(records)}
+        statuses = {}
+        rendered = []
+        for control_id in ids or []:
+            base, kind = control_id['base'], control_id['kind']
+            entry = entries.get(base)
+            if entry is None:
+                rendered.append('已移出列表')
                 continue
-
-            try:
-                status = svc.dataset_preparation_status(
-                    entry['folder'],
-                    base=entry['base']
-                )
-
-                # Species index is always ready (built-in)
-                species_status.append('✓')
-
-                # Event index
-                event_state = (status.get('events') or {}).get('state', 'missing')
-                event_status.append('✓' if event_state == 'ready' else '✗')
-
-                # Trajectory index
-                traj_state = (status.get('trajectory') or {}).get('state', 'missing')
-                trajectory_status.append('✓' if traj_state == 'ready' else '✗')
-
-            except Exception:
-                species_status.append('?')
-                event_status.append('?')
-                trajectory_status.append('?')
-
-        return species_status, event_status, trajectory_status
+            if base not in statuses:
+                try:
+                    svc.validate_browse_path(entry['folder'])
+                    svc.validate_browse_path(entry['base'])
+                    status = svc.dataset_preparation_status(entry['folder'], base=entry['base'])
+                    if str(status.get('dataset_id') or '') != str(entry.get('dataset_id') or ''):
+                        raise svc.ServiceError('RNG 数据身份已变化，请重新导入。', reason='dataset_identity_changed')
+                    statuses[base] = status
+                except svc.ServiceError as exc:
+                    statuses[base] = exc
+            status = statuses[base]
+            if isinstance(status, svc.ServiceError):
+                rendered.append(f'状态不可用：{status.message}')
+                continue
+            controls = _library_index_control(
+                entry, kind, status.get(_INDEX_KEYS[kind]) or {},
+                request, result, cancel_result,
+            )
+            prior = previous[len(rendered)] if previous and len(previous) > len(rendered) else None
+            rendered.append(no_update if _control_snapshot(controls) == _control_snapshot(prior)
+                            else controls)
+        return rendered
 
     @app.callback(
-        Output({'type': 'library-entry-progress', 'base': ALL}, 'children'),
-        Output({'type': 'library-build-index', 'base': ALL}, 'disabled'),
-        Input({'type': 'library-build-index', 'base': ALL}, 'n_clicks'),
-        State('dataset-library', 'data'),
-        State({'type': 'library-entry-progress', 'base': ALL}, 'id'),
-        State({'type': 'library-build-index', 'base': ALL}, 'id'),
-        background=True,
-        progress=[
-            Output({'type': 'library-entry-progress', 'base': ALL}, 'children'),
-        ],
-        running=[
-            (Output({'type': 'library-build-index', 'base': ALL}, 'disabled'), True, False),
-        ],
-        prevent_initial_call=True,
+        Output('library-build-request', 'data'),
+        Input({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'n_clicks'),
+        State('dataset-library', 'data'), prevent_initial_call=True,
     )
-    def build_dataset_index(set_progress, _clicks, records, progress_ids, button_ids):
-        """Build missing indices for a specific dataset entry with real-time progress tracking."""
+    def request_library_index(_clicks, records):
         trigger = ctx.triggered_id
         if not isinstance(trigger, dict) or not _clicked(trigger):
             raise PreventUpdate
+        entry = next((item for item in svc.normalise_dataset_library(records)
+                      if item['base'] == trigger['base']), None)
+        if entry is None:
+            raise PreventUpdate
+        return {**entry, 'kind': trigger['kind'], 'token': uuid.uuid4().hex}
 
-        target_base = trigger['base']
-        entries = svc.normalise_dataset_library(records)
-        target_entry = next((e for e in entries if e['base'] == target_base), None)
-
-        if not target_entry:
-            return [no_update] * len(progress_ids), [no_update] * len(button_ids)
-
-        # Helper to update progress for target entry only
-        def update_progress(message, color='info'):
-            progress_updates = []
-            for id_dict in progress_ids:
-                if id_dict['base'] == target_base:
-                    if isinstance(message, str):
-                        progress_updates.append(
-                            html.Div([
-                                html.Span(message, style={'color': f'var(--rs-text-{color})' if color != 'info' else 'var(--rs-muted)'})
-                            ])
-                        )
-                    else:
-                        progress_updates.append(message)
-                else:
-                    progress_updates.append(no_update)
-            set_progress([progress_updates])
-
+    @app.callback(
+        Output('library-build-result', 'data'), Input('library-build-request', 'data'),
+        background=True, prevent_initial_call=True,
+    )
+    def build_library_index(request):
+        if not isinstance(request, dict) or not request.get('token'):
+            raise PreventUpdate
         try:
-            # Initial progress update
-            update_progress(f'正在检查 {target_entry["label"]} 的索引状态...')
+            result = _build_library_index(request)
+        except svc.ServiceError as exc:
+            return {**request, 'ok': False, 'message': exc.message}
+        message = (
+            '同类任务已在运行。' if result.get('existing_task')
+            else '任务已取消，检查点已保留。' if result.get('canceled')
+            else '索引已重建。' if result.get('rebuilt')
+            else '索引已就绪。'
+        )
+        return {**request, 'ok': True, 'message': message}
 
-            # Get current status
-            status = svc.dataset_preparation_status(
-                target_entry['folder'],
-                base=target_entry['base']
+    @app.callback(
+        Output('library-cancel-result', 'data'),
+        Input({'type': 'library-cancel-index', 'base': ALL, 'kind': ALL}, 'n_clicks'),
+        State('dataset-library', 'data'), prevent_initial_call=True,
+    )
+    def cancel_library_index(_clicks, records):
+        trigger = ctx.triggered_id
+        if not isinstance(trigger, dict) or not _clicked(trigger):
+            raise PreventUpdate
+        entry = next((item for item in svc.normalise_dataset_library(records)
+                      if item['base'] == trigger['base']), None)
+        if entry is None:
+            raise PreventUpdate
+        try:
+            _verified_library_target(entry)
+            result = svc.cancel_dataset_preparation(
+                entry['folder'], base=entry['base'], kind=trigger['kind'],
             )
-
-            # Determine what needs building
-            event_state = (status.get('events') or {}).get('state', 'missing')
-            traj_state = (status.get('trajectory') or {}).get('state', 'missing')
-            comp_state = (status.get('composition') or {}).get('state', 'missing')
-
-            tasks_to_build = []
-            if event_state not in {'ready', 'building'}:
-                tasks_to_build.append('event')
-            if traj_state not in {'ready', 'building'}:
-                tasks_to_build.append('trajectory')
-            if comp_state not in {'ready', 'building'}:
-                tasks_to_build.append('composition')
-
-            if not tasks_to_build:
-                # All indices ready
-                update_progress('所有索引已就绪', 'success')
-                results = []
-                for id_dict in progress_ids:
-                    if id_dict['base'] == target_base:
-                        results.append(html.Span('所有索引已就绪', style={'color': 'var(--rs-success)'}))
-                    else:
-                        results.append(no_update)
-                return results, [no_update] * len(button_ids)
-
-            # Build each missing index with progress updates
-            build_results = []
-            label_map = {
-                'event': '事件索引',
-                'trajectory': '轨迹索引',
-                'composition': '元素分布索引',
-            }
-
-            for idx, kind in enumerate(tasks_to_build, 1):
-                update_progress(f'正在构建 {label_map[kind]} ({idx}/{len(tasks_to_build)})...')
-
-                try:
-                    result = svc.prepare_dataset_workspace(
-                        target_entry['folder'],
-                        base=target_entry['base'],
-                        kind=kind,
-                    )
-
-                    if result.get('existing_task'):
-                        build_results.append(f"{label_map[kind]}已在运行")
-                        update_progress(f'{label_map[kind]}已在后台运行，跳过 ({idx}/{len(tasks_to_build)})')
-                    elif result.get('canceled'):
-                        build_results.append(f"{label_map[kind]}已取消")
-                        update_progress(f'{label_map[kind]}已取消 ({idx}/{len(tasks_to_build)})')
-                    else:
-                        action = "已重建" if result.get('rebuilt') else "已建立"
-                        # Get record count
-                        status_result = result.get('status') or {}
-                        count = (
-                            status_result.get('event_count')
-                            if kind == 'event'
-                            else status_result.get('frames')
-                            if kind == 'trajectory'
-                            else status_result.get('timepoints')
-                        )
-                        count_text = f" · {int(count):,} 条记录" if count is not None else ""
-                        build_results.append(f"{label_map[kind]}{action}{count_text}")
-                        update_progress(f'{label_map[kind]}{action}{count_text} ({idx}/{len(tasks_to_build)})')
-
-                except svc.ServiceError as exc:
-                    build_results.append(f"{label_map[kind]}失败: {exc.message}")
-                    update_progress(f'{label_map[kind]}失败: {exc.message}', 'danger')
-                except Exception as exc:
-                    build_results.append(f"{label_map[kind]}失败: {str(exc)}")
-                    update_progress(f'{label_map[kind]}失败: {str(exc)}', 'danger')
-
-            # Final result message
-            result_msg = html.Div([
-                html.Span(' · '.join(build_results)),
-                html.Small(' (索引状态将在 5 秒内自动刷新)', style={'display': 'block', 'marginTop': '4px', 'color': 'var(--rs-muted)'})
-            ])
-
-            # Update only the target entry's progress
-            results = []
-            for id_dict in progress_ids:
-                if id_dict['base'] == target_base:
-                    results.append(result_msg)
-                else:
-                    results.append(no_update)
-
-            return results, [no_update] * len(button_ids)
-
-        except Exception as exc:
-            update_progress(f'错误: {str(exc)}', 'danger')
-            results = []
-            for id_dict in progress_ids:
-                if id_dict['base'] == target_base:
-                    results.append(html.Span(f'错误: {str(exc)}', style={'color': 'var(--rs-text-danger)'}))
-                else:
-                    results.append(no_update)
-            return results, [no_update] * len(button_ids)
+            message = result['message']
+        except svc.ServiceError as exc:
+            message = exc.message
+        return {**entry, 'kind': trigger['kind'], 'message': message}
 
 
 def management_panel():
