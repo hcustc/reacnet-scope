@@ -822,15 +822,16 @@ def cmd_export_dft_geometry(args: argparse.Namespace) -> int:
 
     try:
         dataset = discover_dataset(args.case, args.base)
-        reactionevent = dataset["reactionevent"]
-        molecules = (
-            dataset["molecules"]
-            if Path(dataset["molecules"]).is_file()
-            else ""
+        from reacnet_scope.timed_evidence import select_timed_evidence
+
+        selection = select_timed_evidence(
+            timeline_file=dataset["timeline"],
+            reactionevent_file=dataset["reactionevent"],
+            molecules_file=dataset["molecules"],
         )
         event = EVENT_EVIDENCE_STORE.get_event(
-            reactionevent,
-            molecules,
+            selection.primary_file,
+            selection.molecules_file,
             args.event_id,
         )
         include_reactants, reactant_indices = _dft_participant_selection(

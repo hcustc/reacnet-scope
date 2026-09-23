@@ -14,6 +14,7 @@ from reacnet_scope.trajectory import (
     load_coordinate_length_unit,
 )
 from scripts import rng_query_cli as cli
+from tests.test_timed_evidence import write_timeline
 
 
 def _frame(timestep: int) -> str:
@@ -230,6 +231,41 @@ def test_export_dft_geometry_cli_writes_selected_initial_geometries(
         occurrence = json.loads(archive.read("occurrence.json"))
         assert occurrence["event_id"] == event_id
     assert "DFT initial geometry package" in capsys.readouterr().out
+
+
+def test_export_dft_geometry_cli_selects_native_timed_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    trajectory, _legacy_event_id = _prepared_dataset(tmp_path, monkeypatch)
+    timeline = write_timeline(
+        Path(f"{trajectory}.timeline.h5"), schema_version="2"
+    )
+    EVENT_EVIDENCE_STORE.build(str(timeline))
+    event_id = EVENT_EVIDENCE_STORE.query_events(
+        str(timeline), "", "[C]+[O]->[C][O]", limit=1
+    )["rows"][0]["event_id"]
+    target = tmp_path / "native-source.zip"
+    result = cli.main(
+        [
+            "export-dft-geometry",
+            "--case", str(tmp_path),
+            "--event-id", event_id,
+            "--type-map", "1=C,2=O",
+            "--source-unit", "angstrom",
+            "--state", "reactants=0,1",
+            "--state", "products=0,1",
+            "--confirm-isolated-cluster",
+            "--out", str(target),
+        ]
+    )
+
+    assert result == 0
+    with ZipFile(target) as archive:
+        occurrence = json.loads(archive.read("occurrence.json"))
+        assert occurrence["event_id"] == event_id
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["source_signatures"]["timeline"]["path"] == str(timeline)
 
 
 def test_export_dft_geometry_cli_requires_unit_confirmation(

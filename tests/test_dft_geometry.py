@@ -15,6 +15,7 @@ from reacnet_scope.dft_geometry import (
     _warnings_for_geometry,
     build_dft_geometry_bundle,
 )
+from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
 from reacnet_scope.trajectory import (
     TrajectoryFrameError,
@@ -24,6 +25,7 @@ from reacnet_scope.trajectory import (
     save_coordinate_length_unit,
     save_type_element_map,
 )
+from tests.test_timed_evidence import write_timeline
 
 
 def _frame(timestep: int, first_x: float, second_x: float) -> str:
@@ -171,6 +173,36 @@ def test_dft_geometry_reconstructs_pbc_complex_and_is_deterministic(
         atom_map = archive.read("atom_map.csv").decode()
         assert "reactants.xyz,1,reactant,0,0,1,[C],1,1,C" in atom_map
         assert "not transition states" in archive.read("README.txt").decode()
+
+
+def test_dft_geometry_read_only_handoff_does_not_persist_dataset_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifacts, event = _case(tmp_path, monkeypatch)
+    timeline = write_timeline(
+        Path(f"{artifacts['trajectory']}.timeline.h5"), schema_version="2"
+    )
+    EVENT_EVIDENCE_STORE.build(str(timeline))
+    artifacts["timeline"] = str(timeline)
+
+    def reject_identity_write(*_args, **_kwargs):
+        raise AssertionError("online geometry export must not persist identity")
+
+    monkeypatch.setattr(
+        "reacnet_scope.indexes._persistent_dataset_id", reject_identity_write
+    )
+    bundle = build_dft_geometry_bundle(
+        artifacts,
+        event,
+        DftGeometryRequest(
+            source_length_unit="angstrom",
+            atom_type_map={"1": "C", "2": "O"},
+        ),
+    )
+
+    assert bundle.manifest["source_signatures"]["trajectory_index"]["size"] > 0
+    assert bundle.manifest["source_signatures"]["event_index"]["size"] > 0
 
 
 def test_dft_geometry_selection_can_export_one_side_and_instance(

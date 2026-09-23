@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from .indexes import TRAJECTORY_INDEX_STORE, resolve_dataset_paths
+from .indexes import TRAJECTORY_INDEX_STORE, event_evidence_index_path
 from .trajectory import (
     TrajectoryDependencyError,
     TrajectoryFrameError,
@@ -837,13 +837,18 @@ def _source_signatures(artifacts: Mapping[str, str]) -> dict[str, dict[str, Any]
     }
     trajectory = paths["trajectory"]
     if trajectory.is_file():
-        dataset_paths = resolve_dataset_paths(str(trajectory))
-        paths["event_index"] = dataset_paths.event_index
         try:
             index = TRAJECTORY_INDEX_STORE.open_required(str(trajectory))
             paths["trajectory_index"] = Path(index.index_path)
         except (OSError, ValueError):
             pass
+    event_source = (
+        paths["timeline"]
+        if paths["timeline"].is_file()
+        else paths["reactionevent"]
+    )
+    if event_source.is_file():
+        paths["event_index"] = event_evidence_index_path(str(event_source))
     for kind, path in paths.items():
         if not path.is_file():
             continue
