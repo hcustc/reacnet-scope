@@ -61,6 +61,10 @@ def test_indexed_result_exposes_structural_identity_without_changing_v3_selectio
     page = svc.candidate_step_events(source, report, route['candidate_signature'], 0)
     assert page['signature_id'] == route['signature_id']
     assert page['candidate_signature'] == route['candidate_signature']
+    forged = {**report, 'paths': [{**route, 'candidate_evidence_key': 'unpublished'}]}
+    assert 'candidate_evidence_key' not in svc.candidate_step_events(
+        source, forged, route['candidate_signature'], 0,
+    )
     rows = list(csv.DictReader(io.StringIO(svc.candidate_paths_csv(report))))
     assert rows[0]['candidate_signature'].startswith('candidate:v1:')
     assert rows[0]['candidate_identity_schema'] == 'reacnet-scope/candidate-identity/v1'

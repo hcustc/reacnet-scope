@@ -111,8 +111,6 @@ def candidate_step_events(artifacts: Mapping[str, Any], report: Mapping[str, Any
     payload['reaction_key'] = key
     payload['signature_id'] = path['signature_id']
     payload['candidate_signature'] = identity.signature
-    if path.get('candidate_evidence_key'):
-        payload['candidate_evidence_key'] = path['candidate_evidence_key']
     payload['step_index'] = step_index
     with _reader(artifacts) as reader:
         for row in payload['rows']:
@@ -158,7 +156,7 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
         for index, step in enumerate(path['steps'], 1):
             writer.writerow(dict(signature_id=path['signature_id'],
                 candidate_signature=path.get('candidate_signature'),
-                candidate_evidence_key=path.get('candidate_evidence_key'),
+                candidate_evidence_key=None,
                 candidate_identity_schema=(path.get('candidate_identity') or {}).get('schema_version'),
                 step=index,
                 carried_from=step['carried_from'], carried_to=step['carried_to'],
