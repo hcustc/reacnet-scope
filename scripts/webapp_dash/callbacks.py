@@ -13,6 +13,7 @@ from .ui_state import species_query
 import re
 import time
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -408,6 +409,24 @@ def _build_dft_bundle_from_controls(
     if confirmed_now and evaluation.bundle is not None:
         svc.save_coordinate_length_unit(trajectory, "angstrom")
     return evaluation
+
+
+def _dft_request_fingerprint(**controls: Any) -> str:
+    """Bind a preview to the exact browser request and dataset context."""
+    context = dict(controls)
+    store = context.pop("app_store") or {}
+    context["dataset"] = {
+        key: store.get(key)
+        for key in ("dataset_id", "source_revision", "label", "artifacts")
+    }
+    context["selected"] = (context.get("selected") or {}).get("row") or {}
+    encoded = json.dumps(context, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _dft_review_token(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return "review:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _dft_readiness_validation(report: dict[str, Any] | None) -> Any:
@@ -7385,43 +7404,23 @@ def register_callbacks(app: Any) -> None:
             for stem in stems
         ]
 
-    @app.callback(
-        Output("event-dft-store", "data", allow_duplicate=True),
-        Output("event-dft-download-btn", "disabled", allow_duplicate=True),
-        Output("event-dft-preview-panel", "style", allow_duplicate=True),
-        Output("event-dft-validation", "children", allow_duplicate=True),
-        Output("event-dft-summary", "children", allow_duplicate=True),
-        Output("event-dft-review-confirmation", "value", allow_duplicate=True),
-        Input("event-dft-reactants", "value"),
-        Input("event-dft-products", "value"),
-        Input("event-dft-layout", "value"),
-        Input("event-dft-unit-confirmation", "value"),
-        Input("event-dft-isolated-cluster-confirmation", "value"),
-        Input({"type": "event-dft-charge", "stem": ALL}, "value"),
-        Input({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
-        Input("event-selected-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _invalidate_dft_preview(
-        _reactants,
-        _products,
-        _layout,
-        _unit,
-        _isolated_cluster,
-        _charges,
-        _multiplicities,
-        _selected,
-    ):
-        return None, True, {"display": "none"}, [], [], []
-
-    @app.callback(
-        Output("event-dft-store", "data"),
-        Output("event-dft-validation", "children"),
-        Output("event-dft-summary", "children"),
-        Output("event-dft-preview-file", "options"),
-        Output("event-dft-preview-file", "value"),
-        Output("event-dft-preview-panel", "style"),
-        Output("event-dft-download-btn", "disabled"),
+    app.clientside_callback(
+        """function(n, reactants, products, layout, unit, isolated, charges,
+                    chargeIds, multiplicities, multiplicityIds, selected, store) {
+            if (!n) return window.dash_clientside.no_update;
+            const id = (window.crypto && window.crypto.randomUUID)
+                ? window.crypto.randomUUID()
+                : String(Date.now()) + '-' + String(Math.random());
+            return {id, controls: {
+                reactant_indices: reactants ?? [], product_indices: products ?? [],
+                layout: layout ?? 'combined', unit_confirmation: unit ?? [],
+                isolated_cluster_confirmation: isolated ?? [],
+                charge_values: charges ?? [], charge_ids: chargeIds ?? [],
+                multiplicity_values: multiplicities ?? [], multiplicity_ids: multiplicityIds ?? [],
+                selected: selected ?? null, app_store: store ?? null
+            }};
+        }""",
+        Output("event-dft-request", "data"),
         Input("event-dft-preview-btn", "n_clicks"),
         State("event-dft-reactants", "value"),
         State("event-dft-products", "value"),
@@ -7435,6 +7434,12 @@ def register_callbacks(app: Any) -> None:
         State("event-selected-store", "data"),
         State("app-store", "data"),
         prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("event-dft-response", "data"),
+        Input("event-dft-request", "data"),
+        prevent_initial_call=True,
         running=[
             (
                 Output(
@@ -7446,36 +7451,13 @@ def register_callbacks(app: Any) -> None:
             )
         ],
     )
-    def _preview_dft_geometry(
-        n_clicks,
-        reactant_indices,
-        product_indices,
-        layout,
-        unit_confirmation,
-        isolated_cluster_confirmation,
-        charge_values,
-        charge_ids,
-        multiplicity_values,
-        multiplicity_ids,
-        selected,
-        app_store,
-    ):
-        if n_clicks is None:
+    def _preview_dft_geometry(request):
+        if not request:
             raise PreventUpdate
+        controls = request["controls"]
+        request_id = request["id"]
         try:
-            evaluation = _build_dft_bundle_from_controls(
-                selected=selected,
-                app_store=app_store,
-                reactant_indices=reactant_indices,
-                product_indices=product_indices,
-                layout=layout,
-                unit_confirmation=unit_confirmation,
-                isolated_cluster_confirmation=isolated_cluster_confirmation,
-                charge_values=charge_values,
-                charge_ids=charge_ids,
-                multiplicity_values=multiplicity_values,
-                multiplicity_ids=multiplicity_ids,
-            )
+            evaluation = _build_dft_bundle_from_controls(**controls)
         except (
             svc.DftGeometryError,
             svc.ServiceError,
@@ -7485,28 +7467,21 @@ def register_callbacks(app: Any) -> None:
             ValueError,
         ) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return (
-                None,
-                dbc.Alert(message, color="danger", className="py-2 mb-0"),
-                [],
-                [],
-                None,
-                {"display": "none"},
-                True,
-            )
+            return {"request_id": request_id, "payload": None,
+                    "validation": dbc.Alert(message, color="danger", className="py-2 mb-0"),
+                    "summary": [], "options": [], "file": None,
+                    "panel": {"display": "none"}, "disabled": True}
         report = evaluation.report
         status = str((report.get("qc_handoff") or {}).get("status") or "blocked")
         validation = _dft_readiness_validation(report)
         if evaluation.bundle is None:
-            return (
-                {"readiness_report": report},
-                validation,
-                [html.Span(status, className="rs-stat-chip")],
-                [],
-                None,
-                {"display": "none"},
-                True,
-            )
+            return {"request_id": request_id,
+                    "payload": {"readiness_report": report,
+                                "request_fingerprint": _dft_request_fingerprint(**controls)},
+                    "validation": validation,
+                    "summary": [html.Span(status, className="rs-stat-chip")],
+                    "options": [], "file": None,
+                    "panel": {"display": "none"}, "disabled": True}
         bundle = evaluation.bundle
         manifest = bundle.manifest
         warnings = [
@@ -7528,15 +7503,72 @@ def register_callbacks(app: Any) -> None:
         options = [
             {"label": name, "value": name} for name in sorted(bundle.geometries)
         ]
-        return (
-            bundle.preview_payload(),
-            validation,
-            summary,
-            options,
-            options[0]["value"],
-            {"display": "block"},
-            status != "ready",
-        )
+        return {"request_id": request_id,
+                "payload": {**bundle.preview_payload(),
+                            "request_fingerprint": _dft_request_fingerprint(**controls)},
+                "validation": validation, "summary": summary,
+                "options": options, "file": options[0]["value"],
+                "panel": {"display": "block"}, "disabled": status != "ready"}
+
+    app.clientside_callback(
+        """function(response, request, reactants, products, layout, unit,
+                    isolated, charges, chargeIds, multiplicities, multiplicityIds,
+                    selected, store) {
+            const empty = [null, [], [], [], null, {display: 'none'}, true, []];
+            if (!response || !request || response.request_id !== request.id)
+                return empty;
+            const current = {
+                reactant_indices: reactants ?? [], product_indices: products ?? [],
+                layout: layout ?? 'combined', unit_confirmation: unit ?? [],
+                isolated_cluster_confirmation: isolated ?? [],
+                charge_values: charges ?? [], charge_ids: chargeIds ?? [],
+                multiplicity_values: multiplicities ?? [], multiplicity_ids: multiplicityIds ?? [],
+                selected: selected ?? null, app_store: store ?? null
+            };
+            const stable = x => x && typeof x === 'object'
+                ? (Array.isArray(x) ? x.map(stable)
+                    : Object.fromEntries(Object.keys(x).sort().map(k => [k, stable(x[k])])))
+                : x;
+            if (JSON.stringify(stable(current)) !== JSON.stringify(stable(request.controls)))
+                return empty;
+            return [response.payload, response.validation, response.summary,
+                    response.options, response.file, response.panel,
+                    response.disabled, []];
+        }""",
+        Output("event-dft-store", "data", allow_duplicate=True),
+        Output("event-dft-validation", "children", allow_duplicate=True),
+        Output("event-dft-summary", "children", allow_duplicate=True),
+        Output("event-dft-preview-file", "options", allow_duplicate=True),
+        Output("event-dft-preview-file", "value", allow_duplicate=True),
+        Output("event-dft-preview-panel", "style", allow_duplicate=True),
+        Output("event-dft-download-btn", "disabled", allow_duplicate=True),
+        Output("event-dft-review-confirmation", "value", allow_duplicate=True),
+        Input("event-dft-response", "data"),
+        Input("event-dft-request", "data"),
+        Input("event-dft-reactants", "value"),
+        Input("event-dft-products", "value"),
+        Input("event-dft-layout", "value"),
+        Input("event-dft-unit-confirmation", "value"),
+        Input("event-dft-isolated-cluster-confirmation", "value"),
+        Input({"type": "event-dft-charge", "stem": ALL}, "value"),
+        Input({"type": "event-dft-charge", "stem": ALL}, "id"),
+        Input({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
+        Input({"type": "event-dft-multiplicity", "stem": ALL}, "id"),
+        Input("event-selected-store", "data"),
+        Input("app-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("event-dft-review-confirmation", "options"),
+        Input("event-dft-store", "data"),
+    )
+    def _bind_dft_review_to_report(payload):
+        report = (payload or {}).get("readiness_report") or {}
+        if (report.get("qc_handoff") or {}).get("status") != "review_required":
+            return []
+        return [{"label": "我已逐项复核当前报告的 review_required 警告",
+                 "value": _dft_review_token(payload)}]
 
     @app.callback(
         Output("event-dft-download-btn", "disabled", allow_duplicate=True),
@@ -7551,7 +7583,7 @@ def register_callbacks(app: Any) -> None:
             return False
         return not (
             status == "review_required"
-            and "acknowledged" in (confirmation or [])
+            and _dft_review_token(payload) in (confirmation or [])
             and bool((payload or {}).get("geometries"))
         )
 
@@ -7565,10 +7597,22 @@ def register_callbacks(app: Any) -> None:
 
     @app.callback(
         Output("event-dft-download", "data"),
+        Output("event-dft-validation", "children", allow_duplicate=True),
+        Output("event-dft-download-btn", "disabled", allow_duplicate=True),
         Input("event-dft-download-btn", "n_clicks"),
         State("event-dft-store", "data"),
         State("event-selected-store", "data"),
         State("event-dft-review-confirmation", "value"),
+        State("app-store", "data"),
+        State("event-dft-reactants", "value"),
+        State("event-dft-products", "value"),
+        State("event-dft-layout", "value"),
+        State("event-dft-unit-confirmation", "value"),
+        State("event-dft-isolated-cluster-confirmation", "value"),
+        State({"type": "event-dft-charge", "stem": ALL}, "value"),
+        State({"type": "event-dft-charge", "stem": ALL}, "id"),
+        State({"type": "event-dft-multiplicity", "stem": ALL}, "value"),
+        State({"type": "event-dft-multiplicity", "stem": ALL}, "id"),
         prevent_initial_call=True,
     )
     def _download_dft_geometry(
@@ -7576,30 +7620,54 @@ def register_callbacks(app: Any) -> None:
         payload,
         selected,
         review_confirmation,
+        app_store,
+        reactant_indices,
+        product_indices,
+        layout,
+        unit_confirmation,
+        isolated_cluster_confirmation,
+        charge_values,
+        charge_ids,
+        multiplicity_values,
+        multiplicity_ids,
     ):
         if n_clicks is None or not payload:
             raise PreventUpdate
+
+        def require_new_preview(message: str):
+            return no_update, dbc.Alert(message, color="warning", className="py-2 mb-0"), True
+
         report = payload.get("readiness_report") or {}
         status = str((report.get("qc_handoff") or {}).get("status") or "")
         if status not in {"ready", "review_required"}:
-            raise PreventUpdate
-        if status == "review_required" and "acknowledged" not in (
+            return require_new_preview("交接条件尚未满足；请补全输入后重新预检。")
+        if status == "review_required" and _dft_review_token(payload) not in (
             review_confirmation or []
         ):
-            raise PreventUpdate
-        bundle = svc.DftGeometryBundle(
-            manifest=dict(payload.get("manifest") or {}),
-            geometries=dict(payload.get("geometries") or {}),
-            atom_map_csv=str(payload.get("atom_map_csv") or ""),
-            readme=str(payload.get("readme") or ""),
-            readiness_report=dict(report),
-            occurrence=dict(payload.get("occurrence") or {}),
+            return require_new_preview("请重新复核并确认当前报告的全部警告，然后下载。")
+        controls = dict(
+            selected=selected, app_store=app_store,
+            reactant_indices=reactant_indices, product_indices=product_indices,
+            layout=layout, unit_confirmation=unit_confirmation,
+            isolated_cluster_confirmation=isolated_cluster_confirmation,
+            charge_values=charge_values, charge_ids=charge_ids,
+            multiplicity_values=multiplicity_values, multiplicity_ids=multiplicity_ids,
         )
+        if payload.get("request_fingerprint") != _dft_request_fingerprint(**controls):
+            return require_new_preview("事件、数据集或几何参数已变化；请重新预检后下载。")
+        try:
+            evaluation = _build_dft_bundle_from_controls(**controls)
+        except (svc.DftGeometryError, svc.ServiceError, OSError, RuntimeError, TypeError, ValueError):
+            return require_new_preview("交接证据已变化或暂不可读取；请检查数据并重新预检。")
+        bundle = evaluation.bundle
+        expected = {key: value for key, value in payload.items() if key != "request_fingerprint"}
+        if bundle is None or bundle.preview_payload() != expected:
+            return require_new_preview("源数据、设置或检查结果已变化；请重新预检并复核当前报告。")
         event_id = str(((selected or {}).get("row") or {}).get("event_id") or "event")
-        return dcc.send_bytes(
-            bundle.to_zip(),
-            f"{event_id}_qc_handoff.zip",
-            type="application/zip",
+        return (
+            dcc.send_bytes(bundle.to_zip(), f"{event_id}_qc_handoff.zip", type="application/zip"),
+            no_update,
+            no_update,
         )
 
     @app.callback(
