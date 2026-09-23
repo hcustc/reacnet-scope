@@ -329,18 +329,60 @@ def register_callbacks(app):
             # Determine what needs building
             event_state = (status.get('events') or {}).get('state', 'missing')
             traj_state = (status.get('trajectory') or {}).get('state', 'missing')
+            comp_state = (status.get('composition') or {}).get('state', 'missing')
 
-            tasks = []
-            if event_state != 'ready':
-                tasks.append('事件索引')
-            if traj_state != 'ready':
-                tasks.append('轨迹索引')
+            tasks_to_build = []
+            if event_state not in {'ready', 'building'}:
+                tasks_to_build.append('event')
+            if traj_state not in {'ready', 'building'}:
+                tasks_to_build.append('trajectory')
+            if comp_state not in {'ready', 'building'}:
+                tasks_to_build.append('composition')
 
-            if not tasks:
-                result_msg = '所有索引已就绪'
-            else:
-                # Build indices (placeholder - actual implementation would call svc.prepare_dataset_workspace)
-                result_msg = f'已触发构建: {", ".join(tasks)}'
+            if not tasks_to_build:
+                # All indices ready
+                results = []
+                for id_dict in ids:
+                    if id_dict['base'] == target_base:
+                        results.append(html.Span('所有索引已就绪', style={'color': 'var(--rs-success)'}))
+                    else:
+                        results.append(no_update)
+                return results
+
+            # Build each missing index
+            build_results = []
+            for kind in tasks_to_build:
+                try:
+                    result = svc.prepare_dataset_workspace(
+                        target_entry['folder'],
+                        base=target_entry['base'],
+                        kind=kind,
+                    )
+
+                    label_map = {
+                        'event': '事件索引',
+                        'trajectory': '轨迹索引',
+                        'composition': '元素分布索引',
+                    }
+
+                    if result.get('existing_task'):
+                        build_results.append(f"{label_map[kind]}已在运行")
+                    elif result.get('canceled'):
+                        build_results.append(f"{label_map[kind]}已取消")
+                    else:
+                        action = "已重建" if result.get('rebuilt') else "已建立"
+                        build_results.append(f"{label_map[kind]}{action}")
+
+                except svc.ServiceError as exc:
+                    build_results.append(f"{label_map[kind]}失败: {exc.message}")
+                except Exception as exc:
+                    build_results.append(f"{label_map[kind]}失败: {str(exc)}")
+
+            # Format result message
+            result_msg = html.Div([
+                html.Span(' · '.join(build_results)),
+                html.Small(' (刷新查看最新状态)', style={'display': 'block', 'marginTop': '4px'})
+            ])
 
             # Update only the target entry's progress
             results = []
@@ -356,7 +398,7 @@ def register_callbacks(app):
             results = []
             for id_dict in ids:
                 if id_dict['base'] == target_base:
-                    results.append(f'错误: {str(exc)}')
+                    results.append(html.Span(f'错误: {str(exc)}', style={'color': 'var(--rs-text-danger)'}))
                 else:
                     results.append(no_update)
             return results
