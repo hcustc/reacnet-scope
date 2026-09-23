@@ -19,8 +19,8 @@ def layout():
         dcc.Store(id="import-selection", data={"paths": [], "assignments": {}}),
         dcc.Store(id="import-preview"), dcc.Store(id="import-collect-request"),
         dcc.Store(id="import-collect-result"), dcc.Store(id="import-location"), dcc.Store(id="import-list-page", data=0),
-        html.Div([html.H2("导入 RNG 文件夹", id="data-browser-title", tabIndex=-1),
-                  html.Span("选择输出目录", className="rs-picker-kind")], className="rs-import-header"),
+        html.Div([html.H2("添加 RNG 数据", id="data-browser-title", tabIndex=-1),
+                  html.Span("浏览软件运行机器上的文件夹", className="rs-picker-kind")], className="rs-import-header"),
         html.Div([
             html.Details([
                 html.Summary("位置与最近使用"),
@@ -70,25 +70,27 @@ def layout():
                 dbc.Button("取消添加", id="import-collect-cancel", disabled=True, color="link"),
             ], id="import-browser-panel", className="rs-picker-browser"),
             html.Details([
-                html.Summary("文件夹数据", id="import-selection-title"),
-                dataset_library.import_panel(),
-                html.Div([html.H3("待分析"), dbc.Button("清空", id="import-clear", color="link", size="sm", style={"display": "none"})], className="rs-import-header"),
-                html.Div([html.Span("＋", **{"aria-hidden": "true"}), html.P("请选择 RNG 输出文件夹"), html.Small("自动识别目录中的结果文件")], id="import-selection-empty", className="rs-picker-empty"),
+                html.Summary("选择与导入", id="import-selection-title"),
                 html.Div([
-                    dcc.RadioItems(id="import-group", options=[], className="rs-import-groups"),
-                    html.Div(id="import-group-summary"),
-                    html.Details([html.Summary("文件清单与路径"), html.Div(id="import-files")], className="rs-picker-file-details"),
-                    html.Div(dbc.Checkbox(id="import-edit-groups", label="调整文件归属", value=False), id="import-group-edit-toggle"),
+                    html.Div([html.H3("待分析文件"), dbc.Button("清空", id="import-clear", color="link", size="sm", style={"display": "none"})], className="rs-import-header"),
+                    html.Div([html.Span("＋", **{"aria-hidden": "true"}), html.P("打开一个 RNG 输出文件夹"), html.Small("识别出的结果文件会自动加入待分析列表")], id="import-selection-empty", className="rs-picker-empty"),
                     html.Div([
-                        dcc.Checklist(id="import-move-files", options=[], value=[]),
-                        dcc.Dropdown(id="import-move-target", options=[], placeholder="选择目标RNG 数据"),
-                        dbc.Input(id="import-new-group", placeholder="或输入新RNG 数据名称"),
-                        dbc.Button("移动所选文件", id="import-move", size="sm", color="secondary"),
-                        dbc.Button("重新按文件名建议归组", id="import-regroup", size="sm", color="link"),
-                    ], id="import-group-editor", style={"display": "none"}),
-                    html.P("同组文件须来自同一次 RNG 运行。", className="rs-meta"),
-                ], id="import-selected-panel", style={"display": "none"}),
-                html.Div(id="import-feedback", role="status"),
+                        dcc.RadioItems(id="import-group", options=[], className="rs-import-groups"),
+                        html.Div(id="import-group-summary"),
+                        html.Details([html.Summary("文件清单与路径"), html.Div(id="import-files")], className="rs-picker-file-details"),
+                        html.Div(dbc.Checkbox(id="import-edit-groups", label="调整文件归属", value=False), id="import-group-edit-toggle"),
+                        html.Div([
+                            dcc.Checklist(id="import-move-files", options=[], value=[]),
+                            dcc.Dropdown(id="import-move-target", options=[], placeholder="选择目标RNG 数据"),
+                            dbc.Input(id="import-new-group", placeholder="或输入新RNG 数据名称"),
+                            dbc.Button("移动所选文件", id="import-move", size="sm", color="secondary"),
+                            dbc.Button("重新按文件名建议归组", id="import-regroup", size="sm", color="link"),
+                        ], id="import-group-editor", style={"display": "none"}),
+                        html.P("同组文件须来自同一次 RNG 运行。", className="rs-meta"),
+                    ], id="import-selected-panel", style={"display": "none"}),
+                    html.Div(id="import-feedback", role="status"),
+                ], className="rs-selection-card"),
+                dataset_library.import_panel(),
             ], className="rs-picker-selection", open=True),
         ], className="rs-picker-body"),
         html.Div([
@@ -435,7 +437,7 @@ def register_callbacks(app):
         return (preview, rows, options, value,
                 [{"label": f"{row['label']} · {Path(row['path']).parent}", "value": row["path"]} for row in preview["files"]],
                 [{"label": g["label"], "value": g["key"]} for g in preview["groups"]],
-                f"文件夹数据 · {len(preview['files'])} 个文件", {} if len(options) > 1 else {"display": "none"})
+                f"选择与导入 · {len(preview['files'])} 个文件", {} if len(options) > 1 else {"display": "none"})
 
     @app.callback(
         Output("dataset-browser-candidate", "data", allow_duplicate=True),

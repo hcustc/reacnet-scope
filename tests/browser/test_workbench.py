@@ -111,16 +111,38 @@ def test_exact_selection_export_and_responsive_detail(page):
     page.locator("#species-query").fill("39.99491462")
     expect(page.locator("#species-mass-field")).to_be_visible()
     expect(page.locator("#species-query-feedback")).to_contain_text("条件已修改")
-    page.set_viewport_size({"width": 760, "height": 900})
-    expect(page.locator("#topbar-rungroup")).to_be_visible()
-    dataset_bounds = page.locator("#topbar-rungroup").bounding_box()
-    topbar_bounds = page.locator(".rs-topbar").bounding_box()
-    assert dataset_bounds["y"] + dataset_bounds["height"] <= topbar_bounds["y"] + topbar_bounds["height"]
-    first.locator('[col-id="smiles"]').click()
-    expect(page.locator("#species-detail-close")).to_be_visible()
-    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.keyboard.press("Escape")
-    expect(page.locator("#species-detail-close")).not_to_be_visible()
+    for width in (768, 375):
+        page.set_viewport_size({"width": width, "height": 900})
+        expect(page.locator("#topbar-rungroup")).to_be_visible()
+        dataset_bounds = page.locator("#topbar-rungroup").bounding_box()
+        topbar_bounds = page.locator(".rs-topbar").bounding_box()
+        assert dataset_bounds["y"] + dataset_bounds["height"] <= topbar_bounds["y"] + topbar_bounds["height"]
+        first.locator('[col-id="smiles"]').click()
+        expect(page.locator("#species-detail-close")).to_be_visible()
+        detail_bounds = page.locator("#species-detail-stage").bounding_box()
+        assert detail_bounds["y"] >= topbar_bounds["y"] + topbar_bounds["height"]
+        overflow = page.evaluate("""() => ({
+            viewport: innerWidth,
+            scrollWidth: document.documentElement.scrollWidth,
+            offenders: [...document.querySelectorAll('body *')]
+                .filter(element => {
+                    const rect = element.getBoundingClientRect();
+                    return rect.width > 0 && rect.right > innerWidth + 1;
+                })
+                .slice(0, 12)
+                .map(element => {
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        selector: `${element.tagName.toLowerCase()}#${element.id}.${element.className}`,
+                        left: rect.left,
+                        right: rect.right,
+                        width: rect.width,
+                    };
+                }),
+        })""")
+        assert overflow["scrollWidth"] <= overflow["viewport"], overflow
+        page.keyboard.press("Escape")
+        expect(page.locator("#species-detail-close")).not_to_be_visible()
 
 
 def test_late_query_responses_do_not_replace_current_results(page):

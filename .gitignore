@@ -39,6 +39,10 @@ htmlcov/
 .superpowers/sdd/task-*-brief.md
 .superpowers/sdd/task-*-report.md
 
+# Local agent workspace and generated previews
+.workbuddy/
+/output/
+
 # Runtime logs
 *.log
 
