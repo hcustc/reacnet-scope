@@ -5202,31 +5202,44 @@ def test_dft_output_stems_and_electronic_states_follow_selection() -> None:
     ) == {"reactants": (0, 1)}
 
 
+def _indexed_qc_case(tmp_path, monkeypatch, *, molecular=True):
+    from tests.test_reaction_readiness import _case
+    from tests.test_timed_evidence import write_timeline
+    from reacnet_scope.dataset_context import inspect_dataset_candidate
+
+    monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    artifacts, _event = _case(tmp_path, monkeypatch)
+    timeline = write_timeline(
+        Path(f"{artifacts['trajectory']}.timeline.h5"), schema_version="2",
+        molecule_enabled=molecular,
+    )
+    EVENT_EVIDENCE_STORE.build(str(timeline))
+    artifacts["timeline"] = str(timeline)
+    reaction = Path(f"{artifacts['trajectory']}.reactionabcd")
+    reaction.write_text("source marker\n", encoding="utf-8")
+    artifacts["reaction"] = str(reaction)
+    event_id = EVENT_EVIDENCE_STORE.query_events(
+        str(timeline), "", "[C]+[O]->[C][O]", limit=1
+    )["rows"][0]["event_id"]
+    event = EVENT_EVIDENCE_STORE.get_event(str(timeline), "", event_id)
+    dataset = inspect_dataset_candidate(str(tmp_path), str(Path(artifacts["trajectory"])))
+    return artifacts, event, {**dataset, "label": "rep-01", "artifacts": artifacts}
+
+
 @pytest.mark.parametrize("message", ["ASE unavailable", "Trajectory index is stale"])
 def test_dft_preview_turns_runtime_failures_into_alerts(
+    tmp_path,
     monkeypatch,
     message: str,
 ) -> None:
+    artifacts, event, dataset = _indexed_qc_case(tmp_path, monkeypatch)
     def fail(*_args, **_kwargs):
         raise RuntimeError(message)
 
     monkeypatch.setattr(svc, "build_dft_geometry_bundle", fail)
     client = create_app().server.test_client()
-    selected = {
-        "row": {
-            "event_id": "rngevt-runtime",
-            "association_status": "matched",
-            "reactant_bonds": "",
-            "product_bonds": "1-2-1",
-            "reactant_participants": [
-                {"species": "[C]", "atom_ids": [1]},
-                {"species": "[O]", "atom_ids": [2]},
-            ],
-            "product_participants": [
-                {"species": "[C][O]", "atom_ids": [1, 2]},
-            ],
-        }
-    }
+    selected = {"row": event, "kind": "rng_event"}
     response = client.post(
         "/_dash-update-component",
         json=_callback_payload(
@@ -5246,7 +5259,7 @@ def test_dft_preview_turns_runtime_failures_into_alerts(
                     "multiplicity_values": [],
                     "multiplicity_ids": [],
                     "selected": selected,
-                    "app_store": {"artifacts": {"trajectory": "/data/run.lammpstrj"}},
+                    "app_store": dataset,
                 },
             }},
             state_values={},
@@ -5261,17 +5274,80 @@ def test_dft_preview_turns_runtime_failures_into_alerts(
     assert payload["disabled"] is True
 
 
+def test_qc_preview_reloads_published_event_and_rejects_tampered_row(
+    tmp_path, monkeypatch,
+) -> None:
+    artifacts, event, dataset = _indexed_qc_case(tmp_path, monkeypatch)
+    original_get_event = EVENT_EVIDENCE_STORE.get_event
+    resolved: list[tuple[str, str]] = []
+
+    def trace_get_event(source, molecules, event_id):
+        resolved.append((source, event_id))
+        return original_get_event(source, molecules, event_id)
+
+    monkeypatch.setattr(EVENT_EVIDENCE_STORE, "get_event", trace_get_event)
+    controls = {
+        "reactant_indices": [0, 1], "product_indices": [0],
+        "layout": "combined", "unit_confirmation": ["angstrom"],
+        "isolated_cluster_confirmation": ["confirmed"],
+        "charge_values": [0, 0],
+        "charge_ids": [{"type": "event-dft-charge", "stem": stem}
+                       for stem in ("reactants", "products")],
+        "multiplicity_values": [1, 1],
+        "multiplicity_ids": [{"type": "event-dft-multiplicity", "stem": stem}
+                             for stem in ("reactants", "products")],
+        "selected": {"row": {**event, "reaction_key": "[O]->[C]"},
+                     "kind": "rng_event"},
+        "app_store": dataset,
+    }
+    client = create_app().server.test_client()
+    preview = client.post("/_dash-update-component", json=_callback_payload(
+        client, input_ids=["event-dft-request"], changed="event-dft-request.data",
+        input_values={"event-dft-request": {"id": "tampered", "controls": controls}},
+        state_values={}, output_id="event-dft-response",
+    ))
+
+    assert preview.status_code == 200
+    response = preview.get_json()["response"]["event-dft-response"]["data"]
+    assert resolved == [(artifacts["timeline"], event["event_id"])]
+    assert response["payload"] is None
+    assert response["disabled"] is True
+    assert "已发布证据不一致" in json.dumps(response["validation"], ensure_ascii=False)
+
+
+def test_qc_preview_rejects_stale_current_dataset_revision(tmp_path, monkeypatch):
+    artifacts, event, dataset = _indexed_qc_case(tmp_path, monkeypatch)
+    with Path(artifacts["reaction"]).open("a", encoding="utf-8") as stream:
+        stream.write("changed after dataset validation\n")
+
+    with pytest.raises(svc.ServiceError, match="来源已变化"):
+        cb._build_dft_bundle_from_controls(
+            selected={"row": event, "kind": "rng_event"},
+            app_store=dataset,
+            reactant_indices=[0, 1], product_indices=[0], layout="combined",
+            unit_confirmation=["angstrom"],
+            isolated_cluster_confirmation=["confirmed"],
+            charge_values=[0, 0], charge_ids=[
+                {"type": "event-dft-charge", "stem": stem}
+                for stem in ("reactants", "products")
+            ],
+            multiplicity_values=[1, 1], multiplicity_ids=[
+                {"type": "event-dft-multiplicity", "stem": stem}
+                for stem in ("reactants", "products")
+            ],
+        )
+
+
 @pytest.mark.parametrize("change", [
-    None, "event", "dataset", "revision", "charge", "source",
+    None, "event", "dataset", "revision", "charge", "source", "candidate-source",
     "review-missing", "review-old", "review-current",
 ])
 def test_qc_download_rechecks_current_preview_before_export(
     tmp_path, monkeypatch, change,
 ) -> None:
-    from tests.test_reaction_readiness import _case
     from reacnet_scope.trajectory import save_type_element_map
 
-    artifacts, event = _case(tmp_path, monkeypatch)
+    artifacts, event, dataset = _indexed_qc_case(tmp_path, monkeypatch)
     monkeypatch.setattr(svc, "save_coordinate_length_unit", lambda *_args: None)
     save_type_element_map(artifacts["trajectory"], {"1": "C", "2": "O"})
     client = create_app().server.test_client()
@@ -5288,8 +5364,8 @@ def test_qc_download_rechecks_current_preview_before_export(
         "charge_values": [0, 0], "charge_ids": charge_ids,
         "multiplicity_values": [1, 3] if str(change).startswith("review-") else [1, 1],
         "multiplicity_ids": multiplicity_ids,
-        "selected": {"row": event},
-        "app_store": {"dataset_id": "dataset-01", "label": "rep-01", "artifacts": artifacts},
+        "selected": {"row": event, "kind": "rng_event"},
+        "app_store": dataset,
     }
     preview = client.post("/_dash-update-component", json=_callback_payload(
         client, input_ids=["event-dft-request"], changed="event-dft-request.data",
@@ -5326,6 +5402,9 @@ def test_qc_download_rechecks_current_preview_before_export(
     elif change == "source":
         with Path(artifacts["trajectory"]).open("a") as stream:
             stream.write("\n")
+    elif change == "candidate-source":
+        with Path(artifacts["reaction"]).open("ab") as stream:
+            stream.write(b"\n")
     state_values = {
         "event-dft-store": payload,
         "event-selected-store": controls["selected"],
@@ -5362,7 +5441,7 @@ def test_qc_download_rechecks_current_preview_before_export(
             manifest = json.loads(archive.read("manifest.json"))
             assert occurrence["event_id"] == manifest["event"]["event_id"] == event["event_id"]
             assert readiness == payload["readiness_report"]
-            assert readiness["subject"]["dataset_id"] == "dataset-01"
+            assert readiness["subject"]["dataset_id"] == dataset["dataset_id"]
             assert readiness["subject"]["replicate"] == "rep-01"
             assert readiness["subject"]["atom_ids"] == {"reactant": [1, 2], "product": [1, 2]}
             assert manifest["cross_side_atom_ids_match"] is True
@@ -5371,11 +5450,9 @@ def test_qc_download_rechecks_current_preview_before_export(
 
 @pytest.mark.parametrize("blocked", [False, True])
 def test_qc_http_needs_input_or_blocked_never_exports(tmp_path, monkeypatch, blocked):
-    from tests.test_reaction_readiness import _case
-
-    artifacts, event = _case(tmp_path, monkeypatch)
-    if blocked:
-        event = {**event, "association_status": "unresolved"}
+    artifacts, event, dataset = _indexed_qc_case(
+        tmp_path, monkeypatch, molecular=not blocked
+    )
     controls = {
         "reactant_indices": [0, 1], "product_indices": [0],
         "layout": "combined", "unit_confirmation": [] if not blocked else ["angstrom"],
@@ -5386,8 +5463,8 @@ def test_qc_http_needs_input_or_blocked_never_exports(tmp_path, monkeypatch, blo
         "multiplicity_values": [1, 1],
         "multiplicity_ids": [{"type": "event-dft-multiplicity", "stem": stem}
                              for stem in ("reactants", "products")],
-        "selected": {"row": event},
-        "app_store": {"dataset_id": "dataset-01", "label": "rep-01", "artifacts": artifacts},
+        "selected": {"row": event, "kind": "rng_event"},
+        "app_store": dataset,
     }
     client = create_app().server.test_client()
     preview = client.post("/_dash-update-component", json=_callback_payload(

@@ -377,6 +377,35 @@ def _build_dft_bundle_from_controls(
 ) -> Any:
     row = (selected or {}).get("row") or {}
     artifacts = (app_store or {}).get("artifacts") or {}
+    current = svc.inspect_dataset_candidate(
+        str((app_store or {}).get("folder") or ""),
+        str((app_store or {}).get("base") or ""),
+    )
+    if (
+        current["dataset_id"] != (app_store or {}).get("dataset_id")
+        or current["source_revision"] != (app_store or {}).get("source_revision")
+    ):
+        raise svc.ServiceError(
+            "Current Dataset 来源已变化；请重新验证数据集。",
+            reason="source_revision_changed",
+        )
+    bookmark = svc.create_event_bookmark(app_store or {}, row)
+    indexed_row = svc.restore_event_bookmark(
+        artifacts,
+        bookmark,
+        dataset_id=str((app_store or {}).get("dataset_id") or ""),
+        source_revision=(app_store or {}).get("source_revision") or {},
+    )["row"]
+    identity_fields = (
+        "event_id", "reaction_key", "before_timestep", "after_timestep",
+        "association_status", "atom_id_list", "reactant_bonds", "product_bonds",
+        "reactant_participants", "product_participants",
+    )
+    if any(row.get(field) != indexed_row.get(field) for field in identity_fields):
+        raise svc.ServiceError(
+            "所选事件与当前已发布证据不一致；请重新选择事件。",
+            reason="stale_event_selection",
+        )
     trajectory = str(artifacts.get("trajectory") or "")
     confirmed_now = "angstrom" in (unit_confirmation or [])
     request = svc.DftGeometryRequest(
@@ -395,7 +424,7 @@ def _build_dft_bundle_from_controls(
     )
     evaluation = svc.evaluate_reaction_readiness(
         artifacts,
-        row,
+        indexed_row,
         svc.ReactionReadinessRequest(
             geometry=request,
             isolated_cluster_confirmed=(
@@ -403,7 +432,7 @@ def _build_dft_bundle_from_controls(
             ),
         ),
         dataset_id=str((app_store or {}).get("dataset_id") or ""),
-        source_revision=(app_store or {}).get("source_revision") or None,
+        source_revision=current["source_revision"],
         replicate=str((app_store or {}).get("label") or "current"),
     )
     if confirmed_now and evaluation.bundle is not None:
