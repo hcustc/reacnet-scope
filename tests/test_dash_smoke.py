@@ -4782,6 +4782,10 @@ def test_rng_event_query_callback_renders_rng_rows(tmp_path, monkeypatch) -> Non
     raw_row = result["event-grid-store"]["data"]["rows"][0]
     assert table_row["atom_ids"] == "1,2"
     assert table_row["id"] == raw_row["event_id"]
+    assert raw_row["before_time_ps"] is None
+    assert raw_row["after_time_ps"] is None
+    assert table_row["before_time_ps"] is None
+    assert table_row["after_time_ps"] is None
     assert "atom_id_list" not in table_row
     assert "reactant_participants" not in table_row
     assert all(

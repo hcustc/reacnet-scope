@@ -4095,7 +4095,7 @@ def register_callbacks(app: Any) -> None:
 
     def _channel_columns(items: list[tuple[str, str, int | None]]) -> list[dict[str, Any]]:
         return ui.columns([
-            {"name": label, "id": field, **({"presentation": "markdown"} if field == "structure" else {}), **({"type": "numeric"} if field not in {"structure", "smiles", "formula", "reaction_formulas", "recommendation", "association_status", "structure_source"} else {})}
+            {"name": label, "id": field, **({"presentation": "markdown"} if field == "structure" else {}), **({"type": "numeric"} if field not in {"structure", "smiles", "formula", "reaction_formulas", "recommendation", "association_status", "structure_source", "timing_unit"} else {})}
             for field, label, _width in items
         ])
 
@@ -9938,10 +9938,7 @@ def _event_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     table_rows: list[dict[str, Any]] = []
     for index, raw in enumerate(rows):
         event_id = str(raw.get("event_id") or f"event-{index + 1}")
-        display = {
-            field: raw.get(field) if raw.get(field) is not None else ""
-            for field in fields
-        }
+        display = {field: raw.get(field) for field in fields}
         display["id"] = event_id
         table_rows.append(display)
     return table_rows

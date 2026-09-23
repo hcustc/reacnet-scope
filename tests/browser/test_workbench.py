@@ -22,6 +22,7 @@ from reacnet_scope import services as svc
 from reacnet_scope import dir_browser
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash.callbacks import _event_columns, _event_table_rows
 
 
 @pytest.fixture(scope="module")
@@ -224,6 +225,31 @@ def test_five_workspaces_and_reaction_query_states(page):
 
         if os.environ.get("REACNET_SCOPE_SCREENSHOTS"):
             page.screenshot(path=str(Path(os.environ["REACNET_SCOPE_SCREENSHOTS"]) / f"{target}.png"))
+
+
+def test_event_query_without_time_conversion_keeps_ps_cells_blank(page):
+    page.locator("#nav-reactions").click()
+    page.locator("#workspace-task-nav").get_by_role("button", name="具体事件").click()
+    rows = _event_table_rows([{
+        "event_id": "event-1",
+        "event_index": 1,
+        "timestep_index": 0,
+        "before_timestep": 0,
+        "after_timestep": 1,
+        "before_time_ps": None,
+        "after_time_ps": None,
+        "time_unit": "analyzed_frame",
+    }])
+    page.evaluate(
+        "({rows, columns}) => window.dash_clientside.set_props('event-grid', "
+        "{rowData: rows, columnDefs: columns})",
+        {"rows": rows, "columns": _event_columns(rows)},
+    )
+    row = page.locator("#event-grid .ag-center-cols-container .ag-row").first
+    expect(row).to_be_visible()
+    expect(row.locator('[col-id="time_unit"]')).to_have_text("analyzed_frame")
+    expect(row.locator('[col-id="before_time_ps"]')).to_be_empty()
+    expect(row.locator('[col-id="after_time_ps"]')).to_be_empty()
 
 
 def test_first_viewport_and_zero_mass_tolerance(page):
