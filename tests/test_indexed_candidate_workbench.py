@@ -46,6 +46,27 @@ def test_independent_steps_create_target_candidates_without_molecules(source):
     assert svc.candidate_step_events(source, report, route['signature_id'], 0)['total'] == 2
 
 
+def test_indexed_result_exposes_structural_identity_without_changing_v3_selection(source):
+    from reacnet_scope import candidate_identity_from_route
+
+    report = svc.search_candidate_paths(source, 'CCO', target='CC(=O)O', max_steps=3)
+    exploratory = svc.search_candidate_paths(source, 'CCO', mode='explore', max_steps=3)
+    route = report['paths'][0]
+    same_route = next(path for path in exploratory['paths'] if path['species'] == route['species'])
+    assert route['candidate_signature'] == same_route['candidate_signature']
+    assert route['candidate_signature'] == candidate_identity_from_route(route).signature
+    assert len(route['candidate_signature'].removeprefix('candidate:v1:')) == 64
+    assert route['candidate_identity']['schema_version'] == 'reacnet-scope/candidate-identity/v1'
+    assert 'candidate_evidence_key' not in route
+    page = svc.candidate_step_events(source, report, route['candidate_signature'], 0)
+    assert page['signature_id'] == route['signature_id']
+    assert page['candidate_signature'] == route['candidate_signature']
+    rows = list(csv.DictReader(io.StringIO(svc.candidate_paths_csv(report))))
+    assert rows[0]['candidate_signature'].startswith('candidate:v1:')
+    assert rows[0]['candidate_identity_schema'] == 'reacnet-scope/candidate-identity/v1'
+    assert rows[0]['candidate_evidence_key'] == ''
+
+
 def test_formula_selects_all_exact_isomers_and_search_does_not_merge(source):
     matches = svc.search_candidate_species(source, 'C2H6O')
     assert {r['species'] for r in matches['rows']} == {'CCO', 'COC'}

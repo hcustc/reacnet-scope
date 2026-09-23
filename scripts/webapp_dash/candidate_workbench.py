@@ -742,6 +742,8 @@ def register_callbacks(app):
                     'origin': {'kind': 'candidate_step',
                                'query_request_id': report.get('query_request_id'),
                                'signature_id': page['signature_id'],
+                               **({'candidate_signature': page['candidate_signature']}
+                                  if page.get('candidate_signature') else {}),
                                'step_index': page['step_index'], 'offset': page['offset'],
                                'action': ctx.triggered_id}}
         try:

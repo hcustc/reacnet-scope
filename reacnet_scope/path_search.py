@@ -19,6 +19,7 @@ from .indexes import IndexInvalidError
 from .network import smiles_to_formula_fast
 from .rng_events import reaction_key
 from .candidate_evidence import materialize_candidate_evidence, quality_summary
+from .candidate_identity import candidate_identity_from_route
 
 SCHEMA = 'reacnet-scope/indexed-candidates/v3'
 ADJACENCY_VERSION = '4'
@@ -323,7 +324,10 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
         identity = {'version': 2, 'species': species,
                     'reactions': [s['reaction_key'] for s in steps]}
         signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+        canonical = candidate_identity_from_route({'species': species, 'steps': steps})
         paths.append(dict(signature_id=signature, species=species, steps=steps,
+                          candidate_signature=canonical.signature,
+                          candidate_identity=canonical.as_dict(),
                           step_count=len(steps), continuous_md='not_evaluated',
                           quality_warning=any(s.get('quality', {}).get('folded_events', 0) for s in steps)))
         return True
