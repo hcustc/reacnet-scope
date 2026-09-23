@@ -5369,6 +5369,65 @@ def test_qc_download_rechecks_current_preview_before_export(
             assert manifest["source_signatures"] == payload["manifest"]["source_signatures"]
 
 
+@pytest.mark.parametrize("blocked", [False, True])
+def test_qc_http_needs_input_or_blocked_never_exports(tmp_path, monkeypatch, blocked):
+    from tests.test_reaction_readiness import _case
+
+    artifacts, event = _case(tmp_path, monkeypatch)
+    if blocked:
+        event = {**event, "association_status": "unresolved"}
+    controls = {
+        "reactant_indices": [0, 1], "product_indices": [0],
+        "layout": "combined", "unit_confirmation": [] if not blocked else ["angstrom"],
+        "isolated_cluster_confirmation": ["confirmed"],
+        "charge_values": [0, 0],
+        "charge_ids": [{"type": "event-dft-charge", "stem": stem}
+                       for stem in ("reactants", "products")],
+        "multiplicity_values": [1, 1],
+        "multiplicity_ids": [{"type": "event-dft-multiplicity", "stem": stem}
+                             for stem in ("reactants", "products")],
+        "selected": {"row": event},
+        "app_store": {"dataset_id": "dataset-01", "label": "rep-01", "artifacts": artifacts},
+    }
+    client = create_app().server.test_client()
+    preview = client.post("/_dash-update-component", json=_callback_payload(
+        client, input_ids=["event-dft-request"], changed="event-dft-request.data",
+        input_values={"event-dft-request": {"id": "blocked-preview", "controls": controls}},
+        state_values={}, output_id="event-dft-response",
+    ))
+    assert preview.status_code == 200
+    response = preview.get_json()["response"]["event-dft-response"]["data"]
+    payload = response["payload"]
+    assert payload["readiness_report"]["qc_handoff"]["status"] == (
+        "blocked" if blocked else "needs_input"
+    )
+    assert response["disabled"] is True
+    download = client.post("/_dash-update-component", json=_callback_payload(
+        client, input_ids=["event-dft-download-btn"],
+        changed="event-dft-download-btn.n_clicks",
+        input_values={"event-dft-download-btn": 1},
+        state_values={
+            "event-dft-store": payload,
+            "event-selected-store": controls["selected"],
+            "event-dft-review-confirmation": [],
+            "app-store": controls["app_store"],
+            "event-dft-reactants": controls["reactant_indices"],
+            "event-dft-products": controls["product_indices"],
+            "event-dft-layout": controls["layout"],
+            "event-dft-unit-confirmation": controls["unit_confirmation"],
+            "event-dft-isolated-cluster-confirmation": controls["isolated_cluster_confirmation"],
+            '{"stem":["ALL"],"type":"event-dft-charge"}.value': controls["charge_values"],
+            '{"stem":["ALL"],"type":"event-dft-charge"}.id': controls["charge_ids"],
+            '{"stem":["ALL"],"type":"event-dft-multiplicity"}.value': controls["multiplicity_values"],
+            '{"stem":["ALL"],"type":"event-dft-multiplicity"}.id': controls["multiplicity_ids"],
+        }, output_id="event-dft-download",
+    ))
+    assert download.status_code == 200
+    result = download.get_json()["response"]
+    assert "event-dft-download" not in result
+    assert result["event-dft-download-btn"]["disabled"] is True
+
+
 def test_lineage_event_click_updates_selection_and_drilldown_request() -> None:
     client = create_app().server.test_client()
     event = {
