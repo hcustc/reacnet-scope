@@ -1,26 +1,4 @@
 /* ReacNet Scope Dash workbench. */
-:root {
-    --rs-topbar-height: 64px;
-    --rs-nav-width: 208px;
-    --rs-detail-width: 312px;
-    --rs-gap: 14px;
-    --rs-border: #dfe3e8;
-    --rs-border-strong: #c9d0d8;
-    --rs-bg: #f4f6f8;
-    --rs-card: #ffffff;
-    --rs-muted: #667085;
-    --rs-text: #20262e;
-    --rs-accent: #2864dc;
-    --rs-accent-soft: #eaf0fe;
-    --rs-success: #16794f;
-    --rs-warning: #a35a08;
-    --rs-border-accent: #b7c8f7;
-    --rs-border-danger: #efc7c7;
-    --rs-surface-danger: #fff5f5;
-    --rs-text-danger: #9b1c1c;
-    --rs-text-disabled: #98a2b3;
-    --rs-radius-sm: 8px;
-}
 .rs-dft-card {
   border-left: 3px solid var(--bs-success, #198754);
 }
@@ -2450,25 +2428,6 @@ body {
 /* ── 2026 workbench UI system ─────────────────────────────────────
    A stable application shell, quieter surfaces, and stronger empty states.
    Feature-specific styles above remain responsible for charts and viewers. */
-:root {
-    --rs-topbar-height: 68px;
-    --rs-nav-width: 232px;
-    --rs-gap: 18px;
-    --rs-bg: #f6f8fb;
-    --rs-card: #ffffff;
-    --rs-text: #172033;
-    --rs-muted: #697386;
-    --rs-border: #e2e7ef;
-    --rs-border-strong: #cfd6e2;
-    --rs-accent: #2856d8;
-    --rs-accent-hover: #2048bb;
-    --rs-accent-soft: #eef3ff;
-    --rs-success: #147a52;
-    --rs-warning: #9a6512;
-    --rs-radius-sm: 8px;
-    --rs-radius: 12px;
-    --rs-shadow: 0 1px 2px rgba(23, 32, 51, .04), 0 8px 24px rgba(23, 32, 51, .035);
-}
 * {
     scrollbar-color: #c8d0dc transparent;
     scrollbar-width: thin;
@@ -4171,25 +4130,6 @@ summary:focus-visible,
 }
 
 /* ── Data management desktop redesign ───────────────────────────── */
-:root {
-  --rs-topbar-height: 58px;
-  --rs-nav-width: 190px;
-  --rs-gap: 14px;
-  --rs-bg: #f2f4f7;
-  --rs-card: #ffffff;
-  --rs-text: #1f2937;
-  --rs-muted: #667085;
-  --rs-border: #dfe4eb;
-  --rs-border-strong: #c6ced9;
-  --rs-accent: #2459c4;
-  --rs-accent-hover: #1f4eae;
-  --rs-accent-soft: #edf3ff;
-  --rs-success: #157754;
-  --rs-warning: #985d08;
-  --rs-radius-sm: 6px;
-  --rs-radius: 8px;
-  --rs-shadow: 0 1px 2px rgba(31, 41, 55, .035);
-}
 .rs-sidebar-brand {
   flex: 0 0 var(--rs-topbar-height);
   width: 100%;
