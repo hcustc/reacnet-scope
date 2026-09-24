@@ -36,6 +36,7 @@ def _build_library_index(request):
     _verified_library_target(request)
     result = svc.prepare_dataset_workspace(
         request['folder'], base=request['base'], kind=kind,
+        expected_dataset_id=request['dataset_id'],
     )
     if str(result.get('dataset_id') or '') != str(request['dataset_id']):
         raise svc.ServiceError('准备结果的数据身份不匹配，请重新检查。', reason='dataset_identity_changed')
@@ -47,7 +48,8 @@ def _library_index_control(entry, kind, item, request, result, cancel_result):
     base = entry['base']
     state = str(item.get('state') or 'missing')
     task = item.get('task') or {}
-    task_state = str(task.get('state') or '')
+    task_state = str(task.get('state') or '') if task.get('matches_current_revision') is True else ''
+    active_task = task_state in {'running', 'cancel_requested'}
     source_available = bool(item.get('source_available'))
     pending = (
         isinstance(request, dict)
@@ -59,7 +61,7 @@ def _library_index_control(entry, kind, item, request, result, cancel_result):
     progress = task.get('progress') if task.get('progress_trusted') else None
     if not source_available:
         state_text = '缺少源文件'
-    elif state == 'building':
+    elif active_task:
         state_text = (
             f'准备中 · {float(progress) * 100:.0f}%'
             if isinstance(progress, (int, float)) else '准备中'
@@ -68,28 +70,32 @@ def _library_index_control(entry, kind, item, request, result, cancel_result):
             state_text = '正在取消'
     elif state == 'ready':
         state_text = '可用'
-    elif task_state in {'interrupted', 'canceled', 'failed', 'superseded'}:
+    elif state in {'stale', 'invalid'}:
+        state_text = {'stale': '需要重建', 'invalid': '索引无效'}[state]
+    elif task_state in {'interrupted', 'canceled', 'failed'}:
         state_text = {'interrupted': '已中断', 'canceled': '已取消',
-                      'failed': '构建失败', 'superseded': '来源已变化'}[task_state]
+                      'failed': '构建失败'}[task_state]
+    elif state == 'building':
+        state_text = '索引未完成'
     else:
-        state_text = {'stale': '需要重建', 'invalid': '索引无效'}.get(state, '尚未建立')
-    if pending and state != 'building':
+        state_text = '尚未建立'
+    if pending and not active_task:
         state_text = '正在启动准备任务'
 
     controls = [html.Span(state_text, className=f'rs-index-state is-{state}')]
     if source_available and state != 'ready':
         action = (
-            '续建索引' if task_state in {'interrupted', 'canceled', 'failed', 'superseded'}
-            else '重新构建' if state in {'stale', 'invalid'}
+            '重新构建' if state in {'stale', 'invalid'}
+            else '续建索引' if task_state in {'interrupted', 'canceled', 'failed'}
             else '准备索引'
         )
         controls.append(dbc.Button(
             action,
             id={'type': 'library-build-index', 'base': base, 'kind': kind},
             n_clicks=0, color='secondary', outline=True, size='sm',
-            disabled=state == 'building' or pending,
+            disabled=active_task or pending,
         ))
-    if state == 'building':
+    if active_task:
         controls.append(dbc.Button(
             '取消准备',
             id={'type': 'library-cancel-index', 'base': base, 'kind': kind},

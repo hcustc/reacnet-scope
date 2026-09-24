@@ -176,6 +176,53 @@ def test_library_build_rejects_stale_dataset_identity_before_preparation(folders
         _build_library_index({**entry, 'dataset_id': 'another-dataset', 'kind': 'composition'})
 
 
+def test_library_build_passes_expected_identity_into_preparation(folders, monkeypatch):
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    calls = []
+
+    def prepare(_folder, **kwargs):
+        calls.append(kwargs)
+        return {'dataset_id': entry['dataset_id'], 'ok': True}
+
+    monkeypatch.setattr(svc, 'prepare_dataset_workspace', prepare)
+
+    _build_library_index({**entry, 'kind': 'composition'})
+
+    assert calls[0]['expected_dataset_id'] == entry['dataset_id']
+
+
+def test_preparation_rejects_wrong_expected_identity_before_build(folders, monkeypatch):
+    from reacnet_scope import prepare
+
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    monkeypatch.setattr(prepare, 'run_preparation',
+                        lambda **_kwargs: pytest.fail('preparation must not start'))
+
+    with pytest.raises(svc.ServiceError, match='身份'):
+        svc.prepare_dataset_workspace(
+            entry['folder'], base=entry['base'], kind='composition',
+            expected_dataset_id='another-dataset',
+        )
+
+
+def test_preparation_rechecks_expected_identity_before_starting_work(folders, monkeypatch):
+    from reacnet_scope import dataset_context, prepare, workspace_services
+
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    monkeypatch.setattr(dataset_context, 'validate_dataset_candidate',
+                        lambda *_args: {'dataset_id': entry['dataset_id']})
+    monkeypatch.setattr(workspace_services, 'dataset_preparation_status',
+                        lambda *_args, **_kwargs: {'dataset_id': 'another-dataset'})
+    monkeypatch.setattr(prepare, 'run_preparation',
+                        lambda **_kwargs: pytest.fail('preparation must not start'))
+
+    with pytest.raises(svc.ServiceError, match='身份'):
+        svc.prepare_dataset_workspace(
+            entry['folder'], base=entry['base'], kind='composition',
+            expected_dataset_id=entry['dataset_id'],
+        )
+
+
 def test_library_control_distinguishes_missing_source_and_task_progress():
     entry = {'base': '/data/run', 'dataset_id': 'dataset-a'}
     missing = _library_index_control(entry, 'trajectory',
@@ -185,13 +232,95 @@ def test_library_control_distinguishes_missing_source_and_task_progress():
 
     building = _library_index_control(entry, 'composition', {
         'state': 'building', 'source_available': True,
-        'task': {'state': 'running', 'progress': 0.3, 'progress_trusted': True},
+        'task': {'state': 'running', 'progress': 0.3, 'progress_trusted': True,
+                 'matches_current_revision': True},
     }, None, None, None)
     assert building[0].children == '准备中 · 30%'
     assert any((getattr(item, 'id', None) or {}).get('type') == 'library-cancel-index'
                for item in building)
     assert all(item.disabled for item in building
                if (getattr(item, 'id', None) or {}).get('type') == 'library-build-index')
+
+
+def test_library_control_resumes_canceled_checkpoint_instead_of_showing_active_build():
+    entry = {'base': '/data/run', 'dataset_id': 'dataset-a'}
+    controls = _library_index_control(entry, 'composition', {
+        'state': 'building', 'source_available': True,
+        'task': {'state': 'canceled', 'matches_current_revision': True},
+    }, None, None, None)
+
+    assert controls[0].children == '已取消'
+    assert any(getattr(item, 'children', None) == '续建索引' and not item.disabled
+               for item in controls if getattr(item, 'id', None))
+    assert not any((getattr(item, 'id', None) or {}).get('type') == 'library-cancel-index'
+                   for item in controls)
+
+
+def test_canceled_composition_checkpoint_is_resumable_in_library(folders):
+    from reacnet_scope import prepare
+    from reacnet_scope.composition import composition_index_path
+
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    svc.dataset_preparation_status(entry['folder'], base=entry['base'])
+    species = f"{entry['base']}.species"
+    checkpoint = Path(f'{composition_index_path(species)}.building')
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b'incomplete checkpoint')
+    dataset = prepare.discover_dataset(entry['folder'], Path(entry['base']).name)
+    task_path = prepare._preparation_task_path(dataset, 'composition')
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+    task_path.write_text(json.dumps({
+        'state': 'canceled',
+        'source_revision': prepare._capability_source_revision(dataset, 'composition'),
+    }))
+
+    status = svc.dataset_preparation_status(entry['folder'], base=entry['base'])
+    controls = _library_index_control(
+        entry, 'composition', status['composition'], None, None, None,
+    )
+
+    assert status['composition']['state'] == 'building'
+    assert status['composition']['task']['matches_current_revision'] is True
+    assert controls[0].children == '已取消'
+    assert any(getattr(item, 'children', None) == '续建索引' for item in controls)
+
+
+def test_library_control_ignores_terminal_task_from_old_source_revision():
+    entry = {'base': '/data/run', 'dataset_id': 'dataset-a'}
+    controls = _library_index_control(entry, 'composition', {
+        'state': 'stale', 'source_available': True,
+        'task': {'state': 'failed', 'matches_current_revision': False},
+    }, None, None, None)
+
+    assert controls[0].children == '需要重建'
+    assert any(getattr(item, 'children', None) == '重新构建' for item in controls)
+
+
+def test_library_does_not_label_old_revision_failure_as_current(folders):
+    from reacnet_scope import prepare
+
+    entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
+    svc.prepare_dataset_workspace(
+        entry['folder'], base=entry['base'], kind='composition',
+        expected_dataset_id=entry['dataset_id'],
+    )
+    dataset = prepare.discover_dataset(entry['folder'], Path(entry['base']).name)
+    old_revision = prepare._capability_source_revision(dataset, 'composition')
+    task_path = prepare._preparation_task_path(dataset, 'composition')
+    task_path.write_text(json.dumps({
+        'state': 'failed', 'source_revision': old_revision,
+    }))
+    Path(f"{entry['base']}.species").write_text('Timestep 0: CCO 200\n')
+
+    status = svc.dataset_preparation_status(entry['folder'], base=entry['base'])
+    controls = _library_index_control(
+        entry, 'composition', status['composition'], None, None, None,
+    )
+
+    assert status['composition']['state'] == 'stale'
+    assert status['composition']['task']['matches_current_revision'] is False
+    assert controls[0].children == '需要重建'
+    assert any(getattr(item, 'children', None) == '重新构建' for item in controls)
 
 
 def test_library_control_snapshot_preserves_click_count_across_idle_poll():
