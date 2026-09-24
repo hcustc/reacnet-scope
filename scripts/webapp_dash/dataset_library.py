@@ -9,6 +9,122 @@ import dash_bootstrap_components as dbc
 from reacnet_scope import services as svc
 
 
+_INDEX_KINDS = (
+    ('composition', '物种丰度 / 元素分布', 'composition'),
+    ('event', '事件检索', 'events'),
+    ('trajectory', '轨迹证据', 'trajectory'),
+)
+_INDEX_KEYS = {kind: key for kind, _label, key in _INDEX_KINDS}
+
+
+def _verified_library_target(entry):
+    """Recheck a browser-stored reference before changing its workspace."""
+    dataset_id = str(entry.get('dataset_id') or '')
+    if not dataset_id:
+        raise svc.ServiceError('RNG 数据身份缺失，请重新导入。', reason='missing_dataset_identity')
+    validation = svc.validate_dataset_candidate(entry['folder'], entry['base'])
+    if str(validation.get('dataset_id') or '') != dataset_id:
+        raise svc.ServiceError('RNG 数据身份已变化，请重新导入。', reason='dataset_identity_changed')
+    return validation
+
+
+def _build_library_index(request):
+    """Prepare one explicitly chosen capability for one verified library entry."""
+    kind = str(request.get('kind') or '')
+    if kind not in _INDEX_KEYS:
+        raise svc.ServiceError('无效准备能力。', reason='invalid_preparation_kind')
+    _verified_library_target(request)
+    result = svc.prepare_dataset_workspace(
+        request['folder'], base=request['base'], kind=kind,
+        expected_dataset_id=request['dataset_id'],
+    )
+    if str(result.get('dataset_id') or '') != str(request['dataset_id']):
+        raise svc.ServiceError('准备结果的数据身份不匹配，请重新检查。', reason='dataset_identity_changed')
+    return result
+
+
+def _library_index_control(entry, kind, item, request, result, cancel_result):
+    """Render one capability without treating missing evidence as a failed build."""
+    base = entry['base']
+    state = str(item.get('state') or 'missing')
+    task = item.get('task') or {}
+    task_state = str(task.get('state') or '') if task.get('matches_current_revision') is True else ''
+    active_task = task_state in {'running', 'cancel_requested'}
+    source_available = bool(item.get('source_available'))
+    pending = (
+        isinstance(request, dict)
+        and request.get('base') == base
+        and request.get('kind') == kind
+        and request.get('dataset_id') == entry.get('dataset_id')
+        and request.get('token') != (result or {}).get('token')
+    )
+    progress = task.get('progress') if task.get('progress_trusted') else None
+    if not source_available:
+        state_text = '缺少源文件'
+    elif active_task:
+        state_text = (
+            f'准备中 · {float(progress) * 100:.0f}%'
+            if isinstance(progress, (int, float)) else '准备中'
+        )
+        if task_state == 'cancel_requested':
+            state_text = '正在取消'
+    elif state == 'ready':
+        state_text = '可用'
+    elif state in {'stale', 'invalid'}:
+        state_text = {'stale': '需要重建', 'invalid': '索引无效'}[state]
+    elif task_state in {'interrupted', 'canceled', 'failed'}:
+        state_text = {'interrupted': '已中断', 'canceled': '已取消',
+                      'failed': '构建失败'}[task_state]
+    elif state == 'building':
+        state_text = '索引未完成'
+    else:
+        state_text = '尚未建立'
+    if pending and not active_task:
+        state_text = '正在启动准备任务'
+
+    controls = [html.Span(state_text, className=f'rs-index-state is-{state}')]
+    if source_available and state != 'ready':
+        action = (
+            '重新构建' if state in {'stale', 'invalid'}
+            else '续建索引' if task_state in {'interrupted', 'canceled', 'failed'}
+            else '准备索引'
+        )
+        controls.append(dbc.Button(
+            action,
+            id={'type': 'library-build-index', 'base': base, 'kind': kind},
+            n_clicks=0, color='secondary', outline=True, size='sm',
+            disabled=active_task or pending,
+        ))
+    if active_task:
+        controls.append(dbc.Button(
+            '取消准备',
+            id={'type': 'library-cancel-index', 'base': base, 'kind': kind},
+            n_clicks=0, color='secondary', outline=True, size='sm',
+            disabled=task_state == 'cancel_requested',
+        ))
+        if task.get('message'):
+            controls.append(html.Small(str(task['message'])))
+
+    for feedback in (result, cancel_result):
+        if (isinstance(feedback, dict) and feedback.get('base') == base
+                and feedback.get('kind') == kind
+                and feedback.get('dataset_id') == entry.get('dataset_id')
+                and feedback.get('message')):
+            controls.append(html.Small(str(feedback['message']), role='status'))
+    return controls
+
+
+def _control_snapshot(value):
+    """Compare visible control state without resetting a button's click count."""
+    if hasattr(value, 'to_plotly_json'):
+        value = value.to_plotly_json()
+    if isinstance(value, dict):
+        return {key: _control_snapshot(item) for key, item in value.items() if key != 'n_clicks'}
+    if isinstance(value, list):
+        return [_control_snapshot(item) for item in value]
+    return value
+
+
 def _clicked(trigger):
     for group in ctx.inputs_list:
         for item in group if isinstance(group, list) else [group]:
@@ -24,9 +140,17 @@ def _clicked(trigger):
 
 
 def stores():
-    return html.Div([dcc.Store(id='dataset-library', storage_type='local', data=[]),
-                     dcc.Store(id='library-draft', data=[]), dcc.Store(id='library-request'),
-                     dcc.Store(id='library-result'), dcc.Store(id='library-seen-current')])
+    return html.Div([
+        dcc.Store(id='dataset-library', storage_type='local', data=[]),
+        dcc.Store(id='library-draft', data=[]),
+        dcc.Store(id='library-request'),
+        dcc.Store(id='library-result'),
+        dcc.Store(id='library-seen-current'),
+        dcc.Store(id='library-build-request'),
+        dcc.Store(id='library-build-result'),
+        dcc.Store(id='library-cancel-result'),
+        dcc.Interval(id='library-index-refresh', interval=5000, disabled=True),
+    ])
 
 
 def selector():
@@ -76,9 +200,21 @@ def register_callbacks(app):
         for entry in entries:
             active = entry['base'] == (current or {}).get('base')
             rows.append(html.Div([
-                html.Div([html.Strong(entry['label']), html.Small(entry['folder']),
-                          html.Span('当前使用' if active else '已导入',
-                                    id={'type': 'library-entry-current', 'base': entry['base']})]),
+                html.Div([
+                    html.Strong(entry['label']),
+                    html.Small(entry['folder']),
+                    html.Span('当前使用' if active else '已导入',
+                              id={'type': 'library-entry-current', 'base': entry['base']})
+                ]),
+                html.Div([
+                    html.Div([
+                        html.Span(label, className='rs-index-status-label'),
+                        html.Span('正在检查…',
+                                  id={'type': 'library-index-control', 'base': entry['base'], 'kind': kind},
+                                  className='rs-library-index-control'),
+                    ], className='rs-library-index-row')
+                    for kind, label, _key in _INDEX_KINDS
+                ], className='rs-library-index-status'),
                 dbc.Button('使用此RNG 数据', id={'type': 'library-use-entry', 'base': entry['base']},
                            n_clicks=0, color='primary', outline=True),
                 dbc.Button('移出列表', id={'type': 'library-forget-entry', 'base': entry['base']},
@@ -220,6 +356,112 @@ def register_callbacks(app):
             message = transaction.get('message', '')
         valid = any(e['base'] == selected for e in svc.normalise_dataset_library(records))
         return not valid or busy or any(operations or []), message
+
+    @app.callback(Output('library-index-refresh', 'disabled'),
+                  Input('page-store', 'data'), Input('library-view', 'value'))
+    def refresh_library_only_when_visible(page_store, view):
+        return (page_store or {}).get('page') != 'data-management' or view != 'library'
+
+    @app.callback(
+        Output({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
+        Input('dataset-library', 'data'),
+        Input('library-index-refresh', 'n_intervals'),
+        Input('library-build-request', 'data'),
+        Input('library-build-result', 'data'),
+        Input('library-cancel-result', 'data'),
+        Input({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'id'),
+        State({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
+    )
+    def update_index_status(records, _interval, request, result, cancel_result, ids, previous):
+        """Read published indexes and persisted task progress for visible entries."""
+        entries = {entry['base']: entry for entry in svc.normalise_dataset_library(records)}
+        statuses = {}
+        rendered = []
+        for control_id in ids or []:
+            base, kind = control_id['base'], control_id['kind']
+            entry = entries.get(base)
+            if entry is None:
+                rendered.append('已移出列表')
+                continue
+            if base not in statuses:
+                try:
+                    svc.validate_browse_path(entry['folder'])
+                    svc.validate_browse_path(entry['base'])
+                    status = svc.dataset_preparation_status(entry['folder'], base=entry['base'])
+                    if str(status.get('dataset_id') or '') != str(entry.get('dataset_id') or ''):
+                        raise svc.ServiceError('RNG 数据身份已变化，请重新导入。', reason='dataset_identity_changed')
+                    statuses[base] = status
+                except svc.ServiceError as exc:
+                    statuses[base] = exc
+            status = statuses[base]
+            if isinstance(status, svc.ServiceError):
+                rendered.append(f'状态不可用：{status.message}')
+                continue
+            controls = _library_index_control(
+                entry, kind, status.get(_INDEX_KEYS[kind]) or {},
+                request, result, cancel_result,
+            )
+            prior = previous[len(rendered)] if previous and len(previous) > len(rendered) else None
+            rendered.append(no_update if _control_snapshot(controls) == _control_snapshot(prior)
+                            else controls)
+        return rendered
+
+    @app.callback(
+        Output('library-build-request', 'data'),
+        Input({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'n_clicks'),
+        State('dataset-library', 'data'), prevent_initial_call=True,
+    )
+    def request_library_index(_clicks, records):
+        trigger = ctx.triggered_id
+        if not isinstance(trigger, dict) or not _clicked(trigger):
+            raise PreventUpdate
+        entry = next((item for item in svc.normalise_dataset_library(records)
+                      if item['base'] == trigger['base']), None)
+        if entry is None:
+            raise PreventUpdate
+        return {**entry, 'kind': trigger['kind'], 'token': uuid.uuid4().hex}
+
+    @app.callback(
+        Output('library-build-result', 'data'), Input('library-build-request', 'data'),
+        background=True, prevent_initial_call=True,
+    )
+    def build_library_index(request):
+        if not isinstance(request, dict) or not request.get('token'):
+            raise PreventUpdate
+        try:
+            result = _build_library_index(request)
+        except svc.ServiceError as exc:
+            return {**request, 'ok': False, 'message': exc.message}
+        message = (
+            '同类任务已在运行。' if result.get('existing_task')
+            else '任务已取消，检查点已保留。' if result.get('canceled')
+            else '索引已重建。' if result.get('rebuilt')
+            else '索引已就绪。'
+        )
+        return {**request, 'ok': True, 'message': message}
+
+    @app.callback(
+        Output('library-cancel-result', 'data'),
+        Input({'type': 'library-cancel-index', 'base': ALL, 'kind': ALL}, 'n_clicks'),
+        State('dataset-library', 'data'), prevent_initial_call=True,
+    )
+    def cancel_library_index(_clicks, records):
+        trigger = ctx.triggered_id
+        if not isinstance(trigger, dict) or not _clicked(trigger):
+            raise PreventUpdate
+        entry = next((item for item in svc.normalise_dataset_library(records)
+                      if item['base'] == trigger['base']), None)
+        if entry is None:
+            raise PreventUpdate
+        try:
+            _verified_library_target(entry)
+            result = svc.cancel_dataset_preparation(
+                entry['folder'], base=entry['base'], kind=trigger['kind'],
+            )
+            message = result['message']
+        except svc.ServiceError as exc:
+            message = exc.message
+        return {**entry, 'kind': trigger['kind'], 'message': message}
 
 
 def management_panel():

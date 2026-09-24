@@ -332,6 +332,42 @@ def test_import_multiple_folders_switch_and_compare(page, workbench):
     assert {p + '/run' for p in paths} <= {r['base'] for r in records}
 
 
+def test_imported_dataset_builds_selected_index_without_switching_current(page, workbench):
+    _, current = workbench
+    folder = Path(current['folder']) / 'direct-index'
+    folder.mkdir(exist_ok=True)
+    (folder / 'run.reactionabcd').write_text('1 CCO->COC\n')
+    (folder / 'run.species').write_text('Timestep 0: CCO 1 COC 1\n')
+
+    page.locator('#nav-data-management').click()
+    page.locator('#library-add-more').click()
+    page.get_by_text('一次填写多个文件夹路径', exact=True).click()
+    page.locator('#library-paths').fill(str(folder))
+    page.locator('#library-add-paths').click()
+    page.locator('#library-import').click()
+    expect(page.locator('#library-import-status')).to_contain_text(
+        '已导入 1 个文件夹；0 个未导入', timeout=30000,
+    )
+    page.locator('#nav-data-management').click()
+    row = page.locator('#library-management-list .rs-library-item').filter(has_text=str(folder))
+    composition = row.locator('.rs-library-index-row').first
+    expect(composition).to_contain_text('尚未建立', timeout=15000)
+    with page.expect_response(
+        lambda response: response.url.endswith('/_dash-update-component')
+        and 'library-build-request.data' in (response.request.post_data or ''),
+        timeout=15000,
+    ) as request_response:
+        composition.get_by_role('button', name='准备索引').click()
+    assert request_response.value.status == 200, request_response.value.text()
+    expect(composition).to_contain_text('可用', timeout=30000)
+
+    assert page.evaluate('JSON.parse(sessionStorage.getItem("dataset-session-store")).base') == current['base']
+    status = svc.dataset_preparation_status(str(folder), base=str(folder / 'run'))
+    assert status['composition']['state'] == 'ready'
+    assert status['events']['state'] != 'ready'
+    assert status['trajectory']['state'] != 'ready'
+
+
 def test_reaction_comparison_is_an_analysis_task(page):
     page.locator('#nav-reactions').click()
     page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比').click()

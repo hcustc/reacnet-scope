@@ -816,6 +816,7 @@ def prepare_dataset_workspace(
     base: str,
     kind: str,
     automatic: bool = False,
+    expected_dataset_id: str = "",
 ) -> dict[str, Any]:
     """Build or rebuild one derived index in its Dataset Workspace."""
     normalized_kind = str(kind or "").strip().lower()
@@ -837,10 +838,25 @@ def prepare_dataset_workspace(
             reason="invalid_dataset_candidate",
         )
 
+    expected_identity = str(expected_dataset_id or "")
+    if expected_identity:
+        from .dataset_context import validate_dataset_candidate
+        validation = validate_dataset_candidate(str(folder_path), str(base_path))
+        if str(validation.get("dataset_id") or "") != expected_identity:
+            raise ServiceError(
+                "RNG 数据身份已变化，请重新导入。",
+                reason="dataset_identity_changed",
+            )
+
     before = dataset_preparation_status(
         str(folder_path),
         base=str(base_path),
     )
+    if expected_identity and str(before.get("dataset_id") or "") != expected_identity:
+        raise ServiceError(
+            "RNG 数据身份已变化，请重新导入。",
+            reason="dataset_identity_changed",
+        )
     if not before.get("workspace_writable"):
         raise ServiceError(
             "Dataset Workspace 不可写；请检查数据集目录或管理员配置的集中位置。",
