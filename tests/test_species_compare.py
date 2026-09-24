@@ -11,6 +11,7 @@ import pytest
 
 from reacnet_scope import services as svc
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
+from reacnet_scope.queries import exact_mass_cached
 from reacnet_scope.trajectory import save_timestep_ps
 from scripts.webapp_dash.app import create_app
 
@@ -69,6 +70,45 @@ def test_missing_target_zero_and_missing_index_are_distinct(tmp_path, monkeypatc
     assert [row["status"] for row in result["summary"]] == ["zero", "target_not_found", "missing_index"]
     assert len(result["curves"]) == 1
     assert svc.species_compare_catalog(str(unprepared))["status"] == "missing_index"
+
+
+def test_comparison_catalog_limits_options_and_searches_exact_species(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    species = _source(tmp_path, "many", [
+        "Timestep 0: " + " ".join(f"{'C' * size} 1" for size in range(1, 121))
+    ])
+
+    initial = svc.species_compare_picker(species)
+    assert initial["status"] == "ready"
+    assert initial["species_count"] == 120
+    assert len(initial["options"]) <= 50
+    assert svc.species_compare_picker(species, query="C" * 120)["options"] == [
+        {"label": f"{'C' * 120} · 总数 1", "value": "C" * 120}
+    ]
+    assert svc.species_compare_target_exists(species, "C" * 120)
+    assert not svc.species_compare_target_exists(species, "N")
+    assert len(svc.species_compare_catalog(species)["options"]) == 120
+
+def test_comparison_search_reuses_formula_and_mass_lookup_but_selects_exact_species(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    species = _source(tmp_path, "isomers", ["Timestep 0: CCO 3 COC 2 O 1"])
+
+    formula = svc.search_species_compare_targets(species, "C2O", kind="formula")
+    assert {option["value"] for option in formula["options"]} == {"CCO", "COC"}
+    assert all("C2O" in option["label"] for option in formula["options"])
+
+    exact_mass = exact_mass_cached("C2O")
+    mass = svc.search_species_compare_targets(
+        species, str(exact_mass), kind="mass", mass_tolerance=0
+    )
+    assert {option["value"] for option in mass["options"]} == {"CCO", "COC"}
+    assert "2 个精确 Species" in mass["message"]
+    assert svc.search_species_compare_targets(species, "OCC", kind="smiles")["options"][0]["value"] == "CCO"
+    assert svc.search_species_compare_targets(species, "N2", kind="formula")["options"] == []
+
+    unprepared = tmp_path / "unprepared.species"
+    unprepared.write_text("Timestep 0: CCO 1\n", encoding="utf-8")
+    assert svc.search_species_compare_targets(str(unprepared), "C2O", kind="formula")["status"] == "missing_index"
 
 
 def test_time_conversion_is_per_source_and_query_replacement_has_no_old_curve(tmp_path, monkeypatch):

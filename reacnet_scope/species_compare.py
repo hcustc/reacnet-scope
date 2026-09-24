@@ -9,6 +9,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
+from reacnet_scope.analysis_services import search_species_catalog
 from reacnet_scope.comparison_sources import (
     build_comparison_source_record,
     comparison_metadata_text,
@@ -49,6 +51,81 @@ def species_compare_catalog(species_file: str) -> dict[str, Any]:
         ],
         "message": f"{len(totals)} 个精确物种",
     }
+
+
+def species_compare_picker(
+    species_file: str, *, query: str = "", selected: str = ""
+) -> dict[str, Any]:
+    """Return a bounded exact-Species picker from one published index."""
+    path = str(Path(species_file).expanduser().resolve())
+    if not Path(path).is_file():
+        return {"status": "missing_source", "options": [], "message": "缺少 Species 文件"}
+    try:
+        species_count, matches = SPECIES_COMPOSITION_STORE.search_species_totals(
+            path, query=str(query or "").strip(), selected=str(selected or "").strip()
+        )
+    except _INDEX_ERRORS as exc:
+        return {"status": "missing_index", "options": [], "message": f"Species Abundance Index 未就绪：{exc}"}
+    return {
+        "status": "ready",
+        "options": [
+            {"label": f"{smiles} · 总数 {count}", "value": smiles}
+            for smiles, count in matches
+        ],
+        "species_count": species_count,
+        "message": f"{species_count} 个精确物种；输入 SMILES 搜索",
+    }
+
+
+def search_species_compare_targets(
+    species_file: str, query: str, *, kind: str = "auto", mass_tolerance: float = 0.5
+) -> dict[str, Any]:
+    """Reuse Species catalogue search while returning only exact abundance targets."""
+    picker = species_compare_picker(species_file)
+    if picker["status"] != "ready":
+        return {"status": picker["status"], "options": [], "message": picker["message"]}
+    if not str(query or "").strip():
+        raise ServiceError("请输入分子式、SMILES 或质量数", reason="missing_query")
+    result = search_species_catalog(
+        {"species": species_file}, query, kind=kind, mass_tolerance=mass_tolerance
+    )
+    rows = result["rows"]
+    truncated = len(rows) > 50
+    if result["query"]["kind"] == "mass":
+        # Mass results group structures by formula. Expand each group so the
+        # user still confirms an exact Species, never a representative row.
+        exact_rows: list[dict[str, Any]] = []
+        for formula_row in rows:
+            exact_rows.extend(search_species_catalog(
+                {"species": species_file}, str(formula_row["formula"]), kind="formula"
+            )["rows"])
+            if len(exact_rows) > 50:
+                truncated = True
+                break
+        rows = exact_rows
+    options = [
+        {
+            "label": f"{row['formula']} · {row['smiles']} · 总数 {row['total_count']}",
+            "value": row["smiles"],
+        }
+        for row in rows[:50]
+    ]
+    message = (
+        "结果超过 50 个精确 Species；显示前 50 个，请缩小检索范围。"
+        if truncated
+        else f"找到 {len(rows)} 个精确 Species，请选择该来源的具体结构。"
+    )
+    return {"status": "ready", "options": options, "message": message}
+
+
+def species_compare_target_exists(species_file: str, target_smiles: str) -> bool:
+    """Validate an exact selection against the published index."""
+    if not target_smiles or not Path(species_file).is_file():
+        return False
+    try:
+        return SPECIES_COMPOSITION_STORE.has_species(species_file, target_smiles)
+    except _INDEX_ERRORS:
+        return False
 
 
 def compare_species_sources(sources: list[dict[str, Any]], *, x_axis: str = "step") -> dict[str, Any]:

@@ -138,7 +138,10 @@ from reacnet_scope.batch_services import (
 )
 from reacnet_scope.species_compare import (
     compare_species_sources,
+    search_species_compare_targets,
     species_compare_catalog,
+    species_compare_picker,
+    species_compare_target_exists,
     species_comparison_zip,
 )
 from reacnet_scope.dataset_context import (
@@ -263,6 +266,9 @@ __all__ = [
     "species_evolution_catalog",
     "evolution_to_csv",
     "species_compare_catalog",
+    "species_compare_picker",
+    "search_species_compare_targets",
+    "species_compare_target_exists",
     "compare_species_sources",
     "species_comparison_zip",
     "build_elemental_composition_evolution",
