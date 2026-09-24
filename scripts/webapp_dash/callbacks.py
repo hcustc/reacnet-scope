@@ -3601,7 +3601,7 @@ def register_callbacks(app: Any) -> None:
                     no_update,
                 )
 
-        if triggered in {"data-apply-btn", "library-use"}:
+        if isinstance(triggered, str) and triggered in {"data-apply-btn", "library-use"}:
             if current.get("state") == "validating":
                 raise PreventUpdate
             if any(bool(value) for value in bound_operations or []):
@@ -3637,7 +3637,7 @@ def register_callbacks(app: Any) -> None:
             )
             return request, request
 
-        if triggered in {"data-browser-index-btn", "dir-browser-cancel-btn"}:
+        if isinstance(triggered, str) and triggered in {"data-browser-index-btn", "dir-browser-cancel-btn"}:
             superseded = svc.supersede_dataset_switch(
                 current,
                 reason=(

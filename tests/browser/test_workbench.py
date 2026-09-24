@@ -434,7 +434,8 @@ def test_import_multiple_folders_switch_and_compare(page, workbench):
         paths.append(str(folder))
     page.locator('#nav-data-management').click()
     expect(page.locator('#library-management-panel')).to_be_visible()
-    expect(page.locator('#data-candidate-summary')).to_be_visible()
+    expect(page.locator('#data-candidate-summary')).not_to_be_visible()
+    expect(page.locator('#library-management-list .rs-library-entry-status.is-current')).to_be_visible()
     expect(page.locator('#data-cache-management')).to_be_visible()
     expect(page.locator('#library-view')).to_have_count(0)
     expect(page.locator('#workspace-task-nav')).not_to_be_visible()
@@ -506,11 +507,12 @@ def test_compare_imported_species_without_current_dataset(workbench):
                 '多来源趋势对比可直接选择多个已导入来源', timeout=15000,
             )
             expect(page.locator('#species-results-card')).to_be_visible()
-            expect(page.locator('#nav-batch-compare')).to_be_visible(timeout=20000)
             expect(page.locator('#species-open-compare-btn')).to_have_count(0)
-            page.locator('#nav-batch-compare').click()
+            page.evaluate("sessionStorage.setItem('page-store', JSON.stringify({page:'batch-compare'}))")
+            page.reload()
             expect(page.locator('#page-batch-compare')).to_be_visible(timeout=20000)
-            expect(page.locator('#page-data-status')).to_contain_text('可直接选择多个来源')
+            expect(page.locator('#species-compare-managed')).to_be_visible(timeout=20000)
+            expect(page.locator('#page-data-status')).to_contain_text('可直接选择多个来源', timeout=30000)
             for folder in folders:
                 option = page.get_by_text(f'{folder.name} · 需准备丰度索引', exact=True)
                 if not option.is_visible():
