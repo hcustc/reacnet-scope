@@ -359,7 +359,7 @@ def test_five_workspaces_and_reaction_query_states(page):
     expect(page.locator("#cp-start-query")).to_be_visible()
     page.locator("#workspace-task-nav").get_by_role("button", name="具体事件").click()
     expect(page.locator("#page-events")).to_be_visible()
-    page.locator("#workspace-task-nav").get_by_role("button", name="直接通道与反应式").click()
+    page.locator("#workspace-task-nav").get_by_role("button", name="反应路径").click()
     expect(page.locator("#rxn-reactants")).to_be_visible()
     page.locator("#rxn-reactants").fill("C2O")
     page.locator("#rxn-reactants").press("Enter")
@@ -462,10 +462,9 @@ def test_import_multiple_folders_switch_and_compare(page, workbench):
         expect(page.locator('#page-data-management')).to_be_visible()
     expect(page.locator('#library-compare-selection')).to_have_count(0)
     expect(page.locator('#data-open-batch-compare-btn')).not_to_be_visible()
-    page.locator('#nav-species').click()
-    page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比').click()
+    page.locator('#nav-batch-compare').click()
     expect(page.locator('#page-batch-compare')).to_be_visible()
-    expect(page.locator('#nav-species')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#nav-batch-compare')).to_have_attribute('aria-current', 'page')
     for path in paths:
         option = page.get_by_text(f'{Path(path).name} · 需准备丰度索引', exact=True)
         if not option.is_visible():
@@ -507,9 +506,9 @@ def test_compare_imported_species_without_current_dataset(workbench):
                 '多来源趋势对比可直接选择多个已导入来源', timeout=15000,
             )
             expect(page.locator('#species-results-card')).to_be_visible()
-            expect(page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比')).to_be_visible(timeout=20000)
+            expect(page.locator('#nav-batch-compare')).to_be_visible(timeout=20000)
             expect(page.locator('#species-open-compare-btn')).to_have_count(0)
-            page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比').click()
+            page.locator('#nav-batch-compare').click()
             expect(page.locator('#page-batch-compare')).to_be_visible(timeout=20000)
             expect(page.locator('#page-data-status')).to_contain_text('可直接选择多个来源')
             for folder in folders:
@@ -645,12 +644,12 @@ def test_imported_index_builds_for_two_entries_finish_independently(page, workbe
 
 def test_reaction_comparison_is_an_analysis_task(page):
     page.locator('#nav-reactions').click()
-    page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比').click()
+    page.locator('#workspace-task-nav').get_by_role('button', name='反应对比').click()
     expect(page.locator('#page-reaction-compare')).to_be_visible()
     expect(page.locator('#batch-managed-selector')).to_be_visible()
     expect(page.locator('#species-compare-managed')).not_to_be_visible()
     expect(page.locator('#nav-reactions')).to_have_attribute('aria-current', 'page')
-    page.locator('#workspace-task-nav').get_by_role('button', name='直接通道与反应式').click()
+    page.locator('#workspace-task-nav').get_by_role('button', name='反应路径').click()
     expect(page.locator('#page-reactions')).to_be_visible()
 
 
@@ -662,8 +661,7 @@ def test_species_comparison_searches_large_catalog_without_loading_all_options(p
     )
     SPECIES_COMPOSITION_STORE.build(str(species))
 
-    page.locator('#nav-species').click()
-    page.locator('#workspace-task-nav').get_by_role('button', name='多来源对比').click()
+    page.locator('#nav-batch-compare').click()
     page.get_by_text('未在列表中？手工添加 Species 文件').click()
     page.locator('#species-compare-path').fill(str(species))
     page.locator('#species-compare-add-path').click()
