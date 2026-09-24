@@ -65,6 +65,9 @@ uv sync --locked --no-dev --extra web --extra trajectory
 `./start-reacnet-scope.sh --check` 可以只检查配置而不启动服务；额外挂载点可通过
 `REACNET_SCOPE_EXTRA_ROOTS` 追加，多个目录用冒号分隔。
 
+启动脚本默认启用紧凑导航；如需经典布局，可运行
+`REACNET_SCOPE_COMPACT_NAV=0 ./start-reacnet-scope.sh`。
+
 远程部署时，目录浏览器看到的是服务端文件系统，实际数据挂载点必须包含在允许
 根目录中。
 

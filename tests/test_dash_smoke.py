@@ -110,8 +110,9 @@ def _loading_descendant_ids(node: Any) -> set[str]:
     return ids
 
 
-def test_dash_layout_and_callback_dependencies_are_loadable(monkeypatch) -> None:
-    monkeypatch.setenv("REACNET_SCOPE_COMPACT_NAV", "0")
+@pytest.mark.parametrize("compact_nav", ["0", "1"])
+def test_dash_layout_and_callback_dependencies_are_loadable(monkeypatch, compact_nav) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_COMPACT_NAV", compact_nav)
     app = create_app()
     client = app.server.test_client()
 

@@ -29,7 +29,9 @@
         // immediate page transition, even while a server response is pending.
         if (window.dash_clientside && window.dash_clientside.set_props) {
             window.dash_clientside.set_props("page-store", {data: {page: pageId}});
-            window.dash_clientside.set_props("page-title", {children: targetNav.textContent.trim()});
+            window.dash_clientside.set_props("page-title", {
+                children: targetNav.getAttribute("aria-label") || targetNav.textContent.trim(),
+            });
         }
         return true;
     }

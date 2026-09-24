@@ -12,6 +12,8 @@ RS_REQUIRED_ROOTS="${RS_USER_HOME}:/media/${RS_USERNAME}:/data:/mnt"
 RS_EXTRA_ROOTS="${REACNET_SCOPE_EXTRA_ROOTS:-}"
 RS_CLI="${RS_PROJECT_DIR}/.venv/bin/reacnet-scope"
 
+export REACNET_SCOPE_COMPACT_NAV="${REACNET_SCOPE_COMPACT_NAV:-1}"
+
 if [[ -n "${RS_EXTRA_ROOTS}" ]]; then
     export REACNET_SCOPE_ALLOWED_ROOTS="${RS_REQUIRED_ROOTS}:${RS_EXTRA_ROOTS}"
 else
@@ -37,6 +39,7 @@ fi
 echo "ReacNet Scope 启动配置"
 echo "  项目目录：${RS_PROJECT_DIR}"
 echo "  访问地址：http://${RS_HOST}:${RS_PORT}"
+echo "  紧凑导航开关：${REACNET_SCOPE_COMPACT_NAV}"
 echo "  数据目录：${RS_DATASET_PATH}"
 echo "  允许根目录：${REACNET_SCOPE_ALLOWED_ROOTS}"
 
