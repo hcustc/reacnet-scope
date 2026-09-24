@@ -607,8 +607,17 @@ def _persistent_dataset_id(base_path: Path, workspace_root: Path) -> str:
                     }
                     records.append(selected)
             if selected is None:
+                # Read-only candidate validation reports this identity before a
+                # workspace manifest exists. Persist that same identity when the
+                # first preparation/status call creates the registry.
+                initial_id = _path_derived_dataset_id(str(base_path))
+                if (
+                    (workspace_root / "datasets" / initial_id).exists()
+                    or any(str(record.get("dataset_id") or "") == initial_id for record in records)
+                ):
+                    initial_id = uuid.uuid4().hex[:20]
                 selected = {
-                    "dataset_id": uuid.uuid4().hex[:20],
+                    "dataset_id": initial_id,
                     "base_name": base_name,
                     "active_path": str(base_path.resolve()),
                     "source_anchor": source_anchor,

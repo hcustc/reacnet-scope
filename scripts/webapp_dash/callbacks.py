@@ -3105,6 +3105,7 @@ def register_callbacks(app: Any) -> None:
         Input("dataset-browser-candidate", "data"),
         Input("app-store", "data"),
         Input("recent-datasets", "data"),
+        Input("dataset-library", "data"),
         Input("data-prep-cancel-result", "data"),
         State("preparation-task-snapshot", "data"),
         prevent_initial_call=True,
@@ -3114,6 +3115,7 @@ def register_callbacks(app: Any) -> None:
         candidate,
         app_store,
         recent_records,
+        library_records,
         _task_action_result,
         previous_tasks,
     ):
@@ -3121,6 +3123,7 @@ def register_callbacks(app: Any) -> None:
             candidate if isinstance(candidate, dict) else {},
             app_store if isinstance(app_store, dict) else {},
             *(recent_records if isinstance(recent_records, list) else []),
+            *(library_records if isinstance(library_records, list) else []),
             *(previous_tasks if isinstance(previous_tasks, list) else []),
         ]
         tasks = svc.list_preparation_tasks(targets)
@@ -3170,6 +3173,7 @@ def register_callbacks(app: Any) -> None:
         Output("preparation-task-refresh", "disabled"),
         Input("preparation-task-snapshot", "data"),
         Input("import-auto-request", "data"),
+        Input("library-build-request", "data"),
         Input("data-prep-event-btn", "n_clicks"),
         Input("data-prep-trajectory-btn", "n_clicks"),
         Input("data-prep-composition-btn", "n_clicks"),
@@ -3178,12 +3182,14 @@ def register_callbacks(app: Any) -> None:
     def _toggle_preparation_task_refresh(
         task_snapshot,
         _auto_request,
+        _library_request,
         _event_clicks,
         _trajectory_clicks,
         _composition_clicks,
     ):
         if ctx.triggered_id in {
             "import-auto-request",
+            "library-build-request",
             "data-prep-event-btn",
             "data-prep-trajectory-btn",
             "data-prep-composition-btn",
