@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from reacnet_scope import services as svc
+from reacnet_scope import dir_browser
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
 from reacnet_scope.queries import exact_mass_cached
 from reacnet_scope.trajectory import save_timestep_ps
@@ -89,6 +90,17 @@ def test_comparison_catalog_limits_options_and_searches_exact_species(tmp_path, 
     assert not svc.species_compare_target_exists(species, "N")
     assert len(svc.species_compare_catalog(species)["options"]) == 120
 
+    rendered = _post_callback(
+        create_app().server.test_client(),
+        "species-compare-sources.children",
+        "species-compare-sources-store.data",
+        {"species-compare-sources-store": [_entry(species, "many", "C" * 120)]},
+    )
+    target = _find_pattern_component(rendered["species-compare-sources"]["children"], "species-compare-target")
+    assert len(target["props"]["options"]) <= 51
+    assert target["props"]["value"] == "C" * 120
+
+
 def test_comparison_search_reuses_formula_and_mass_lookup_but_selects_exact_species(tmp_path, monkeypatch):
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
     species = _source(tmp_path, "isomers", ["Timestep 0: CCO 3 COC 2 O 1"])
@@ -109,6 +121,32 @@ def test_comparison_search_reuses_formula_and_mass_lookup_but_selects_exact_spec
     unprepared = tmp_path / "unprepared.species"
     unprepared.write_text("Timestep 0: CCO 1\n", encoding="utf-8")
     assert svc.search_species_compare_targets(str(unprepared), "C2O", kind="formula")["status"] == "missing_index"
+
+
+def test_managed_collection_uses_registered_species_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    species = _source(tmp_path, "collection-source", ["Timestep 0: C 1"])
+    candidate = svc.collection_candidate({"species": species}, "collection")
+    svc.commit_file_collection(svc.validate_file_collection_candidate(candidate))
+    base = candidate["base"]
+    managed = {"datasets": [{"id": base, "base": base, "label": "collection"}]}
+    client = create_app().server.test_client()
+
+    options = _post_callback(
+        client, "species-compare-managed.options", "batch-managed-store.data",
+        {"batch-managed-store": managed},
+        {"species-compare-sources-store": []},
+    )
+    assert "丰度索引可用" in options["species-compare-managed"]["options"][0]["label"]
+
+    selected = _post_callback(
+        client, "species-compare-sources-store.data", "species-compare-managed.value",
+        {"species-compare-managed": [base],
+         '{"path":["ALL"],"type":"species-compare-remove"}': []},
+        {"batch-managed-store": managed, "species-compare-sources-store": []},
+    )
+    assert selected["species-compare-sources-store"]["data"][0]["species_file"] == species
 
 
 def test_time_conversion_is_per_source_and_query_replacement_has_no_old_curve(tmp_path, monkeypatch):
@@ -213,6 +251,96 @@ def _find_pattern_component(node, component_type):
             found = _find_pattern_component(value, component_type)
             if found is not None:
                 return found
+
+
+def test_comparison_page_shows_running_index_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    folder = tmp_path / "run-A"
+    folder.mkdir()
+    (folder / "run.reactionabcd").write_text("1 CCO->COC\n")
+    species = folder / "run.species"
+    species.write_text("Timestep 0: CCO 1\n")
+    entry = svc.inspect_dataset_folders([str(folder)])["entries"][0]
+    revision = svc.validate_dataset_candidate(entry["folder"], entry["base"])["source_revision"]
+    source = {"species_file": str(species), "dataset_id": entry["dataset_id"],
+              "source_origin": "managed"}
+    monkeypatch.setattr(svc, "dataset_preparation_status", lambda *_args, **_kwargs: {
+        "dataset_id": entry["dataset_id"],
+        "composition": {
+            "state": "building", "source_available": True,
+            "task": {"state": "running", "progress": 0.3, "progress_trusted": True,
+                     "matches_current_revision": True},
+        },
+    })
+    client = create_app().server.test_client()
+    dependency = next(item for item in client.get("/_dash-dependencies").get_json()
+                      if "species-compare-index-status" in item["output"])
+    types = (
+        "species-compare-index-status", "species-compare-index-badge",
+        "species-compare-index-badge", "species-compare-prepare",
+        "species-compare-prepare", "species-compare-prepare",
+        "species-compare-cancel", "species-compare-cancel",
+    )
+    properties = ("children", "children", "color", "children", "disabled",
+                  "style", "disabled", "style")
+    ids = [{"type": kind, "path": str(species)} for kind in types]
+    outputs = [[{"id": component_id, "property": prop}]
+               for component_id, prop in zip(ids, properties)]
+    outputs.append({"id": "species-compare-catalog-store", "property": "data"})
+    input_values = {
+        "species-compare-sources-store": [source],
+        "batch-managed-store": {"datasets": [{**entry, "id": entry["base"]}]},
+        "species-compare-index-refresh": 1,
+    }
+    state_values = {
+        "species-compare-catalog-store": {},
+    }
+    for component_id in ids:
+        state_values[component_id["type"]] = [component_id]
+
+    def value(item, values):
+        name = item["id"]
+        for kind in (*types, "species-compare-prepare-request", "species-compare-prepare-result"):
+            if f'"type":"{kind}"' in name:
+                return values.get(kind, [])
+        return values.get(name)
+
+    response = client.post("/_dash-update-component", json={
+        "output": dependency["output"], "outputs": outputs,
+        "changedPropIds": ["species-compare-index-refresh.n_intervals"],
+        "inputs": [{**item, "value": value(item, input_values)}
+                   for item in dependency["inputs"]],
+        "state": [{**item, "value": value(item, state_values)}
+                  for item in dependency["state"]],
+    })
+    assert response.status_code == 200, response.get_data(as_text=True)
+    body = response.get_json()["response"]
+    status_id = json.dumps(ids[0], sort_keys=True, separators=(",", ":"))
+    shown = body[status_id]["children"]
+    progress = next(item for item in shown if item["props"].get("role") == "progressbar")
+    assert progress["props"]["aria-valuenow"] == 30
+    prepare_id = json.dumps(ids[3], sort_keys=True, separators=(",", ":"))
+    cancel_id = json.dumps(ids[6], sort_keys=True, separators=(",", ":"))
+    assert body[prepare_id]["disabled"] is True
+    assert body[cancel_id]["disabled"] is False
+
+    species.write_text("Timestep 0: CCO 2\n")
+    request = {**entry, "path": str(species), "kind": "composition", "token": "old"}
+    input_values["species-compare-prepare-request"] = [request]
+    input_values["species-compare-prepare-result"] = [
+        {**request, "source_revision": revision, "ok": True, "message": "丰度索引已就绪。"}
+    ]
+    stale = client.post("/_dash-update-component", json={
+        "output": dependency["output"], "outputs": outputs,
+        "changedPropIds": ['{"path":["ALL"],"type":"species-compare-prepare-result"}.data'],
+        "inputs": [{**item, "value": value(item, input_values)}
+                   for item in dependency["inputs"]],
+        "state": [{**item, "value": value(item, state_values)}
+                  for item in dependency["state"]],
+    })
+    assert stale.status_code == 200, stale.get_data(as_text=True)
+    assert "丰度索引已就绪" not in str(stale.get_json()["response"][status_id]["children"])
     return None
 
 
@@ -481,9 +609,9 @@ def test_evolution_handoff_adds_current_source_and_exact_species(tmp_path):
 def test_comparison_pages_belong_to_their_analysis_workspaces():
     from scripts.webapp_dash.navigation import PAGE_WORKSPACES
     client = create_app().server.test_client()
-    assert PAGE_WORKSPACES['batch-compare'] == 'species'
+    assert PAGE_WORKSPACES['batch-compare'] == 'batch-compare'
     assert PAGE_WORKSPACES['reaction-compare'] == 'reactions'
-    for page, nav in [('batch-compare', 'species'), ('reaction-compare', 'reactions')]:
+    for page, nav in [('batch-compare', 'batch-compare'), ('reaction-compare', 'reactions')]:
         response = _post_callback(client, 'page-title.children@', 'page-store.data',
                                   {'page-store': {'page': page}})
         assert response[f'page-{page}']['className'].endswith(' active')

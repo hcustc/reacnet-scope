@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import uuid
 import json
-from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
+import math
+from dash import ALL, MATCH, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from reacnet_scope import services as svc
+from reacnet_scope.indexes import IndexBuildInProgressError
 
 
 _INDEX_KINDS = (
@@ -33,7 +35,9 @@ def _build_library_index(request):
     kind = str(request.get('kind') or '')
     if kind not in _INDEX_KEYS:
         raise svc.ServiceError('无效准备能力。', reason='invalid_preparation_kind')
-    _verified_library_target(request)
+    validation = _verified_library_target(request)
+    if request.get('source_revision') and not svc.is_same_dataset_revision(request, validation):
+        raise svc.ServiceError('来源文件已变化，请重新选择该来源。', reason='source_revision_changed')
     result = svc.prepare_dataset_workspace(
         request['folder'], base=request['base'], kind=kind,
         expected_dataset_id=request['dataset_id'],
@@ -59,12 +63,17 @@ def _library_index_control(entry, kind, item, request, result, cancel_result):
         and request.get('token') != (result or {}).get('token')
     )
     progress = task.get('progress') if task.get('progress_trusted') else None
+    progress_percent = (
+        max(0, min(100, round(float(progress) * 100)))
+        if isinstance(progress, (int, float)) and not isinstance(progress, bool)
+        and math.isfinite(float(progress)) else None
+    )
     if not source_available:
         state_text = '缺少源文件'
     elif active_task:
         state_text = (
-            f'准备中 · {float(progress) * 100:.0f}%'
-            if isinstance(progress, (int, float)) else '准备中'
+            f'准备中 · {progress_percent}%'
+            if progress_percent is not None else '准备中'
         )
         if task_state == 'cancel_requested':
             state_text = '正在取消'
@@ -83,17 +92,37 @@ def _library_index_control(entry, kind, item, request, result, cancel_result):
         state_text = '正在启动准备任务'
 
     controls = [html.Span(state_text, className=f'rs-index-state is-{state}')]
-    if source_available and state != 'ready':
-        action = (
-            '重新构建' if state in {'stale', 'invalid'}
-            else '续建索引' if task_state in {'interrupted', 'canceled', 'failed'}
-            else '准备索引'
-        )
-        controls.append(dbc.Button(
-            action,
-            id={'type': 'library-build-index', 'base': base, 'kind': kind},
-            n_clicks=0, color='secondary', outline=True, size='sm',
-            disabled=active_task or pending,
+    action = (
+        '重新构建' if state in {'stale', 'invalid'}
+        else '续建索引' if task_state in {'interrupted', 'canceled', 'failed'}
+        else '准备索引'
+    )
+    controls.append(dbc.Button(
+        action,
+        id={'type': 'library-build-index', 'base': base, 'kind': kind},
+        n_clicks=0, color='secondary', outline=True, size='sm',
+        disabled=active_task or pending or not source_available or state == 'ready',
+        style={'display': 'none'} if not source_available or state == 'ready' else None,
+    ))
+    if active_task or pending:
+        bar_label = '正在取消索引准备' if task_state == 'cancel_requested' else '索引准备进度'
+        known_progress = active_task and progress_percent is not None
+        bar_attributes = {
+            'role': 'progressbar',
+            'aria-label': bar_label if known_progress else f'{bar_label}，进度未知',
+            'aria-valuemin': 0,
+            'aria-valuemax': 100,
+        }
+        if known_progress:
+            bar_attributes['aria-valuenow'] = progress_percent
+        controls.append(html.Div(
+            html.Div(
+                className='rs-library-index-progress-fill',
+                style={'width': f'{progress_percent}%'} if known_progress else None,
+            ),
+            className=('rs-library-index-progress' if known_progress
+                       else 'rs-library-index-progress is-indeterminate'),
+            **bar_attributes,
         ))
     if active_task:
         controls.append(dbc.Button(
@@ -146,20 +175,19 @@ def stores():
         dcc.Store(id='library-request'),
         dcc.Store(id='library-result'),
         dcc.Store(id='library-seen-current'),
-        dcc.Store(id='library-build-request'),
-        dcc.Store(id='library-build-result'),
         dcc.Store(id='library-cancel-result'),
-        dcc.Interval(id='library-index-refresh', interval=5000, disabled=True),
+        dcc.Store(id='library-index-refresh', data=0),
     ])
 
 
 def selector():
+    # Hidden selector kept for callback dependencies (library-use trigger from list)
     return html.Div([
         html.Label('选择已导入数据', htmlFor='library-select', className='visually-hidden'),
         dcc.Dropdown(id='library-select', options=[], placeholder='选择已导入的 RNG 文件夹', clearable=False),
         dbc.Button('使用', id='library-use', color='primary', size='sm', disabled=True),
         html.Span(id='library-switch-status', role='status'),
-    ], className='rs-library-selector')
+    ], style={'display': 'none'})
 
 
 def import_panel():
@@ -180,18 +208,6 @@ def import_panel():
 
 
 def register_callbacks(app):
-    @app.callback(Output('library-view', 'value'),
-                  Input('nav-data-management', 'n_clicks'), Input('open-data-modal', 'n_clicks'),
-                  Input('data-browser-index-btn', 'n_clicks'), Input('page-capability-manage-btn', 'n_clicks'),
-                  Input('cp-prepare', 'n_clicks'), prevent_initial_call=True)
-    def choose_view(*_):
-        return 'library' if ctx.triggered_id == 'nav-data-management' else 'tasks'
-
-    @app.callback(Output('library-management-panel', 'style'), Output('library-tasks-panel', 'style'),
-                  Input('library-view', 'value'))
-    def show_view(view):
-        return ({'display': 'none'}, {}) if view == 'tasks' else ({}, {'display': 'none'})
-
     @app.callback(Output('library-management-list', 'children'),
                   Input('dataset-library', 'data'), State('app-store', 'data'))
     def management(records, current):
@@ -204,37 +220,107 @@ def register_callbacks(app):
                     html.Strong(entry['label']),
                     html.Small(entry['folder']),
                     html.Span('当前使用' if active else '已导入',
-                              id={'type': 'library-entry-current', 'base': entry['base']})
+                              id={'type': 'library-entry-current', 'base': entry['base']},
+                              className=('rs-library-entry-status is-current' if active
+                                         else 'rs-library-entry-status'))
                 ]),
                 html.Div([
                     html.Div([
                         html.Span(label, className='rs-index-status-label'),
-                        html.Span('正在检查…',
-                                  id={'type': 'library-index-control', 'base': entry['base'], 'kind': kind},
-                                  className='rs-library-index-control'),
+                        html.Div([
+                            html.Div('正在检查…',
+                                     id={'type': 'library-index-control', 'base': entry['base'], 'kind': kind},
+                                     className='rs-library-index-state'),
+                            dbc.Button('准备索引',
+                                       id={'type': 'library-build-index', 'base': entry['base'], 'kind': kind},
+                                       n_clicks=0, color='secondary', outline=True, size='sm',
+                                       disabled=True, style={'display': 'none'}),
+                            dbc.Button('取消准备',
+                                       id={'type': 'library-cancel-index', 'base': entry['base'], 'kind': kind},
+                                       n_clicks=0, color='secondary', outline=True, size='sm',
+                                       disabled=True, style={'display': 'none'}),
+                        ], className='rs-library-index-control'),
+                        dcc.Store(id={'type': 'library-build-request', 'base': entry['base'], 'kind': kind}),
+                        dcc.Store(id={'type': 'library-build-result', 'base': entry['base'], 'kind': kind}),
                     ], className='rs-library-index-row')
                     for kind, label, _key in _INDEX_KINDS
                 ], className='rs-library-index-status'),
-                dbc.Button('使用此RNG 数据', id={'type': 'library-use-entry', 'base': entry['base']},
-                           n_clicks=0, color='primary', outline=True),
+                html.Div([
+                    dbc.Button('切换到此数据', id={'type': 'library-use-entry', 'base': entry['base']},
+                               n_clicks=0, color='primary', outline=True,
+                               style={'display': 'none'} if active else None),
+                    html.Span(id={'type': 'library-switch-feedback', 'base': entry['base']},
+                              className='rs-library-switch-feedback', role='status',
+                              **{'aria-live': 'polite'}),
+                ], className='rs-library-use-control'),
                 dbc.Button('移出列表', id={'type': 'library-forget-entry', 'base': entry['base']},
-                           n_clicks=0, color='link'),
+                           n_clicks=0, color='link', disabled=active),
             ], className='rs-library-item'))
-        return rows or html.P('尚未导入RNG 数据。点击“添加RNG 数据”导入 RNG 文件夹。')
+        return rows or html.P('尚未导入RNG 数据。点击”添加数据”导入 RNG 文件夹。')
 
     @app.callback(Output({'type': 'library-entry-current', 'base': ALL}, 'children'),
+                  Output({'type': 'library-entry-current', 'base': ALL}, 'className'),
                   Input('app-store', 'data'), Input({'type': 'library-entry-current', 'base': ALL}, 'id'))
     def current_entry(current, ids):
-        return ['当前使用' if item['base'] == (current or {}).get('base') else '已导入' for item in ids or []]
+        active_base = (current or {}).get('base')
+        active = [item['base'] == active_base for item in ids or []]
+        return (['当前使用' if selected else '已导入' for selected in active],
+                ['rs-library-entry-status is-current' if selected
+                 else 'rs-library-entry-status' for selected in active])
 
-    @app.callback(Output('library-select', 'value'), Output('library-use', 'n_clicks'),
-                  Input({'type': 'library-use-entry', 'base': ALL}, 'n_clicks'),
-                  State('library-use', 'n_clicks'), prevent_initial_call=True)
-    def use_entry(_clicks, previous):
-        trigger = ctx.triggered_id
-        if not isinstance(trigger, dict) or not _clicked(trigger):
-            raise PreventUpdate
-        return trigger['base'], (previous or 0) + 1
+    @app.callback(
+        Output({'type': 'library-use-entry', 'base': ALL}, 'children'),
+        Output({'type': 'library-use-entry', 'base': ALL}, 'disabled'),
+        Output({'type': 'library-use-entry', 'base': ALL}, 'style'),
+        Output({'type': 'library-switch-feedback', 'base': ALL}, 'children'),
+        Output({'type': 'library-forget-entry', 'base': ALL}, 'disabled'),
+        Input('dataset-switch-transaction', 'data'),
+        Input('app-store', 'data'),
+        Input({'type': 'library-use-entry', 'base': ALL}, 'n_clicks'),
+        Input({'type': 'library-use-entry', 'base': ALL}, 'id'),
+    )
+    def entry_switch_state(transaction, current, _clicks, ids):
+        request = transaction if isinstance(transaction, dict) else {}
+        active_base = str((current or {}).get('base') or '')
+        target_base = str((request.get('candidate') or {}).get('base') or '')
+        state = str(request.get('state') or '')
+        pending_base = ''
+        if isinstance(ctx.triggered_id, dict) and ctx.triggered_id.get('type') == 'library-use-entry':
+            if _clicked(ctx.triggered_id):
+                pending_base = str(ctx.triggered_id.get('base') or '')
+        applying = state == 'succeeded' and target_base != active_base
+        busy = bool(pending_base or state == 'validating' or applying)
+        labels, disabled, styles, feedback, forget_disabled = [], [], [], [], []
+        for item in ids or []:
+            base = str(item['base'])
+            active = bool(active_base and base == active_base)
+            selected = base == (pending_base or target_base)
+            labels.append('正在加载…' if selected and busy else '切换到此数据')
+            disabled.append(active or busy)
+            styles.append({'display': 'none'} if active else {})
+            forget_disabled.append(active or busy)
+            if selected and busy:
+                message = ('正在发起切换…' if pending_base else
+                           '正在检查RNG 数据…' if state == 'validating' else
+                           '正在载入分析上下文…')
+                feedback.append(html.Span([
+                    html.Span(className='rs-library-switch-spinner', **{'aria-hidden': 'true'}),
+                    message,
+                ]))
+            elif selected and state == 'failed':
+                feedback.append(html.Span(
+                    str(request.get('message') or '切换失败，请重试。'),
+                    className='rs-library-switch-error',
+                ))
+            elif selected and active and state == 'succeeded':
+                feedback.append(html.Span([
+                    html.Span('✓', className='rs-library-success-icon',
+                              **{'aria-hidden': 'true'}),
+                    '加载成功，已设为当前 RNG 数据',
+                ], className='rs-library-switch-success'))
+            else:
+                feedback.append('')
+        return labels, disabled, styles, feedback, forget_disabled
 
     @app.callback(Output('library-draft', 'data'), Output('library-draft-feedback', 'children'),
                   Input('library-add-current', 'n_clicks'), Input('library-add-paths', 'n_clicks'),
@@ -357,31 +443,41 @@ def register_callbacks(app):
         valid = any(e['base'] == selected for e in svc.normalise_dataset_library(records))
         return not valid or busy or any(operations or []), message
 
-    @app.callback(Output('library-index-refresh', 'disabled'),
-                  Input('page-store', 'data'), Input('library-view', 'value'))
-    def refresh_library_only_when_visible(page_store, view):
-        return (page_store or {}).get('page') != 'data-management' or view != 'library'
-
     @app.callback(
         Output({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
+        Output({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'children'),
+        Output({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'disabled'),
+        Output({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'style'),
+        Output({'type': 'library-cancel-index', 'base': ALL, 'kind': ALL}, 'disabled'),
+        Output({'type': 'library-cancel-index', 'base': ALL, 'kind': ALL}, 'style'),
         Input('dataset-library', 'data'),
-        Input('library-index-refresh', 'n_intervals'),
-        Input('library-build-request', 'data'),
-        Input('library-build-result', 'data'),
-        Input('library-cancel-result', 'data'),
+        Input('library-index-refresh', 'data'),
         Input({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'id'),
+        State({'type': 'library-build-request', 'base': ALL, 'kind': ALL}, 'data'),
+        State({'type': 'library-build-result', 'base': ALL, 'kind': ALL}, 'data'),
+        State('library-cancel-result', 'data'),
         State({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),
+        State({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'id'),
+        State({'type': 'library-cancel-index', 'base': ALL, 'kind': ALL}, 'id'),
     )
-    def update_index_status(records, _interval, request, result, cancel_result, ids, previous):
+    def update_index_status(records, _refresh, ids, requests, results,
+                            cancel_result, previous, build_ids, cancel_ids):
         """Read published indexes and persisted task progress for visible entries."""
         entries = {entry['base']: entry for entry in svc.normalise_dataset_library(records)}
+        requests_by_key = {(item['base'], item['kind']): item for item in requests or []
+                           if isinstance(item, dict) and item.get('base') and item.get('kind')}
+        results_by_key = {(item['base'], item['kind']): item for item in results or []
+                          if isinstance(item, dict) and item.get('base') and item.get('kind')}
         statuses = {}
         rendered = []
+        button_state = {}
         for control_id in ids or []:
             base, kind = control_id['base'], control_id['kind']
+            key = (base, kind)
             entry = entries.get(base)
             if entry is None:
                 rendered.append('已移出列表')
+                button_state[key] = ('准备索引', True, {'display': 'none'}, True, {'display': 'none'})
                 continue
             if base not in statuses:
                 try:
@@ -391,29 +487,46 @@ def register_callbacks(app):
                     if str(status.get('dataset_id') or '') != str(entry.get('dataset_id') or ''):
                         raise svc.ServiceError('RNG 数据身份已变化，请重新导入。', reason='dataset_identity_changed')
                     statuses[base] = status
-                except svc.ServiceError as exc:
+                except (svc.ServiceError, OSError, IndexBuildInProgressError) as exc:
                     statuses[base] = exc
             status = statuses[base]
-            if isinstance(status, svc.ServiceError):
-                rendered.append(f'状态不可用：{status.message}')
+            if isinstance(status, (svc.ServiceError, OSError, IndexBuildInProgressError)):
+                rendered.append(html.Span(f'状态不可用：{status}', role='status'))
+                button_state[key] = ('准备索引', True, {'display': 'none'}, True, {'display': 'none'})
                 continue
             controls = _library_index_control(
                 entry, kind, status.get(_INDEX_KEYS[kind]) or {},
-                request, result, cancel_result,
+                requests_by_key.get(key), results_by_key.get(key), cancel_result,
             )
+            content = [item for item in controls if not getattr(item, 'id', None)]
+            build = next(item for item in controls
+                         if (getattr(item, 'id', None) or {}).get('type') == 'library-build-index')
+            cancel = next((item for item in controls
+                           if (getattr(item, 'id', None) or {}).get('type') == 'library-cancel-index'), None)
+            button_state[key] = (build.children, build.disabled, build.style,
+                                 cancel.disabled if cancel else True,
+                                 getattr(cancel, 'style', None) if cancel else {'display': 'none'})
             prior = previous[len(rendered)] if previous and len(previous) > len(rendered) else None
-            rendered.append(no_update if _control_snapshot(controls) == _control_snapshot(prior)
-                            else controls)
-        return rendered
+            rendered.append(no_update if _control_snapshot(content) == _control_snapshot(prior)
+                            else content)
+        hidden = ('准备索引', True, {'display': 'none'}, True, {'display': 'none'})
+        build_state = [button_state.get((item['base'], item['kind']), hidden) for item in build_ids or []]
+        cancel_state = [button_state.get((item['base'], item['kind']), hidden) for item in cancel_ids or []]
+        return (rendered,
+                [item[0] for item in build_state],
+                [item[1] for item in build_state],
+                [item[2] for item in build_state],
+                [item[3] for item in cancel_state],
+                [item[4] for item in cancel_state])
 
     @app.callback(
-        Output('library-build-request', 'data'),
-        Input({'type': 'library-build-index', 'base': ALL, 'kind': ALL}, 'n_clicks'),
+        Output({'type': 'library-build-request', 'base': MATCH, 'kind': MATCH}, 'data'),
+        Input({'type': 'library-build-index', 'base': MATCH, 'kind': MATCH}, 'n_clicks'),
         State('dataset-library', 'data'), prevent_initial_call=True,
     )
-    def request_library_index(_clicks, records):
+    def request_library_index(clicks, records):
         trigger = ctx.triggered_id
-        if not isinstance(trigger, dict) or not _clicked(trigger):
+        if not isinstance(trigger, dict) or not clicks:
             raise PreventUpdate
         entry = next((item for item in svc.normalise_dataset_library(records)
                       if item['base'] == trigger['base']), None)
@@ -422,7 +535,8 @@ def register_callbacks(app):
         return {**entry, 'kind': trigger['kind'], 'token': uuid.uuid4().hex}
 
     @app.callback(
-        Output('library-build-result', 'data'), Input('library-build-request', 'data'),
+        Output({'type': 'library-build-result', 'base': MATCH, 'kind': MATCH}, 'data'),
+        Input({'type': 'library-build-request', 'base': MATCH, 'kind': MATCH}, 'data'),
         background=True, prevent_initial_call=True,
     )
     def build_library_index(request):
@@ -430,8 +544,8 @@ def register_callbacks(app):
             raise PreventUpdate
         try:
             result = _build_library_index(request)
-        except svc.ServiceError as exc:
-            return {**request, 'ok': False, 'message': exc.message}
+        except (svc.ServiceError, OSError, IndexBuildInProgressError) as exc:
+            return {**request, 'ok': False, 'message': str(exc)}
         message = (
             '同类任务已在运行。' if result.get('existing_task')
             else '任务已取消，检查点已保留。' if result.get('canceled')
@@ -466,9 +580,9 @@ def register_callbacks(app):
 
 def management_panel():
     return html.Section([
-        html.Div([html.H3('已导入RNG 数据'),
-                  dbc.Button('添加RNG 数据', id='library-add-more', color='primary')],
+        html.Div([html.H3('RNG 数据管理'),
+                  dbc.Button('添加数据', id='library-add-more', color='primary')],
                  className='rs-library-heading'),
-        html.P('添加 RNG 文件夹并选择一个RNG 数据用于分析。移出列表不会删除原始文件。'),
+        html.P('切换会更新当前分析数据；移出列表不会删除原始文件。'),
         html.Div(id='library-management-list'),
-    ], id='library-management-panel', className='rs-card rs-library-management')
+    ], id='library-management-panel', className='rs-library-management')

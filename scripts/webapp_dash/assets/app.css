@@ -3894,6 +3894,29 @@ summary:focus-visible,
   align-items: stretch;
   max-width: 920px;
 }
+#compare-species-panel.rs-species-compare-workspace {
+  display: grid;
+  grid-template-columns: minmax(420px, 45%) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.rs-species-compare-workspace > .rs-card { min-width: 0; }
+.rs-compare-results-card { position: sticky; top: 12px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.rs-compare-results-heading { display: grid; gap: 2px; margin-bottom: 8px; }
+.rs-compare-source-list { max-height: 60vh; overflow: auto; margin-top: 10px; padding-right: 3px; }
+.rs-compare-source-picker, .rs-compare-source-picker > .rs-grow { width: 100%; max-width: none; }
+.rs-compare-section-label { margin: 12px 0 7px; font-size: var(--rs-font-sm); font-weight: 700; color: var(--rs-text); }
+.rs-compare-axis { flex: 1 1 150px; min-width: 150px; }
+.rs-compare-search-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) 72px auto; gap: 6px; align-items: center; }
+.rs-compare-search-details { margin-bottom: 6px; }
+.rs-compare-search-details > summary { padding: 2px 0; color: var(--rs-accent); font-size: var(--rs-font-xs); font-weight: 600; cursor: pointer; }
+.rs-compare-search-details[open] > summary { margin-bottom: 6px; }
+.rs-compare-query-input, .rs-compare-mass-tol { width: 100%; min-width: 0; }
+.rs-compare-mass-field { display: grid; margin: 0; }
+.rs-compare-mass-caption { color: var(--rs-muted); font-size: 10px; line-height: 1; }
+.rs-compare-search-status { margin: 5px 0; color: var(--rs-muted); font-size: var(--rs-font-xs); }
+.rs-compare-summary { margin-top: 10px; }
+.rs-compare-summary .ag-theme-alpine { min-width: 0; }
 .rs-compare-manual-source {
   margin-top: 8px;
   border: 1px solid var(--rs-border);
@@ -3921,8 +3944,8 @@ summary:focus-visible,
   text-align: center;
 }
 .rs-compare-source-card {
-  margin-bottom: 10px;
-  padding: 12px 14px;
+  margin-bottom: 7px;
+  padding: 9px 11px;
   border: 1px solid var(--rs-border);
   border-radius: 10px;
   background: #fff;
@@ -3949,14 +3972,13 @@ summary:focus-visible,
   font-size: var(--rs-font-sm);
 }
 .rs-compare-source-main {
-  margin-top: 9px;
+  margin-top: 7px;
 }
 .rs-compare-target-field {
   display: grid;
-  grid-template-columns: 165px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 94px minmax(0, 1fr);
+  gap: 6px;
   align-items: center;
-  max-width: 900px;
 }
 .rs-compare-field-label {
   margin: 0;
@@ -3974,12 +3996,12 @@ summary:focus-visible,
   width: 100%;
 }
 .rs-compare-source-status {
-  margin-top: 7px;
+  margin-top: 4px;
   color: var(--rs-muted);
   font-size: var(--rs-font-sm);
 }
 .rs-compare-source-details {
-  margin-top: 8px;
+  margin-top: 4px;
   border-top: 1px solid var(--rs-border);
 }
 .rs-compare-source-metadata {
@@ -4005,9 +4027,10 @@ summary:focus-visible,
 }
 .rs-compare-actions {
   align-items: end;
+  flex-wrap: wrap;
 }
 .rs-compare-readiness {
-  margin: 8px 0 12px;
+  margin: 8px 0 0;
 }
 .rs-batch-card-heading {
   display: flex;
@@ -4103,6 +4126,20 @@ summary:focus-visible,
   line-height: 1.65;
 }
 
+@media (max-width: 1280px) and (min-width: 1101px) {
+#compare-species-panel.rs-species-compare-workspace { grid-template-columns: minmax(360px, 40%) minmax(0, 1fr); }
+.rs-compare-source-list { max-height: 56vh; }
+}
+@media (max-width: 1100px) {
+#compare-species-panel.rs-species-compare-workspace { grid-template-columns: minmax(0, 1fr); }
+.rs-compare-results-card { position: static; max-height: none; overflow: visible; }
+.rs-compare-source-list { max-height: 52vh; }
+}
+@media (max-width: 1200px) and (min-width: 901px) {
+.rs-compare-source-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 @media (max-width: 900px) {
 .rs-compare-heading-row {
     align-items: flex-start;
@@ -4127,6 +4164,10 @@ summary:focus-visible,
 .rs-batch-field-label {
     flex-basis: auto;
   }
+}
+@media (max-width: 560px) {
+.rs-compare-search-row { grid-template-columns: 112px minmax(0, 1fr); }
+.rs-compare-search-row > button { width: 100%; }
 }
 
 /* ── Data management desktop redesign ───────────────────────────── */
@@ -4412,10 +4453,6 @@ summary:focus-visible,
   color: var(--rs-muted);
   font-size: var(--rs-font-sm);
 }
-.rs-empty-dataset-action {
-  display: none !important;
-  width: fit-content;
-}
 .rs-data-primary-analysis-action {
   display: inline-flex;
 }
@@ -4436,9 +4473,6 @@ summary:focus-visible,
 #data-overview-view:has(.rs-current-dataset-empty) #data-cache-management {
   display: none;
 }
-.rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-empty-dataset-action {
-  display: inline-flex !important;
-}
 .rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-change-dataset-action,
 .rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-data-primary-analysis-action,
 .rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-current-refresh-action {
@@ -4447,10 +4481,10 @@ summary:focus-visible,
 .rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-data-summary-main {
   display: grid;
   max-width: 720px;
-  min-height: 230px;
+  min-height: 110px;
   align-content: center;
   justify-self: center;
-  padding: 34px 28px;
+  padding: 18px 28px;
   text-align: center;
 }
 .rs-data-summary-panel:has(.rs-current-dataset-empty) .rs-data-summary-heading,

@@ -129,7 +129,7 @@ def test_validation_result_is_resolved_by_a_distinct_dash_callback() -> None:
     assert "dataset-switch-transaction" not in worker_inputs
 
 
-def test_explicit_apply_starts_visible_background_validation(monkeypatch) -> None:
+def test_explicit_apply_starts_visible_validation(monkeypatch) -> None:
     candidate = {"folder": "/data", "base": "/data/new", "label": "new"}
     expected = {
         "state": "validating",
@@ -161,7 +161,7 @@ def test_explicit_apply_starts_visible_background_validation(monkeypatch) -> Non
         for item in client.get("/_dash-dependencies").get_json()
         if item.get("output") == "dataset-switch-validation.data"
     )
-    assert validation_dependency.get("background") is not None
+    assert validation_dependency.get("background") is None
     assert validation_dependency["inputs"] == [
         {"id": "dataset-switch-request", "property": "data"}
     ]
@@ -715,49 +715,25 @@ def test_session_restore_failure_clears_only_current_context(monkeypatch) -> Non
     assert "recent-datasets" not in result
 
 
-def test_missing_restored_dataset_routes_analysis_page_to_data_workspace() -> None:
+def test_empty_session_restore_does_not_reset_fresh_result_stores() -> None:
     client = create_app().server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "dataset-switch-navigation.data" in str(item.get("output") or "")
-        and any(
-            input_item.get("id") == "dataset-restore-result"
-            for input_item in item.get("inputs") or []
-        )
-    )
-
     response = client.post(
         "/_dash-update-component",
-        json={
-            "output": dependency["output"],
-            "outputs": {
-                "id": "dataset-switch-navigation",
-                "property": "data",
-            },
-            "changedPropIds": ["dataset-restore-result.data"],
-            "inputs": [
-                {
-                    "id": "dataset-restore-result",
-                    "property": "data",
-                    "value": {"state": "none"},
-                }
-            ],
-            "state": [
-                {
-                    "id": "page-store",
-                    "property": "data",
-                    "value": {"page": "species"},
-                }
-            ],
-        },
+        json=_payload(
+            client,
+            output_contains="dataset-restore-result.data",
+            changed="dataset-session-restore.n_intervals",
+            inputs={"dataset-session-restore": 1},
+            states={"dataset-session-store": cb.initial_store()},
+        ),
     )
-
     assert response.status_code == 200
-    navigation = response.get_json()["response"]["dataset-switch-navigation"][
-        "data"
-    ]
-    assert navigation["page"] == "data-management"
+    result = response.get_json()["response"]
+    assert result["app-store"]["data"]["context_state"] == "none"
+    assert result["dataset-restore-result"]["data"] == {"state": "none"}
+    assert "dataset-session-store" not in result
+    assert "species-grid-store" not in result
+    assert "rxn-grid-store" not in result
 
 
 def test_revision_changed_without_candidate_has_one_primary_update_action() -> None:
