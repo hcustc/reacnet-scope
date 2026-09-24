@@ -42,7 +42,7 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
 
-Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从一个或多个精确 Species 出发，以具有 event-local dominant atom-descendant 证据的 Carried Species 连接相邻 Reaction Type；每一步至少有一次 matched Reaction Occurrence 支持局部原子传递，但不同步骤不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是排名后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
+Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作流。它在当前数据集的 MD-observed directed reaction hypergraph 上，从精确起点、朝精确终点或在两者之间搜索，以具有 event-local dominant atom-descendant 证据的 Carried Species 连接相邻 Reaction Type；每一步至少有一次 matched Reaction Occurrence 支持局部原子传递，但不同步骤不要求同一 Replicate、时间邻近、共享 Molecule Instance 或完整 Event Path。Continuous MD Support 是发现后对有限 Candidate 的独立分子谱系验证，不决定 Candidate 是否存在。
 
 围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它本身不递归扩展路径。
 
@@ -99,7 +99,7 @@ Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
 - 分子式反应检索只用于发现。事件、路径、批量统计和导出必须使用精确 Reaction Type。
 - 跨工具交接传递精确 SMILES、Occurrence Identity 或稳定反应键，不能只传显示文字。
 - Path Verification 必须接收按顺序排列的完整 Reaction Type；不接受只有起点、终点或路径长度的自动搜索请求。
-- Candidate Path Discovery 接收一个或多个精确起始 Species 和显式搜索限制；它不能改变 Path Verification 的输入契约。
+- Candidate Path Discovery 接收精确起点、精确终点或两者，并受显式执行预算约束；双端搜索默认不要求步数上限。它不能改变 Path Verification 的输入契约。
 
 ### 6.2 Candidate、Evidence 与 Query Result 身份
 
@@ -321,21 +321,21 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 - Discovery graph 只包含当前发布 revision 中至少有一次 normalized Reaction Occurrence 和具体 Reaction Evidence 支持的记录方向；聚合网络、推导反向或 `count=0` 不能创建方向。`count >= 1` 只表示 eligible，不代表 mechanistically significant。
 - 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。至少一个 matched Reaction Occurrence 必须证明该产物是 focal reactant 的 event-local dominant atom descendant，即与 focal reactant 具有所有产物 participant 中最大的正 atom-ID 交集。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
 - 多产物 Reaction Type 只对满足上述局部原子传递规则的 product Species 产生 carried branch；最大交集并列时分别保留。ranker 不得按分子式、结构相似度或人工类别猜测 Carried Species。不同步骤仍可来自不同事件和 Molecule Instance；这一局部规则不等于 Continuous MD Support。
-- 普通 Candidate 使用 Carried-Species-simple path；已访问 Carried Species 的 expansion 不进入普通 Candidate，而记录为可审计 cycle closure evidence。到达 `max_steps` 是正常 discovery horizon termination，不是 cycle 或 execution truncation。
-- `max_steps` 是 declarative query horizon。`max_expansions`、`max_frontier_states`、`max_candidates_examined`、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
+- 普通 Candidate 使用 Carried-Species-simple path；已访问 Carried Species 的 expansion 不进入普通 Candidate，而记录为可审计 cycle closure evidence。显式设置 `max_steps` 时，到达该上限是正常 discovery horizon termination，不是 cycle 或 execution truncation。
+- 单端探索每次只展开一步；用户可沿选中分支继续。双端搜索默认 `max_steps=null`，不得暗藏固定步数截止。用户显式指定的 `max_steps` 才是 declarative query horizon；`max_expansions`、`max_frontier_states`、`max_candidates_examined`、路线前缀数、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
 
 #### 11.5.1 Discovery modes 与完成状态
 
 - `target-constrained` 查询从 anchor Species 寻找一个或多个 target Species。只有 carried endpoint 到达 target 才形成结果；target 仅作为其他 product 出现不算到达，首次到达任一 target 后停止扩展该分支，未到达的中间状态不输出，且普通路径拒绝 `target_species == anchor_species`。
-- `exploratory` 查询不要求 target；`min_steps <= length <= max_steps` 的每个 simple prefix 都可成为 Candidate，短 Candidate 输出后仍可继续扩展。`max_steps` 不宣称 endpoint 是稳定产物或化学终点。
-- target-constrained 状态为 `found`、`not_found_within_constraints` 或 `truncated/inconclusive`。所有模式分别报告 `query_complete`、`graph_exhaustive` 和 `horizon_limited`；在完整搜索 `length <= max_steps` 后未命中只能说明约束内未找到，不能声明任意长度均不存在。
-- exploratory 输出由确定性、版本化 ranking 和 Top-K 有界化。第一版依 ADR-0015 采用按步数优先、同层按精确身份确定性展开的展示顺序，不计算综合评分。hub 邻接、frontier 和结果数预算均显式报告；它们不是化学重要性过滤。
+- 仅起点查询分页展开原方向的合格 carried transfers；仅终点查询在相同正向转移上按产物查前驱，结果与导出仍写正向 Reaction Type。二者逐步展开，重复 Carried Species 只作 cycle closure evidence，不把网络前驱说成实际分子来源。
+- 双端查询先在有界局部图中判断可达性，再从可达子图枚举 simple routes；至少一条路线被找到即可确认当前证据视图中的网络连接，但不代表备选路线查全。只有可达搜索完整且未命中，才能报告当前视图中不可达；预算截断后的无命中是 inconclusive。显式步数上限下的无命中仅针对该 horizon。
+- 双端展示数和候选检查数分开；达到展示数不停止搜索。首步分支轮流进入展示，分支内按步数展开，规则只改善不同分支的覆盖，不构成化学重要性评分。分别报告 `reachability_status`、`routes_complete`、`display_truncated`、`query_complete`、`graph_exhaustive`、`horizon_limited`、预算与消耗；无法保证未检查路线的排名。
 
 #### 11.5.2 Discovery execution boundary
 
 - 正式数据流是 `raw MD evidence → offline indexed substrate → online bounded local discovery → selective Continuous MD Support → paged evidence drill-down`。
 - Online Candidate Discovery 只读已发布的 hypergraph adjacency、aggregate metrics 和 canonical identity indexes，围绕 exact Carried Species 局部展开。
-- 目标检索先按唯一 Species 读取有界局部邻接，再在已读取子图中按到目标的最少剩余步数剪枝、枚举 simple routes。不得让汇合到同一 Species 的重复前缀反复占用邻接展开预算；不同前缀的已访问集合仍独立保留。邻接、目标探测和 frontier 均受原预算限制，路线枚举另受 `max_expansions * max_steps` 前缀预算及同一时间预算限制，截断原因保留。结果记录 `search_algorithm` 和实际前缀预算/消耗；结构身份不变。
+- 双端目标检索按唯一 Species 读取有界局部邻接，在已读取子图中用到目标的剩余距离剪枝并枚举 simple routes；不同前缀的已访问集合仍独立保留。邻接、目标探测、frontier、路线前缀和已检查候选各有显式预算，截断原因保留。仅终点的在线查询使用 product-leading 的准备期逆邻接索引，不扫描全局转移表或把边反向发布。结果记录 `search_algorithm` 和实际预算/消耗；结构身份不变。
 - 在线请求不得扫描 raw event source、加载全部 occurrences 或 continuity segments、构造全局 occurrence graph，也不得预枚举或持久化全部 Candidate Paths。
 - `reacnet_scope/event_paths.py` 当前从完整事件集合构建 occurrence graph 的 Candidate discovery 只能作为原型/兼容实现保留。正式 production endpoint 上线并完成兼容迁移前不删除；上线后不得作为默认或百万级发布路径。
 

@@ -608,9 +608,11 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
         result = svc.search_candidate_paths(
             artifacts, args.start, target=args.target, mode=args.mode,
             max_steps=args.max_steps, max_paths=args.max_paths,
+            anchor_offset=args.anchor_offset,
             quality_view=args.quality_view, return_window_frames=args.return_window_frames,
             return_basis=args.return_basis, max_expansions=args.max_expansions,
-            max_frontier=args.max_frontier,
+            max_frontier=args.max_frontier, max_prefixes=args.max_prefixes,
+            max_candidates_examined=args.max_candidates_examined,
         )
         for path in result['paths'][:args.check_top]:
             checked = svc.check_candidate_continuity(artifacts, result, path['signature_id'])
@@ -1702,20 +1704,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp_event_paths.set_defaults(func=cmd_verify_path)
 
     sp_candidate_search = sub.add_parser(
-        "candidate-search", help="查询已索引的候选路径（与 Web 第一版相同，无综合评分）",
+        "candidate-search", help="查询已索引的候选路径（与 Web 工作台共用核心搜索，无综合评分）",
     )
     sp_candidate_search.add_argument("--source", required=True, help="原生 .timeline.h5 或 .reactionevent.csv")
     sp_candidate_search.add_argument("--molecules", default="", help="可选兼容分子 CSV；须与准备索引时一致")
-    sp_candidate_search.add_argument("--start", required=True, help="精确 RNG 起始 Species 标签")
+    sp_candidate_search.add_argument("--start", default="", help="精确 RNG 起始 Species 标签；终点前驱查询可省略")
     sp_candidate_search.add_argument("--target", default="", help="精确 RNG 目标 Species 标签")
-    sp_candidate_search.add_argument("--mode", choices=["target", "explore"], default="target")
-    sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 8), default=4)
+    sp_candidate_search.add_argument("--mode", choices=["target", "explore", "reverse"], default="target")
+    sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 100), default=None,
+                                     help="可选查询步数上限；双端搜索默认不设步数上限")
     sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
+    sp_candidate_search.add_argument("--anchor-offset", type=_bounded_int("anchor-offset", 0, 1000000), default=0,
+                                     help="仅单端一步探索：跳过前 N 条候选转移")
     sp_candidate_search.add_argument("--quality-view", choices=['persistent', 'raw'], default='persistent', help='默认折叠有证据的短暂往返；raw 保留全部事件')
     sp_candidate_search.add_argument("--return-window-frames", type=_bounded_int('return-window-frames', 1, 100), default=3)
     sp_candidate_search.add_argument("--return-basis", choices=['topology', 'exact'], default='topology', help='连接关系返回或精确键级返回')
     sp_candidate_search.add_argument("--max-expansions", type=_bounded_int('max-expansions', 1, 20000), default=2000)
     sp_candidate_search.add_argument("--max-frontier", type=_bounded_int('max-frontier', 1, 20000), default=5000)
+    sp_candidate_search.add_argument("--max-prefixes", type=_bounded_int('max-prefixes', 1, 100000), default=10000)
+    sp_candidate_search.add_argument("--max-candidates-examined", type=_bounded_int('max-candidates-examined', 1, 20000), default=2000)
     sp_candidate_search.add_argument("--check-top", type=_bounded_int('check-top', 0, 10), default=0, help='独立检查前 N 条路线的连续历史，每条最多 1000 状态/5 秒')
     sp_candidate_search.add_argument("--out-json", default="")
     sp_candidate_search.add_argument("--out-csv", default="")

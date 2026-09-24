@@ -77,6 +77,8 @@ def test_formula_selects_all_exact_isomers_and_search_does_not_merge(source):
     report = svc.search_candidate_paths(source, 'COC', target='CC=O', max_steps=4)
     assert report['paths'] == []  # no reverse inference or formula bridge
     assert report['status'] == 'not_found_within_constraints'
+    assert report['reachability_status'] == 'not_found'
+    assert report['query_complete'] and report['graph_exhaustive']
 
 
 def test_counts_stoichiometry_limits_and_exports(source):
@@ -86,9 +88,14 @@ def test_counts_stoichiometry_limits_and_exports(source):
     assert report['horizon_limited'] and report['query_complete']
     rows = list(csv.DictReader(io.StringIO(svc.candidate_paths_csv(report))))
     assert all(json.loads(r['source_revision']) == report['source_revision'] for r in rows)
+    assert all(r['step_count'] == '1' and r['horizon_limited'] == 'True' for r in rows)
     limited = svc.search_candidate_paths(source, 'CCO', mode='explore', max_paths=1)
     assert not limited['query_complete'] and 'result_limit' in limited['truncation_reasons']
     assert len(limited['paths']) == 1
+    second_page = svc.search_candidate_paths(source, 'CCO', mode='explore', max_paths=1,
+                                             anchor_offset=limited['next_offset'])
+    assert second_page['previous_offset'] == 0
+    assert second_page['paths'][0]['signature_id'] != limited['paths'][0]['signature_id']
     no_result = svc.search_candidate_paths(source, 'CCO', target='CC(=O)O', max_expansions=1)
     assert not no_result['query_complete'] and no_result['status'] == 'truncated/inconclusive'
 
@@ -115,6 +122,12 @@ def test_index_query_never_reads_raw_or_aggregate_network(source, monkeypatch):
 def test_old_index_requires_explicit_rebuild_and_source_change_rejects(source):
     report = svc.search_candidate_paths(source, 'CCO', target='CC(=O)O')
     opened = EVENT_EVIDENCE_STORE.open_required(source['reactionevent'])
+    with sqlite3.connect(opened['index_path']) as con:
+        con.execute("UPDATE meta SET value='4' WHERE key='candidate_adjacency_version'")
+    status = svc.candidate_search_status(source)
+    assert not status['available']
+    assert '已有：v4' in status['message'] and '当前需要：v5' in status['message']
+    assert '无需重新导入' in status['message']
     with sqlite3.connect(opened['index_path']) as con:
         con.execute("DELETE FROM meta WHERE key='candidate_adjacency_version'")
     status = svc.candidate_search_status(source)
@@ -159,7 +172,15 @@ def test_cli_shares_indexed_query(source, tmp_path, capsys):
     assert main(['candidate-search', '--source', source['reactionevent'], '--start', 'CCO',
                  '--target', 'CC(=O)O', '--out-json', str(out)]) == 0
     report = json.loads(out.read_text())
-    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v3')
+    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v4')
+    assert report['query']['max_steps'] is None
+    assert report['reachability_status'] == 'found'
+    reverse_out = tmp_path / 'reverse.json'
+    assert main(['candidate-search', '--source', source['reactionevent'], '--mode', 'reverse',
+                 '--target', 'CC(=O)O', '--out-json', str(reverse_out)]) == 0
+    reverse = json.loads(reverse_out.read_text())
+    assert {path['species'][0] for path in reverse['paths']} == {'CC=O', 'COC'}
+    assert all(path['species'][-1] == 'CC(=O)O' for path in reverse['paths'])
     capsys.readouterr()
 
 
@@ -315,6 +336,10 @@ def test_carrier_follows_event_local_dominant_atom_descendant(tmp_path):
     try:
         result = discover_indexed_candidates(reader, '[C][C]', target='[N][H]', max_steps=2)
         explored = discover_indexed_candidates(reader, '[C][C]', mode='explore', max_steps=1)
+        incoming = discover_indexed_candidates(reader, '', target='[C][C][O]', mode='reverse')
+        index_plan = reader.connection.execute('''EXPLAIN QUERY PLAN
+            SELECT source_species FROM candidate_transfers WHERE product_species=? LIMIT 20''',
+            ('[C][C][O]',)).fetchall()
     finally:
         reader.close()
     assert result['paths'] == []
@@ -323,6 +348,100 @@ def test_carrier_follows_event_local_dominant_atom_descendant(tmp_path):
     assert step['transfer_event_count'] == 1
     assert step['max_shared_atoms'] == 2
     assert result['carrier_policy'] == 'event_local_dominant_atom_descendant'
+    assert {tuple(path['species']) for path in incoming['paths']} == {
+        ('[C][C]', '[C][C][O]'), ('[O]', '[C][C][O]')}
+    assert all(step['reaction_key'] == first for path in incoming['paths']
+               for step in path['steps'])
+    assert any('SEARCH' in row[3] and 'product_species=?' in row[3] for row in index_plan)
+
+
+def test_unbounded_target_search_reaches_past_old_eight_step_limit(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'long-route.sqlite'
+    labels = [f'[C:{i}]' for i in range(1, 11)]
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)',
+                        [(f'{a}->{b}',) for a, b in zip(labels, labels[1:])])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, labels[0], target=labels[-1])
+        limited = discover_indexed_candidates(reader, labels[0], target=labels[-1], max_steps=8)
+    finally:
+        reader.close()
+    assert report['query']['max_steps'] is None
+    assert report['reachability_status'] == 'found'
+    assert report['routes_complete']
+    assert [p['step_count'] for p in report['paths']] == [9]
+    assert limited['paths'] == [] and limited['horizon_limited']
+
+
+def test_target_display_limit_does_not_stop_route_examination(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'branches.sqlite'
+    edges = ['[C]->[C:1]', '[C]->[C:2]', '[C:1]->[O]', '[C:2]->[O]',
+             '[C:1]->[N]', '[N]->[O]']
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)', [(edge,) for edge in edges])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, '[C]', target='[O]', max_paths=2)
+    finally:
+        reader.close()
+    assert report['reachability_status'] == 'found'
+    assert report['routes_complete'] and report['display_truncated']
+    assert report['candidates_examined'] == 3
+    assert {p['species'][1] for p in report['paths']} == {'[C:1]', '[C:2]'}
+
+
+def test_target_display_samples_longer_first_branch_after_many_short_routes(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'uneven-branches.sqlite'
+    edges = ['[C]->[C:1]', '[C]->[C:2]']
+    edges += [f'[C:1]->[N:{i}]' for i in range(1, 5)]
+    edges += [f'[N:{i}]->[O]' for i in range(1, 5)]
+    edges += ['[C:2]->[S]', '[S]->[S:1]', '[S:1]->[O]']
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)', [(edge,) for edge in edges])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, '[C]', target='[O]', max_paths=2)
+    finally:
+        reader.close()
+    assert report['candidates_examined'] == 5
+    assert report['display_truncated'] and report['routes_complete']
+    assert [path['species'][1] for path in report['paths']] == ['[C:1]', '[C:2]']
+    assert [path['step_count'] for path in report['paths']] == [3, 4]
+
+
+def test_reverse_network_fallback_pages_carrier_pairs_and_skips_self_loops(tmp_path):
+    from reacnet_scope.path_search import materialize_candidate_adjacency
+    index = tmp_path / 'network-only.sqlite'
+    with sqlite3.connect(index) as con:
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
+        con.execute('CREATE TABLE reaction_summary(reaction_key TEXT PRIMARY KEY,total_events INTEGER)')
+        con.executemany('INSERT INTO reaction_summary VALUES(?,1)',
+                        [(key,) for key in ['[O]->[O]', '[C]+[N]->[O]']])
+        materialize_candidate_adjacency(con)
+    reader = CandidateReader({'index_path': str(index)})
+    try:
+        report = discover_indexed_candidates(reader, '', target='[O]', mode='reverse', max_paths=1)
+        next_page = discover_indexed_candidates(reader, '', target='[O]', mode='reverse',
+                                                max_paths=1, anchor_offset=1)
+    finally:
+        reader.close()
+    assert [path['species'] for path in report['paths']] == [['[C]', '[O]']]
+    assert report['display_truncated'] and 'result_limit' in report['truncation_reasons']
+    assert [path['species'] for path in next_page['paths']] == [['[N]', '[O]']]
+    assert next_page['previous_offset'] == 0 and next_page['next_offset'] is None
 
 
 def test_target_search_does_not_spend_budget_on_reconvergent_prefixes(tmp_path):

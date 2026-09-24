@@ -1,26 +1,36 @@
 # 有界候选路径发现
 
-Web 第一版使用“反应与事件 → 候选路径”、`candidate-search` CLI 与
-`reacnet_scope.search_candidate_paths`。它们从事件索引的已发布邻接目录局部搜索，
-支持目标约束，按步数优先展示，不使用下文旧综合评分。见
-[ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
+“反应与事件 → 候选路径”、`candidate-search` CLI 与
+`reacnet_scope.search_candidate_paths` 共用事件索引的已发布局部邻接。
+仅起点沿观测方向逐步查后续，仅终点在观测方向上逐步查候选前驱；
+双端查询默认不要求最大步数，用首步分支轮流展示已检查路线。
+单端结果可翻到上一页或下一页，选择一条后可继续展开一步；
+浏览记录不等于已验证的完整 MD 路线。
+这些展示规则不计算化学重要性评分。见
+[ADR-0026](adr/0026-search-candidates-by-anchor-mode.md)。
 
-当前工作台结果为 `reacnet-scope/indexed-candidates/v3`（与下面兼容命令的 v3 不同）。
+当前工作台结果为 `reacnet-scope/indexed-candidates/v4`（与下面兼容命令的 v3 不同）。
 每条路线还提供版本化 `candidate_signature`；旧 `signature_id` 保留供 v3 交接使用。
 身份字段及证据修订边界见 [Candidate 结构身份](candidate-identity.md)。
 默认折叠三个分析帧间隔内、完整原子参与者返回的短暂往返。可切换原始视图、调整窗口，或只折叠
 精确键级也恢复的事件。低频和短寿命本身不触发折叠；步骤页始终保留原始事件，并可选择具体事件
 查看真实键图和首次后续消耗。见 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
 
-CLI 增加 `--quality-view raw|persistent`、`--return-window-frames`、`--return-basis topology|exact`、
-`--max-expansions`、`--max-frontier`。`--check-top N` 单独检查前 N 条路线的连续历史（最多 10 条），
+CLI 的 `--mode explore|reverse|target` 分别对应仅起点、仅终点、双端。
+`--max-steps` 是双端查询的可选上限；单端每次展开一步，
+可用 `--anchor-offset` 读取下一页转移。
+`--quality-view raw|persistent`、`--return-window-frames`、`--return-basis topology|exact`、
+`--max-expansions`、`--max-frontier`、`--max-prefixes` 和 `--max-candidates-examined`
+限制在线工作，不是化学筛选。`--check-top N` 单独检查前 N 条路线的连续历史（最多 10 条），
 Web 可检查所选路线。找到具体链、未找到、证据不足分别展示和导出；没有间隔内逐帧键状态证明时
 不会宣称连续。旧候选索引需通过 `reacnet-scope prepare rebuild event <source>` 显式重建。
 
-目标检索使用 `local_graph_then_target_routes_v1`：先按唯一物种读取有界局部邻接，再枚举可达目标的路线。
-汇合到同一物种的不同路径保留各自身份，但不重复消耗邻接展开预算。路线枚举的前缀预算为
-`max_expansions * max_steps`，与邻接读取共用时间预算；结果和导出保留算法版本与截断原因。
-此搜索修复复用已发布的 v3 索引，无需重建。
+双端检索使用 `local_reachability_fair_routes_v1`：先按唯一物种读取有界局部邻接，
+再在已读取的可达子图中按首步分支轮流枚举路线。`reachability_status`
+表示是否已在当前证据视图中确认连接，`routes_complete` 表示备选路线是否查全，
+`display_truncated` 表示是否有已检查路线因展示条数限制而未显示。
+无路线且预算截断只能解释为未确定；找到路线也不能证明备选路线查全。
+仅终点检索需要新 product-leading 索引，因此旧候选索引须显式重建。
 
 Web 默认使用路径合并图浏览本次返回的路线：结构卡片按精确 RNG 物种身份合并，
 同分子式的不同结构分别显示；菱形按完整有向反应式和主线载体对合并。

@@ -44,7 +44,11 @@ def test_return_only_edge_folded_but_raw_evidence_and_identity_preserved(tmp_pat
     artifacts = source(tmp_path)
     folded = svc.search_candidate_paths(artifacts, A, target=C)
     raw = svc.search_candidate_paths(artifacts, A, target=C, quality_view='raw')
+    folded_precursors = svc.search_candidate_paths(artifacts, target=B, mode='reverse')
+    raw_precursors = svc.search_candidate_paths(artifacts, target=B, mode='reverse', quality_view='raw')
     assert folded['query_complete'] and folded['paths'] == []
+    assert folded_precursors['paths'] == []
+    assert [path['species'] for path in raw_precursors['paths']] == [[A, B]]
     assert len(raw['paths']) == 1
     step = raw['paths'][0]['steps'][0]
     assert step['quality']['rapid_return_events'] == 1

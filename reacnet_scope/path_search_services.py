@@ -68,7 +68,7 @@ def candidate_source_revision(artifacts: Mapping[str, Any]) -> dict[str, Any]:
                 'mtime_ns': str(Path(p).stat().st_mtime_ns)} for p in paths if p}
 
 
-def search_candidate_paths(artifacts: Mapping[str, Any], start: str, **query: Any) -> dict[str, Any]:
+def search_candidate_paths(artifacts: Mapping[str, Any], start: str = '', **query: Any) -> dict[str, Any]:
     # Local import keeps the event-index build independent of services.
     from .analysis_services import rng_processing_metadata
     revision = candidate_source_revision(artifacts)
@@ -145,9 +145,11 @@ def check_candidate_continuity(artifacts: Mapping[str, Any], report: Mapping[str
 def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     output = io.StringIO()
     fields = ['signature_id', 'candidate_signature', 'candidate_evidence_key',
-              'candidate_identity_schema', 'step', 'carried_from', 'carried_to', 'reaction_key',
+              'candidate_identity_schema', 'step_count', 'step', 'carried_from', 'carried_to', 'reaction_key',
               'reactants', 'products', 'event_count', 'transfer_event_count',
               'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
+              'reachability_status', 'routes_complete', 'graph_exhaustive', 'horizon_limited',
+              'display_truncated', 'candidates_examined', 'next_offset', 'previous_offset',
               'quality', 'continuous_support', 'query', 'source_revision', 'truncation_reasons',
               'search_algorithm', 'path_prefix_budget', 'path_prefixes_examined']
     writer = csv.DictWriter(output, fieldnames=fields)
@@ -158,6 +160,7 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 candidate_signature=path.get('candidate_signature'),
                 candidate_evidence_key=None,
                 candidate_identity_schema=(path.get('candidate_identity') or {}).get('schema_version'),
+                step_count=path['step_count'],
                 step=index,
                 carried_from=step['carried_from'], carried_to=step['carried_to'],
                 reaction_key=step['reaction_key'], reactants=json.dumps(step['reactants']),
@@ -166,6 +169,14 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 max_shared_atoms=step.get('max_shared_atoms'),
                 transfer_basis=step.get('transfer_basis'),
                 continuous_md=path['continuous_md'], query_complete=report['query_complete'],
+                reachability_status=report.get('reachability_status'),
+                routes_complete=report.get('routes_complete'),
+                graph_exhaustive=report.get('graph_exhaustive'),
+                horizon_limited=report.get('horizon_limited'),
+                display_truncated=report.get('display_truncated'),
+                candidates_examined=report.get('candidates_examined'),
+                next_offset=report.get('next_offset'),
+                previous_offset=report.get('previous_offset'),
                 quality=json.dumps(step.get('quality', {})),
                 continuous_support=json.dumps(path.get('continuous_support')),
                 query=json.dumps(report['query']), source_revision=json.dumps(report['source_revision']),
