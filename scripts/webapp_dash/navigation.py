@@ -126,19 +126,6 @@ PAGE_CAPABILITY_REQUIREMENTS: Final[dict[str, str]] = {
     "trajectory": "event_search",
 }
 
-# Question, required input, useful next step. Guidance never transfers a
-# display label as evidence or advertises an unimplemented tool as available.
-PAGE_WORKFLOWS: Final[dict[str, tuple[str, str, str]]] = {
-    "data-management": ("要分析哪一个RNG 数据？", "RNG 数据目录、来源修订与能力状态", "加载成功后再进入分析工作区；检查候选不会改变当前RNG 数据。"),
-    "species": ("体系中有哪些目标物种及其趋势？", "分子式、SMILES、质量范围或丰度证据", "先确认精确结构，再查看直接反应通道或时间演化。"),
-    "reactions": ("目标物种如何生成或消耗？", "精确物种或有方向的 Reaction Type", "选中直接通道并下钻具体事件；计数和净通量不等于速率常数。"),
-    "evolution": ("物种丰度如何随时间变化？", "物种列表与丰度证据", "用趋势定位观察窗口，再检查相应反应事件。"),
-    "element-distribution": ("元素在不同物种间如何分布？", "目标元素、筛选条件与丰度证据", "从分布变化回到具体物种与反应证据。"),
-    "events": ("哪些具体事件支持这个反应？", "反应通道与观察窗口", "选中事件后提取局部轨迹，检查参与分子与原子。"),
-    "trajectory": ("这次具体反应的结构如何变化？", "一个具体反应实例；坐标任务另需可用轨迹", "先核查前后结构和键变化，再按需查看局部轨迹、导出几何或使用分子变化追踪。"),
-    "batch-compare": ("不同模拟条件或模型迭代的观测有何差异？", "独立来源、目标映射、模拟条件与重复定义", "先核对身份、时间和证据是否可比；选择来源不会切换当前RNG 数据。"),
-}
-
 GROUP_DESCRIPTIONS: Final[dict[str, str]] = {
     "分析工作区": "从物种、反应和具体事件逐步下钻到轨迹与原子证据。",
 }

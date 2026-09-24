@@ -3141,7 +3141,6 @@ def build_layout() -> html.Div:
                         [
                             _page_header(),
                             _workspace_task_navigation(),
-                            html.Div(id="page-workflow-guide"),
                             file_import.preparation_layout(),
                             _species_page(),
                             _reactions_page(),
