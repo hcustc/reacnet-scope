@@ -838,6 +838,49 @@ class SpeciesCompositionStore:
         finally:
             connection.close()
 
+    def search_species_totals(
+        self, species_file: str, *, query: str = "", selected: str = "", limit: int = 50
+    ) -> tuple[int, list[tuple[str, int]]]:
+        """Read a bounded Species picker page from the published index."""
+        meta = self.open_required(species_file)
+        connection = _readonly_connection(Path(meta["index_path"]))
+        try:
+            species_count = int(connection.execute("SELECT COUNT(*) FROM species_summary").fetchone()[0])
+            if query:
+                rows = connection.execute(
+                    "SELECT smiles,total_count FROM species_summary "
+                    "WHERE instr(lower(smiles), lower(?)) > 0 "
+                    "ORDER BY total_count DESC,smiles LIMIT ?",
+                    (query, max(1, min(int(limit), 50))),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT smiles,total_count FROM species_summary "
+                    "ORDER BY total_count DESC,smiles LIMIT ?",
+                    (max(1, min(int(limit), 50)),),
+                ).fetchall()
+            result = [(str(smiles), int(count)) for smiles, count in rows]
+            if selected and all(smiles != selected for smiles, _count in result):
+                exact = connection.execute(
+                    "SELECT total_count FROM species_summary WHERE smiles=?", (selected,)
+                ).fetchone()
+                if exact is not None:
+                    result.append((selected, int(exact[0])))
+            return species_count, result
+        finally:
+            connection.close()
+
+    def has_species(self, species_file: str, smiles: str) -> bool:
+        """Check one exact Species identity without loading the catalogue."""
+        meta = self.open_required(species_file)
+        connection = _readonly_connection(Path(meta["index_path"]))
+        try:
+            return connection.execute(
+                "SELECT 1 FROM species_summary WHERE smiles=?", (smiles,)
+            ).fetchone() is not None
+        finally:
+            connection.close()
+
     def timeline_summary(self, species_file: str) -> dict[str, Any]:
         """Return prepared abundance classification statistics."""
         meta = self.open_required(species_file)
