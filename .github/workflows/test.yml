@@ -44,10 +44,11 @@ jobs:
       - name: Install Chromium
         run: uv run --locked --group browser playwright install --with-deps chromium
       - name: Exercise the offline workbench
+        timeout-minutes: 30
         env:
           REACNET_SCOPE_BROWSER_TESTS: "1"
           REACNET_SCOPE_SCREENSHOTS: /tmp/reacnet-ui-screenshots
-        run: uv run --locked --group browser pytest -q tests/browser
+        run: uv run --locked --group browser pytest -vv -o faulthandler_timeout=120 tests/browser
       - name: Preserve browser evidence
         if: always()
         uses: actions/upload-artifact@v4
