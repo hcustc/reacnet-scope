@@ -3128,12 +3128,18 @@ def _enable_query_session_persistence(component: Any) -> None:
 
 def build_layout() -> html.Div:
     """Build the full application layout."""
+    use_compact_navbar = os.environ.get("REACNET_SCOPE_COMPACT_NAV", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if use_compact_navbar:
+        from . import compact_navbar
+
     layout = html.Div(
         [
-            _topbar(),
+            compact_navbar.build_navbar() if use_compact_navbar else _topbar(),
             html.Div(
                 [
-                    _sidebar(),
+                    *([] if use_compact_navbar else [_sidebar()]),
                     html.Div(
                         [
                             _page_header(),
@@ -3269,7 +3275,7 @@ def build_layout() -> html.Div:
                 data={"rows": [], "columns": [], "details": {}, "groups": []},
             ),
         ],
-        className="rs-root",
+        className="rs-root rs-compact-shell" if use_compact_navbar else "rs-root",
     )
     _enable_query_session_persistence(layout)
     return layout

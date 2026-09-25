@@ -27,11 +27,11 @@ from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash.callbacks import _event_columns, _event_table_rows
 
 
-@pytest.fixture(scope="module")
-def workbench(tmp_path_factory):
+@pytest.fixture(scope="module", params=["0", "1"], ids=["classic", "compact"])
+def workbench(tmp_path_factory, request):
     root = tmp_path_factory.mktemp("browser-workbench")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("REACNET_SCOPE_COMPACT_NAV", "0")
+        patch.setenv("REACNET_SCOPE_COMPACT_NAV", request.param)
         patch.setenv("REACNET_SCOPE_CACHE_DIR", str(root / "workspace"))
         patch.setenv("REACNET_SCOPE_ALLOWED_ROOTS", str(root))
         patch.setattr(dir_browser, "ALLOWED_ROOTS", [root])
