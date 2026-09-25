@@ -5,6 +5,9 @@ date: 2026-09-21
 
 # Add an indexed Candidate task to Reactions & Events
 
+ADR-0026 supersedes this first version's required start, mandatory step horizon
+and shortest-first display. Its indexed task and evidence decisions remain in force.
+
 ADR-0017 supersedes the first-version prohibition on selected-history controls
 and adds explicit return-evidence views and candidate schema/index version 3.
 

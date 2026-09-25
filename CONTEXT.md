@@ -69,7 +69,7 @@ The network of exact Species and directed Reaction Types for which the current d
 _Avoid_: Aggregate reaction network, occurrence graph, inferred mechanism network
 
 **Candidate Path Discovery**:
-A bounded network search from an exact anchor Species through directed Reaction Types observed in the current dataset, connecting adjacent steps by an exact carried Species with event-local dominant atom-descendant support. It proposes routes for investigation without requiring one concrete molecule lineage to realize the whole route.
+A bounded network search from an exact start Species, toward an exact target Species, or between both, through directed Reaction Types observed in the current dataset. Adjacent steps connect by an exact Carried Species with event-local dominant atom-descendant support. A target-only query navigates predecessors of observed forward transfers; it does not infer reverse reactions or a concrete origin history. Discovery proposes routes for investigation without requiring one concrete molecule lineage to realize the whole route.
 _Avoid_: Path Verification, mechanism prediction, occurrence-lineage replay
 
 **Candidate Path**:

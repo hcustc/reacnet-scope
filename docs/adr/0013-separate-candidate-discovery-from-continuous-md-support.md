@@ -4,6 +4,9 @@ status: accepted
 
 # Separate Candidate Path Discovery from Continuous MD Support
 
+ADR-0026 supersedes the mandatory `max_steps` horizon for two-anchor search;
+the discovery/continuous-support separation in this decision remains in force.
+
 ADR-0016 refines the per-step carried branch: ordinary Candidate routes now
 require event-local dominant atom-descendant evidence. This ADR's separation
 from whole-route Continuous MD Support remains in force.

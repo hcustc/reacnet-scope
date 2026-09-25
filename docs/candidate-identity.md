@@ -1,9 +1,9 @@
 # Candidate 结构身份
 
-现行 indexed Candidate 搜索的 `reacnet-scope/indexed-candidates/v3` 结果在保留
+现行 indexed Candidate 搜索的 `reacnet-scope/indexed-candidates/v4` 结果在保留
 `signature_id` 的同时，给每条路线增加完整的 `candidate_signature` 和独立版本的
 `candidate_identity` 文档。CLI JSON、Dash 查询结果和逐步 CSV 使用同一核心结果。
-`signature_id` 仍供旧的 v3 选择与交接使用；它不是可跨 schema 复用的结构身份。
+`signature_id` 仍供结果内选择与交接使用；它不是可跨 schema 复用的结构身份。
 
 `SpeciesKey` 保留 RNG 的精确结构字符串，拒绝空白或非法空 token，不用化学工具再次规范化。
 `DirectedReactionKey` 对反应两侧分别排序，保留方向、重复计量和共同参与物。
