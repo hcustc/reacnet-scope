@@ -90,6 +90,35 @@ def invoke(app, prefix, changed, values, expected_status=200):
     return response.get_json()['response'] if expected_status == 200 else {}
 
 
+def test_candidate_request_accepts_three_anchor_modes_and_continues(app, report):
+    values = {'app-store': {'dataset_id': 'one'},
+              'cp-start': 'CCO', 'cp-target': 'CC(=O)O', 'cp-mode': 'target',
+              'cp-depth': None, 'cp-limit': 20, 'cp-quality-view': 'persistent',
+              'cp-return-window': 3, 'cp-return-basis': 'topology',
+              'cp-expansions': 2000, 'cp-frontier': 5000,
+              'cp-prefixes': 10000, 'cp-examined': 2000, 'cp-seconds': 5}
+    target = invoke(app, '..cp-request.data', 'cp-search.n_clicks', values)
+    assert target['cp-request']['data']['query']['max_steps'] is None
+    values['cp-mode'] = 'reverse'
+    reverse = invoke(app, '..cp-request.data', 'cp-search.n_clicks', values)
+    assert reverse['cp-request']['data']['query'] == {
+        **target['cp-request']['data']['query'], 'start': '', 'mode': 'reverse', 'max_steps': 1}
+    values['cp-mode'] = 'explore'
+    explore = invoke(app, '..cp-request.data', 'cp-search.n_clicks', values)
+    assert explore['cp-request']['data']['query']['target'] == ''
+    assert explore['cp-request']['data']['query']['max_steps'] == 1
+    continued_report = dict(report, query=dict(report['query'], mode='explore'))
+    continued = invoke(app, '..cp-request.data', 'cp-continue.n_clicks', dict(values,
+        **{'cp-report': continued_report, 'cp-focus': 'path-0'}))
+    assert continued['cp-request']['data']['query']['start'] == 'CC(=O)O'
+    assert continued['cp-nav-anchor']['data']['species'] == 'CC(=O)O'
+    paged_report = dict(continued_report, query=dict(continued_report['query'],
+        anchor_offset=0, max_paths=1), next_offset=1)
+    paged = invoke(app, '..cp-request.data', 'cp-page-next.n_clicks', dict(values,
+        **{'cp-report': paged_report}))
+    assert paged['cp-request']['data']['query']['anchor_offset'] == 1
+
+
 def test_graph_filters_highlights_clicks_and_dataset_reset(app, report):
     values = {'cp-report': report, 'app-store': {'dataset_id': 'one'},
               'cp-graph-scope': 'all', 'cp-routes': [], 'cp-focus': 'path-0'}
@@ -116,6 +145,9 @@ def test_graph_filters_highlights_clicks_and_dataset_reset(app, report):
     filtered = invoke(app, '..cp-graph.elements', 'cp-graph-scope.value', dict(values,
         **{'cp-graph-scope': 'selected'}))['cp-graph']['elements']
     assert len(filtered) == 13  # Four exact species and three two-edge steps.
+    # The third route has branches above/below it in the union. Focusing it
+    # must form a compact row rather than retaining those union positions.
+    assert {e['position']['y'] for e in filtered if 'position' in e} == {0}
     assert {e['data']['label'] for e in filtered if 'label' in e['data']} <= {
         e['data']['label'] for e in elements if 'label' in e['data']}
     stale = dict(values, **{'app-store': {'dataset_id': 'two'}})
@@ -135,6 +167,43 @@ def test_clicking_shared_edge_locates_step_in_current_route(app, report):
     values['cp-graph-pick'] = picked
     assert invoke(app, 'cp-focus.value@', 'cp-graph-pick.data', values)['cp-focus']['value'] == 'path-2'
     assert invoke(app, '..cp-detail.children', 'cp-graph-pick.data', values)['cp-step']['value'] == 2
+
+
+def test_step_evidence_reveals_only_current_graph_selection(app, report):
+    picked = next(e['data'] for e in graph.elements(report) if e['data']['kind'] == 'reaction')
+    values = {'cp-report': report, 'app-store': {'dataset_id': 'one'}, 'cp-graph-pick': picked}
+    assert invoke(app, 'cp-evidence.open', 'cp-graph-pick.data', values)['cp-evidence']['open'] is True
+    assert invoke(app, 'cp-evidence.open', 'cp-request.data', values)['cp-evidence']['open'] is False
+    stale = dict(values, **{'app-store': {'dataset_id': 'two'}})
+    assert invoke(app, 'cp-evidence.open', 'cp-graph-pick.data', stale)['cp-evidence']['open'] is False
+
+
+def test_ready_capability_is_quiet_but_missing_evidence_keeps_recovery(app, monkeypatch):
+    from reacnet_scope import services as svc
+
+    monkeypatch.setattr(svc, 'candidate_search_status', lambda _: dict(available=True, message='ready'))
+    ready = invoke(app, '..cp-capability.children', 'app-store.data', {'app-store': {}})
+    assert ready['cp-capability']['children'] == ''
+    assert ready['cp-prepare']['style'] == {'display': 'none'}
+
+    monkeypatch.setattr(svc, 'candidate_search_status', lambda _: dict(available=False, message='缺少事件索引'))
+    missing = invoke(app, '..cp-capability.children', 'app-store.data', {'app-store': {}})
+    assert '缺少事件索引' in json.dumps(missing, ensure_ascii=False)
+    assert missing['cp-prepare']['style'] == {}
+
+
+def test_search_presentation_resets_for_new_dataset_and_keeps_empty_result_editable(app, report):
+    values = {'cp-report': report, 'app-store': {'dataset_id': 'one'}}
+    found = invoke(app, '..cp-results.style', 'cp-report.data', values)
+    assert found['cp-search-settings']['open'] is False
+    assert found['cp-results']['style'] == {}
+    empty = invoke(app, '..cp-results.style', 'cp-report.data', dict(values,
+        **{'cp-report': dict(report, paths=[])}))
+    assert empty['cp-search-settings']['open'] is True
+    reset = invoke(app, '..cp-results.style', 'app-store.data', dict(values,
+        **{'app-store': {'dataset_id': 'two'}}))
+    assert reset['cp-results']['style'] == {'display': 'none'}
+    assert reset['cp-search-settings']['open'] is True
 
 
 def test_related_route_buttons_are_bound_to_their_search_and_dataset(app, report):

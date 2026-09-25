@@ -116,14 +116,6 @@ def register_callbacks(app):
         return []
 
     @app.callback(Output("species-workspace-stage", "data", allow_duplicate=True),
-                  Input("species-detail-close", "n_clicks"), State("species-grid-store", "data"),
-                  prevent_initial_call=True)
-    def close_species_detail(clicks, result):
-        if not clicks:
-            return no_update
-        return "structures" if (result or {}).get("query_kind") == "mass" else "results"
-
-    @app.callback(Output("species-workspace-stage", "data", allow_duplicate=True),
                   Input("species-grid", "cellClicked"), Input("species-structure-grid", "cellClicked"),
                   State("species-grid-store", "data"),
                   State("species-structure-grid", "rowData"), prevent_initial_call=True)
@@ -142,7 +134,7 @@ def register_callbacks(app):
             requestAnimationFrame(() => {
                 if (stage === 'detail') {
                     if (detailStyle?.display !== 'none' && panelStyle?.display !== 'none') {
-                        document.getElementById('species-detail-close')?.focus({preventScroll: true});
+                        document.getElementById('species-stage-back-btn')?.focus({preventScroll: true});
                     }
                 }
                 else {

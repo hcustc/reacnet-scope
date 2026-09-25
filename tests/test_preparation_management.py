@@ -661,10 +661,12 @@ def test_task_polling_runs_only_while_a_preparation_task_is_active() -> None:
         tasks: list[dict[str, str]],
         event_clicks: int = 0,
     ) -> bool:
+        library_request_pattern = next(item["id"] for item in dependency["inputs"]
+                                       if "library-build-request" in str(item["id"]))
         values = {
             "preparation-task-snapshot": tasks,
             "import-auto-request": None,
-            "library-build-request": None,
+            library_request_pattern: [],
             "data-prep-event-btn": event_clicks,
             "data-prep-trajectory-btn": 0,
             "data-prep-composition-btn": 0,

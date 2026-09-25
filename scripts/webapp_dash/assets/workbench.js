@@ -1,11 +1,12 @@
-/* Keyboard behavior for the responsive, non-modal inspection panel. */
+/* Keyboard behavior for the species detail view. */
 document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
-    // Bootstrap dialogs own Escape while they are open.
-    if (document.querySelector('.modal.show, .offcanvas.show')) return;
-    const close = document.getElementById('species-detail-close');
-    if (close && close.getClientRects().length) {
+    // Let open Bootstrap overlays handle Escape first.
+    if (document.querySelector('.modal.show, .offcanvas.show, #species-candidate-menu .dropdown-menu.show')) return;
+    const detail = document.getElementById('species-detail-stage');
+    const back = document.getElementById('species-stage-back-btn');
+    if (detail && detail.getClientRects().length && back && back.getClientRects().length) {
         event.preventDefault();
-        close.click();
+        back.click();
     }
 });

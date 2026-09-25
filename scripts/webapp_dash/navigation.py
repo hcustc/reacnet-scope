@@ -18,27 +18,27 @@ PAGE_IDS: Final[tuple[str, ...]] = (
 )
 
 PAGE_LABELS: Final[dict[str, str]] = {
-    "species": "物种与趋势",
-    "reactions": "反应与事件",
+    "species": "物种发现",
+    "reactions": "反应路径",
     "evolution": "时间演化",
     "events": "反应事件",
-    "trajectory": "结构与轨迹",
+    "trajectory": "证据核查",
     "element-distribution": "元素分布演化",
     "data-management": "RNG 数据",
-    "batch-compare": "物种多来源对比",
+    "batch-compare": "物种趋势",
     "reaction-compare": "反应多来源对比",
 }
 
 PAGE_DESCRIPTIONS: Final[dict[str, str]] = {
-    "species": "检索精确物种与结构，并从同一工作区进入丰度趋势和元素分布。",
-    "reactions": "查看直接生成/消耗通道、反应式和具体事件，不把计数解释为速率或机理。",
+    "species": "检索精确物种，查看丰度排名。",
+    "reactions": "从精确物种出发，查看直接通道或搜索候选路径，选择反应步骤及具体事件。",
     "evolution": "绘制单个或多组物种的时间演化曲线，比较生成与消耗趋势。",
     "events": "从反应通道定位 RNG 事件，建立可复核的轨迹证据入口。",
-    "trajectory": "核查具体反应实例的前后结构、局部轨迹与几何导出，并按需追踪参与分子的变化。",
+    "trajectory": "核查事件键结构、完整轨迹和周围环境，导出可复核事件包或 DFT 初始几何。",
     "element-distribution": "按RNG 数据中发现的元素分组和筛选物种，追踪分布随时间的变化。",
     "data-management": "管理已导入的RNG 数据，添加来源、选择当前RNG 数据；在独立页签准备当前数据。",
-    "reaction-compare": "比较多个来源的反应与条件统计，保持当前RNG 数据不变。",
-    "batch-compare": "选择多个来源，逐来源确认精确物种后比较丰度趋势；保持当前RNG 数据不变。",
+    "reaction-compare": "比较多个来源的反应与条件统计。",
+    "batch-compare": "查看单个RNG 数据的物种丰度与元素分布随时间的变化，或选择多个来源对比物种趋势。",
 }
 
 # Compact, font-independent marks keep navigation legible without another
@@ -66,7 +66,7 @@ PAGE_CLASS_NAMES: Final[dict[str, str]] = {
 # The product surface is deliberately small.  Only pages owned by the five
 # supported workspaces are mounted in Dash.
 NAV_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
-    ("分析工作区", ("species", "reactions", "trajectory")),
+    ("分析工作区", ("species", "reactions", "trajectory", "batch-compare")),
 )
 
 WORKSPACE_PAGE_IDS: Final[tuple[str, ...]] = (
@@ -74,13 +74,15 @@ WORKSPACE_PAGE_IDS: Final[tuple[str, ...]] = (
     "species",
     "reactions",
     "trajectory",
+    "batch-compare",
 )
 
 WORKSPACE_TOOL_PAGES: Final[dict[str, tuple[str, ...]]] = {
     "data-management": ("data-management",),
-    "species": ("species", "evolution", "element-distribution", "batch-compare"),
+    "species": ("species",),
     "reactions": ("reactions", "events", "reaction-compare"),
     "trajectory": ("trajectory",),
+    "batch-compare": ("batch-compare", "evolution", "element-distribution"),
 }
 
 WORKSPACE_TASK_LABELS: Final[dict[str, str]] = {
@@ -88,11 +90,11 @@ WORKSPACE_TASK_LABELS: Final[dict[str, str]] = {
     "species": "物种检索",
     "evolution": "时间演化",
     "element-distribution": "元素分布",
-    "reactions": "直接通道与反应式",
+    "reactions": "反应路径",
     "events": "具体事件",
-    "trajectory": "反应结构、轨迹与变化追踪",
+    "trajectory": "证据核查与导出",
     "batch-compare": "多来源对比",
-    "reaction-compare": "多来源对比",
+    "reaction-compare": "反应对比",
 }
 
 PAGE_WORKSPACES: Final[dict[str, str]] = {
@@ -127,7 +129,7 @@ PAGE_CAPABILITY_REQUIREMENTS: Final[dict[str, str]] = {
 }
 
 GROUP_DESCRIPTIONS: Final[dict[str, str]] = {
-    "分析工作区": "从物种、反应和具体事件逐步下钻到轨迹与原子证据。",
+    "分析工作区": "检索物种、探索反应、核查证据，并查看单来源趋势或开展多来源对比。",
 }
 
 TOP_NAV_PAGE_IDS: Final[tuple[str, ...]] = tuple(

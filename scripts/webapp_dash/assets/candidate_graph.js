@@ -8,6 +8,17 @@
   let pending;
   let previous = "";
 
+  // Native <details> toggles change the DOM without updating Dash's prop.
+  // Keep user toggles in sync so a later graph pick can reopen evidence,
+  // and another completed search can close the query form again.
+  document.addEventListener("toggle", function (event) {
+    const section = event.target;
+    if (section.id !== "cp-evidence" && section.id !== "cp-search-settings") return;
+    if (window.dash_clientside && window.dash_clientside.set_props) {
+      window.dash_clientside.set_props(section.id, {open: section.open});
+    }
+  }, true);
+
   function attach() {
     const next = document.getElementById("cp-graph");
     if (next === container) return;

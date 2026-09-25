@@ -150,25 +150,26 @@ def stylesheet(graph, focus, selected, step_index):
 
 def layout():
     return html.Div([
-        html.Div([html.H6('路径合并图'), html.Div(id='cp-graph-summary', role='status')], className='rs-candidate-graph-heading'),
         html.Div([
-            dcc.RadioItems(id='cp-graph-scope', options=[{'label': '全部返回路线', 'value': 'all'},
-                {'label': '当前与勾选路线', 'value': 'selected'}], value='all', inline=True),
+            html.H6('候选路线图'),
+            dcc.RadioItems(id='cp-graph-scope', options=[{'label': '当前与勾选路线', 'value': 'selected'},
+                {'label': '全部返回路线', 'value': 'all'}], value='selected', inline=True),
             dbc.Button('还原视图', id='cp-graph-reset', size='sm', outline=True),
-        ], className='rs-query-row'),
-        html.P('结构卡片为主线物种，菱形为反应步骤；点击节点或连线查看详情。拖动平移，滚轮缩放。', className='text-muted'),
+            html.Div(id='cp-graph-summary', role='status'),
+        ], className='rs-candidate-graph-heading'),
         html.Div([
             cyto.Cytoscape(id='cp-graph', elements=[], layout={'name': 'preset', 'fit': True, 'padding': 45},
-                           stylesheet=STYLESHEET, style={'width': '100%', 'height': '540px'},
+                           stylesheet=STYLESHEET, style={'width': '100%'},
                            minZoom=0.08, maxZoom=2.5, wheelSensitivity=0.2,
                            responsive=True, className='rs-candidate-graph-canvas'),
             html.Div(id='cp-graph-inspector', className='rs-candidate-graph-inspector'),
         ], className='rs-candidate-graph-body'),
-        html.Div([html.Span('● 当前路线', className='rs-candidate-legend-focus'),
-                  html.Span('● 当前步骤', className='rs-candidate-legend-step'),
-                  html.Span('● 勾选路线', className='rs-candidate-legend-compare')], className='rs-candidate-legend'),
-        html.P('仅合并本次返回路线中的精确 RNG 物种；同分子式不合并。反应次数为该步骤的原始支持事件数，共享步骤不累加。'
-               '图上的连通不代表一条已验证的连续历史。', className='text-muted'),
+        html.Div([
+            html.Div([html.Span('● 当前路线', className='rs-candidate-legend-focus'),
+                      html.Span('● 当前步骤', className='rs-candidate-legend-step'),
+                      html.Span('● 勾选路线', className='rs-candidate-legend-compare')], className='rs-candidate-legend'),
+            html.Small('点击反应菱形或连线展开步骤证据；拖动平移，滚轮缩放。次数为各步原始支持事件数，共享步骤不累加。', className='text-muted'),
+        ], className='rs-candidate-graph-footer'),
         dcc.Store(id='cp-graph-pick'),
         dcc.Store(id='cp-graph-size'),
     ], className='rs-candidate-graph-panel')
@@ -176,21 +177,9 @@ def layout():
 
 def inspector(report, picked, structure):
     data = resolve_pick(report, picked)
-    if not data:
-        return html.P('点击共享物种查看经过它的路线；点击菱形或连线定位反应步骤。')
-    if data['kind'] == 'edge':
-        data = next(e['data'] for e in elements(report) if e['data']['id'] == data['reaction_id'])
-    if data['kind'] == 'species':
-        content = [html.H6('主线物种'), structure(data['species'])]
-    else:
-        member = data['members'][0]
-        path = next(p for p in report['paths'] if p['signature_id'] == member['signature_id'])
-        step = path['steps'][member['step_index']]
-        quality = step.get('quality') or {}
-        content = [html.H6(data['label']), html.Code(data['reaction_key']),
-                   html.P(f"主线载体：{data['carried_from']} → {data['carried_to']}"),
-                   html.P(f"原始支持 {data['event_count']} 次；其中折叠 {quality.get('folded_events', '未知')} 次。"),
-                   html.Small('完整反应式包含共反应物和副产物；下方步骤证据可查看具体结构与事件。')]
+    if not data or data['kind'] != 'species':
+        return ''
+    content = [html.H6('主线物种'), structure(data['species'])]
     related = {m['signature_id'] for m in data['members']}
     content.extend([html.H6(f'经过此处的路线 · {len(related)}'), html.Div([
         dbc.Button(f'路线 {i}', id={'type': 'cp-graph-route', 'signature': p['signature_id'],

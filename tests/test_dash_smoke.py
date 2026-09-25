@@ -110,7 +110,8 @@ def _loading_descendant_ids(node: Any) -> set[str]:
     return ids
 
 
-def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
+def test_dash_layout_and_callback_dependencies_are_loadable(monkeypatch) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_COMPACT_NAV", "0")
     app = create_app()
     client = app.server.test_client()
 
@@ -176,6 +177,11 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         '{"name":"species-detail","type":"dataset-bound-operation"}.data': True
     }
     for navigation_id in {
+        "topbar-page-context",
+        "topbar-rungroup",
+        "topbar-folder",
+        "topbar-status",
+        "topbar-index-status",
         "nav-species",
         "species-to-channels-btn",
         "species-to-evolution-btn",
@@ -202,6 +208,8 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "nav-data-management",
         "page-data-management",
         "data-open-batch-compare-btn",
+        "nav-batch-compare",
+        "page-batch-compare",
     }:
         assert navigation_id in layout_ids
     for removed_id in {
@@ -209,7 +217,6 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         "page-workflow",
         "nav-literature",
         "page-literature",
-        "nav-batch-compare",
         "data-modal",
         "species-mass-mode",
         "species-top",
@@ -228,12 +235,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "直接生成/消耗通道" not in reaction_channel_view
     assert "这里是围绕焦点物种的单步" not in reaction_channel_view
     assert "pathway-csv-btn" not in layout_ids
-    assert (
-        (_layout_node_by_id(layout, "species-to-event-btn") or {})["props"][
-            "children"
-        ]
-        == "经反应通道定位事件"
-    )
+    assert "species-to-event-btn" not in layout_ids
     assert "rs-top-nav-item" in str(
         ((_layout_node_by_id(layout, "nav-species") or {}).get("props") or {}).get(
             "className"
@@ -330,7 +332,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
         (_layout_node_by_id(layout, "species-to-channels-btn") or {})["props"][
             "children"
         ]
-        == "查看所选物种的反应通道与时间"
+        == "直接反应与事件时间"
     )
     for removed_intermediate_id in {
         "nav-intermediate",
@@ -432,7 +434,9 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "page-network" not in layout_ids
     assert "nav-network" not in layout_ids
     layout_text = json.dumps(layout, ensure_ascii=False)
-    assert "查看所选物种的反应通道与时间" in layout_text
+    assert "直接反应与事件时间" in layout_text
+    assert "species-detail-close" not in layout_ids
+    assert (_layout_node_by_id(layout, "species-candidate-menu") or {})["props"]["label"] == "候选路径"
     for removed_text in (
         "从所选反应继续探索",
         "搜索候选路径",
@@ -512,7 +516,11 @@ def test_dash_layout_and_callback_dependencies_are_loadable() -> None:
     assert "rs-tool-menu" not in layout_text
     assert "运行组 (base)" not in layout_text
     assert "开始分析" in layout_text
-    assert "data-empty-pick-btn" in layout_ids
+    library_workspace = _layout_node_by_id(layout, "data-library-workspace")
+    assert library_workspace is not None
+    assert {"data-candidate-summary", "library-management-panel", "library-add-more"} <= _layout_string_ids(library_workspace)
+    assert "RNG 数据管理" in json.dumps(library_workspace, ensure_ascii=False)
+    assert "data-empty-pick-btn" not in layout_ids
     assert "data-change-pick-btn" in layout_ids
     assert "data-open-species-btn" in layout_ids
     assert "dir-browser-recent-datasets" in layout_ids
@@ -543,7 +551,7 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         for page_id in page_ids
     ]
 
-    assert len(grouped_pages) == 3
+    assert len(grouped_pages) == 4
     assert len(set(grouped_pages)) == len(grouped_pages)
     assert tuple(grouped_pages) == TOP_NAV_PAGE_IDS
     assert WORKSPACE_PAGE_IDS == (
@@ -551,6 +559,7 @@ def test_navigation_groups_cover_each_tool_once() -> None:
         "species",
         "reactions",
         "trajectory",
+        "batch-compare",
     )
     assert set(LEGACY_PAGE_REDIRECTS).isdisjoint(WORKSPACE_PAGE_IDS)
     assert LEGACY_PAGE_REDIRECTS == {
@@ -560,10 +569,10 @@ def test_navigation_groups_cover_each_tool_once() -> None:
     }
 
 
-def test_element_distribution_is_a_task_inside_species_workspace() -> None:
-    assert "element-distribution" in WORKSPACE_TOOL_PAGES["species"]
-    assert PAGE_WORKSPACES["element-distribution"] == "species"
-    assert PAGE_SECTIONS["element-distribution"] == "物种与趋势"
+def test_element_distribution_is_a_task_inside_batch_compare_workspace() -> None:
+    assert "element-distribution" in WORKSPACE_TOOL_PAGES["batch-compare"]
+    assert PAGE_WORKSPACES["element-distribution"] == "batch-compare"
+    assert PAGE_SECTIONS["element-distribution"] == "物种趋势"
 
 
 def test_workspace_task_navigation_exposes_only_owned_active_tools() -> None:
@@ -590,10 +599,9 @@ def test_workspace_task_navigation_exposes_only_owned_active_tools() -> None:
     children = response.get_json()["response"]["workspace-task-nav"]["children"]
     ids = _component_pattern_ids(children)
     assert {item["page"] for item in ids} == {
-        "species",
+        "batch-compare",
         "evolution",
         "element-distribution",
-        "batch-compare",
     }
 
 
@@ -615,7 +623,7 @@ def test_retired_page_session_restores_owning_workspace_without_mounting_page() 
     body = response.get_json()["response"]
     assert body["page-reactions"]["className"].endswith(" active")
     assert body["nav-reactions"]["aria-current"] == "page"
-    assert body["page-title"]["children"] == "反应与事件"
+    assert body["page-title"]["children"] == "反应路径"
     assert resolve_page_id("candidate-paths") == "reactions"
     assert resolve_page_id("pathway") == "reactions"
     assert resolve_page_id("species-fate") == "trajectory"
@@ -727,6 +735,41 @@ def _callback_payload(
             for item in dependency["state"]
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("side", "shortcut"),
+    [("start", "cp-from-species"), ("target", "cp-to-species")],
+)
+def test_candidate_shortcut_carries_exact_species_without_candidate_index(
+    monkeypatch, side: str, shortcut: str,
+) -> None:
+    def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise svc.ServiceError("候选路径索引版本不兼容；请重建事件索引。")
+
+    monkeypatch.setattr(svc, "search_candidate_species", unavailable)
+    client = create_app().server.test_client()
+    input_ids = [
+        f"cp-{side}-find", f"cp-{side}-current", "cp-context",
+        "cp-from-species", "cp-to-species", "cp-nav-anchor",
+    ]
+    response = client.post(
+        "/_dash-update-component",
+        json=_callback_payload(
+            client, input_ids=input_ids, changed=f"{shortcut}.n_clicks",
+            input_values={shortcut: 1},
+            state_values={
+                "app-store": {"selected_smiles": "CCO", "artifacts": {}},
+                f"cp-{side}-query": "", f"cp-{side}": [],
+                f"cp-{side}.value": None,
+            },
+            output_id=f"cp-{side}",
+        ),
+    )
+    assert response.status_code == 200
+    selected = response.get_json()["response"][f"cp-{side}"]
+    assert selected["value"] == "CCO"
+    assert selected["options"][0]["value"] == "CCO"
 
 
 def _candidate_instance_state() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1509,6 +1552,7 @@ def test_species_workspace_widgets_switch_and_return_between_stages() -> None:
     assert render_detail.status_code == 200
     detail_view = render_detail.get_json()["response"]
     assert detail_view["species-detail-stage"]["style"] == {}
+    assert detail_view["species-structure-stage"]["style"] == {"display": "none"}
     assert detail_view["species-stage-detail-btn"]["active"] is True
     assert detail_view["species-stage-back-btn"]["children"] == (
         "← 返回结构列表"
@@ -1567,8 +1611,8 @@ def test_batch_compare_opens_from_data_management() -> None:
     body = response.get_json()["response"]
     assert body["page-store"]["data"] == {"page": "batch-compare"}
     assert body["page-batch-compare"]["className"] == "rs-page active"
-    assert body["nav-species"]["aria-current"] == "page"
-    assert body["data-open-batch-compare-btn"]["aria-current"] == "false"
+    assert body["nav-batch-compare"]["aria-current"] == "page"
+    assert body["data-open-batch-compare-btn"]["aria-current"] == "page"
 
 
 def test_evolution_page_exposes_and_opens_multi_source_comparison() -> None:
@@ -1610,7 +1654,18 @@ def test_evolution_page_exposes_and_opens_multi_source_comparison() -> None:
     body = response.get_json()["response"]
     assert body["page-store"]["data"] == {"page": "batch-compare"}
     assert body["page-batch-compare"]["className"] == "rs-page active"
-    assert body["nav-species"]["aria-current"] == "page"
+    assert body["nav-batch-compare"]["aria-current"] == "page"
+
+
+def test_species_empty_state_mentions_comparison_workflow() -> None:
+    app = create_app()
+    client = app.server.test_client()
+    layout = client.get("/_dash-layout").get_json()
+    empty_state = _layout_node_by_id(layout, "species-empty-state")
+    assert empty_state is not None
+    assert "多来源趋势对比可直接选择多个已导入来源" in json.dumps(empty_state, ensure_ascii=False)
+    assert "batch-compare" not in WORKSPACE_TOOL_PAGES["species"]
+    assert "batch-compare" in WORKSPACE_PAGE_IDS
 
 
 def test_data_management_opens_as_workspace_page() -> None:
@@ -1755,11 +1810,7 @@ def test_data_workspace_overview_card_opens_workspace(target: str) -> None:
     body = response.get_json()["response"]
     assert body["page-store"]["data"] == {"page": target}
     assert body[f"page-{target}"]["className"].endswith(" active")
-    nav_id = (
-        "nav-species"
-        if target == "batch-compare"
-        else f"nav-{target}"
-    )
+    nav_id = f"nav-{target}"
     assert body[nav_id]["aria-current"] == "page"
 
 
@@ -1807,7 +1858,7 @@ def test_data_workspace_next_step_syncs_restored_page_chrome() -> None:
     assert body["nav-species"]["aria-current"] == "page"
     assert body["nav-data-management"]["aria-current"] == "false"
     assert body["data-open-batch-compare-btn"]["aria-current"] == "false"
-    assert body["page-title"]["children"] == "物种与趋势"
+    assert body["page-title"]["children"] == "物种发现"
 
 
 def test_review_source_files_are_collapsed_by_default() -> None:
@@ -1885,7 +1936,7 @@ def test_selected_species_channel_action_opens_reaction_search() -> None:
     assert body["page-store"]["data"] == {"page": "reactions"}
     assert body["page-reactions"]["className"] == "rs-page active"
     assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
-    assert body["page-title"]["children"] == "反应与事件"
+    assert body["page-title"]["children"] == "反应路径"
     assert body["page-header"]["className"] == (
         "rs-page-header is-title-only"
     )
@@ -1970,63 +2021,7 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
     navigation = navigation_response.get_json()["response"]
     assert navigation["page-store"]["data"] == {"page": "evolution"}
     assert navigation["page-evolution"]["className"] == "rs-page active"
-    assert navigation["nav-species"]["className"] == "rs-top-nav-item active"
-
-
-def test_selected_species_event_action_opens_reaction_channels() -> None:
-    app = create_app()
-    client = app.server.test_client()
-    dependency = next(
-        item
-        for item in client.get("/_dash-dependencies").get_json()
-        if "page-species.className" in str(item.get("output") or "")
-    )
-    input_ids = [item["id"] for item in dependency["inputs"]]
-    input_values = {item["id"]: 0 for item in dependency["inputs"]}
-    input_values["species-to-event-btn"] = 1
-
-    response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=input_ids,
-            changed="species-to-event-btn.n_clicks",
-            input_values=input_values,
-            state_values={"page-store": {"page": "species"}},
-            output_id="page-species",
-        ),
-    )
-
-    assert response.status_code == 200
-    body = response.get_json()["response"]
-    assert body["page-store"]["data"] == {"page": "reactions"}
-    assert body["page-reactions"]["className"] == "rs-page active"
-    assert body["nav-reactions"]["className"] == "rs-top-nav-item active"
-
-    view_response = client.post(
-        "/_dash-update-component",
-        json=_callback_payload(
-            client,
-            input_ids=[
-                "species-to-channels-btn",
-                "species-to-event-btn",
-                "nav-reactions",
-            ],
-            changed="species-to-event-btn.n_clicks",
-            input_values={
-                "species-to-channels-btn": 0,
-                "species-to-event-btn": 1,
-                "nav-reactions": 0,
-            },
-            state_values={},
-            output_id="rxn-channel-view",
-        ),
-    )
-    assert view_response.status_code == 200
-    view = view_response.get_json()["response"]
-    assert view["rxn-query-card"]["style"] == {"display": "none"}
-    assert view["rxn-results-card"]["style"] == {"display": "none"}
-    assert view["rxn-channel-view"]["style"] == {"display": "block"}
+    assert navigation["nav-batch-compare"]["className"] == "rs-top-nav-item active"
 
 
 def test_channel_view_back_button_uses_navigation_history() -> None:
@@ -2385,13 +2380,11 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
             client,
             input_ids=[
                 "species-to-channels-btn",
-                "species-to-event-btn",
                 "nav-reactions",
             ],
             changed="species-to-channels-btn.n_clicks",
             input_values={
                 "species-to-channels-btn": 1,
-                "species-to-event-btn": 0,
                 "nav-reactions": 0,
             },
             state_values={},
@@ -2408,11 +2401,10 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["species-to-channels-btn", "species-to-event-btn"],
+            input_ids=["species-to-channels-btn"],
             changed="species-to-channels-btn.n_clicks",
             input_values={
                 "species-to-channels-btn": 1,
-                "species-to-event-btn": 0,
             },
             state_values={
                 "rxn-top": 12,
@@ -5879,7 +5871,7 @@ def test_species_detail_reports_only_explicit_rng_identity_context(tmp_path) -> 
         "event_search": {"state": "needs-preparation", "reason": "Prepare event index"},
     }}, "Prepare event index"),
 ])
-def test_workflow_launcher_explains_requirements_for_five_workspaces(store, expected):
+def test_workflow_launcher_contains_only_analysis_workspaces(store, expected):
     app = create_app()
     client = app.server.test_client()
     response = client.post("/_dash-update-component", json={
@@ -5892,11 +5884,47 @@ def test_workflow_launcher_explains_requirements_for_five_workspaces(store, expe
     content = response.get_json()["response"]["data-overview-actions"]["children"]
     assert expected in json.dumps(content, ensure_ascii=False)
     ids = _component_pattern_ids(content)
-    assert {item["page"] for item in ids} == set(WORKSPACE_PAGE_IDS)
-    assert len(ids) == len(WORKSPACE_PAGE_IDS)
+    analysis_pages = set(WORKSPACE_PAGE_IDS) - {"data-management"}
+    assert {item["page"] for item in ids} == analysis_pages
+    assert len(ids) == len(analysis_pages)
     assert set(LEGACY_PAGE_REDIRECTS).isdisjoint(
         {item["page"] for item in ids}
     )
+
+
+@pytest.mark.parametrize("state, label, reason", [
+    ("ready", "可用", ""),
+    ("needs-preparation", "需准备索引", "请准备丰度索引"),
+    ("preparing", "准备中", "正在准备丰度索引"),
+    ("stale", "需更新", "来源已变化"),
+    ("missing-source", "缺少源数据", "缺少物种丰度源文件"),
+])
+def test_trend_workspace_reports_current_dataset_capabilities(state, label, reason):
+    client = create_app().server.test_client()
+    response = client.post("/_dash-update-component", json={
+        "output": "data-overview-actions.children",
+        "outputs": {"id": "data-overview-actions", "property": "children"},
+        "inputs": [{"id": "app-store", "property": "data", "value": {
+            "dataset_id": "single-source",
+            "analysis_capabilities": {
+                "species_abundance": {"state": state, "reason": reason},
+                "element_distribution": {"state": state, "reason": reason},
+            },
+        }}],
+        "state": [], "changedPropIds": ["app-store.data"],
+    })
+    assert response.status_code == 200
+    content = response.get_json()["response"]["data-overview-actions"]["children"]
+    cards = content["props"]["children"][0]["props"]["children"][1]["props"]["children"]
+    card = next(card for card in cards if any(
+        item.get("page") == "batch-compare" for item in _component_pattern_ids(card)
+    ))
+    heading = card["props"]["children"][0]["props"]["children"]
+    assert heading[1]["props"]["children"] == label
+    rendered = json.dumps(card, ensure_ascii=False)
+    assert reason in rendered
+    assert "状态待检查" not in rendered
+    assert "请刷新RNG 数据状态" not in rendered
 
 
 @pytest.mark.parametrize("payload, disabled", [(None, True), ({"curves": []}, True), ({"curves": [{"values": [1]}]}, False)])

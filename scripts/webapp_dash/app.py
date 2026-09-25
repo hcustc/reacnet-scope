@@ -161,7 +161,7 @@ def _topbar() -> dbc.Container:
                         className="rs-index-global-state",
                     ),
                     dbc.Button(
-                        "选择RNG 数据",
+                        "选择数据",
                         id="data-pick-btn",
                         color="secondary",
                         size="sm",
@@ -285,7 +285,7 @@ def _page_header() -> html.Div:
             html.Div(
                 [
                     html.Div(
-                        "需要选择RNG 数据",
+                        "需要选择数据",
                         id="page-data-status",
                         className="rs-page-status is-blocked",
                         role="status",
@@ -324,20 +324,34 @@ def _detail_panel() -> html.Div:
             html.Div(
                 [
                     html.Div([html.H6("选中物种详情"), html.Span("结构与网络统计", className="rs-detail-kicker")]),
-                    dbc.Button("关闭详情", id="species-detail-close", size="sm", color="secondary", outline=True, title="关闭物种详情并返回结果"),
                     html.Div(
                         [
                             dbc.Button(
-                                "查看时间演化",
+                                "直接反应与事件时间",
+                                id="species-to-channels-btn",
+                                color="primary",
+                                size="sm",
+                                disabled=True,
+                            ),
+                            dbc.Button(
+                                "丰度趋势",
                                 id="species-to-evolution-btn",
                                 color="primary",
                                 size="sm",
                                 outline=True,
                                 disabled=True,
                             ),
-                            dbc.Button("经反应通道定位事件", id="species-to-event-btn", color="secondary", size="sm", outline=True, disabled=True),
-                            dbc.Button("从该物种探索", id="cp-from-species", size="sm", outline=True, disabled=True),
-                            dbc.Button("寻找生成路线", id="cp-to-species", size="sm", outline=True, disabled=True),
+                            dbc.DropdownMenu(
+                                [
+                                    dbc.DropdownMenuItem("从该物种看后续", id="cp-from-species", disabled=True),
+                                    dbc.DropdownMenuItem("向该物种查前驱", id="cp-to-species", disabled=True),
+                                ],
+                                id="species-candidate-menu",
+                                label="候选路径",
+                                color="secondary",
+                                size="sm",
+                                disabled=True,
+                            ),
                         ],
                         className="rs-detail-actions",
                     ),
@@ -453,15 +467,17 @@ def _species_page() -> html.Div:
                             ),
                             html.Div(
                                 [
-                                    html.H5("尚未导入反应数据", className="rs-empty-title"),
+                                    html.H5("尚未选择当前RNG 数据", className="rs-empty-title"),
                                     html.P(
-                                        "选择 reactionabcd 数据后即可检索。",
+                                        "单来源物种检索需要选择一个RNG 数据；多来源趋势对比可直接选择多个已导入来源。",
                                         className="rs-empty-copy",
                                     ),
                                 ],
                                 id="species-empty-copy",
                             ),
-                            dbc.Button("选择RNG 数据", id="species-open-data-modal", color="primary", size="sm"),
+                            html.Div([
+                                dbc.Button("添加或切换RNG 数据", id="species-open-data-modal", color="primary", size="sm"),
+                            ], className="rs-empty-actions"),
                         ],
                         id="species-empty-state",
                         className="rs-empty-state",
@@ -502,13 +518,6 @@ def _species_page() -> html.Div:
                                     html.Div(
                                         [
                                             dbc.Button(
-                                                "查看所选物种的反应通道与时间",
-                                                id="species-to-channels-btn",
-                                                color="primary",
-                                                size="sm",
-                                                disabled=True,
-                                            ),
-                                            dbc.Button(
                                                 "← 返回检索结果",
                                                 id="species-stage-back-btn",
                                                 color="secondary",
@@ -534,6 +543,14 @@ def _species_page() -> html.Div:
                                             html.Span(
                                                 "悬停分子式或 SMILES 可预览结构",
                                                 className="rs-species-hover-hint",
+                                            ),
+                                            dbc.Button(
+                                                "对比多个来源",
+                                                id="species-result-compare-btn",
+                                                color="secondary",
+                                                size="sm",
+                                                outline=True,
+                                                className="ms-1",
                                             ),
                                             dbc.Button(
                                                 "导出全部 CSV",
@@ -603,7 +620,7 @@ def _species_page() -> html.Div:
                                         ),
                                         html.P(
                                             "时间属于具体的精确 Reaction Type。选择一个结构后，"
-                                            "点击“查看所选物种的反应通道与时间”，再选择一条生成或消耗通道。",
+                                            "进入物种详情，点击“直接反应与事件时间”，再选择一条生成或消耗通道。",
                                             id="species-structure-timing-hint",
                                             className="rs-step-note mt-2 mb-0",
                                         ),
@@ -631,6 +648,8 @@ def _species_page() -> html.Div:
             )
         ],
         className="rs-card",
+        id="species-results-card",
+        style={"display": "none"},
     )
 
     return html.Div([query_card,
@@ -2474,15 +2493,9 @@ def _batch_compare_page() -> html.Div:
         dbc.CardBody([
             html.Div([
                 html.Div([
-                    html.Span("01", className="rs-compare-step"),
-                    html.Div([
-                        html.H6("选择数据来源", className="rs-card-title mb-0"),
-                        html.Span(
-                            "选择已导入的RNG 数据加入对比；至少需要两个来源。",
-                            className="rs-card-subtitle",
-                        ),
-                    ]),
-                ], className="rs-compare-step-heading"),
+                    html.H6("来源与物种", className="rs-card-title mb-0"),
+                    html.Span("每个来源分别确认精确结构", className="rs-card-subtitle"),
+                ]),
                 html.Div(id="species-compare-entry-note", className="small"),
             ], className="rs-compare-heading-row"),
             html.Div([
@@ -2495,17 +2508,8 @@ def _batch_compare_page() -> html.Div:
                     className="rs-grow",
                 ),
             ], className="rs-query-row rs-compare-source-picker"),
-            html.Div([
-                html.Span("02", className="rs-compare-step"),
-                html.Div([
-                    html.H6("逐来源确认精确 Species", className="rs-card-title mb-0"),
-                    html.Span(
-                        "相同分子式或显示名称不会自动视为同一结构。",
-                        className="rs-card-subtitle",
-                    ),
-                ]),
-            ], className="rs-compare-step-heading"),
-            html.Div(id="species-compare-sources"),
+            html.Div(id="species-compare-sources", className="rs-compare-source-list"),
+            dcc.Interval(id="species-compare-index-refresh", interval=5000, disabled=True),
             html.Details([
                 html.Summary("未在列表中？手工添加 Species 文件"),
                 html.Div([
@@ -2514,24 +2518,23 @@ def _batch_compare_page() -> html.Div:
                     dbc.Button("添加来源", id="species-compare-add-path", size="sm", color="secondary", outline=True),
                 ], className="rs-query-row"),
             ], className="rs-compare-manual-source"),
-            html.Div([
-                html.Span("03", className="rs-compare-step"),
-                html.Div([
-                    html.H6("检查时间口径并运行", className="rs-card-title mb-0"),
-                    html.Span(
-                        "原始 timestep 保持独立；物理时间要求每个来源都已确认换算。",
-                        className="rs-card-subtitle",
-                    ),
-                ]),
-            ], className="rs-compare-step-heading"),
+            html.Div("时间口径与运行", className="rs-compare-section-label"),
             html.Div([
                 dbc.Label("时间轴"),
-                dcc.Dropdown(id="species-compare-axis", options=[{"label": "原始 timestep", "value": "step"}, {"label": "ps（各来源需已确认换算）", "value": "ps"}, {"label": "ns（各来源需已确认换算）", "value": "ns"}], value="step", clearable=False, style={"width": 240}),
+                dcc.Dropdown(id="species-compare-axis", options=[{"label": "原始 timestep", "value": "step"}, {"label": "ps（各来源需已确认换算）", "value": "ps"}, {"label": "ns（各来源需已确认换算）", "value": "ns"}], value="step", clearable=False, className="rs-compare-axis"),
                 dbc.Button("比较丰度", id="species-compare-run", color="primary", size="sm", disabled=True),
                 dbc.Button("导出曲线、汇总和查询条件", id="species-compare-export", color="secondary", size="sm", outline=True, disabled=True),
                 dcc.Download(id="species-compare-download"),
             ], className="rs-query-row rs-compare-actions"),
             html.Div(id="species-compare-readiness", className="rs-compare-readiness", role="status", **{"aria-live": "polite"}),
+        ], className="p-3"), className="rs-card rs-batch-controls-card"
+    )
+    species_results_card = dbc.Card(
+        dbc.CardBody([
+            html.Div([
+                html.H6("丰度曲线", className="rs-card-title mb-0"),
+                html.Span("曲线按来源独立显示；更改来源或物种后重新比较。", className="rs-card-subtitle"),
+            ], className="rs-compare-results-heading"),
             html.Div(id="species-compare-alert", className="small"),
             dcc.Loading(dcc.Graph(
                 id="species-compare-graph",
@@ -2540,8 +2543,11 @@ def _batch_compare_page() -> html.Div:
                     "准备完成后，比较按钮会自动启用。",
                 ),
             ), type="circle"),
-            _grid("species-compare-summary", page_size=25),
-        ], className="p-3"), className="rs-card rs-batch-controls-card"
+            html.Div([
+                html.Div("逐来源汇总", className="rs-compare-section-label"),
+                _grid("species-compare-summary", page_size=25),
+            ], className="rs-compare-summary"),
+        ], className="p-3"), className="rs-card rs-compare-results-card"
     )
     condition_card = dbc.Card(
         dbc.CardBody(
@@ -2711,7 +2717,8 @@ def _batch_compare_page() -> html.Div:
         style={"display": "none"},
     )
     return html.Div([
-        html.Div(html.Div(species_card, id="compare-species-panel"),
+        html.Div(html.Div([species_card, species_results_card], id="compare-species-panel",
+                          className="rs-species-compare-workspace"),
                  className="rs-page", id="page-batch-compare"),
         html.Div(html.Div([condition_card, matrix_card, detail_card], id="compare-reactions-panel"),
                  className="rs-page", id="page-reaction-compare"),
@@ -2958,101 +2965,91 @@ def _data_management_page() -> html.Div:
                         **{"aria-live": "polite"},
                     ),
                     html.Div([
-                        dcc.RadioItems(id="library-view", options=[
-                            {"label": "已导入RNG 数据", "value": "library"},
-                            {"label": "当前数据与准备任务", "value": "tasks"}],
-                            value="library", inline=True, className="rs-library-tabs"),
-                        dataset_library.management_panel(),
-                        html.Div(
-                        [
-                            html.Section(
-                                [
-                                    html.Div(
-                                        [
-                                            html.Div(
-                                                [
-                                                    html.Div(
-                                                        [
-                                                            html.Div(
-                                                                "当前RNG 数据",
-                                                                className="rs-data-section-kicker",
-                                                            ),
-                                                            html.Div(
-                                                                id="data-candidate-summary",
-                                                                className="rs-data-candidate-summary",
-                                                            ),
-                                                        ],
-                                                        className="rs-data-summary-title-group",
-                                                    ),
-                                                    html.Div(
-                                                        id="data-scan-status",
-                                                        className="rs-data-scan-status",
-                                                    ),
-                                                ],
-                                                className="rs-data-summary-heading",
-                                            ),
-                                            html.Div(
-                                                id="data-artifacts",
-                                                className="rs-data-artifacts",
-                                            ),
-                                            html.Div(
-                                                [
-                                                    dbc.Button(
-                                                        "选择RNG 数据",
-                                                        id="data-empty-pick-btn",
-                                                        color="primary",
-                                                        className="rs-empty-dataset-action",
-                                                    ),
-                                                    dbc.Button(
-                                                        "更新状态",
-                                                        id="data-current-refresh-btn",
-                                                        color="secondary",
-                                                        outline=True,
-                                                        className="rs-current-refresh-action",
-                                                        style={"display": "none"},
-                                                    ),
-                                                    dbc.Button(
-                                                        "更换RNG 数据",
-                                                        id="data-change-pick-btn",
-                                                        color="secondary",
-                                                        outline=True,
-                                                        className="rs-change-dataset-action",
-                                                    ),
-                                                    dbc.Button(
-                                                        "打开分析功能",
-                                                        id="data-open-species-btn",
-                                                        style={"display": "none"},
-                                                    ),
-                                                ],
-                                                className="rs-data-summary-actions",
-                                            ),
-                                            html.Div(
-                                                [
-                                                    html.Div(
-                                                        id="data-prep-basic-status",
-                                                    ),
-                                                    html.Div(
-                                                        id="data-recent-datasets",
-                                                    ),
-                                                ],
-                                                hidden=True,
-                                            ),
+                        html.Section(
+                            [
+                                html.Section(
+                                    [
+                                        html.Div(
+                                            [
+                                                html.Div(
+                                                    [
+                                                        html.Div(
+                                                            [
+                                                                html.Div(
+                                                                    "当前RNG 数据",
+                                                                    className="rs-data-section-kicker",
+                                                                ),
+                                                                html.Div(
+                                                                    id="data-candidate-summary",
+                                                                    className="rs-data-candidate-summary",
+                                                                ),
+                                                            ],
+                                                            className="rs-data-summary-title-group",
+                                                        ),
+                                                        html.Div(
+                                                            id="data-scan-status",
+                                                            className="rs-data-scan-status",
+                                                        ),
+                                                    ],
+                                                    className="rs-data-summary-heading",
+                                                ),
+                                                html.Div(
+                                                    id="data-artifacts",
+                                                    className="rs-data-artifacts",
+                                                ),
+                                                html.Div(
+                                                    [
+                                                        dbc.Button(
+                                                            "更新状态",
+                                                            id="data-current-refresh-btn",
+                                                            color="secondary",
+                                                            outline=True,
+                                                            className="rs-current-refresh-action",
+                                                        ),
+                                                        dbc.Button(
+                                                            "更换数据",
+                                                            id="data-change-pick-btn",
+                                                            color="secondary",
+                                                            outline=True,
+                                                            className="rs-change-dataset-action",
+                                                        ),
+                                                        dbc.Button(
+                                                            "打开分析功能",
+                                                            id="data-open-species-btn",
+                                                            style={"display": "none"},
+                                                        ),
+                                                    ],
+                                                    className="rs-data-summary-actions",
+                                                ),
+                                                html.Div(
+                                                    [
+                                                        html.Div(
+                                                            id="data-prep-basic-status",
+                                                        ),
+                                                        html.Div(
+                                                            id="data-recent-datasets",
+                                                        ),
+                                                    ],
+                                                    hidden=True,
+                                                ),
+                                            ],
+                                            className="rs-data-summary-main",
+                                        ),
                                     ],
-                                    className="rs-data-summary-main",
+                                    className="rs-data-summary-panel",
                                 ),
-                                ],
-                                className="rs-data-summary-panel",
-                            ),
-                            html.Div(
-                                id="data-next-action",
-                                className="rs-data-next-action d-none",
-                            ),
-                            html.Div(id="data-overview-actions", className="rs-data-overview-actions"),
-                            _data_cache_management_card(),
-                        ],
-                        id="library-tasks-panel",
-                        style={"display": "none"},
-                    )], id="data-overview-view", className="rs-data-view"),
+                                dataset_library.management_panel(),
+                            ],
+                            id="data-library-workspace",
+                            className="rs-card rs-data-library-workspace",
+                        ),
+                        html.Div(
+                            id="data-next-action",
+                            className="rs-data-next-action d-none",
+                        ),
+                        html.Div(id="data-overview-actions", className="rs-data-overview-actions"),
+                        _data_cache_management_card(),
+                    ], id="data-overview-view", className="rs-data-view"),
                     file_import.layout(),
                 ],
                 className="rs-data-page-body",
@@ -3263,6 +3260,7 @@ def build_layout() -> html.Div:
             dcc.Store(id="batch-managed-store", storage_type="memory", data={"datasets": []}),
             dcc.Store(id="species-compare-sources-store", storage_type="session", data=[]),
             dcc.Store(id="species-compare-catalog-store", storage_type="memory", data={}),
+            dcc.Store(id="species-compare-cancel-result", storage_type="memory"),
             dcc.Store(id="species-compare-result-store", storage_type="memory", data=None),
             dcc.Store(id="batch-conditions-store", storage_type="memory", data=None),
             dcc.Store(
