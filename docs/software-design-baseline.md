@@ -2,7 +2,7 @@
 
 状态：已接受
 日期：2026-08-03
-最近产品范围修订：2026-09-21（目标物种、候选步骤与反应实例主线）
+最近产品范围修订：2026-09-25（物种中心研究工作流）
 
 本文档定义 ReacNet Scope 当前版本的产品范围、领域语义、功能契约和发布验收基准。它不是对现有实现状态的声明；代码是否符合本文档，需要另行审查。
 
@@ -10,7 +10,7 @@
 
 ## 1. 产品定位
 
-ReacNet Scope 是面向 ReacNetGenerator 输出的反应分子动力学证据工作台。它组织并查询 Species Abundance Evidence、Reaction Evidence 和 Molecular Evidence，帮助用户从聚合反应网络逐步下钻到可复核的具体事件和局部轨迹。
+ReacNet Scope 是面向反应分子动力学（MD）的证据分析工作台。它围绕研究者关注的精确 Species，将 ReacNetGenerator（RNG）记录组织为可探索的候选反应路线，并将路线中的每一步关联到可核查的具体事件，帮助研究者形成、筛选机理假设，并评估其在现有 MD 数据中的证据支持。它不自动确认机理成立。
 
 ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权威生产者。ReacNet Scope 负责索引、查询、关联、统计、证据验证、可视化和导出，不从原始轨迹运行第二套反应检测或通用成键判定。
 
@@ -38,7 +38,10 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 发布必过的核心链路是：
 
-> 加载 ReacNetGenerator 数据集 → 确认精确目标 Species → 查看 Direct Reaction Channel 或 Candidate Path → 选择反应步骤及 Reaction Occurrence → 核查结构/局部轨迹 → 导出可复核事件包或该实例的 DFT Initial Geometry
+> 选择 RNG 数据 → 打开精确 Species 详情 → 探索 Candidate Path → 选择反应步骤及具体 Reaction Occurrence → 核查结构/局部轨迹或导出 → 返回原分析位置
+
+每份物种详情及其分析请求绑定当前 RNG 数据、源修订与该详情的精确 Species；浏览另一物种不重新解释已有结果。跨入口返回恢复原来源、查询与选择位置，不重新执行分析。Direct Reaction Channel 保留生成/消耗的一步查询，包含未满足候选主线载体条件的反应；丰度趋势沿用自身的时间与单位条件，不暗中筛选候选路线。
+在物种发现结果中选中精确结构即打开该物种详情；随后可打开任一适用分析工具。独立反应式与事件检索无需先打开物种详情。
 
 Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
 
@@ -46,9 +49,8 @@ Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作
 
 围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它本身不递归扩展路径。
 
-普通 Dash 的发布主线为“精确目标 Species → Direct Reaction Channel 或 Candidate Path →
-反应步骤 → Reaction Occurrence → 结构/局部轨迹 → 证据或初始几何导出”。Candidate Path
-Discovery 位于“反应与事件”工作区；Molecular Lineage 以界面名称“分子变化追踪”作为所选
+普通 Dash 的物种起点发布主线为“精确 Species 详情 → 候选路线 → 反应步骤 → 具体事件 → 详情／核查或导出 → 返回路线”，同时允许从反应、演化和事件独立开始。Candidate Path
+Discovery 位于物种详情的路线分析；Molecular Lineage 以界面名称“分子变化追踪”作为所选
 实例的可选下钻，不是候选成立或几何导出的前置条件。Path Verification 与 Species Fate
 Analysis 的科学契约继续有效，但不挂载独立 Dash 页面；公共 CLI/API 默认兼容保留。旧页面
 ID 恢复时只归一到所属工作区，不运行退役分析。产品优先级与 ADR-0018 的替代范围见
@@ -58,7 +60,7 @@ ID 恢复时只归一到所属工作区，不运行退役分析。产品优先�
 
 以下能力继续作为普通工作区内的正式辅助功能，但不是核心链路的必经步骤：
 
-- Candidate Path Discovery 及其独立的 Continuous MD Support 检查。
+- 对已发现候选路线执行的独立 Continuous MD Support 检查。
 - 从所选 Reaction Occurrence 进入的分子变化追踪。
 - Species 时间演化。
 - Element Distribution Evolution。
@@ -150,7 +152,7 @@ Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
 
 - 界面显示名称统一为“RNG 数据”或“RNG 文件夹”；内部 Dataset 身份不变。无批量草稿时可直接“导入当前文件夹”，有草稿时明确显示导入数量并只提交列表内容；空请求不能呈现为源文件损坏或导入失败计数。
 
-- 左侧“RNG 数据”打开统一页面，同时展示当前数据概览、已导入列表和准备任务；列表提供“添加数据”、切换使用与移出引用操作。数据页不提供对比控件，也不展示分析工作区的任务导航。
+- “RNG 数据”作为平级入口打开统一页面，同时展示当前数据概览、已导入列表和准备任务；列表提供“添加数据”、切换使用与移出引用操作。数据页不提供对比控件或旧工作区任务导航。
 
 - 支持显式批量导入多个独立 RNG 文件夹，加入当前浏览器持久保存的已导入数据集列表；该列表与最近使用记录分开，不因最近记录数量限制而淘汰。每批最多 100 个文件夹，逐项报告成功或失败；取消与过期结果不得登记。导入不合并运行、不构建分析索引、不改变 Current Dataset。
 - 已导入列表按数据集、按能力显示索引状态；用户可在条目上显式启动、续建或取消该数据集的索引准备，无需先设为 Current Dataset。每项操作重新验证该条目的身份和服务器可访问路径，不因点击一个按钮默认构建其他能力或扫描轨迹。
@@ -197,51 +199,25 @@ Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
 
 ## 10. Dash 信息架构与会话
 
-普通导航提供 RNG 数据入口和四个分析工作区：
+普通导航为五个平级入口：“RNG 数据／物种／反应／演化／事件”；展示决定见 [ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)。内部可保留原页面 ID 和单份控件，但不显示旧工作区任务排或空白核查入口。
 
-- RNG 数据：Dataset Candidate 检查、Current Dataset 切换、来源、能力与 Preparation Task。
-- 物种发现：物种检索、结构与质量检索。
-- 反应路径：Direct Reaction Channel、候选路径、反应式检索、时间分布和 Reaction Occurrence 列表。
-- 证据核查：具体反应实例、前后键结构、局部帧、事件包、最低必要的 DFT Initial Geometry 导出与检查，以及可选的分子变化追踪。
-- 物种趋势：单来源时间演化、Element Distribution Evolution 和多来源物种对比。
-反应与条件对比归入“反应路径”；多来源选择不切换 Current Dataset，普通导入与分析只需要一个数据集。
+- RNG 数据管理导入列表、Current Dataset、各项能力和 Preparation Task。
+- 物种提供分子式、质量和精确结构检索；选择精确结构后显示一份身份、结构与统计详情，并可探索候选路线、一步直接通道或丰度趋势。路线工具带入当前精确物种，在工具内选择后续、前驱或两物种连接模式；检索空态可独立填写候选路线起终点。
+- 反应独立检索 Reaction Type，展示反应结构、事件与时间分布，并提供多来源反应对比；不要求先打开物种详情。
+- 演化使用同一丰度探索器：精确物种列表按累计采样丰度排序，选中一行就在当前页绘制该物种的逐帧曲线；按元素原子数分组时，同一曲线区显示该组的逐帧总量，点击时间点可选择组内精确 Species，并显示所选物种、组内其余物种与组总量。列表选择和组内下钻不自动跳到物种页；继续研究路线或反应须显式进入物种详情。排行必须标注已分析帧范围、显示上限和精确结构身份；分子式或元素分组下钻先确定精确 Species。多来源物种比较仍由演化入口进入。
+- 事件独立查询 Reaction Occurrence。同一事件从候选步骤、反应或事件结果打开时共用详情，再按需展开全宽核查、轨迹、事件包、DFT 初始几何或分子变化追踪。
 
-内部工具可以继续使用原页面 ID，但不再为每个概念提供一级导航。数据集管理位于页面上方的
-当前数据与已导入列表区域；其下方“分析工具”展示物种发现、反应路径、证据核查和物种趋势四个工作区，不再重复提供
-数据管理卡片。工作区内的任务导航只列出当前普通任务。能力不足时仍显示受影响能力、原因和恢复动作，
-不能通过隐藏按钮把“缺证据”“需准备”或“尚未验证”伪装为有效空结果。
+物种详情内的分析结果以该详情的精确 Species 为明确目标，保留输入参数及结果自身的来源与修订；从详情进入丰度趋势时直接绘制该精确物种的曲线，独立工具允许手工输入。没有跨详情持续存在的“研究物种”身份，也不自动设置此身份。浏览 B 不改变已经生成的 A 结果的目标。返回链在会话内有界保存来源、修订、查询与选择位置；返回不重新执行分析。过期来源或修订不得借返回链恢复旧证据。详见 [ADR-0030](adr/0030-use-local-species-focus-in-dash.md)。
 
-界面以任务控件和结果为主，不常驻设计宣言、内部架构、工具退役说明或跨页面的通用“使用帮助”。
-必要的操作说明在相关控件附近按需提供；空状态只提示下一步，正常就绪状态不重复解释。
-缺证据、冲突、失败和准备进度在相关操作附近直接显示；影响科学解释的限制和文件运行归属
-要求不得只藏在悬浮提示中。
+丰度趋势默认使用 Current Dataset；“添加对比来源”在同一分析中确认逐来源精确 Species、索引和时间口径，无 Current Dataset 时也可独立比较。比较不切换 Current Dataset。比较结果的另一来源物种只有在用户显式切换、验证成功且修订仍匹配后才能用于普通单源分析。返回单源趋势保留输入和结果。反应对比同样不合并来源或事件身份。
 
-Candidate Path Discovery 作为“反应与事件”内的“候选路径”任务提供，不新增一级导航。
-支持单数据集的起点逐步探索、终点逐步查找候选前驱、双端目标搜索、精确结构选择、路线比较、逐步事件分页与 JSON/CSV 导出。
-已知 `miso=1` 显示 RNG 代表身份与键级限制；步骤证据可查看具体事件的真实键图。单端每次展开一步；双端默认不设步数上限，按首步分支轮流展示已检查路线，
-不提供综合评分或能量 CSV 排名。默认使用明确参数的短暂往返折叠视图，原始视图保留全部证据。
-路径图中的反应菱形及其两侧连线选择同一个完整步骤；步骤详情按稳定 `event_id` 浏览多个支持实例，
-上一/下一实例可跨有界分页读取。同一 Transition 中的列表顺序不解释为事件先后。选中实例可直接
-进入“结构与轨迹”，接收端从发布索引重读事件并清除旧实例的轨迹、几何和变化追踪结果；返回时
-恢复候选路线上下文。缺少坐标只禁用局部轨迹及坐标导出，不隐藏已有的分子证据。
-用户可独立检查所选路线的连续历史，区分找到实例链、未找到与证据不足；缺少间隔内逐帧键状态证明时
-不得宣称连续。首版检查边界见 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
+具体事件详情以 Dataset Identity、源修订与稳定 `event_id` 从已发布索引重读。缺事件索引、unresolved、缺坐标、有效零结果与查询失败分别显示；缺坐标仍可核查 RNG 键与分子证据。选中另一事件时清理旧轨迹、几何和追踪状态，迟到响应不得覆盖新事件。关闭详情或全宽核查恢复发起结果、所选步骤及事件页。全宽核查保持发起入口高亮，不产生独立一级导航。
 
-Path Verification 与 Species Fate Analysis 不挂载普通 Dash 页面。旧 `page-store` 中的
-`candidate-paths`、`pathway`、`species-fate` 仍分别归一到“反应与事件”“反应与事件”和
-“结构与轨迹”，只恢复所属工作区，不自动运行分析。公共 CLI/API 与兼容导出继续保留。
-第一版候选任务的范围与 ADR-0014 局部替代关系见
-[ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)。
+Candidate Path Discovery 的三种模式、逐步实例证据与独立 Continuous MD Support 检查保持原契约。路径图以一个菱形表示一条完整有向 Reaction Type，全部反应物和产物分别作为物种节点连接，当前路线的 Carried Species 连线高亮；共享菱形不合并不同候选路线的身份或逐步证据。点击菱形及其连线选择完整步骤，事件按稳定身份分页，同一 Transition 内不推断顺序；缺坐标只影响依赖坐标的操作。路线阅读保持结构可读，全部返回路线作为独立总览；局部重复的非主线参与物保留同一 Species 身份，不视为新分子实例。步骤面板使用唯一观测列表，选中后进入共用事件详情核查实际键与明确参与者的后续变化；连续历史检查置于路线级。Apparent Rate Constant Estimate 不由直接通道隐式计算；TP 不称为事件频率。Path Verification 与 Species Fate Analysis 不作为普通 Dash 入口，其公共 CLI/API 保留。
 
-Apparent Rate Constant Estimate 不由普通 Direct Reaction Channel 查询隐式计算；普通界面保留
-显式物理时间换算、事件计数和观察窗口，但不提供默认 k 设置或“显示速率列”开关。已有结果字段、
-研究用核心与公共接口按兼容政策保留。分子变化追踪、DFT 初始几何与必要检查仍位于具体事件的结构与轨迹上下文，
-不扩展为量化调度、TS/IRC、理论速率或主方程平台。
+旧 `page-store` 需要版本化迁移：旧 `reactions` 表示物种研究，旧候选任务归入物种路线；`reaction-compare` 归反应，`element-distribution` 和 `batch-compare` 归演化，`trajectory` 仅在事件书签通过来源与修订核验后恢复。没有完整上下文时落到可操作入口，不自动查询或读取轨迹。
 
-普通内部工具可以独立进入。跨工具按钮只交接稳定身份和必要上下文，目标工具仍调用统一核心
-实现；退役能力不提供 Dash 入口。
-
-Current Dataset、页面和工作流选择属于浏览器会话；索引、任务和数据集设置属于 Dataset Workspace。数据集切换清空旧选择。页面恢复前重新验证路径权限、数据集身份和源修订。
+Current Dataset、页面和工作流选择属于浏览器会话；索引、任务和数据集设置属于 Dataset Workspace。数据集切换清空旧选择，失败或取消保留原上下文。界面以查询与结果为主，科学限制、缺能力和恢复动作在相关操作附近可见。
 
 ## 11. 查询与分析契约
 
@@ -285,6 +261,8 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 普通 Dash 查询必须读取持久化 Species Abundance Index，不得每次完整扫描 `.species`。索引至少提供物种目录、时间点定位、峰值摘要和按 Species 读取的时间序列。
 
 - 精确 SMILES 表示具体 Species。
+- 演化入口的累计采样丰度排行读取已发布索引中的 `total_count`，按精确 Species 排序并有界展示；同时显示已分析帧数、source timestep 范围、总物种数和显示截断。该指标不是当前丰度、峰值或事件频率。
+- 同页元素组的逐帧总量是该帧中符合元素条件的精确 Species 丰度之和；选中一个组内物种时，“其余物种”是组总量减去该物种丰度。曲线显示降采样不改变全量帧计算的排行，也不能从显示点反算排行。
 - 分子式查询显式选择合计、分别显示或两者，并列出聚合成员。
 - 归一化、时间对齐、平滑和降采样都记录参数。
 - 平滑与降采样只影响显示，不覆盖原始数值或统计结论。
@@ -318,14 +296,18 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 ### 11.5 Candidate Path Discovery
 
+- [ADR-0031](adr/0031-show-net-reaction-directions-in-candidate-workbench.md)：Dash 默认 `direction_view=net`，按完整精确 Species 多重集合配对严格正逆反应，只展开 `forward_count - reverse_count > 0` 的记录方向；净零与完全自反类型不连边，不推导未观测方向。可切换 `observed`；Python/CLI 保留 observed 兼容默认。
+- 净计数统计当前发布修订的全部观测区间（`count_scope=published_revision_all_transitions`），包含 unresolved；不按展示页、主线转移支持数或时间返回分类相减。净视图固定有效 `quality_view=raw`，不作短时折叠。方向过滤在邻接分页之前，正逆总数、净数和原始支持事件在步骤详情及 JSON/CSV 保留。结果 schema 为 indexed-candidates/v5；结构身份与现有邻接版本不变，无需因此重建索引。
+- 图的物种重复只表示网络或浏览历史中的循环，不称为具体分子的返回；净值为正的多步循环不因此隐藏。普通候选的 simple-path 约束是路线枚举边界，不是化学禁环规则。继续、翻页及返回使用已提交查询口径，修改控件后新搜索才生效。
+
 - ADR-0017 增加离线 Candidate Return Evidence，区分精确键级返回与仅拓扑返回；同 Transition 无内部先后，相关原子上的中间事件或 unresolved 屏障不能跳过。
-- 默认 `quality_view=persistent`、`return_window_frames=3`、`return_basis=topology`；可选 raw、1–100 分析帧间隔及 exact。只在全部支持事件均满足折叠条件时不展开该边；未分类、低频或单纯短寿命证据不自动删除。结构身份和原始计数保持不变，过滤在邻接分页限制之前进行。
+- 全部观测方向中的返回折叠使用 `quality_view=persistent`、`return_window_frames=3`、`return_basis=topology`；Python/CLI 保留此兼容默认，Dash 默认净方向及 raw。可选 raw、1–100 分析帧间隔及 exact。只在全部支持事件均满足折叠条件时不展开该边；未分类、低频或单纯短寿命证据不自动删除。结构身份和原始计数保持不变，过滤在邻接分页限制之前进行。
 
 - Discovery graph 只包含当前发布 revision 中至少有一次 normalized Reaction Occurrence 和具体 Reaction Evidence 支持的记录方向；聚合网络、推导反向或 `count=0` 不能创建方向。`count >= 1` 只表示 eligible，不代表 mechanistically significant。
 - 相邻步骤必须由明确的 exact Carried Species 连接：它是前一步的 product，也是后一步的 reactant。至少一个 matched Reaction Occurrence 必须证明该产物是 focal reactant 的 event-local dominant atom descendant，即与 focal reactant 具有所有产物 participant 中最大的正 atom-ID 交集。所有 co-reactants 和其他 products 保留为完整 Reaction Type context，但不决定主路径连接。
 - 多产物 Reaction Type 只对满足上述局部原子传递规则的 product Species 产生 carried branch；最大交集并列时分别保留。ranker 不得按分子式、结构相似度或人工类别猜测 Carried Species。不同步骤仍可来自不同事件和 Molecule Instance；这一局部规则不等于 Continuous MD Support。
 - 普通 Candidate 使用 Carried-Species-simple path；已访问 Carried Species 的 expansion 不进入普通 Candidate，而记录为可审计 cycle closure evidence。显式设置 `max_steps` 时，到达该上限是正常 discovery horizon termination，不是 cycle 或 execution truncation。
-- 单端探索每次只展开一步；用户可沿选中分支继续。双端搜索默认 `max_steps=null`，不得暗藏固定步数截止。用户显式指定的 `max_steps` 才是 declarative query horizon；`max_expansions`、`max_frontier_states`、`max_candidates_examined`、路线前缀数、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
+- 单端探索每次只展开一步；用户可沿选中分支继续。继续操作使用当前末端精确 Species 发起新的一步查询，同时保留至多 100 步已选浏览历史；返回上一步重新执行当时的查询。浏览链仅组合展示各步的独立 Step Evidence，不改写各次查询返回的 Candidate 身份，不表示同一 Molecule Instance 连续演化；连续性仍由独立检查回答。双端搜索默认 `max_steps=null`，不得暗藏固定步数截止。用户显式指定的 `max_steps` 才是 declarative query horizon；`max_expansions`、`max_frontier_states`、`max_candidates_examined`、路线前缀数、wall-time 和 memory 是 execution budgets，必须与 horizon 分开报告。
 
 #### 11.5.1 Discovery modes 与完成状态
 
@@ -374,8 +356,8 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 
 ### 11.7 Reaction Occurrence 与轨迹查看
 
-- 事件页查询并选择具体 Reaction Occurrence；未解析发生可统计但不可打开轨迹。
-- Candidate step 也可按稳定 `event_id` 直接交接一个已匹配 Reaction Occurrence；接收端必须按来源修订重读事件，不能信任前端缓存行或显示序号。
+- 事件页可独立查询并选择具体 Reaction Occurrence；反应结果和候选步骤也可直接打开同一详情。未解析发生可统计并显示可用元数据，但不可定位分子或打开轨迹。
+- Candidate step 也可按稳定 `event_id` 直接交接一个已匹配 Reaction Occurrence；共用详情必须按来源修订重读事件，不能信任前端缓存行或显示序号。详情按需展开全宽核查并返回原结果位置。
 - 默认显示全部参与原子，可切换仅反应核或周围环境。
 - 周围环境默认 `4.0 Å`、最多 `500` 原子；允许在服务器安全范围内修改，截断时显示原始命中数。
 - 轨迹读取只使用预建索引返回的有限帧字节范围。
@@ -483,6 +465,8 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 
 ### 11.9 Element Distribution Evolution
 
+演化入口承载本能力；图表中的分子式或元素计数组先下钻到精确结构，再从该 Species 详情进入其他分析，返回保留原筛选、图表和选择。
+
 - 用户选择分组元素；数据含碳时可默认 C，但不得写死。
 - 默认统计至少含一个分组元素的 Species，提供包含 `E0` 的显式选项。
 - 筛选元素和条件从数据集发现，可表达存在、不存在或原子数范围。
@@ -494,6 +478,8 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 只保留一个通用核心、一个 Dash 页面和 CLI `element-distribution`。删除 C/O/Cl 固定 schema、第二套 Carbon 模式和旧 `carbon-plot`。
 
 ### 11.10 Batch Compare
+
+多来源反应对比从“反应”入口使用；多来源物种丰度比较从“演化”入口使用。两者仍保留各自统计语义，不把 TP 改称单位时间事件频率。
 
 - 每个输入明确归属 Simulation Condition 和 Replicate；目录自动识别只作建议，用户运行前可检查和修改。
 - 目录扫描不得默认选择或确认推断分组。只有用户检查、必要时修改并显式确认后，建议值才可作为条件/Replicate 元数据进入统计；普通多来源选择默认只表示独立来源。
@@ -576,8 +562,8 @@ Candidate Path / Continuous MD Support 的发布门槛还必须在 `10^6 normali
 5. 具备核心单元/契约测试、Dash 或 CLI 集成测试和代表性真实数据验收。
 6. 通过跨平台核心测试与 Dash smoke test。
 
-收敛版本还必须保证：普通导航只有四个工作区；退役页面不再挂载；可选能力不作为主线前置
-条件且不会因旧会话恢复自动运行；普通通道查询不调用表观 k、候选评分、Species Fate 或
+收敛版本还必须保证：普通导航有独立的 RNG 数据入口和三个分析工作区；退役页面不再挂载；
+可选能力不作为主线前置条件且不会因旧会话恢复自动运行；普通通道查询不调用表观 k、候选评分、Species Fate 或
 QC 预检。
 
 RP3 验收至少固定验证反应类型数、事件数、事件关联、已知路径验证结论、Event Path、局部帧和事件包成员。大型数据验收验证结构性能契约与回归指标。自动测试不启动 OVITO；OVITO 打开属于受控人工验收。

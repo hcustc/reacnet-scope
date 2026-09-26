@@ -90,42 +90,6 @@
     flex-shrink: 0;
 }
 
-.rs-compact-shell .rs-dataset-context-compact {
-    display: flex;
-    align-items: center;
-    flex: 1 1 140px;
-    gap: 8px;
-    padding: 0 12px;
-    border-left: 1px solid var(--rs-border);
-    min-width: 0;
-}
-
-.rs-compact-shell .rs-dataset-indicator-compact {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--rs-border-strong);
-    flex-shrink: 0;
-}
-
-.rs-compact-shell .rs-dataset-info {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    min-width: 0;
-}
-
-.rs-compact-shell .rs-dataset-name {
-    max-width: 100%;
-    font-size: var(--rs-font-base);
-    font-weight: 500;
-    color: var(--rs-text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .rs-compact-shell .rs-badge {
     padding: 1px 6px;
     border-radius: 4px;
@@ -136,13 +100,6 @@
 .rs-compact-shell .rs-badge.rs-bad {
     background: var(--rs-surface-warning);
     color: var(--rs-warning);
-}
-
-.rs-compact-shell .rs-navbar-actions {
-    flex-direction: row;
-    flex: 0 0 auto;
-    align-items: center;
-    white-space: nowrap;
 }
 
 .rs-compact-shell .rs-body.rs-tool-shell {
@@ -170,7 +127,6 @@
         flex: 1 0 100%;
         justify-content: space-between;
     }
-    .rs-compact-shell .rs-dataset-context-compact { flex-basis: 80px; padding: 4px 8px; }
     .rs-compact-shell .rs-index-global-state { display: none; }
     .rs-compact-shell .rs-nav-main-compact .rs-top-nav-item { padding: 6px; gap: 4px; }
 }
@@ -178,5 +134,4 @@
 @media (max-width: 400px) {
     .rs-compact-shell .rs-navbar-container { padding: 8px; gap: 4px; }
     .rs-compact-shell .rs-nav-icon-compact { display: none; }
-    .rs-compact-shell .rs-dataset-context-compact { flex-basis: 40px; }
 }

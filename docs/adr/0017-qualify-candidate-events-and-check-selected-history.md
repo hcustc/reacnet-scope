@@ -5,6 +5,8 @@ date: 2026-09-21
 
 # Qualify candidate events and check selected history
 
+ADR-0031 supersedes the Dash default folding view with net-direction discovery; the occurrence-level records and optional observed-direction folding remain in force.
+
 The user authorized implementation following the chlorophenol case study.
 This refines ADR-0013/15/16: discovery and continuous history remain separate;
 candidate structural identity stays version 2 and report schema advances to

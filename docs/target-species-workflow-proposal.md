@@ -1,5 +1,9 @@
 # 围绕目标物种整理使用流程
 
+> 导航更新：普通入口现按[ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)分为 RNG 数据、物种、反应、演化和事件；本提案的历史工具摆放不再作为验收标准。
+
+> 历史提案：当前研究入口与导航见[物种中心研究工作流交接](species-centered-workflow-handoff-2026-09-25.md)及[ADR-0027](adr/0027-center-dash-on-persistent-research-species.md)。本文件“仅目标需另选起点”的说明已由[ADR-0026](adr/0026-search-candidates-by-anchor-mode.md)替代，不作为现行要求。
+
 状态：已实施；科学契约同步至设计基准和 ADR-0020。
 日期：2026-09-21。
 依据：当前工作区代码（含已有未提交改动）、用户提供的候选路径合并图，以及后续讨论。

@@ -5,6 +5,8 @@ date: 2026-09-21
 
 # Center the Dash workflow on candidate steps and concrete occurrences
 
+The separate evidence-inspection navigation placement is superseded by [ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md). Candidate-step evidence, concrete occurrence selection, stable handoff, return, and export decisions remain accepted.
+
 ## Context
 
 The ordinary research task starts with a target Species and asks which observed
@@ -58,6 +60,10 @@ name becomes “结构与轨迹”; the lineage domain object, schemas, API name
 the scientific rules in ADR-0018 and ADR-0019 do not change.
 
 ## Supersession
+
+[ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md)
+subsequently replaces this decision's navigation placement of the Candidate task.
+The step, occurrence, return and evidence rules below remain accepted.
 
 This ADR supersedes only ADR-0018's statement that Molecular Lineage recovery
 is the product development mainline. ADR-0018's prepared substrate, traversal,

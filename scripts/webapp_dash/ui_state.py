@@ -1,4 +1,4 @@
-"""Presentation state shared by the five workspaces."""
+"""Presentation state shared by the analysis workspaces."""
 
 from __future__ import annotations
 
@@ -30,9 +30,44 @@ def reaction_query(reactants, products, mode, top, share, metric, absolute, posi
 
 def register_callbacks(app):
     app.clientside_callback(
+        """function(store) {
+            const current = store || {};
+            window.reacnetScopeNavigation?.setDatasetContext(Object.fromEntries(
+                ['dataset_id', 'source_revision', 'artifacts'].map(key => [key, current[key] ?? null])
+            ));
+            return window.dash_clientside.no_update;
+        }""",
+        Output("workspace-context-sync", "data"), Input("app-store", "data"),
+    )
+    app.clientside_callback(
+        """function(transaction) {
+            if (transaction?.state === 'succeeded') {
+                const menu = document.getElementById('current-dataset-menu');
+                if (menu) menu.open = false;
+                return false;
+            }
+            return window.dash_clientside.no_update;
+        }""",
+        Output("current-dataset-menu", "open"), Input("dataset-switch-transaction", "data"),
+        prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(enabled) { return enabled ? {} : {display: 'none'}; }",
+        Output("rxn-share-options", "style"), Input("rxn-with-share", "value"),
+    )
+    app.clientside_callback(
+        """function(before, after) {
+            return `轨迹窗口：前 ${before ?? '未填写'} 帧 / 后 ${after ?? '未填写'} 帧`;
+        }""",
+        Output("event-window-summary", "children"),
+        Input("event-rxn-before", "value"), Input("event-rxn-after", "value"),
+    )
+    app.clientside_callback(
         """function(children, page, task, ids) {
             let active = (page || {}).page;
+            if (active === 'batch-compare') active = 'evolution';
             if (active === 'reactions' && task === 'candidates') active = 'reaction-candidates';
+            if (active === 'reactions' && task === 'direct') active = 'reaction-related';
             return [(ids || []).map(id => 'rs-task-tab nav-link' + (id.page === active ? ' active' : '')),
                     (ids || []).map(id => id.page === active ? 'page' : 'false')];
         }""",
@@ -46,6 +81,8 @@ def register_callbacks(app):
     for button, fields in {
         "species-search-btn": ("species-query", "species-mass-tol"),
         "rxn-search-btn": ("rxn-reactants", "rxn-products"),
+        "event-rxn-btn": ("event-reaction-text", "event-rxn-max", "event-rxn-before", "event-rxn-after"),
+        "rxn-timing-apply-btn": ("rxn-timing-start", "rxn-timing-end", "rxn-timing-width"),
         "cp-start-find": ("cp-start-query",), "cp-target-find": ("cp-target-query",),
     }.items():
         app.clientside_callback(
@@ -67,8 +104,17 @@ def register_callbacks(app):
         trigger = ctx.triggered_id or {}
         if not isinstance(trigger, dict) or not any(_clicks or []):
             return no_update
-        target = {"reactions": "direct", "reaction-candidates": "candidates"}.get(trigger.get("page"))
+        target = {"reactions": "overview", "reaction-candidates": "candidates",
+                  "reaction-related": "direct"}.get(trigger.get("page"))
         return target if target and target != current else no_update
+
+    @app.callback(Output("reaction-task-tabs", "value", allow_duplicate=True),
+                  Input("nav-reactions", "n_clicks"),
+                  Input("species-direct-route-btn", "n_clicks"),
+                  prevent_initial_call=True)
+    def primary_reaction_mode(_reactions, _route):
+        trigger = ctx.triggered_id
+        return "candidates" if trigger == "species-direct-route-btn" else "direct"
 
     @app.callback(Output("rxn-query-feedback", "children"),
                   Input("rxn-reactants", "value"), Input("rxn-products", "value"),

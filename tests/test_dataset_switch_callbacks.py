@@ -281,7 +281,7 @@ def test_empty_data_workspace_is_an_onboarding_state_not_an_error_report() -> No
 
     assert response.status_code == 200
     rendered = json.dumps(response.get_json()["response"], ensure_ascii=False)
-    assert "尚未加载RNG 数据" in rendered
+    assert "当前未选择用于分析的数据" in rendered
     assert "missing-source" not in rendered
     assert "缺少源数据" not in rendered
 

@@ -5,6 +5,8 @@ date: 2026-09-24
 
 # Search candidates by available Species anchors
 
+ADR-0031 adds net-direction filtering and advances the indexed report to v5; anchor modes, route enumeration and adjacency version 5 remain in force.
+
 The user approved three Candidate Path Discovery entries after reviewing the
 search method: an exact start only, an exact target only, or both. This decision
 supersedes ADR-0015's required start and shortest-first first-version display,
