@@ -79,12 +79,20 @@ def test_task_navigation_matches_clicked_button_not_another_buttons_old_count(mo
 
 
 def test_switching_reaction_tasks_preserves_mounted_navigation_buttons():
-    from dash import no_update
-    from scripts.webapp_dash.app import create_app
+    from scripts.webapp_dash.app import _workspace_task_navigation, create_app
 
     app = create_app()
-    callback = app.callback_map["workspace-task-nav.children"]["callback"].__wrapped__
-    current = [{"props": {"id": {"type": "workspace-open-page", "page": page}}}
-               for page in ("reactions", "reaction-candidates", "events", "reaction-compare")]
-    assert callback({"page": "reactions"}, "candidates", current) is no_update
-    assert callback({"page": "events"}, "candidates", current) is no_update
+    assert "workspace-task-nav.children" not in app.callback_map
+    navigation = _workspace_task_navigation()
+    pages = [button.id["page"] for button in navigation.children]
+    assert pages == [
+        "species",
+        "reactions",
+        "reaction-candidates",
+        "reaction-related",
+        "reaction-compare",
+        "evolution",
+        "element-distribution",
+        "events",
+    ]
+    assert all(button.n_clicks == 0 for button in navigation.children)

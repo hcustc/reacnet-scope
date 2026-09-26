@@ -14,6 +14,19 @@ from scripts.webapp_dash.dataset_library import (
 from tests.test_dataset_switch_callbacks import _payload
 
 
+def _component_by_id(node, component_id):
+    if getattr(node, 'id', None) == component_id:
+        return node
+    children = getattr(node, 'children', None)
+    if children is None:
+        return None
+    for child in children if isinstance(children, (list, tuple)) else [children]:
+        found = _component_by_id(child, component_id)
+        if found is not None:
+            return found
+    return None
+
+
 @pytest.fixture
 def folders(tmp_path, monkeypatch):
     monkeypatch.setattr(dir_browser, 'ALLOWED_ROOTS', [tmp_path])
@@ -127,7 +140,7 @@ def test_library_row_click_starts_switch_without_hidden_selector(folders, monkey
         ))
         transaction, request = reducer(
             0, 0, [1], 0, 0, None, {'page': 'reactions'},
-            None, [entry], {}, [],
+            None, None, [entry], {}, [],
         )
         assert request == transaction
         assert request['state'] == 'validating'
@@ -157,17 +170,20 @@ def test_dataset_management_has_no_comparison_controls():
     assert 'library-compare' not in layout
     assert '至少两个' not in layout
     assert 'library-add-more' in layout
-    assert PAGE_WORKSPACES['batch-compare'] == 'batch-compare'
+    assert PAGE_WORKSPACES['evolution'] == 'evolution'
     assert PAGE_WORKSPACES['reaction-compare'] == 'reactions'
-    assert 'batch-compare' in WORKSPACE_PAGE_IDS
+    assert 'batch-compare' not in WORKSPACE_PAGE_IDS
 
 
 def test_imported_list_is_visible_before_analysis_tools_with_no_current_dataset(folders):
     from plotly.utils import PlotlyJSONEncoder
 
-    layout = json.dumps(_data_management_page(), cls=PlotlyJSONEncoder, ensure_ascii=False)
-    assert layout.index('data-candidate-summary') < layout.index('library-management-panel')
-    assert layout.index('library-management-panel') < layout.index('data-overview-actions')
+    page = _data_management_page()
+    panel = _component_by_id(page, 'library-management-panel')
+    assert _component_by_id(panel, 'data-candidate-summary') is not None
+    assert _component_by_id(panel, 'library-management-list') is not None
+    layout = json.dumps(page, cls=PlotlyJSONEncoder, ensure_ascii=False)
+    assert layout.index('library-management-list') < layout.index('data-overview-actions')
 
     entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
     client = create_app().server.test_client()

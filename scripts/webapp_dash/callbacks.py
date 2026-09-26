@@ -41,7 +41,7 @@ from reacnet_scope.indexes import IndexBuildInProgressError
 from reacnet_scope import services as svc
 from scripts.webapp_dash import dataset_library
 from scripts.webapp_dash.chart_presentation import empty_chart_figure
-from scripts.webapp_dash.candidate_workbench import actual_event_view
+from scripts.webapp_dash.candidate_workbench import actual_event_view, context_key, event_participants_view
 from scripts.webapp_dash.navigation import (
     DEFAULT_PAGE,
     PAGE_CAPABILITY_REQUIREMENTS,
@@ -53,12 +53,11 @@ from scripts.webapp_dash.navigation import (
     PAGE_WORKSPACES,
     TOP_NAV_PAGE_IDS,
     WORKSPACE_PAGE_IDS,
-    WORKSPACE_TASK_LABELS,
-    WORKSPACE_TOOL_PAGES,
+    migrate_page_state,
     resolve_page_id,
 )
 PAGE_DATA_REQUIREMENTS = {
-    "species": ("reaction", "reactionabcd"),
+    "species": ("species", ".species"),
     "reactions": ("reaction", "reactionabcd"),
     "evolution": ("species", ".species + Species Abundance Index"),
     "element-distribution": ("species", ".species"),
@@ -76,12 +75,10 @@ _CAPABILITY_LABELS = {
 }
 
 _WORKSPACE_CAPABILITIES = {
-    "species": ("reaction_search", "species_abundance", "element_distribution"),
+    "species": ("species_abundance", "reaction_search"),
     "reactions": ("reaction_search", "event_search"),
-    "trajectory": ("event_search", "trajectory_evidence"),
-    # The overview describes current-data trends. Comparison sources retain
-    # their independent readiness checks inside the multi-source task.
-    "batch-compare": ("species_abundance", "element_distribution"),
+    "evolution": ("species_abundance", "element_distribution"),
+    "events": ("event_search", "trajectory_evidence"),
 }
 
 _CAPABILITY_STATE_LABELS = {
@@ -557,6 +554,13 @@ def initial_store() -> dict[str, Any]:
     }
 
 
+def _channel_focus_species(channel_focus, store):
+    focus = channel_focus if isinstance(channel_focus, dict) else {}
+    if focus.get("context") == context_key(store):
+        return str(focus.get("species") or "").strip()
+    return str((store or {}).get("selected_smiles") or "").strip()
+
+
 def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
     """Pair every dataset-bound UI value with its canonical empty state."""
 
@@ -570,22 +574,38 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("cp-report", "data", None),
         reset("cp-event-page", "data", None),
         reset("species-workspace-stage", "data", "results"),
+        reset("species-detail-handoff", "data", None),
         reset("rxn-grid-store", "data", {"rows": []}),
+        reset("reaction-event-request", "data", None),
+        reset("reaction-event-response", "data", None),
+        reset("reaction-event-store", "data", None),
+        reset("reaction-event-grid", "rowData", []),
         reset("rxn-timing-distribution-store", "data", None),
         reset("rxn-timing-page-store", "data", None),
         reset("rxn-timing-graph", "figure", {}),
         reset("rxn-timing-event-grid", "rowData", []),
         reset("rxn-timing-card", "style", {"display": "none"}),
         reset("evolution-payload-store", "data", None),
+        reset("evolution-group-payload-store", "data", None),
+        reset("evolution-rank-store", "data", None),
+        reset("evolution-rank-grid", "rowData", []),
+        reset("evolution-rank-grid", "selectedRows", []),
+        reset("evolution-group-members-grid", "rowData", []),
+        reset("evolution-group-members-grid", "selectedRows", []),
         reset("evolution-timestep", "value", None),
         reset("element-distribution-payload-store", "data", None),
         reset("element-distribution-timestep", "value", None),
         reset("event-grid-store", "data", {"rows": []}),
         reset("event-selected-store", "data", None),
+        reset("event-detail-response", "data", None),
+        reset("event-detail-state", "data", None),
+        reset("event-detail-dismissed", "data", None),
         reset("event-bookmark-validation-store", "data", None),
         reset("event-viewer-store", "data", None),
+        reset("event-viewer-response", "data", None),
         reset("event-dft-store", "data", None),
         reset("molecule-lineage-store", "data", None),
+        reset("molecule-lineage-response", "data", None),
         reset("molecule-lineage-drilldown-store", "data", None),
         reset("species-grid", "rowData", []),
         reset("species-grid", "selectedRows", []),
@@ -625,7 +645,7 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("molecule-lineage-event-grid", "selectedRows", []),
         reset("molecule-lineage-cytoscape", "elements", []),
         reset("evolution-graph", "figure", empty_chart_figure(
-            "选择物种，开始查看时间演化", "在设置区添加目标，然后点击绘制。"
+            "选择对象，开始查看时间演化", "从左侧选择物种或元素分组。"
         )),
         reset("element-distribution-composition-trend", "figure", go.Figure()),
         reset("element-distribution-composition-table", "rowData", []),
@@ -1569,21 +1589,27 @@ def _structure_species_card(
     ]
     if action_scope:
         action_label = f"查看 {formula} 的直接生成/消耗通道"
-        return html.Button(
-            children,
-            id={
-                "type": "rxn-structure-species",
-                "scope": action_scope,
-                "side": side,
-                "index": int(item.get("index") or 0),
-                "smiles": smiles,
-                "formula": formula,
-            },
-            n_clicks=0,
-            type="button",
-            title=action_label,
-            className="rs-channel-species-card rs-channel-species-action",
-            **{"aria-label": action_label},
+        return html.Div(
+            [html.Button(
+                children,
+                id={
+                    "type": "rxn-structure-species",
+                    "scope": action_scope,
+                    "side": side,
+                    "index": int(item.get("index") or 0),
+                    "smiles": smiles,
+                    "formula": formula,
+                },
+                n_clicks=0, type="button", title=action_label,
+                className="rs-channel-species-card rs-channel-species-action",
+                **{"aria-label": action_label},
+            ),
+             html.Button("查看物种详情", id={
+                 "type": "species-open-detail", "scope": action_scope,
+                 "side": side, "index": int(item.get("index") or 0),
+                 "smiles": smiles, "formula": formula,
+             }, n_clicks=0, type="button", className="rs-open-species-detail")],
+            className="rs-channel-species-actions",
         )
     return html.Div(children, className="rs-channel-species-card")
 
@@ -1781,6 +1807,56 @@ def _selected_table_row(selected_rows, rows):
     return ui.selected_row(selected_rows, rows)
 
 
+def _species_detail_children(detail: dict[str, Any], smiles: str) -> list[Any]:
+    """Render the one exact Species detail used by search and cross-entry drilldown."""
+    formula = detail.get("formula") or "?"
+    smiles_value = detail.get("smiles") or smiles
+    info_panel = html.Div(
+        [
+            html.Div(
+                [html.Span(formula, className="rs-detail-formula"),
+                 html.Code(smiles_value, className="rs-detail-smiles")],
+                className="rs-detail-identity",
+            ),
+            html.Dl([
+                html.Dt("精确质量"), html.Dd(_fmt_num(detail.get("exact_mass"))),
+                html.Dt("标称质量"), html.Dd(_fmt_num(detail.get("nominal_mass"))),
+                html.Dt("反应物通量"), html.Dd(_fmt_num(detail.get("tp_as_reactant"))),
+                html.Dt("产物通量"), html.Dd(_fmt_num(detail.get("tp_as_product"))),
+                html.Dt("总通量"), html.Dd(_fmt_num(detail.get("total_throughput"))),
+                html.Dt("消耗反应数"), html.Dd(_fmt_num(detail.get("n_consume_rxns"))),
+                html.Dt("生成反应数"), html.Dd(_fmt_num(detail.get("n_produce_rxns"))),
+            ]),
+            _species_identity_context_panel(detail),
+        ], className="rs-detail-stats",
+    )
+    svg_result = svc.render_species_svg(smiles)
+    if svg_result.get("ok") and svg_result.get("svg"):
+        structure_panel = html.Div(
+            html.Iframe(srcDoc=_wrap_svg_doc(svg_result["svg"]),
+                        style={"border": "none", "width": "100%", "height": "100%"}),
+            className="rs-svg-wrap",
+        )
+    else:
+        structure_panel = html.Div(
+            svg_result.get("message") or "暂无可用结构图",
+            className="rs-svg-wrap rs-empty",
+        )
+    return [structure_panel, info_panel]
+
+
+def _species_return_label(frame: dict[str, Any]) -> str:
+    source_entry = str(frame.get("entry") or PAGE_WORKSPACES.get(frame.get("page")))
+    return f"← 返回{PAGE_LABELS.get(source_entry, '来处')}"
+
+
+def _evolution_comparison_active(page: dict | None) -> bool:
+    state = page or {}
+    return state.get("page") == "batch-compare" or (
+        state.get("page") == "evolution" and bool(state.get("compare_sources"))
+    )
+
+
 def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("rxn-channel-lanes", "className"),
@@ -1840,19 +1916,23 @@ def register_callbacks(app: Any) -> None:
         Input("page-capability-manage-btn", "n_clicks"),
         Input("species-open-data-modal", "n_clicks"),
         Input("species-result-compare-btn", "n_clicks"),
+        Input("reaction-open-compare-btn", "n_clicks"),
+        Input("reaction-compare-back-btn", "n_clicks"),
         Input("species-to-channels-btn", "n_clicks"),
         Input("species-to-evolution-btn", "n_clicks"),
+        Input("species-direct-route-btn", "n_clicks"),
+        Input("analysis-back-btn", "n_clicks"),
         Input("evolution-open-compare-btn", "n_clicks"),
-        Input("cp-open-events", "n_clicks"),
-        Input("cp-track-instance", "n_clicks"),
+        Input("evolution-close-compare-btn", "n_clicks"),
+        Input("evolution-distribution-tab", "n_clicks"),
+        Input("element-distribution-back-evolution-btn", "n_clicks"),
+        Input("event-participant-handoff", "data"),
         Input("cp-prepare", "n_clicks"),
         Input("cp-from-species", "n_clicks"),
-        Input("cp-to-species", "n_clicks"),
-        Input("rxn-to-event-btn", "n_clicks"),
-        Input("rxn-channel-to-event-btn", "n_clicks"),
         Input("rxn-timing-open-events-btn", "n_clicks"),
         Input("event-back-btn", "n_clicks"),
         Input("event-extract-btn", "n_clicks"),
+        Input("event-detail-expand-btn", "n_clicks"),
         Input("trajectory-back-events-btn", "n_clicks"),
         Input("dir-browser-cancel-btn", "n_clicks"),
         Input("dataset-switch-navigation", "data"),
@@ -1865,10 +1945,15 @@ def register_callbacks(app: Any) -> None:
         # Dynamic overview buttons may hydrate in the same renderer batch as
         # a real click or a completed import. Their zero-click notification
         # must not swallow that navigation event.
-        direct_click = next((item for item in ctx.triggered
+        direct_clicks = [item for item in ctx.triggered
             if str(item.get("prop_id") or "").endswith(".n_clicks")
             and not str(item.get("prop_id") or "").startswith("{")
-            and isinstance(item.get("value"), (int, float)) and item["value"] > 0), None)
+            and isinstance(item.get("value"), (int, float)) and item["value"] > 0]
+        # A freshly mounted page can report its navigation click alongside the
+        # next action. The action is the user's latest intent in that batch.
+        direct_click = next((item for item in reversed(direct_clicks)
+                             if not str(item["prop_id"]).startswith("nav-")),
+                            direct_clicks[-1] if direct_clicks else None)
         switch_event = next((item for item in ctx.triggered
             if item.get("prop_id") == "dataset-switch-navigation.data" and item.get("value")), None)
         if direct_click or switch_event:
@@ -1910,7 +1995,11 @@ def register_callbacks(app: Any) -> None:
         triggered_string_id = (
             triggered_id if isinstance(triggered_id, str) else None
         )
-        stored_state = (_args[-1] or {}) if _args else {}
+        if triggered_string_id == "event-participant-handoff" and not (
+            isinstance(triggered.get("value"), dict) and triggered["value"].get("token")
+        ):
+            raise PreventUpdate
+        stored_state = migrate_page_state(_args[-1] if _args else {})
         stored_page = resolve_page_id(stored_state.get("page"))
         switch_navigation = _args[-2] if len(_args) >= 2 else {}
         if triggered_string_id == "dataset-switch-navigation":
@@ -1919,35 +2008,39 @@ def register_callbacks(app: Any) -> None:
             page_id = str(triggered_id.get("page") or "data-management")
         elif _pattern_trigger_type(triggered_id) == "workspace-open-page":
             page_id = str(triggered_id.get("page") or DEFAULT_PAGE)
-            if page_id == "reaction-candidates":
+            if page_id in {"reaction-candidates", "reaction-related"}:
                 page_id = "reactions"
         elif triggered_string_id == "dir-browser-cancel-btn":
             page_id = str(
                 ((stored_state.get("dataset_return") or {}).get("page"))
                 or "data-management"
             )
-        elif triggered_string_id in {
-            "rxn-to-event-btn",
-            "rxn-channel-to-event-btn",
-            "rxn-timing-open-events-btn",
-        }:
+        elif triggered_string_id == "rxn-timing-open-events-btn":
             page_id = "events"
-        elif triggered_string_id in {"cp-open-events", "cp-track-instance"}:
+        elif triggered_string_id == "event-participant-handoff":
             page_id = "trajectory"
+        elif triggered_string_id == "analysis-back-btn":
+            page_id = "species"
+        elif triggered_string_id == "evolution-distribution-tab":
+            page_id = "element-distribution"
+        elif triggered_string_id == "element-distribution-back-evolution-btn":
+            page_id = "evolution"
+        elif triggered_string_id == "reaction-open-compare-btn":
+            page_id = "reaction-compare"
+        elif triggered_string_id == "reaction-compare-back-btn":
+            page_id = "reactions"
         elif triggered_string_id == "event-back-btn":
             page_id = stored_state.get("return_page") or DEFAULT_PAGE
-        elif triggered_string_id == "event-extract-btn":
+        elif triggered_string_id in {"event-extract-btn", "event-detail-expand-btn"}:
             page_id = "trajectory"
         elif triggered_string_id == "trajectory-back-events-btn":
-            page_id = (
-                "reactions"
-                if stored_state.get("candidate_direct_return")
-                else "events"
+            page_id = stored_state.get("return_page") or (
+                "reactions" if stored_state.get("candidate_direct_return") else "events"
             )
         elif triggered_string_id in {
             "species-to-channels-btn",
             "cp-from-species",
-            "cp-to-species",
+            "species-direct-route-btn",
         }:
             page_id = "reactions"
         elif triggered_string_id in {
@@ -1955,7 +2048,7 @@ def register_callbacks(app: Any) -> None:
             "evolution-open-compare-btn",
             "species-result-compare-btn",
         }:
-            page_id = "batch-compare"
+            page_id = "evolution"
         elif triggered_string_id == "data-open-species-btn":
             page_id = "species"
         elif triggered_string_id in {
@@ -1968,7 +2061,7 @@ def register_callbacks(app: Any) -> None:
             "species-open-data-modal",
         }:
             page_id = "data-management"
-        elif triggered_string_id == "species-to-evolution-btn":
+        elif triggered_string_id in {"species-to-evolution-btn", "evolution-close-compare-btn"}:
             page_id = "evolution"
         else:
             page_id = (
@@ -1985,12 +2078,34 @@ def register_callbacks(app: Any) -> None:
             )
             for pid in PAGE_IDS
         }
-        active_workspace = PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE)
+        page_state = {"page": page_id, "version": 2}
+        if (stored_state.get("return_stack")
+                and triggered_string_id != "dataset-switch-navigation"
+                and not str(triggered_string_id or "").startswith("nav-")):
+            page_state["return_stack"] = list(stored_state["return_stack"])[-4:]
+        species_entry_actions = {
+            "species-to-channels-btn", "cp-from-species",
+            "species-direct-route-btn",
+            "species-to-evolution-btn",
+        }
+        if triggered_string_id in species_entry_actions:
+            page_state["entry"] = "species"
+        elif triggered_string_id in {
+            "event-participant-handoff", "event-extract-btn", "event-detail-expand-btn",
+            "event-back-btn", "trajectory-back-events-btn",
+            "rxn-timing-open-events-btn",
+        } and stored_state.get("entry") == "species":
+            page_state["entry"] = "species"
+        active_workspace = str(page_state.get("entry") or PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE))
         nav_classes = {
             pid: f"rs-top-nav-item{' active' if pid == active_workspace else ''}"
             for pid in TOP_NAV_PAGE_IDS
         }
-        page_state = {"page": page_id}
+        if page_id == "evolution" and triggered_string_id in {
+            "data-open-batch-compare-btn", "evolution-open-compare-btn",
+            "species-result-compare-btn",
+        }:
+            page_state["compare_sources"] = True
         if (
             triggered_string_id in {
                 "data-pick-btn",
@@ -2012,8 +2127,6 @@ def register_callbacks(app: Any) -> None:
         ):
             page_state["dataset_return"] = dict(stored_state["dataset_return"])
         return_context = {
-            "rxn-to-event-btn": ("reactions", "返回反应式检索"),
-            "rxn-channel-to-event-btn": ("reactions", "返回反应通道"),
             "rxn-timing-open-events-btn": ("reactions", "返回时间分布"),
         }.get(triggered_string_id)
         if page_id == "events" and return_context:
@@ -2021,26 +2134,12 @@ def register_callbacks(app: Any) -> None:
                 return_page=return_context[0],
                 return_label=return_context[1],
             )
-        elif triggered_string_id in {"cp-open-events", "cp-track-instance"}:
-            # 保存候选路径上下文用于返回
-            cp_report = stored_state.get("cp_report") or {}
-            cp_focus = stored_state.get("cp_focus")
-            cp_step = stored_state.get("cp_step") or {}
-            page_state.update(
-                return_page="reactions",
-                return_label="返回候选路线",
-                candidate_direct_return=True,
-            )
-            if cp_focus:
-                page_state["candidate_route_signature"] = cp_focus
-            if cp_step.get("index") is not None:
-                page_state["candidate_step_index"] = cp_step["index"]
-            if cp_report.get("query_request_id"):
-                page_state["candidate_query_id"] = cp_report["query_request_id"]
-        elif triggered_string_id == "event-extract-btn":
-            for key in ("return_page", "return_label"):
-                if stored_state.get(key):
-                    page_state[key] = stored_state[key]
+        elif triggered_string_id == "event-participant-handoff":
+            page_state.update(return_page=stored_page,
+                              return_label=f"返回{PAGE_LABELS.get(stored_page, '事件列表')}")
+        elif triggered_string_id in {"event-extract-btn", "event-detail-expand-btn"}:
+            page_state["return_page"] = stored_page
+            page_state["return_label"] = f"返回{PAGE_LABELS.get(stored_page, '事件列表')}"
         elif (
             triggered_string_id == "trajectory-back-events-btn"
             and page_id == "events"
@@ -2100,7 +2199,7 @@ def register_callbacks(app: Any) -> None:
                     PAGE_LABELS[page_id] if page_id != "data-management" else ""
                 ),
             }
-        elif triggered_string_id == "cp-track-instance":
+        elif triggered_string_id == "event-participant-handoff":
             focus_request = {
                 "token": f"candidate-lineage-{time.time_ns()}",
                 "target": "lx-card",
@@ -2110,13 +2209,13 @@ def register_callbacks(app: Any) -> None:
             + tuple(nav_classes[pid] for pid in TOP_NAV_PAGE_IDS)
             + (
                 (
-                    "rs-top-nav-item rs-nav-utility active"
+                    "rs-top-nav-item active"
                     if active_workspace == "data-management"
-                    else "rs-top-nav-item rs-nav-utility"
+                    else "rs-top-nav-item"
                 ),
                 (
                     "rs-top-nav-item rs-nav-utility active"
-                    if active_workspace == "batch-compare"
+                    if page_id == "evolution"
                     else "rs-top-nav-item rs-nav-utility"
                 ),
             )
@@ -2126,14 +2225,14 @@ def register_callbacks(app: Any) -> None:
             )
             + (
                 "page" if active_workspace == "data-management" else "false",
-                "page" if active_workspace == "batch-compare" else "false",
+                "page" if page_id == "evolution" else "false",
             )
             + (
                 page_state,
-                PAGE_LABELS[page_id],
-                PAGE_SECTIONS[page_id],
-                PAGE_DESCRIPTIONS[page_id],
-                PAGE_LABELS[page_id],
+                PAGE_LABELS[active_workspace],
+                PAGE_SECTIONS[active_workspace],
+                PAGE_DESCRIPTIONS[active_workspace],
+                PAGE_LABELS[active_workspace],
                 (
                     "rs-page-header is-title-only"
                     if page_id == "reactions"
@@ -2201,9 +2300,9 @@ def register_callbacks(app: Any) -> None:
     def _sync_page_after_restore(page_store):
         """Keep visible page chrome aligned when session storage restores page-store."""
         state = page_store if isinstance(page_store, dict) else {}
-        page_id = str(state.get("page") or DEFAULT_PAGE)
-        page_id = resolve_page_id(page_id)
-        active_workspace = PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE)
+        state = migrate_page_state(state)
+        page_id = str(state["page"])
+        active_workspace = str(state.get("entry") or PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE))
         page_classes = tuple(
             (
                 f"{PAGE_CLASS_NAMES.get(pid, 'rs-page')} active"
@@ -2220,13 +2319,13 @@ def register_callbacks(app: Any) -> None:
             *page_classes,
             *nav_classes,
             (
-                "rs-top-nav-item rs-nav-utility active"
+                "rs-top-nav-item active"
                 if active_workspace == "data-management"
-                else "rs-top-nav-item rs-nav-utility"
+                else "rs-top-nav-item"
             ),
             (
                 "rs-top-nav-item rs-nav-utility active"
-                if active_workspace == "batch-compare"
+                if page_id == "evolution"
                 else "rs-top-nav-item rs-nav-utility"
             ),
             *(
@@ -2235,12 +2334,12 @@ def register_callbacks(app: Any) -> None:
             ),
             *(
                 "page" if active_workspace == "data-management" else "false",
-                "page" if active_workspace == "batch-compare" else "false",
+                "page" if page_id == "evolution" else "false",
             ),
-            PAGE_LABELS[page_id],
-            PAGE_SECTIONS[page_id],
-            PAGE_DESCRIPTIONS[page_id],
-            PAGE_LABELS[page_id],
+            PAGE_LABELS[active_workspace],
+            PAGE_SECTIONS[active_workspace],
+            PAGE_DESCRIPTIONS[active_workspace],
+            PAGE_LABELS[active_workspace],
             (
                 "rs-page-header is-title-only"
                 if page_id == "reactions"
@@ -2248,6 +2347,54 @@ def register_callbacks(app: Any) -> None:
             ),
             "rs-body rs-tool-shell",
         )
+
+    app.clientside_callback(
+        """function(command) {
+            if (!command || !command.page) return window.dash_clientside.no_update;
+            window.requestAnimationFrame(() => {
+                window.reacnetScopeNavigation?.activatePage(command.page, command.entry);
+            });
+            return command.page + ':' + (command.entry || '');
+        }""",
+        Output("navigation-sync-token", "data"),
+        Input("navigation-command", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("analysis-back-bar", "style"),
+        Input("page-store", "data"),
+    )
+    def _analysis_back_visibility(page_store):
+        state = migrate_page_state(page_store)
+        return {} if state.get("entry") == "species" and state["page"] != "species" else {"display": "none"}
+
+    @app.callback(
+        Output("page-store", "data", allow_duplicate=True),
+        Input("dataset-session-restore", "n_intervals"),
+        State("page-store", "data"),
+        State("event-bookmark-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _migrate_restored_page(_tick, page_store, bookmark, dataset):
+        migrated = migrate_page_state(page_store)
+        if (isinstance(page_store, dict) and page_store.get("version") != 2
+                and page_store.get("page") == "trajectory" and bookmark):
+            store = dataset or {}
+            try:
+                svc.restore_event_bookmark(
+                    store.get("artifacts") or {}, bookmark,
+                    dataset_id=str(store.get("dataset_id") or ""),
+                    source_revision=store.get("source_revision") or {},
+                )
+            except svc.ServiceError:
+                pass
+            else:
+                migrated["page"] = "trajectory"
+                migrated.setdefault("return_page", "events")
+                migrated.setdefault("return_label", "返回事件")
+        return migrated if migrated != (page_store or {}) else no_update
 
     @app.callback(
         Output("event-back-btn", "children"),
@@ -2285,7 +2432,7 @@ def register_callbacks(app: Any) -> None:
             if label:
                 return ready_status(f"当前RNG 数据：{label}")
             return "尚未加载RNG 数据", "rs-page-status is-independent"
-        if page_id in {"batch-compare", "reaction-compare"}:
+        if page_id == "reaction-compare" or _evolution_comparison_active(page_store):
             return "可直接选择多个来源进行对比", "rs-page-status is-independent"
         capability_key = PAGE_CAPABILITY_REQUIREMENTS.get(page_id, "")
         if not capability_key:
@@ -2498,43 +2645,6 @@ def register_callbacks(app: Any) -> None:
 
 
     @app.callback(
-        Output("workspace-task-nav", "children"),
-        Input("page-store", "data"),
-        Input("reaction-task-tabs", "value"),
-        State("workspace-task-nav", "children"),
-    )
-    def _render_workspace_task_navigation(page_store, reaction_task, previous):
-        page_id = resolve_page_id((page_store or {}).get("page"))
-        workspace_id = PAGE_WORKSPACES[page_id]
-        page_ids = WORKSPACE_TOOL_PAGES.get(workspace_id, (workspace_id,))
-        if len(page_ids) <= 1:
-            return []
-        if workspace_id == "reactions":
-            page_ids = ("reactions", "reaction-candidates", "events", "reaction-compare")
-            if page_id == "reactions" and reaction_task == "candidates":
-                page_id = "reaction-candidates"
-        previous_pages = [((child.get("props") or {}).get("id") or {}).get("page")
-                          for child in previous or [] if isinstance(child, dict)]
-        if previous_pages == list(page_ids):
-            # Keep mounted buttons and their click counts stable. Replacing the
-            # children during a task switch can erase the next click before
-            # Dash samples its n_clicks. Active styles are updated separately.
-            return no_update
-        return [
-            *[
-                html.Button(
-                    "候选路径" if tool_page == "reaction-candidates" else WORKSPACE_TASK_LABELS[tool_page],
-                    id={"type": "workspace-open-page", "page": tool_page},
-                    className="rs-task-tab nav-link" + (" active" if tool_page == page_id else ""),
-                    n_clicks=0,
-                    type="button",
-                    **{"aria-current": "page" if tool_page == page_id else "false"},
-                )
-                for tool_page in page_ids
-            ],
-        ]
-
-    @app.callback(
         Output("data-overview-actions", "children"),
         Input("app-store", "data"),
     )
@@ -2559,6 +2669,8 @@ def register_callbacks(app: Any) -> None:
                 state = "no-dataset"
             elif states and all(item == "ready" for item in states):
                 state = "ready"
+            elif "ready" in states:
+                state = "partial"
             elif "needs-preparation" in states:
                 state = "needs-preparation"
             else:
@@ -2566,11 +2678,9 @@ def register_callbacks(app: Any) -> None:
                     (item for item in states if item != "ready"),
                     "unknown",
                 )
-            state_label = (
-                _CAPABILITY_STATE_LABELS.get(state, "状态待检查")
-                if loaded
-                else "先选择RNG 数据"
-            )
+            state_label = ("部分能力可用" if state == "partial" else
+                           _CAPABILITY_STATE_LABELS.get(state, "状态待检查")
+                           if loaded else "先选择RNG 数据")
             reasons = [
                 f"{_CAPABILITY_LABELS[key]}：{evidence.get('reason')}"
                 for key, evidence in workspace_evidence
@@ -2590,7 +2700,7 @@ def register_callbacks(app: Any) -> None:
                 if loaded and state != "ready"
                 else None,
                 dbc.Button(
-                    "进入工作区",
+                    "打开入口",
                     id={"type": "data-overview-open-page", "page": page_id},
                     color="primary" if state == "ready" else "secondary",
                     outline=True,
@@ -2697,11 +2807,7 @@ def register_callbacks(app: Any) -> None:
             else:
                 summary = html.Div(
                     [
-                        html.Strong("尚未加载RNG 数据"),
-                        html.Span(
-                            "从下方列表选择一个用于分析。",
-                            className="rs-current-dataset-empty-copy",
-                        ),
+                        html.Strong("当前未选择用于分析的数据"),
                     ],
                     className="rs-current-dataset-empty",
                 )
@@ -3543,6 +3649,7 @@ def register_callbacks(app: Any) -> None:
         Input("dir-browser-cancel-btn", "n_clicks"),
         Input("dataset-browser-candidate", "data"),
         Input("page-store", "data"),
+        Input("species-compare-switch-request", "data"),
         State("library-select", "value"),
         State("dataset-library", "data"),
         State("dataset-switch-transaction", "data"),
@@ -3557,6 +3664,7 @@ def register_callbacks(app: Any) -> None:
         _cancel_clicks,
         candidate,
         page_store,
+        compare_switch,
         library_selected,
         library_records,
         transaction,
@@ -3585,6 +3693,26 @@ def register_callbacks(app: Any) -> None:
                     break
         current = transaction if isinstance(transaction, dict) else {}
         selected = candidate if isinstance(candidate, dict) else {}
+
+        if triggered == "species-compare-switch-request":
+            handoff = compare_switch if isinstance(compare_switch, dict) else {}
+            if not handoff.get("candidate") or current.get("state") == "validating":
+                raise PreventUpdate
+            if any(bool(value) for value in bound_operations or []):
+                return ({"state": "failed", "reason": "analysis_in_progress",
+                         "message": "当前分析仍在完成，请等待后重试；RNG 数据未切换。"}, no_update)
+            selected = handoff["candidate"]
+            if not selected.get("dataset_id") or not selected.get("base"):
+                return ({"state": "failed", "reason": "missing_dataset_identity",
+                         "message": "所选来源尚未登记为 RNG 数据；请先导入。"}, no_update)
+            request = svc.begin_dataset_switch(
+                selected,
+                origin={"page": "species", "library": True,
+                        "target_smiles": handoff["target_smiles"],
+                        "expected_source_revision": handoff.get("expected_source_revision"),
+                        "origin_frame": handoff.get("origin_frame")},
+            )
+            return request, request
 
         if triggered == "library-use":
             selected = next((entry for entry in svc.normalise_dataset_library(library_records)
@@ -3850,7 +3978,7 @@ def register_callbacks(app: Any) -> None:
         origin_is_library = bool((request.get("origin") or {}).get("library"))
         # Return to origin page only if switching directly from library list (not from modal/browser)
         # This ensures library list switches return to the analysis page, while modal switches show overview
-        if origin_is_library and origin_page in PAGE_LABELS and origin_page not in {"data-management", "batch-compare"}:
+        if origin_is_library and origin_page in PAGE_LABELS and origin_page != "data-management":
             navigation["page"] = origin_page
         label = str(validation.get("label") or "未命名RNG 数据")
         if svc.is_same_dataset_revision(current_store, validation):
@@ -4384,6 +4512,7 @@ def register_callbacks(app: Any) -> None:
             message,
             {
                 "rows": rows,
+                "context": context_key(store),
                 "query_kind": query_kind,
                 "n_rows": matching_count,
                 "n_visible_rows": len(rows),
@@ -4439,6 +4568,14 @@ def register_callbacks(app: Any) -> None:
                            className="rs-empty-copy"),
                 ]
             return empty, {"display": "flex"}, {"display": "none"}, {}, True, True, {"display": "none"}, {}
+
+        if (store.get("selected_species_source") == "cross_entry_detail"
+                and store.get("selected_smiles")):
+            # This detail is opened without a Species search result. Keep its
+            # mounted card visible when app-store changes to the local focus.
+            return ([], {"display": "none"}, {"display": "block"},
+                    {"display": "none"}, False, not bool(rows),
+                    {"display": "none"}, {"display": "block"})
 
         if not rows and not searched and not running and grid_store.get("state") not in {"error", "blocked"}:
             return [], {"display": "none"}, {"display": "none"}, {"display": "none"}, False, True, {}, {"display": "none"}
@@ -4629,6 +4766,7 @@ def register_callbacks(app: Any) -> None:
         raise PreventUpdate
 
     @app.callback(
+        Output("species-query-card", "style"),
         Output("species-result-stage", "style"),
         Output("species-structure-stage", "style"),
         Output("species-detail-stage", "style"),
@@ -4647,6 +4785,7 @@ def register_callbacks(app: Any) -> None:
         Input("species-structure-grid", "rowData"),
         Input("species-grid", "selectedRows"),
         Input("species-structure-grid", "selectedRows"),
+        Input("species-detail-handoff", "data"),
     )
     def _render_species_workspace_stage(
         requested_stage,
@@ -4654,6 +4793,7 @@ def register_callbacks(app: Any) -> None:
         structure_rows,
         formula_selected_rows,
         structure_selected_rows,
+        external_handoff,
     ):
         is_mass_search = (
             str((grid_store or {}).get("query_kind") or "") == "mass"
@@ -4663,7 +4803,7 @@ def register_callbacks(app: Any) -> None:
             structure_selected_rows
             if is_mass_search
             else formula_selected_rows
-        )
+        ) or bool((external_handoff or {}).get("species"))
         stage = str(requested_stage or "results")
         if stage == "structures" and not has_structures:
             stage = "results"
@@ -4690,6 +4830,7 @@ def register_callbacks(app: Any) -> None:
         )
         back_visible = stage != "results"
         return (
+            {} if stage == "results" else {"display": "none"},
             {} if not is_mass_search or stage == "results" else {"display": "none"},
             {} if is_mass_search and stage == "structures" else {"display": "none"},
             {} if stage == "detail" else {"display": "none"},
@@ -4969,6 +5110,150 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
+        Output("reaction-event-request", "data"),
+        Input("rxn-to-event-btn", "n_clicks"),
+        Input("rxn-channel-to-event-btn", "n_clicks"),
+        State("rxn-grid", "selectedRows"),
+        State("rxn-grid", "rowData"),
+        State("rxn-channel-selection-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _request_reaction_events(_search_clicks, _channel_clicks, selected_rows,
+                                 table_rows, channel_selection, dataset):
+        trigger = ctx.triggered_id
+        if trigger == "rxn-to-event-btn" and _search_clicks:
+            row = _selected_table_row(selected_rows, table_rows)
+        elif trigger == "rxn-channel-to-event-btn" and _channel_clicks:
+            row = (channel_selection or {}).get("row")
+        else:
+            raise PreventUpdate
+        store = dataset or {}
+        revision = store.get("source_revision") or {}
+        return {
+            "request_id": str(time.time_ns()),
+            "reaction_smiles": str((row or {}).get("reaction_smiles") or ""),
+            "dataset_id": str(store.get("dataset_id") or ""),
+            "fingerprint": str(revision.get("fingerprint") or "") if isinstance(revision, dict) else "",
+            "origin": "channel" if trigger == "rxn-channel-to-event-btn" else "reaction_search",
+        }
+
+    @app.callback(
+        Output("reaction-event-request", "data", allow_duplicate=True),
+        Input("reaction-event-close-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _close_reaction_events(clicks):
+        if not clicks:
+            raise PreventUpdate
+        return None
+
+    @app.callback(
+        Output("reaction-event-request", "data", allow_duplicate=True),
+        Input("rxn-grid", "selectedRows"),
+        Input("rxn-channel-selection-store", "data"),
+        State("reaction-event-request", "data"),
+        prevent_initial_call=True,
+    )
+    def _clear_reaction_events_for_new_selection(selected_rows, channel_selection, request):
+        if not request:
+            raise PreventUpdate
+        origin = request.get("origin")
+        if origin == "reaction_search" and ctx.triggered_id == "rxn-grid":
+            row = (selected_rows or [None])[0] or {}
+        elif origin == "channel" and ctx.triggered_id == "rxn-channel-selection-store":
+            row = (channel_selection or {}).get("row") or {}
+        else:
+            raise PreventUpdate
+        if str(row.get("reaction_smiles") or "") != request.get("reaction_smiles"):
+            return None
+        raise PreventUpdate
+
+    @app.callback(
+        Output("reaction-event-response", "data"),
+        Input("reaction-event-request", "data"),
+        State("app-store", "data"),
+    )
+    def _read_reaction_events(request, dataset):
+        if not request:
+            return None
+        store = dataset or {}
+        revision = store.get("source_revision") or {}
+        if (request.get("dataset_id") != str(store.get("dataset_id") or "")
+                or request.get("fingerprint") != (str(revision.get("fingerprint") or "") if isinstance(revision, dict) else "")):
+            return {"request": request, "error": "来源已经变化，请重新选择反应。"}
+        reaction = str(request.get("reaction_smiles") or "").strip()
+        if not reaction:
+            return {"request": request, "error": "请先选择一条精确反应类型。"}
+        try:
+            result = svc.locate_rng_events(store.get("artifacts") or {}, reaction, max_events=100)
+        except svc.ServiceError as exc:
+            return {"request": request, "error": exc.message}
+        return {"request": request, "rows": result.get("rows") or [], "meta": result.get("meta") or {}}
+
+    app.clientside_callback(
+        """function(response, request, dataset) {
+            if (!request || !response || !response.request ||
+                response.request.request_id !== request.request_id) return null;
+            const revision = (dataset || {}).source_revision || {};
+            if (request.dataset_id !== ((dataset || {}).dataset_id || '') ||
+                request.fingerprint !== (revision.fingerprint || '')) return null;
+            return response;
+        }""",
+        Output("reaction-event-store", "data"),
+        Input("reaction-event-response", "data"),
+        Input("reaction-event-request", "data"),
+        Input("app-store", "data"),
+    )
+
+    @app.callback(
+        Output("reaction-event-panel", "style"),
+        Output("reaction-event-status", "children"),
+        Output("reaction-event-grid", "rowData"),
+        Output("reaction-event-grid", "columnDefs"),
+        Output("reaction-event-grid", "selectedRows"),
+        Input("reaction-event-store", "data"),
+    )
+    def _render_reaction_events(response):
+        if not response:
+            return {"display": "none"}, "", [], _event_columns(), []
+        if response.get("error"):
+            return {}, response["error"], [], _event_columns(), []
+        rows = response.get("rows") or []
+        status = str((response.get("meta") or {}).get("message") or f"找到 {len(rows)} 条事件")
+        if len(rows) >= 100:
+            status += "；当前仅请求前 100 条，列表可能被截断。"
+        return {}, status, _event_table_rows(rows), _event_columns(), []
+
+    @app.callback(
+        Output("event-selected-store", "data", allow_duplicate=True),
+        Output("event-bookmark-store", "data", allow_duplicate=True),
+        Input("reaction-event-grid", "selectedRows"),
+        State("reaction-event-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _select_reaction_event(selected_rows, response, dataset):
+        if not selected_rows or not response or response.get("error"):
+            raise PreventUpdate
+        event_id = str((selected_rows[0] or {}).get("id") or "")
+        row = next((item for item in response.get("rows") or []
+                    if str(item.get("event_id") or "") == event_id), None)
+        if row is None:
+            raise PreventUpdate
+        request = response.get("request") or {}
+        selected = {"row": row, "kind": "rng_event",
+                    "config": {"reaction_text": request.get("reaction_smiles") or "",
+                               "before_frames": 3, "after_frames": 3},
+                    "origin": {"kind": request.get("origin") or "reaction_search"},
+                    "selection_token": str(time.time_ns())}
+        try:
+            bookmark = svc.create_event_bookmark(dataset or {}, row)
+        except svc.ServiceError:
+            bookmark = None
+        return selected, bookmark
+
+    @app.callback(
         Output("rxn-query-card", "style"),
         Output("rxn-results-card", "style"),
         Output("rxn-channel-view", "style"),
@@ -5092,6 +5377,9 @@ def register_callbacks(app: Any) -> None:
                     data: {{...(appStore || {{}}), ...frame.focus}},
                 }};
             }}
+            if (frame.channel_focus) {{
+                updates["rxn-channel-focus-store"] = {{data: frame.channel_focus}};
+            }}
             for (const [componentId, props] of Object.entries(updates)) {{
                 window.dash_clientside.set_props(componentId, props);
             }}
@@ -5115,6 +5403,7 @@ def register_callbacks(app: Any) -> None:
         Output("rxn-consumption-grid", "selectedRows"),
         Output("rxn-production-grid", "cellClicked"),
         Output("rxn-consumption-grid", "cellClicked"),
+        Output("rxn-channel-focus-store", "data"),
         Input("species-to-channels-btn", "n_clicks"),
         State("rxn-top", "value"),
         State("app-store", "data"),
@@ -5129,6 +5418,8 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
         store = store or {}
         selected_smiles = str(store.get("selected_smiles") or "").strip()
+        if not selected_smiles:
+            raise PreventUpdate
         columns = _direct_channel_columns()
         try:
             result = svc.collect_species_channels(
@@ -5148,6 +5439,7 @@ def register_callbacks(app: Any) -> None:
                 [],
                 None,
                 None,
+                {"species": selected_smiles, "context": context_key(store)},
         )
         production_rows = result.get("production_rows") or []
         consumption_rows = result.get("consumption_rows") or []
@@ -5169,6 +5461,7 @@ def register_callbacks(app: Any) -> None:
             [],
             None,
             None,
+            {"species": selected_smiles, "context": context_key(store)},
         )
 
     @app.callback(
@@ -5187,6 +5480,7 @@ def register_callbacks(app: Any) -> None:
         State("rxn-channel-timestep-ps", "value"),
         State("rxn-top", "value"),
         State("app-store", "data"),
+        State("rxn-channel-focus-store", "data"),
         prevent_initial_call=True,
         running=[
             (
@@ -5211,7 +5505,7 @@ def register_callbacks(app: Any) -> None:
             ),
         ],
     )
-    def _save_channel_timestep_ps(n_clicks, timestep_ps, top, store):
+    def _save_channel_timestep_ps(n_clicks, timestep_ps, top, store, channel_focus):
         if not n_clicks:
             raise PreventUpdate
         store = store or {}
@@ -5229,7 +5523,7 @@ def register_callbacks(app: Any) -> None:
             )
 
         try:
-            selected_smiles = str(store.get("selected_smiles") or "").strip()
+            selected_smiles = _channel_focus_species(channel_focus, store)
             result = svc.collect_species_channels(
                 artifacts,
                 selected_smiles,
@@ -5326,6 +5620,7 @@ def register_callbacks(app: Any) -> None:
         State("rxn-channel-coordinate-unit-confirm", "value"),
         State("rxn-top", "value"),
         State("app-store", "data"),
+        State("rxn-channel-focus-store", "data"),
         background=True,
         prevent_initial_call=True,
         running=[
@@ -5362,6 +5657,7 @@ def register_callbacks(app: Any) -> None:
         confirm_angstrom,
         top,
         store,
+        channel_focus,
     ):
         if not n_clicks:
             raise PreventUpdate
@@ -5411,7 +5707,7 @@ def register_callbacks(app: Any) -> None:
                     str(evidence.get("message") or "模拟盒体积证据仍未就绪"),
                     reason=str(evidence.get("reason") or "volume_unavailable"),
                 )
-            selected_smiles = str(current.get("selected_smiles") or "").strip()
+            selected_smiles = _channel_focus_species(channel_focus, current)
             result = svc.collect_species_channels(
                 artifacts,
                 selected_smiles,
@@ -5469,6 +5765,7 @@ def register_callbacks(app: Any) -> None:
         State("rxn-production-grid", "rowData"),
         State("rxn-consumption-grid", "rowData"),
         State("app-store", "data"),
+        State("rxn-channel-focus-store", "data"),
         prevent_initial_call=True,
     )
     def _download_species_channels(
@@ -5477,6 +5774,7 @@ def register_callbacks(app: Any) -> None:
         production_rows,
         consumption_rows,
         store,
+        channel_focus,
     ):
         triggered_id = ctx.triggered_id
         if triggered_id == "rxn-production-csv-btn":
@@ -5493,8 +5791,8 @@ def register_callbacks(app: Any) -> None:
             raise PreventUpdate
 
         store = store if isinstance(store, dict) else {}
-        focus_formula = str(store.get("selected_formula") or "").strip()
-        focus_smiles = str(store.get("selected_smiles") or "").strip()
+        focus_smiles = _channel_focus_species(channel_focus, store)
+        focus_formula = str(svc.candidate_formula(focus_smiles) or "").strip()
         export_rows = [
             {
                 "channel_role": role,
@@ -5578,6 +5876,7 @@ def register_callbacks(app: Any) -> None:
         Output("rxn-query-card", "style", allow_duplicate=True),
         Output("rxn-results-card", "style", allow_duplicate=True),
         Output("rxn-channel-view", "style", allow_duplicate=True),
+        Output("rxn-channel-focus-store", "data", allow_duplicate=True),
         Input(
             {
                 "type": "rxn-structure-species",
@@ -5600,6 +5899,7 @@ def register_callbacks(app: Any) -> None:
         State("rxn-consumption-grid", "selectedRows"),
         State("rxn-channel-selection-store", "data"),
         State("rxn-channel-alert", "children"),
+        State("rxn-channel-focus-store", "data"),
         prevent_initial_call=True,
     )
     def _focus_reaction_structure_species(
@@ -5615,6 +5915,7 @@ def register_callbacks(app: Any) -> None:
         consumption_selected_rows,
         channel_selection,
         channel_alert,
+        channel_focus,
     ):
         click_values = _clicks if isinstance(_clicks, (list, tuple)) else [_clicks]
         if not any(
@@ -5641,7 +5942,11 @@ def register_callbacks(app: Any) -> None:
         }
         history = list(history) if isinstance(history, list) else []
         if triggered.get("scope") == "channel":
-            previous_target = focus["selected_formula"] or focus["selected_smiles"]
+            previous_species = _channel_focus_species(channel_focus, store)
+            previous_target = (
+                str(svc.candidate_formula(previous_species) or "")
+                or focus["selected_formula"] or previous_species
+            )
             history.append(
                 {
                     "kind": "channel",
@@ -5659,6 +5964,7 @@ def register_callbacks(app: Any) -> None:
                     "consumption_selected_rows": consumption_selected_rows or [],
                     "selection": channel_selection,
                     "alert": channel_alert or "",
+                    **({"channel_focus": channel_focus} if channel_focus else {}),
                 }
             )
         else:
@@ -5706,6 +6012,7 @@ def register_callbacks(app: Any) -> None:
             {"display": "none"},
             {"display": "none"},
             {"display": "block"},
+            {"species": selected_smiles, "context": context_key(store)},
         )
 
     @app.callback(
@@ -6002,12 +6309,19 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-graph", "figure"),
         Output("evolution-alert", "children"),
         Output("evolution-payload-store", "data"),
+        Output("evolution-group-payload-store", "data"),
         Output("import-pending-evolution", "data"),
         Input("evolution-search-btn", "n_clicks"),
         Input("import-auto-result", "data"),
+        Input("species-to-evolution-btn", "n_clicks"),
+        Input("evolution-rank-grid", "selectedRows"),
+        Input("evolution-browse-mode", "value"),
+        Input("evolution-group-element", "value"),
+        Input("evolution-group-count", "value"),
+        Input("evolution-xaxis", "value"),
+        Input("evolution-group-members-grid", "selectedRows"),
         State("evolution-species-picker", "value"),
         State("evolution-targets", "value"),
-        State("evolution-xaxis", "value"),
         State("evolution-smooth", "value"),
         State("evolution-species-file", "value"),
         State("evolution-species-files", "value"),
@@ -6019,6 +6333,10 @@ def register_callbacks(app: Any) -> None:
         State("evolution-downsample", "value"),
         State("evolution-max-curves", "value"),
         State("evolution-curve-filter", "value"),
+        State("evolution-rank-store", "data"),
+        State("evolution-rank-grid", "rowData"),
+        State("evolution-group-payload-store", "data"),
+        State("evolution-group-members-grid", "rowData"),
         State("app-store", "data"),
         State("import-pending-evolution", "data"),
         prevent_initial_call=True,
@@ -6040,12 +6358,22 @@ def register_callbacks(app: Any) -> None:
             ),
         ],
     )
-    @defer_query("composition", 3)
+    @defer_query("composition", 4, submit_triggers=frozenset({
+        "species-to-evolution-btn",
+        "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
+        "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid",
+    }), replay_trigger_kw="submitted_trigger")
     def _build_evolution(
         n_clicks,
+        shortcut_clicks,
+        rank_selection,
+        browse_mode,
+        group_element,
+        group_count,
+        x_axis,
+        member_selection,
         selected_species,
         targets_text,
-        x_axis,
         smooth,
         species_file,
         species_files,
@@ -6057,12 +6385,84 @@ def register_callbacks(app: Any) -> None:
         downsample,
         max_curves,
         curve_filter,
+        rank_store,
+        rank_rows,
+        group_payload,
+        member_rows,
         store,
+        submitted_trigger=None,
     ):
-        if n_clicks is None:
+        if n_clicks is None and ctx.triggered_id not in {
+            "species-to-evolution-btn",
+            "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
+            "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid", "import-auto-result",
+        }:
             raise PreventUpdate
         store = store or {}
         artifacts = store.get("artifacts", {}) or {}
+        from_detail = submitted_trigger == "species-to-evolution-btn" and bool(shortcut_clicks)
+        if from_detail:
+            browse_mode = "species"
+            species_file = ""
+            species_files = ""
+        if browse_mode != "group" and ctx.triggered_id in {
+            "evolution-group-element", "evolution-group-count", "evolution-group-members-grid",
+        }:
+            raise PreventUpdate
+        if browse_mode == "group":
+            selected_element = str(group_element or "C")
+            try:
+                selected_count = int(group_count)
+                if selected_count < 0 or selected_count > 200:
+                    raise ValueError("元素原子数须在 0–200 之间")
+                member = _selected_table_row(member_selection, member_rows)
+                group_name = f"{selected_element}{selected_count}"
+                member_context_matches = (
+                    isinstance(group_payload, dict)
+                    and group_payload.get("context") == context_key(store)
+                    and group_payload.get("selected_group") == group_name
+                )
+                reference = (
+                    str((member or {}).get("smiles") or "")
+                    if member_context_matches and ctx.triggered_id in {
+                        "evolution-group-members-grid", "evolution-xaxis", "import-auto-result",
+                    }
+                    else ""
+                )
+                species_path = str(artifacts.get("species") or "")
+                confirmed_timestep = (
+                    float(timestep) if timestep is not None
+                    else svc.load_timestep_ps(species_path) if species_path else None
+                )
+                payload = svc.build_elemental_composition_evolution(
+                    artifacts,
+                    group_element=selected_element,
+                    max_group_count=selected_count,
+                    include_zero=selected_count == 0,
+                    reference_smiles=reference,
+                    x_axis=x_axis or "step",
+                    timestep_ps=confirmed_timestep,
+                )
+                visible_rows = [
+                    row for row in payload.get("distribution_rows") or []
+                    if row.get("series") in {group_name, "参考物种", f"{group_name} 其他物种"}
+                ]
+                if not any(row.get("series") == group_name for row in visible_rows):
+                    return (_empty_plotly_figure(f"{group_name} 没有可显示的丰度"),
+                            f"当前筛选中没有 {group_name} 物种。", None, None)
+                figure = _composition_trend_figure({**payload, "distribution_rows": visible_rows})
+                figure.update_layout(title={"text": f"{group_name} · 丰度随时间变化", "x": 0.01})
+                return figure, None, None, {**payload, "context": context_key(store), "selected_group": group_name}
+            except (svc.ServiceError, TypeError, ValueError) as exc:
+                message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+                return _empty_plotly_figure(message), message, None, None
+        rank_context_matches = (
+            isinstance(rank_store, dict)
+            and rank_store.get("context") == context_key(store)
+        )
+        selected_rank = _selected_table_row(rank_selection, rank_rows) if rank_context_matches else None
+        if ctx.triggered_id == "evolution-rank-grid" and selected_rank is None:
+            raise PreventUpdate
         picked_targets = [
             str(item).strip()
             for item in (selected_species or [])
@@ -6074,11 +6474,19 @@ def register_callbacks(app: Any) -> None:
             if t.strip()
         ]
         targets = list(dict.fromkeys([*picked_targets, *manual_targets]))
+        if from_detail:
+            species = str(store.get("selected_smiles") or "").strip()
+            if not species:
+                raise PreventUpdate
+            targets = [species]
+        elif selected_rank and ctx.triggered_id != "evolution-search-btn":
+            targets = [str(selected_rank.get("smiles") or "")]
         if not targets:
             targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
             targets = [targets_text_default] if targets_text_default else []
         if not targets:
-            return empty_chart_figure("尚未选择目标物种", "输入目标或从物种目录选择后再绘制。"), "请先输入目标物种或分子式（或用物种检索中选择的物种）。", None
+            message = "请先选择或输入目标物种。" if ctx.triggered_id == "evolution-search-btn" else None
+            return empty_chart_figure("尚未选择目标物种", "从排行选择物种，或展开设置手动输入目标。"), message, None, None
         try:
             payload = svc.build_species_evolution(
                 artifacts,
@@ -6096,7 +6504,7 @@ def register_callbacks(app: Any) -> None:
                 time_align=time_align or "raw",
             )
         except svc.ServiceError as exc:
-            return empty_chart_figure("本次绘图未完成", "请查看上方提示，调整设置后重试。"), str(exc.message), None
+            return empty_chart_figure("本次绘图未完成", "请查看上方提示，调整设置后重试。"), str(exc.message), None, None
 
         curves = payload.get("curves") or []
         curve_filter_text = (curve_filter or "").strip().casefold()
@@ -6144,7 +6552,62 @@ def register_callbacks(app: Any) -> None:
             fig,
             "；".join(warnings) if warnings else None,
             {**payload, "visible_curve_names": visible_names},
+            None,
         )
+
+    @app.callback(
+        Output("evolution-group-members-grid", "columnDefs"),
+        Output("evolution-group-members-grid", "rowData"),
+        Output("evolution-group-members-status", "children"),
+        Input("evolution-graph", "clickData"),
+        State("evolution-group-payload-store", "data"),
+        State("evolution-browse-mode", "value"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _show_abundance_group_members(click_data, payload, mode, dataset):
+        columns = [
+            {"field": "formula", "headerName": "分子式", "minWidth": 110},
+            {"field": "smiles", "headerName": "精确结构 (RNG SMILES)", "minWidth": 190},
+            {"field": "current_count", "headerName": "当前数量", "minWidth": 110, "type": "numericColumn"},
+            {"field": "peak_count", "headerName": "峰值", "minWidth": 90, "type": "numericColumn"},
+        ]
+        if mode != "group" or not payload or payload.get("context") != context_key(dataset):
+            return columns, [], ""
+        points = (click_data or {}).get("points") or []
+        if not points:
+            return columns, [], "点击曲线上的时间点，查看组内精确物种。"
+        custom = points[0].get("customdata") or []
+        try:
+            timestep, series = int(custom[0]), str(custom[1])
+            detail = svc.build_element_distribution_species_drilldown(
+                payload, series=series, timestep=timestep,
+            )
+        except (IndexError, TypeError, ValueError, svc.ServiceError) as exc:
+            message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+            return columns, [], f"无法读取该时间点：{message}"
+        rows = list(detail.get("rows") or [])
+        return columns, rows, f"{series} · {detail['current_time']:.6g} {detail['x_unit']} · {len(rows)} 个精确物种（最多 100 个）"
+
+    @app.callback(
+        Output("evolution-group-members-grid", "selectedRows"),
+        Output("evolution-group-members-grid", "rowData", allow_duplicate=True),
+        Output("evolution-group-members-status", "children", allow_duplicate=True),
+        Input("evolution-browse-mode", "value"),
+        Input("evolution-group-element", "value"),
+        Input("evolution-group-count", "value"),
+        prevent_initial_call=True,
+    )
+    def _clear_abundance_group_member_selection(_mode, _element, _count):
+        return [], [], "点击曲线上的时间点，查看组内精确物种。"
+
+    @app.callback(
+        Output("evolution-group-member-open-btn", "disabled"),
+        Input("evolution-group-members-grid", "selectedRows"),
+        State("evolution-group-members-grid", "rowData"),
+    )
+    def _group_member_open_disabled(selected_rows, rows):
+        return _selected_table_row(selected_rows, rows) is None
 
     @app.callback(
         Output("evolution-csv-btn", "disabled"),
@@ -6820,6 +7283,7 @@ def register_callbacks(app: Any) -> None:
             "row": row,
             "kind": kind,
             "config": workflow.get("config") or {},
+            "selection_token": str(time.time_ns()),
         }
         event_id = str(selected["row"].get("event_id") or "")
         association_ready = (
@@ -6863,6 +7327,218 @@ def register_callbacks(app: Any) -> None:
         )
 
     @app.callback(
+        Output("event-selected-store", "data", allow_duplicate=True),
+        Output("event-bookmark-store", "data", allow_duplicate=True),
+        Input("rxn-timing-event-grid", "selectedRows"),
+        State("rxn-timing-page-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _select_reaction_timing_event(selected_rows, page, dataset):
+        if not selected_rows or not page or page.get("dataset_id") != (dataset or {}).get("dataset_id"):
+            raise PreventUpdate
+        event_id = str((selected_rows[0] or {}).get("id") or "")
+        row = next((item for item in page.get("rows") or []
+                    if str(item.get("event_id") or "") == event_id), None)
+        if not row:
+            raise PreventUpdate
+        selected = {"row": row, "kind": "rng_event",
+                    "config": {"reaction_text": page.get("reaction_key") or "",
+                               "before_frames": 3, "after_frames": 3},
+                    "origin": {"kind": "reaction_timing", "reaction_key": page.get("reaction_key"),
+                               "offset": page.get("offset")},
+                    "selection_token": str(time.time_ns())}
+        try:
+            bookmark = svc.create_event_bookmark(dataset or {}, row)
+        except svc.ServiceError:
+            bookmark = None
+        return selected, bookmark
+
+    @app.callback(
+        Output("event-detail-response", "data"),
+        Input("event-selected-store", "data"),
+        State("app-store", "data"),
+        State("cp-report", "data"),
+    )
+    def _read_selected_event_detail(selected, dataset, report=None):
+        row = (selected or {}).get("row") or {}
+        event_id = str(row.get("event_id") or "")
+        if not event_id:
+            return None
+        store = dataset or {}
+        revision = store.get("source_revision") or {}
+        fingerprint = str(revision.get("fingerprint") or "") if isinstance(revision, dict) else ""
+        key = {"event_id": event_id, "dataset_id": str(store.get("dataset_id") or ""),
+               "fingerprint": fingerprint}
+        origin = (selected or {}).get("origin") or {}
+        try:
+            bookmark = svc.create_event_bookmark(store, row)
+            restored = svc.restore_event_bookmark(
+                store.get("artifacts") or {}, bookmark,
+                dataset_id=key["dataset_id"], source_revision=revision,
+            )
+            row = restored["selection"]["row"]
+            if origin.get("kind") == "candidate_step":
+                if (not report or report.get("context") != context_key(store)
+                        or origin.get("query_request_id") != report.get("query_request_id")):
+                    return None
+                evidence = svc.candidate_step_events(store.get("artifacts") or {}, report,
+                    origin.get("signature_id"), origin.get("step_index"), origin.get("offset", 0))
+                row = next((r for r in evidence.get("rows", []) if r.get("event_id") == event_id), None)
+                if row is None:
+                    return None
+        except svc.ServiceError as exc:
+            return {"key": key, "error": exc.message, "origin": origin}
+        return {"key": key, "row": row, "origin": origin}
+
+    app.clientside_callback(
+        """function(selected) {
+            return [null, {display: 'none'}, null, null, {display: 'none'}, null];
+        }""",
+        Output("event-viewer-store", "data", allow_duplicate=True),
+        Output("event-viewer-card", "style", allow_duplicate=True),
+        Output("event-dft-store", "data", allow_duplicate=True),
+        Output("molecule-lineage-store", "data", allow_duplicate=True),
+        Output("molecule-lineage-results", "style", allow_duplicate=True),
+        Output("molecule-lineage-drilldown-store", "data", allow_duplicate=True),
+        Input("event-selected-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """function(viewer, selected, drilldown) {
+            const expected = [selected, drilldown].map(item =>
+                String((((item || {}).row || {}).event_id) || ''));
+            if (!viewer || !expected.includes(String(viewer.event_id || ''))) {
+                return {display: 'none'};
+            }
+            return window.dash_clientside.no_update;
+        }""",
+        Output("event-viewer-card", "style", allow_duplicate=True),
+        Input("event-viewer-store", "data"),
+        Input("event-selected-store", "data"),
+        Input("molecule-lineage-drilldown-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """function(response, selected, dataset, report, signature, step) {
+            const row = (selected || {}).row || {};
+            const revision = (dataset || {}).source_revision || {};
+            const key = (response || {}).key || {};
+            if (!row.event_id || key.event_id !== row.event_id ||
+                key.dataset_id !== ((dataset || {}).dataset_id || '') ||
+                key.fingerprint !== (revision.fingerprint || '')) return null;
+            const origin = (selected || {}).origin || {};
+            if (origin.kind === 'candidate_step') {
+                const received = (response || {}).origin || {};
+                if (origin.query_request_id !== (report || {}).query_request_id ||
+                    origin.signature_id !== signature || origin.step_index !== step ||
+                    received.query_request_id !== origin.query_request_id ||
+                    received.signature_id !== signature || received.step_index !== step) return null;
+            }
+            return response;
+        }""",
+        Output("event-detail-state", "data"),
+        Input("event-detail-response", "data"),
+        Input("event-selected-store", "data"),
+        Input("app-store", "data"),
+        Input("cp-report", "data"), Input("cp-focus", "value"), Input("cp-step", "value"),
+    )
+
+    @app.callback(
+        Output("event-detail-dismissed", "data"),
+        Input("event-detail-close-btn", "n_clicks"),
+        State("event-detail-state", "data"),
+        prevent_initial_call=True,
+    )
+    def _close_event_detail(clicks, detail):
+        if not clicks or not detail:
+            raise PreventUpdate
+        return detail.get("key")
+
+    @app.callback(
+        Output("event-detail-dismissed", "data", allow_duplicate=True),
+        Input("event-selected-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _reopen_detail_for_selection(_selected):
+        return None
+
+    @app.callback(
+        Output("event-detail-panel", "style"),
+        Output("event-detail-body", "children"),
+        Output("event-detail-expand-btn", "disabled"),
+        Input("event-detail-state", "data"),
+        Input("event-detail-dismissed", "data"),
+        Input("page-store", "data"),
+        Input("app-store", "data"),
+    )
+    def _render_event_detail(detail, dismissed, page, dataset):
+        page_id = migrate_page_state(page)["page"]
+        origin_kind = str(((detail or {}).get("origin") or {}).get("kind") or "")
+        origin_page = "reactions" if origin_kind in {
+            "candidate_step", "channel", "reaction_search", "reaction_timing",
+        } else "events"
+        store = dataset or {}
+        revision = store.get("source_revision") or {}
+        fingerprint = str(revision.get("fingerprint") or "") if isinstance(revision, dict) else ""
+        key = (detail or {}).get("key") or {}
+        if (not detail or page_id != origin_page or detail.get("key") == dismissed
+                or key.get("dataset_id") != str(store.get("dataset_id") or "")
+                or key.get("fingerprint") != fingerprint):
+            return {"display": "none"}, [], True
+        row = detail.get("row") or {}
+        if detail.get("error"):
+            return {}, dbc.Alert(f"事件证据不可用：{detail['error']}", color="warning"), True
+        association_ready = row.get("association_status") == "matched" and bool(row.get("atom_id_list"))
+        coordinate_ready = bool(((dataset or {}).get("artifacts") or {}).get("trajectory"))
+        content = [
+            html.Div([
+                html.Span(f"事件 {row.get('event_id') or '-'}", className="rs-stat-chip"),
+                html.Span(f"Transition {row.get('timestep_index', '-')}", className="rs-stat-chip"),
+                html.Span(str(row.get("association_status") or "状态未知"), className="rs-stat-chip"),
+            ], className="rs-stat-row"),
+            html.Div(f"来源：{(dataset or {}).get('label') or '当前 RNG 数据'}"),
+            actual_event_view(row),
+            event_participants_view(row, context_key(store)),
+        ]
+        if not association_ready:
+            content.append(dbc.Alert("事件保留反应统计与可用元数据，但参与分子尚未解析，不能定位轨迹。", color="warning"))
+        elif not coordinate_ready:
+            content.append(dbc.Alert("当前来源没有轨迹坐标；前后键结构仍可核查。", color="info"))
+        return {}, content, not association_ready
+
+    @app.callback(
+        Output("event-selected-store", "data", allow_duplicate=True),
+        Output("event-participant-handoff", "data"),
+        Input({"type": "event-track-participant", "event": ALL, "side": ALL,
+               "index": ALL, "context": ALL}, "n_clicks"),
+        State("event-detail-state", "data"), State("event-selected-store", "data"),
+        State("app-store", "data"), State("cp-report", "data"), prevent_initial_call=True,
+    )
+    def _track_event_participant(clicks, detail, selected, dataset, report=None):
+        trigger = ctx.triggered_id
+        if (not any(clicks or []) or not isinstance(trigger, dict)
+                or trigger.get("context") != context_key(dataset)
+                or trigger.get("event") != ((detail or {}).get("key") or {}).get("event_id")
+                or trigger.get("event") != (((selected or {}).get("row") or {}).get("event_id"))):
+            raise PreventUpdate
+        # Resolve participants again by stable event identity and current revision.
+        current = _read_selected_event_detail(selected, dataset, report)
+        if not current or not current.get("row"):
+            raise PreventUpdate
+        row = current["row"]
+        side, index = trigger.get("side"), trigger.get("index")
+        participants = row.get(f"{side}_participants") or []
+        if (row.get("association_status") != "matched" or side not in {"reactant", "product"}
+                or not isinstance(index, int) or not 0 <= index < len(participants)
+                or not participants[index].get("atom_ids")):
+            raise PreventUpdate
+        origin = dict((selected or {}).get("origin") or {}, action="track-participant", participant=f"{side}:{index}")
+        return dict(selected, row=row, origin=origin), {"token": str(time.time_ns()), "event_id": row["event_id"]}
+
+    @app.callback(
         Output("trajectory-selection-summary", "children"),
         Output("trajectory-selection-structure", "children"),
         Output("trajectory-open-selected-btn", "disabled"),
@@ -6877,7 +7553,9 @@ def register_callbacks(app: Any) -> None:
         row = (selected or {}).get("row") or {}
         origin = (selected or {}).get("origin") or {}
         return_label = (
-            "← 返回候选路线"
+            f"← {(page_store or {}).get('return_label')}"
+            if (page_store or {}).get("return_label")
+            else "← 返回候选路线"
             if (page_store or {}).get("candidate_direct_return")
             else "← 选择反应实例"
         )
@@ -6901,6 +7579,8 @@ def register_callbacks(app: Any) -> None:
         origin_text = (
             f"候选路线步骤 {int(origin.get('step_index', 0)) + 1}"
             if origin.get("kind") == "candidate_step"
+            else "反应时间分布"
+            if origin.get("kind") == "reaction_timing"
             else "事件检索"
         )
         summary = html.Div(
@@ -6945,7 +7625,7 @@ def register_callbacks(app: Any) -> None:
                 True,
                 "缺少轨迹坐标",
                 return_label,
-                origin.get("action") == "cp-track-instance",
+                origin.get("action") == "track-participant",
             )
         return (
             summary,
@@ -6953,7 +7633,7 @@ def register_callbacks(app: Any) -> None:
             False,
             "载入当前实例的局部轨迹",
             return_label,
-            origin.get("action") == "cp-track-instance",
+            origin.get("action") == "track-participant",
         )
 
     @app.callback(
@@ -7017,6 +7697,7 @@ def register_callbacks(app: Any) -> None:
             )
 
         restored_selection = restored["selection"]
+        restored_selection["selection_token"] = str(time.time_ns())
         row = restored_selection["row"]
         config = restored_selection["config"]
         association_ready = (
@@ -7189,18 +7870,7 @@ def register_callbacks(app: Any) -> None:
         return message, class_name, not bool(mapping or saved_mapping)
 
     @app.callback(
-        Output("event-viewer-store", "data"),
-        Output("event-viewer-card", "style"),
-        Output("event-viewer-summary", "children"),
-        Output("event-viewer-paths", "children"),
-        Output("event-atom-ids-text", "children"),
-        Output("event-ovito-expression-text", "children"),
-        Output("event-frame-slider", "min"),
-        Output("event-frame-slider", "max"),
-        Output("event-frame-slider", "value"),
-        Output("event-frame-slider", "marks"),
-        Output("event-storyboard", "children"),
-        Output("trajectory-alert", "children"),
+        Output("event-viewer-response", "data"),
         Input("event-extract-btn", "n_clicks"),
         Input("trajectory-open-selected-btn", "n_clicks"),
         Input("trajectory-refresh-btn", "n_clicks"),
@@ -7255,6 +7925,22 @@ def register_callbacks(app: Any) -> None:
             "molecule-lineage-drilldown-store",
         }:
             raise PreventUpdate
+        if ctx.triggered_id == "molecule-lineage-drilldown-store" and not lineage_drilldown:
+            raise PreventUpdate
+        original_selected = selected or {}
+        store = store or {}
+        revision = store.get("source_revision") or {}
+        response_key = {
+            "trigger": ctx.triggered_id,
+            "selected_event_id": str(((original_selected.get("row") or {}).get("event_id")) or ""),
+            "selected_token": original_selected.get("selection_token"),
+            "drilldown_event_id": str((((lineage_drilldown or {}).get("row") or {}).get("event_id")) or ""),
+            "drilldown_token": (lineage_drilldown or {}).get("selection_token"),
+            "dataset_id": str(store.get("dataset_id") or ""),
+            "fingerprint": str(revision.get("fingerprint") or "") if isinstance(revision, dict) else "",
+            "clicks": [int(value or 0) for value in
+                       (_open_clicks, _open_selected_clicks, _refresh_clicks, _clear_clicks)],
+        }
         if ctx.triggered_id == "molecule-lineage-drilldown-store":
             selected = lineage_drilldown or {}
         selected = selected or {}
@@ -7292,7 +7978,9 @@ def register_callbacks(app: Any) -> None:
                 raise svc.ServiceError("请先从定位结果中选择一个事件", reason="missing_selection")
         except (svc.ServiceError, TypeError, ValueError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-            return None, {"display": "none"}, [], [], "", "", 0, 0, 0, {}, [], message
+            return {"key": response_key, "values": [
+                None, {"display": "none"}, [], [], "", "", 0, 0, 0, {}, [], message,
+            ]}
 
         frames = viewer.get("frames") or []
         anchor = row.get("anchor_frame")
@@ -7345,7 +8033,59 @@ def register_callbacks(app: Any) -> None:
             str(value) for value in svc.event_viewer_atom_ids(viewer)
         )
         ovito_expression = svc.event_viewer_ovito_expression(viewer)
-        return viewer, {"display": "block"}, summary, " · ".join(path_items), atom_ids_text, ovito_expression, 0, len(frames) - 1, anchor_index, marks, storyboard, "局部轨迹已按 PBC 重定位；3Dmol.js 用于快速查看，原始坐标可下载到 OVITO 复核。"
+        return {"key": response_key, "values": [
+            viewer, {"display": "block"}, summary, " · ".join(path_items),
+            atom_ids_text, ovito_expression, 0, len(frames) - 1,
+            anchor_index, marks, storyboard,
+            "局部轨迹已按 PBC 重定位；3Dmol.js 用于快速查看，原始坐标可下载到 OVITO 复核。",
+        ]}
+
+    app.clientside_callback(
+        """function(response, selected, drilldown, dataset, openClicks,
+                    selectedClicks, refreshClicks, clearClicks) {
+            const none = window.dash_clientside.no_update;
+            const discard = () => Array(12).fill(none);
+            if (!response || !Array.isArray(response.values) || response.values.length !== 12) {
+                return discard();
+            }
+            const key = response.key || {};
+            const selectedId = String((((selected || {}).row || {}).event_id) || '');
+            const drilldownId = String((((drilldown || {}).row || {}).event_id) || '');
+            const revision = (dataset || {}).source_revision || {};
+            const clicks = [openClicks, selectedClicks, refreshClicks, clearClicks]
+                .map(value => Number(value || 0));
+            if (key.selected_event_id !== selectedId ||
+                key.selected_token !== ((selected || {}).selection_token ?? null) ||
+                key.drilldown_event_id !== drilldownId ||
+                key.drilldown_token !== ((drilldown || {}).selection_token ?? null) ||
+                key.dataset_id !== String((dataset || {}).dataset_id || '') ||
+                key.fingerprint !== String(revision.fingerprint || '') ||
+                JSON.stringify(key.clicks) !== JSON.stringify(clicks)) {
+                return discard();
+            }
+            return response.values;
+        }""",
+        Output("event-viewer-store", "data"),
+        Output("event-viewer-card", "style"),
+        Output("event-viewer-summary", "children"),
+        Output("event-viewer-paths", "children"),
+        Output("event-atom-ids-text", "children"),
+        Output("event-ovito-expression-text", "children"),
+        Output("event-frame-slider", "min"),
+        Output("event-frame-slider", "max"),
+        Output("event-frame-slider", "value"),
+        Output("event-frame-slider", "marks"),
+        Output("event-storyboard", "children"),
+        Output("trajectory-alert", "children"),
+        Input("event-viewer-response", "data"),
+        Input("event-selected-store", "data"),
+        Input("molecule-lineage-drilldown-store", "data"),
+        Input("app-store", "data"),
+        Input("event-extract-btn", "n_clicks"),
+        Input("trajectory-open-selected-btn", "n_clicks"),
+        Input("trajectory-refresh-btn", "n_clicks"),
+        Input("event-type-map-clear-btn", "n_clicks"),
+    )
 
     @app.callback(
         Output("event-dft-card", "style"),
@@ -7712,6 +8452,20 @@ def register_callbacks(app: Any) -> None:
             no_update,
         )
 
+    def _lineage_report_current(report, selected, dataset):
+        if not isinstance(report, dict):
+            return False
+        event_id = str((((selected or {}).get("row") or {}).get("event_id")) or "")
+        store = dataset or {}
+        revision = store.get("source_revision") or {}
+        context = report.get("context") or {}
+        return bool(event_id) and (
+            str((report.get("query") or {}).get("event_id") or "") == event_id
+            and str(context.get("dataset_id") or "") == str(store.get("dataset_id") or "")
+            and str((context.get("source_revision") or {}).get("fingerprint") or "")
+            == str(revision.get("fingerprint") or "")
+        )
+
     @app.callback(
         Output("molecule-lineage-card", "style"),
         Output("molecule-lineage-participant", "options"),
@@ -7776,13 +8530,7 @@ def register_callbacks(app: Any) -> None:
         return True, "当前规则无需填写"
 
     @app.callback(
-        Output("molecule-lineage-store", "data"),
-        Output("molecule-lineage-alert", "children"),
-        Output("molecule-lineage-summary", "children"),
-        Output("molecule-lineage-truncation", "children"),
-        Output("molecule-lineage-results", "style"),
-        Output("molecule-lineage-json-btn", "disabled"),
-        Output("molecule-lineage-csv-btn", "disabled"),
+        Output("molecule-lineage-response", "data"),
         Input("molecule-lineage-run-btn", "n_clicks"),
         Input("molecule-lineage-continue-btn", "n_clicks"),
         State("molecule-lineage-participant", "value"),
@@ -7838,9 +8586,21 @@ def register_callbacks(app: Any) -> None:
             "molecule-lineage-continue-btn",
         }:
             raise PreventUpdate
+        store = app_store or {}
+        revision = store.get("source_revision") or {}
+        response_key = {
+            "selected_event_id": str((((selected or {}).get("row") or {}).get("event_id")) or ""),
+            "selected_token": (selected or {}).get("selection_token"),
+            "viewer_event_id": str((viewer or {}).get("event_id") or ""),
+            "dataset_id": str(store.get("dataset_id") or ""),
+            "fingerprint": str(revision.get("fingerprint") or "") if isinstance(revision, dict) else "",
+            "clicks": [int(n_clicks or 0), int(continue_clicks or 0)],
+        }
         try:
             if triggered == "molecule-lineage-continue-btn":
-                if not existing_report or not branch_id:
+                if not _lineage_report_current(existing_report, selected, app_store):
+                    raise ValueError("事件或来源已变化，请重新运行分子追踪")
+                if not branch_id:
                     raise ValueError("请先选择一条可继续追踪的分支")
                 report = svc.continue_molecule_lineage_analysis(
                     (app_store or {}).get("artifacts") or {},
@@ -7855,6 +8615,10 @@ def register_callbacks(app: Any) -> None:
             else:
                 if n_clicks is None:
                     raise PreventUpdate
+                if not viewer or str(viewer.get("event_id") or "") != str(
+                    (((selected or {}).get("row") or {}).get("event_id")) or ""
+                ):
+                    raise ValueError("事件轨迹已变化，请重新打开当前事件")
                 side, index_text = str(participant_value or "").split(":", 1)
                 participant_index = int(index_text)
                 tokens = [
@@ -7889,16 +8653,12 @@ def register_callbacks(app: Any) -> None:
         except (svc.ServiceError, TypeError, ValueError) as exc:
             message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
             if triggered == "molecule-lineage-continue-btn":
-                return (
-                    no_update,
+                return {"key": response_key, "preserve_report": True, "values": [
+                    None,
                     dbc.Alert(message, color="danger", className="py-2 mb-0"),
-                    no_update,
-                    no_update,
-                    no_update,
-                    no_update,
-                    no_update,
-                )
-            return (
+                    None, None, None, None, None,
+                ]}
+            return {"key": response_key, "values": [
                 None,
                 dbc.Alert(message, color="danger", className="py-2 mb-0"),
                 [],
@@ -7906,7 +8666,7 @@ def register_callbacks(app: Any) -> None:
                 {"display": "none"},
                 True,
                 True,
-            )
+            ]}
         summary_chips, truncation_text = _molecule_lineage_result_presentation(
             report
         )
@@ -7915,7 +8675,7 @@ def register_callbacks(app: Any) -> None:
             if triggered == "molecule-lineage-continue-btn"
             else "分支追踪已完成。图用于总览；下方事件表和导出文件是审计依据。"
         )
-        return (
+        return {"key": response_key, "values": [
             report,
             dbc.Alert(
                 message,
@@ -7927,7 +8687,45 @@ def register_callbacks(app: Any) -> None:
             {},
             False,
             False,
-        )
+        ]}
+
+    app.clientside_callback(
+        """function(response, selected, viewer, dataset, runClicks, continueClicks) {
+            const none = window.dash_clientside.no_update;
+            const discard = () => Array(7).fill(none);
+            if (!response || !Array.isArray(response.values) || response.values.length !== 7) {
+                return discard();
+            }
+            const key = response.key || {};
+            const revision = (dataset || {}).source_revision || {};
+            const clicks = [runClicks, continueClicks].map(value => Number(value || 0));
+            if (key.selected_event_id !== String(((((selected || {}).row || {}).event_id) || '')) ||
+                key.selected_token !== ((selected || {}).selection_token ?? null) ||
+                key.viewer_event_id !== String((viewer || {}).event_id || '') ||
+                key.dataset_id !== String((dataset || {}).dataset_id || '') ||
+                key.fingerprint !== String(revision.fingerprint || '') ||
+                JSON.stringify(key.clicks) !== JSON.stringify(clicks)) {
+                return discard();
+            }
+            if (response.preserve_report) {
+                return [none, response.values[1], none, none, none, none, none];
+            }
+            return response.values;
+        }""",
+        Output("molecule-lineage-store", "data"),
+        Output("molecule-lineage-alert", "children"),
+        Output("molecule-lineage-summary", "children"),
+        Output("molecule-lineage-truncation", "children"),
+        Output("molecule-lineage-results", "style"),
+        Output("molecule-lineage-json-btn", "disabled"),
+        Output("molecule-lineage-csv-btn", "disabled"),
+        Input("molecule-lineage-response", "data"),
+        Input("event-selected-store", "data"),
+        Input("event-viewer-store", "data"),
+        Input("app-store", "data"),
+        Input("molecule-lineage-run-btn", "n_clicks"),
+        Input("molecule-lineage-continue-btn", "n_clicks"),
+    )
 
     @app.callback(
         Output("molecule-lineage-cytoscape", "elements"),
@@ -7940,9 +8738,11 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-branch-summary", "children"),
         Input("molecule-lineage-store", "data"),
         Input("molecule-lineage-view", "value"),
+        Input("event-selected-store", "data"),
+        Input("app-store", "data"),
     )
-    def _render_molecule_lineage(report, view):
-        if not report:
+    def _render_molecule_lineage(report, view, selected, dataset):
+        if not _lineage_report_current(report, selected, dataset):
             return (
                 [],
                 [],
@@ -7973,6 +8773,30 @@ def register_callbacks(app: Any) -> None:
             disabled,
             branch_summary,
         )
+
+    app.clientside_callback(
+        """function(report, selected, dataset) {
+            const none = window.dash_clientside.no_update;
+            if (!report) return [none, none, none];
+            const eventId = String(((((selected || {}).row || {}).event_id) || ''));
+            const context = report.context || {};
+            const revision = (dataset || {}).source_revision || {};
+            if (!eventId || String(((report.query || {}).event_id) || '') !== eventId ||
+                String(context.dataset_id || '') !== String((dataset || {}).dataset_id || '') ||
+                String(((context.source_revision || {}).fingerprint) || '') !==
+                    String(revision.fingerprint || '')) {
+                return [{display: 'none'}, true, true];
+            }
+            return [none, none, none];
+        }""",
+        Output("molecule-lineage-results", "style", allow_duplicate=True),
+        Output("molecule-lineage-json-btn", "disabled", allow_duplicate=True),
+        Output("molecule-lineage-csv-btn", "disabled", allow_duplicate=True),
+        Input("molecule-lineage-store", "data"),
+        Input("event-selected-store", "data"),
+        Input("app-store", "data"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("molecule-lineage-drilldown-store", "data"),
@@ -8013,6 +8837,7 @@ def register_callbacks(app: Any) -> None:
             "row": event,
             "kind": "rng_event",
             "config": (current_selected or {}).get("config") or {},
+            "selection_token": str(time.time_ns()),
         }
         return selected
 
@@ -8020,10 +8845,12 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-json-download", "data"),
         Input("molecule-lineage-json-btn", "n_clicks"),
         State("molecule-lineage-store", "data"),
+        State("event-selected-store", "data"),
+        State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _download_molecule_lineage_json(n_clicks, report):
-        if n_clicks is None or not report:
+    def _download_molecule_lineage_json(n_clicks, report, selected, dataset):
+        if n_clicks is None or not _lineage_report_current(report, selected, dataset):
             raise PreventUpdate
         event_id = str((report.get("query") or {}).get("event_id") or "lineage")
         return dcc.send_string(
@@ -8035,10 +8862,12 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-csv-download", "data"),
         Input("molecule-lineage-csv-btn", "n_clicks"),
         State("molecule-lineage-store", "data"),
+        State("event-selected-store", "data"),
+        State("app-store", "data"),
         prevent_initial_call=True,
     )
-    def _download_molecule_lineage_csv(n_clicks, report):
-        if n_clicks is None or not report:
+    def _download_molecule_lineage_csv(n_clicks, report, selected, dataset):
+        if n_clicks is None or not _lineage_report_current(report, selected, dataset):
             raise PreventUpdate
         event_id = str((report.get("query") or {}).get("event_id") or "lineage")
         return {
@@ -8215,6 +9044,299 @@ def register_callbacks(app: Any) -> None:
             "type": "text/plain",
         }
 
+    @app.callback(
+        Output("evolution-species-browser", "style"),
+        Output("evolution-group-browser", "style"),
+        Output("evolution-csv-btn", "style"),
+        Output("evolution-structure-detail", "style"),
+        Output("evolution-manual-settings", "style"),
+        Input("evolution-browse-mode", "value"),
+    )
+    def _render_abundance_browser(mode):
+        grouped = mode == "group"
+        return ({"display": "none"} if grouped else {},
+                {} if grouped else {"display": "none"},
+                {"display": "none"} if grouped else {},
+                {"display": "none"} if grouped else {},
+                {"display": "none"} if grouped else {})
+
+    @app.callback(
+        Output("evolution-browse-mode", "value"),
+        Input("species-to-evolution-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _open_species_abundance(_clicks):
+        if not _clicks:
+            raise PreventUpdate
+        return "species"
+
+    @app.callback(
+        Output("evolution-group-element", "options"),
+        Output("evolution-group-element", "value"),
+        Input("evolution-rank-store", "data"),
+        State("evolution-group-element", "value"),
+        State("app-store", "data"),
+    )
+    def _group_element_options(_ranking, current, dataset):
+        status = svc.composition_index_status((dataset or {}).get("artifacts") or {})
+        elements = [str(value) for value in status.get("available_elements") or []] or ["C"]
+        return ([{"label": element, "value": element} for element in elements],
+                current if current in elements else ("C" if "C" in elements else elements[0]))
+
+    @app.callback(
+        Output("evolution-rank-store", "data"),
+        Output("evolution-rank-grid", "rowData"),
+        Output("evolution-rank-grid", "columnDefs"),
+        Output("evolution-rank-grid-previews", "data"),
+        Output("evolution-rank-status", "children"),
+        Input("page-store", "data"),
+        Input("app-store", "data"),
+        State("evolution-rank-store", "data"),
+    )
+    def _load_abundance_ranking(page, dataset, previous):
+        state = migrate_page_state(page)
+        if state["page"] != "evolution" or _evolution_comparison_active(state):
+            raise PreventUpdate
+        store = dataset or {}
+        if not store.get("dataset_id"):
+            return None, [], [], [], "请先选择当前 RNG 数据，或选择多个来源进行丰度比较。"
+        current_context = context_key(store)
+        if isinstance(previous, dict) and previous.get("context") == current_context:
+            raise PreventUpdate
+        columns = [
+            {"field": "formula", "headerName": "分子式", "minWidth": 140},
+            {"field": "smiles", "headerName": "精确结构 (RNG SMILES)", "minWidth": 220},
+            {"field": "total_count", "headerName": "累计采样丰度", "minWidth": 150, "type": "numericColumn"},
+        ]
+        try:
+            result = svc.ranked_species_abundance(store.get("artifacts") or {}, limit=50)
+        except svc.ServiceError as exc:
+            return {"context": current_context, "error": exc.message}, [], columns, [], exc.message
+        rows = result["rows"]
+        count = int(result["total_species"])
+        shown = len(rows)
+        frame_range = (
+            f"分析帧对应的 source timestep {result['first_timestep']}–{result['last_timestep']}"
+            if result.get("sampled_frames") else "无已分析帧"
+        )
+        status = (
+            f"显示前 {shown} / {count} 个精确物种；指标为 {result['sampled_frames']} 个已分析帧的丰度计数之和；"
+            f"范围：{frame_range}。" + (" 本页仅显示前 50 名。" if count > shown else "")
+        )
+        return {"context": current_context, "rows": rows}, rows, columns, _species_preview_tooltips(rows), status
+
+    @app.callback(
+        Output("evolution-rank-open-btn", "disabled"),
+        Input("evolution-rank-grid", "selectedRows"),
+        State("evolution-rank-grid", "rowData"),
+    )
+    def _rank_open_disabled(selected_rows, rows):
+        return _selected_table_row(selected_rows, rows) is None
+
+    @app.callback(
+        Output("element-distribution-open-species-btn", "disabled"),
+        Input("element-distribution-composition-table", "selectedRows"),
+        State("element-distribution-composition-table", "rowData"),
+    )
+    def _distribution_open_disabled(selected_rows, rows):
+        row = _selected_table_row(selected_rows, rows)
+        return not bool(row and row.get("smiles"))
+
+    @app.callback(
+        Output("species-detail-handoff", "data"),
+        Input({"type": "species-open-detail", "scope": ALL, "side": ALL,
+               "index": ALL, "smiles": ALL, "formula": ALL}, "n_clicks"),
+        Input("evolution-rank-open-btn", "n_clicks"),
+        Input("evolution-group-member-open-btn", "n_clicks"),
+        Input("element-distribution-open-species-btn", "n_clicks"),
+        State("evolution-rank-grid", "selectedRows"),
+        State("evolution-rank-grid", "rowData"),
+        State("evolution-group-members-grid", "selectedRows"),
+        State("evolution-group-members-grid", "rowData"),
+        State("element-distribution-composition-table", "selectedRows"),
+        State("element-distribution-composition-table", "rowData"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _request_species_detail(_participants, rank_clicks, group_clicks, distribution_clicks,
+                                rank_selected, rank_rows, group_selected, group_rows,
+                                distribution_selected, distribution_rows, dataset):
+        triggered = ctx.triggered_id
+        if isinstance(triggered, dict):
+            triggered_clicks = [item.get("value") for item in ctx.triggered
+                                if "species-open-detail" in str(item.get("prop_id") or "")]
+            click_values = triggered_clicks if triggered_clicks else (_participants or [])
+            if not any(isinstance(value, (int, float)) and value > 0
+                       for value in click_values):
+                raise PreventUpdate
+            smiles = str(triggered.get("smiles") or "").strip()
+            formula = str(triggered.get("formula") or "").strip()
+        elif triggered == "evolution-rank-open-btn" and rank_clicks:
+            row = _selected_table_row(rank_selected, rank_rows)
+            smiles, formula = str((row or {}).get("smiles") or ""), str((row or {}).get("formula") or "")
+        elif triggered == "evolution-group-member-open-btn" and group_clicks:
+            row = _selected_table_row(group_selected, group_rows)
+            smiles, formula = str((row or {}).get("smiles") or ""), str((row or {}).get("formula") or "")
+        elif triggered == "element-distribution-open-species-btn" and distribution_clicks:
+            row = _selected_table_row(distribution_selected, distribution_rows)
+            smiles, formula = str((row or {}).get("smiles") or ""), str((row or {}).get("formula") or "")
+        else:
+            raise PreventUpdate
+        if not smiles:
+            raise PreventUpdate
+        return {"species": smiles, "formula": formula, "context": context_key(dataset),
+                "request_id": time.time_ns()}
+
+    @app.callback(
+        Output("app-store", "data", allow_duplicate=True),
+        Output("species-workspace-stage", "data", allow_duplicate=True),
+        Output("species-results-card", "style", allow_duplicate=True),
+        Output("species-results", "style", allow_duplicate=True),
+        Output("detail-panel", "style", allow_duplicate=True),
+        Output("detail-body", "style", allow_duplicate=True),
+        Output("detail-body", "children", allow_duplicate=True),
+        Output("detail-empty", "style", allow_duplicate=True),
+        Output("evolution-targets", "value", allow_duplicate=True),
+        Output("page-store", "data", allow_duplicate=True),
+        Output("navigation-command", "data", allow_duplicate=True),
+        Output("species-handoff-back-btn", "style", allow_duplicate=True),
+        Output("species-handoff-back-btn", "children", allow_duplicate=True),
+        Output("species-query-card", "style", allow_duplicate=True),
+        Output("species-result-stage", "style", allow_duplicate=True),
+        Output("species-structure-stage", "style", allow_duplicate=True),
+        Output("species-detail-stage", "style", allow_duplicate=True),
+        Input("species-detail-handoff", "data"),
+        State("app-store", "data"),
+        State("page-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _open_species_from_another_entry(handoff, dataset, page):
+        store = dataset or {}
+        if not isinstance(handoff, dict) or handoff.get("context") != context_key(store):
+            raise PreventUpdate
+        smiles = str(handoff.get("species") or "").strip()
+        if not smiles:
+            raise PreventUpdate
+        try:
+            detail = svc.species_detail(store.get("artifacts") or {}, smiles)
+        except svc.ServiceError:
+            detail = {"smiles": smiles, "formula": handoff.get("formula") or "?"}
+        formula = str(detail.get("formula") or handoff.get("formula") or "?")
+        state = migrate_page_state(page)
+        frame = {
+            "page": state["page"], "entry": state.get("entry"),
+            "compare_sources": state.get("compare_sources"),
+            "context": context_key(store),
+            "focus": {key: store.get(key) for key in
+                      ("selected_smiles", "selected_formula", "selected_species_source")},
+        }
+        if isinstance(handoff.get("origin_frame"), dict):
+            frame = dict(handoff["origin_frame"])
+        stack = [*(state.get("return_stack") or []), frame][-4:]
+        back_label = _species_return_label(frame)
+        updated_store = {**store, "selected_smiles": smiles,
+                         "selected_formula": formula,
+                         "selected_species_source": "cross_entry_detail"}
+        return (updated_store, "detail", {"display": "block"}, {"display": "block"},
+                {"display": "block"}, {"display": "grid"},
+                _species_detail_children(detail, smiles), {"display": "none"},
+                smiles, {"page": "species", "version": 2, "return_stack": stack},
+                {"page": "species", "token": handoff.get("request_id")},
+                {}, back_label, {"display": "none"}, {"display": "none"},
+                {"display": "none"}, {})
+
+    @app.callback(
+        Output("species-handoff-back-btn", "style"),
+        Output("species-handoff-back-btn", "children"),
+        Input("page-store", "data"),
+    )
+    def _render_species_handoff_back(page):
+        state = migrate_page_state(page)
+        stack = state.get("return_stack") or []
+        if state["page"] != "species" or not stack:
+            return {"display": "none"}, "← 返回来处"
+        return {}, _species_return_label(stack[-1])
+
+    @app.callback(
+        Output("page-store", "data", allow_duplicate=True),
+        Output("app-store", "data", allow_duplicate=True),
+        Output("species-detail-handoff", "data", allow_duplicate=True),
+        Output("species-query-feedback", "children", allow_duplicate=True),
+        Output("navigation-command", "data", allow_duplicate=True),
+        Output("species-handoff-back-btn", "style", allow_duplicate=True),
+        Output("species-handoff-back-btn", "children", allow_duplicate=True),
+        Output("species-workspace-stage", "data", allow_duplicate=True),
+        Output("species-query-card", "style", allow_duplicate=True),
+        Output("species-result-stage", "style", allow_duplicate=True),
+        Output("species-structure-stage", "style", allow_duplicate=True),
+        Output("species-detail-stage", "style", allow_duplicate=True),
+        Output("detail-panel", "style", allow_duplicate=True),
+        Input("species-handoff-back-btn", "n_clicks"),
+        State("page-store", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _return_from_species_detail(clicks, page, dataset):
+        state = migrate_page_state(page)
+        stack = list(state.get("return_stack") or [])
+        if not clicks or not stack:
+            raise PreventUpdate
+        frame = stack.pop()
+        store = dataset or {}
+        if not frame.get("independent") and frame.get("context") != context_key(store):
+            return ({"page": "species", "version": 2}, no_update, None,
+                    dbc.Alert("来源或修订已变化，旧结果无法恢复。", color="warning"),
+                    {"page": "species", "token": time.time_ns()},
+                    {"display": "none"}, "← 返回来处", "results", {}, {},
+                    {"display": "none"}, {"display": "none"}, {"display": "none"})
+        focus = frame.get("focus") or {}
+        updated_store = (no_update if frame.get("independent") else
+                         {**store, **{key: focus.get(key) or "" for key in
+                                      ("selected_smiles", "selected_formula", "selected_species_source")}})
+        previous = {"page": resolve_page_id(frame.get("page")), "version": 2}
+        if frame.get("entry"):
+            previous["entry"] = frame["entry"]
+        if frame.get("compare_sources"):
+            previous["compare_sources"] = True
+        if stack:
+            previous["return_stack"] = stack
+        return previous, updated_store, None, no_update, {
+            "page": previous["page"], "entry": previous.get("entry"), "token": time.time_ns(),
+        }, ({"display": "none"} if previous["page"] != "species" or not stack else {}), (
+            _species_return_label(stack[-1]) if stack else "← 返回来处"
+        ), "results", {}, {}, {"display": "none"}, {"display": "none"}, {"display": "none"}
+
+    @app.callback(
+        Output("evolution-current-panel", "style"),
+        Output("compare-species-panel", "style"),
+        Output("evolution-open-compare-btn", "style"),
+        Output("evolution-close-compare-btn", "style"),
+        Output("evolution-current-label", "children"),
+        Input("page-store", "data"),
+        Input("evolution-open-compare-btn", "n_clicks"),
+        Input("evolution-close-compare-btn", "n_clicks"),
+        Input("species-result-compare-btn", "n_clicks"),
+        Input("data-open-batch-compare-btn", "n_clicks"),
+    )
+    def _show_evolution_sources(page, _open, _close, _species_open, _data_open):
+        clicked = {
+            str(item.get("prop_id") or "").removesuffix(".n_clicks")
+            for item in ctx.triggered
+            if str(item.get("prop_id") or "").endswith(".n_clicks")
+            and isinstance(item.get("value"), (int, float)) and item["value"] > 0
+        }
+        if clicked & {"evolution-open-compare-btn", "species-result-compare-btn",
+                      "data-open-batch-compare-btn"}:
+            comparing = True
+        elif "evolution-close-compare-btn" in clicked:
+            comparing = False
+        else:
+            comparing = _evolution_comparison_active(page)
+        hidden = {"display": "none"}
+        return (hidden if comparing else {}, {} if comparing else hidden,
+                hidden if comparing else {}, {} if comparing else hidden,
+                "对比来源" if comparing else "当前数据")
+
     # ── Batch comparison ────────────────────────────────────────────
 
     @app.callback(
@@ -8330,11 +9452,7 @@ def register_callbacks(app: Any) -> None:
                 (store.get("artifacts") or {}).get("species") or ""
             ).strip()
             if not species_file:
-                return sources, dbc.Alert(
-                    "当前RNG 数据没有可交接的 Species 来源；请从已管理RNG 数据或手工路径添加。",
-                    color="warning",
-                    className="py-1 px-2 mb-0",
-                )
+                return sources, "选择已导入的 RNG 数据，或添加 Species 文件。"
             path = str(Path(species_file).expanduser().resolve())
             selected_smiles = str(store.get("selected_smiles") or "").strip()
             existing = next(
@@ -8618,7 +9736,7 @@ def register_callbacks(app: Any) -> None:
         Input("species-compare-sources-store", "data"),
     )
     def _poll_species_compare_indexes(page, sources):
-        return (page or {}).get("page") != "batch-compare" or not bool(sources)
+        return not _evolution_comparison_active(page) or not bool(sources)
 
     @app.callback(
         Output({"type": "species-compare-index-status", "path": ALL}, "children"),
@@ -9008,6 +10126,76 @@ def register_callbacks(app: Any) -> None:
             className="py-1 px-2 mb-0",
         )
         return fig, payload["summary"], columns, alert, payload, False
+
+    @app.callback(
+        Output("species-compare-switch-btn", "disabled"),
+        Input("species-compare-summary", "selectedRows"),
+        State("species-compare-summary", "rowData"),
+    )
+    def _compare_switch_disabled(selected, rows):
+        row = _selected_table_row(selected, rows)
+        return not bool(row and row.get("target_smiles") and row.get("status") in {"ready", "zero"})
+
+    @app.callback(
+        Output("species-compare-switch-request", "data"),
+        Output("species-detail-handoff", "data", allow_duplicate=True),
+        Output("species-compare-switch-status", "children"),
+        Input("species-compare-switch-btn", "n_clicks"),
+        State("species-compare-summary", "selectedRows"),
+        State("species-compare-summary", "rowData"),
+        State("dataset-library", "data"),
+        State("app-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _switch_to_compared_species(clicks, selected, rows, library, dataset):
+        if not clicks:
+            raise PreventUpdate
+        row = _selected_table_row(selected, rows)
+        if not row or row.get("status") not in {"ready", "zero"}:
+            return None, no_update, "请选择一个有精确物种结果的来源。"
+        target = str(row.get("target_smiles") or "").strip()
+        dataset_id = str(row.get("dataset_id") or "")
+        expected_revision = str(row.get("source_revision") or "")
+        if not target or not dataset_id or not expected_revision:
+            return None, no_update, "比较结果缺少精确目标或来源修订，请重新比较。"
+        origin_frame = {"page": "evolution", "compare_sources": True,
+                        "independent": True, "focus": {}, "context": None}
+        store = dataset or {}
+        current_revision = store.get("source_revision") or {}
+        if (dataset_id == str(store.get("dataset_id") or "")
+                and expected_revision == str(current_revision.get("fingerprint") or "")):
+            return None, {"species": target, "formula": "", "context": context_key(store),
+                          "origin_frame": origin_frame, "request_id": time.time_ns()}, ""
+        candidate = next((item for item in svc.normalise_dataset_library(library)
+                          if str(item.get("dataset_id") or "") == dataset_id), None)
+        if not candidate:
+            return None, no_update, "该来源尚未导入 RNG 数据列表，请先导入后再切换。"
+        return ({"candidate": candidate, "target_smiles": target,
+                 "expected_source_revision": expected_revision,
+                 "origin_frame": origin_frame, "request_id": str(time.time_ns())},
+                no_update, f"正在核验并切换到 {row.get('label') or '所选来源'}…")
+
+    @app.callback(
+        Output("species-detail-handoff", "data", allow_duplicate=True),
+        Output("species-compare-switch-status", "children", allow_duplicate=True),
+        Input("dataset-context-commit", "data"),
+        State("dataset-switch-transaction", "data"),
+        prevent_initial_call=True,
+    )
+    def _finish_compared_species_switch(marker, transaction):
+        request = transaction or {}
+        origin = request.get("origin") or {}
+        if (not marker or request.get("state") != "succeeded"
+                or marker.get("request_id") != request.get("request_id")
+                or not origin.get("target_smiles")):
+            raise PreventUpdate
+        new_store = svc.current_dataset_from_validation(request.get("validation") or {})
+        fingerprint = str((new_store.get("source_revision") or {}).get("fingerprint") or "")
+        if fingerprint != str(origin.get("expected_source_revision") or ""):
+            return no_update, "来源已切换，但修订与比较时不同；请重新比较后再分析该物种。"
+        return ({"species": origin["target_smiles"], "formula": "",
+                 "context": context_key(new_store), "origin_frame": origin.get("origin_frame"),
+                 "request_id": request.get("request_id")}, "")
 
     @app.callback(
         Output("species-compare-download", "data"),

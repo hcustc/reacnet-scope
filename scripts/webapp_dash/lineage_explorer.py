@@ -170,7 +170,9 @@ def register_callbacks(app):
             for i, p in enumerate(row.get(f'{side}_participants') or []):
                 options.append({'label':f"{label} {i+1} · {p['species']} · atoms {p['atom_ids']}", 'value':f'{side}:{i}'})
         status = svc.lineage_explorer_status((store or {}).get('artifacts') or {})
-        return options, options[0]['value'] if options else None, status['message']
+        preferred = ((selected or {}).get('origin') or {}).get('participant')
+        choice = preferred if any(o['value'] == preferred for o in options) else options[0]['value'] if options else None
+        return options, choice, status['message']
 
     @app.callback(Output('lx-request','data'),
                   *[Input('lx-'+key,'n_clicks') for key in ['start','prev','next','all','continue','paths','frame-show','event','cancel']],
