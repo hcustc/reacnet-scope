@@ -93,6 +93,7 @@ from reacnet_scope.analysis_services import (
     search_reactions_by_formula,
     search_species,
     search_species_catalog,
+    ranked_species_abundance,
     channel_timestep_ps,
     species_detail,
     validate_event_path_sources_for_dash,

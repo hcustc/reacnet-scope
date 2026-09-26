@@ -119,6 +119,24 @@ def test_element_distribution_index_streams_and_queries_selected_groups(tmp_path
     assert by_smiles["[C][O]"]["current_count"] == 3
 
 
+def test_ranked_abundance_reads_only_published_summary_and_reports_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    species = _species_file(tmp_path)
+    with pytest.raises(svc.ServiceError):
+        svc.ranked_species_abundance({"species": str(species)}, limit=2)
+    SPECIES_COMPOSITION_STORE.build(str(species))
+    monkeypatch.setattr(composition, "_parse_species_line", lambda _line: pytest.fail("online raw parse"))
+    result = svc.ranked_species_abundance({"species": str(species)}, limit=2)
+    assert result["sampled_frames"] == 3
+    assert (result["first_timestep"], result["last_timestep"]) == (0, 200)
+    assert result["total_species"] > len(result["rows"]) == 2
+    assert [(row["smiles"], row["total_count"]) for row in result["rows"]] == [
+        ("[O]=[O]", 100), (PARENT, 14),
+    ]
+
+
 def test_species_count_matrix_parses_each_timepoint_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
