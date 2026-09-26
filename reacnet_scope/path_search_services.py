@@ -146,7 +146,7 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     output = io.StringIO()
     fields = ['signature_id', 'candidate_signature', 'candidate_evidence_key',
               'candidate_identity_schema', 'step_count', 'step', 'carried_from', 'carried_to', 'reaction_key',
-              'reactants', 'products', 'event_count', 'transfer_event_count',
+              'reactants', 'products', 'event_count', 'forward_count', 'reverse_count', 'net_count', 'transfer_event_count',
               'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
               'reachability_status', 'routes_complete', 'graph_exhaustive', 'horizon_limited',
               'display_truncated', 'candidates_examined', 'next_offset', 'previous_offset',
@@ -165,7 +165,8 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 carried_from=step['carried_from'], carried_to=step['carried_to'],
                 reaction_key=step['reaction_key'], reactants=json.dumps(step['reactants']),
                 products=json.dumps(step['products']), event_count=step['event_count'],
-                transfer_event_count=step.get('transfer_event_count'),
+                forward_count=step.get('forward_count'), reverse_count=step.get('reverse_count'),
+                net_count=step.get('net_count'), transfer_event_count=step.get('transfer_event_count'),
                 max_shared_atoms=step.get('max_shared_atoms'),
                 transfer_basis=step.get('transfer_basis'),
                 continuous_md=path['continuous_md'], query_complete=report['query_complete'],

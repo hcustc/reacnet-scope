@@ -21,7 +21,7 @@ from .rng_events import reaction_key
 from .candidate_evidence import materialize_candidate_evidence, quality_summary
 from .candidate_identity import candidate_identity_from_route
 
-SCHEMA = 'reacnet-scope/indexed-candidates/v4'
+SCHEMA = 'reacnet-scope/indexed-candidates/v5'
 ADJACENCY_VERSION = '5'
 ATOM_TRANSFER_POLICY = 'event_local_dominant_atom_descendant'
 NETWORK_ONLY_POLICY = 'species_connectivity_only'
@@ -204,6 +204,7 @@ class CandidateReader:
                 "SELECT value FROM meta WHERE key='candidate_carrier_policy'"
             ).fetchone()
             self.carrier_policy = str(policy[0]) if policy else NETWORK_ONLY_POLICY
+            self.direction_view = 'observed'
             self.quality_view = 'persistent'
             self.return_window_frames = 3
             self.return_basis = 'topology'
@@ -230,6 +231,27 @@ class CandidateReader:
         return self.connection.execute('SELECT 1 FROM candidate_species WHERE species=?',
                                        (species,)).fetchone() is not None
 
+    def _direction_filter(self) -> str:
+        # Canonical keys already preserve exact identities, multiplicities and
+        # ordering within each side. Reverse lookup uses the existing primary
+        # key, including reactions outside this page or carrier neighbourhood.
+        if self.direction_view != 'net':
+            return ''
+        return """ AND r.total_events > COALESCE((
+            SELECT reverse.total_events FROM candidate_reactions reverse
+            WHERE reverse.reaction_key =
+                substr(r.reaction_key,instr(r.reaction_key,'->')+2) || '->' ||
+                substr(r.reaction_key,1,instr(r.reaction_key,'->')-1)),0)"""
+
+    def _counts(self, key: str, forward: int) -> dict[str, int]:
+        left, right = key.split('->', 1)
+        row = self.connection.execute(
+            'SELECT total_events FROM candidate_reactions WHERE reaction_key=?',
+            (right + '->' + left,)).fetchone()
+        reverse = int(row[0]) if row else 0
+        return dict(forward_count=forward, reverse_count=reverse,
+                    net_count=forward - reverse)
+
     def outgoing(self, species: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
         if self.carrier_policy == ATOM_TRANSFER_POLICY:
             return self._transfers(species, limit, offset=offset)
@@ -237,10 +259,11 @@ class CandidateReader:
             SELECT r.reaction_key,r.reactants,r.products,r.total_events,t.product_species
             FROM candidate_network_transfers t JOIN candidate_reactions r
             ON r.reaction_key=t.reaction_key WHERE t.source_species=?
+            ''' + self._direction_filter() + '''
             ORDER BY r.reaction_key,t.product_species LIMIT ? OFFSET ?
         ''', (species, limit, offset)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
-                     event_count=n, carried_products=[product],
+                     event_count=n, **self._counts(k, n), carried_products=[product],
                      transfer_event_count=n, max_shared_atoms=None,
                      transfer_basis=NETWORK_ONLY_POLICY) for k, a, b, n, product in rows]
 
@@ -257,10 +280,11 @@ class CandidateReader:
             FROM candidate_adjacency a JOIN candidate_reactions r
             ON r.reaction_key=a.reaction_key WHERE a.species=?
             AND EXISTS (SELECT 1 FROM json_each(r.products) WHERE value=?)
+            ''' + self._direction_filter() + '''
             ORDER BY a.reaction_key LIMIT ?
         ''', (species, target, limit)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
-                     event_count=n, carried_products=[target], transfer_event_count=n,
+                     event_count=n, **self._counts(k, n), carried_products=[target], transfer_event_count=n,
                      max_shared_atoms=None, transfer_basis=NETWORK_ONLY_POLICY)
                 for k, a, b, n in rows]
 
@@ -273,10 +297,11 @@ class CandidateReader:
             FROM candidate_network_transfers t JOIN candidate_reactions r
             ON r.reaction_key=t.reaction_key WHERE t.product_species=?
             AND t.source_species<>t.product_species
+            ''' + self._direction_filter() + '''
             ORDER BY t.source_species,r.reaction_key LIMIT ? OFFSET ?
         ''', (species, limit, offset)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
-                     event_count=n, carried_from=source, carried_to=species,
+                     event_count=n, **self._counts(k, n), carried_from=source, carried_to=species,
                      carried_products=[species], transfer_event_count=n,
                      max_shared_atoms=None, transfer_basis=NETWORK_ONLY_POLICY)
                 for k, a, b, n, source in rows]
@@ -287,6 +312,7 @@ class CandidateReader:
                  t.source_species,t.product_species,t.supporting_events,t.max_shared_atoms
             FROM candidate_transfers t JOIN candidate_reactions r USING(reaction_key)
             WHERE t.'''+('product_species' if incoming else 'source_species')+'=?'
+        sql += self._direction_filter()
         params = [species]
         if incoming:
             sql += ' AND t.source_species<>t.product_species'
@@ -310,7 +336,7 @@ class CandidateReader:
                                       self.return_window_frames, self.return_basis)
             quality['retained_events'] = support - quality['folded_events']
             result.append(dict(reaction_key=key, reactants=json.loads(left), products=json.loads(right),
-                               event_count=total, carried_products=[product], transfer_event_count=support,
+                               event_count=total, **self._counts(key, total), carried_products=[product], transfer_event_count=support,
                                carried_from=source, carried_to=product, max_shared_atoms=shared,
                                transfer_basis=ATOM_TRANSFER_POLICY, quality=quality))
         return result
@@ -369,7 +395,8 @@ def _discover_incoming(reader: CandidateReader, target: str, *, max_paths: int,
     paths = [_candidate_path([row['carried_from'], target], [row])
              for row in rows[:max_paths]]
     return dict(schema_version=SCHEMA,
-                query=dict(start='', target=target, mode='reverse', max_steps=1,
+                query=dict(direction_view=reader.direction_view,
+                    count_scope='published_revision_all_transitions', start='', target=target, mode='reverse', max_steps=1,
                     max_paths=max_paths, quality_view=quality_view,
                     anchor_offset=offset,
                     return_window_frames=return_window_frames, return_basis=return_basis,
@@ -409,7 +436,8 @@ def _discover_forward_one_step(reader: CandidateReader, start: str, *,
     self_cycles = sum(product == start for row in rows[:max_paths]
                       for product in row['carried_products'])
     return dict(schema_version=SCHEMA,
-                query=dict(start=start, target='', mode='explore', max_steps=1,
+                query=dict(direction_view=reader.direction_view,
+                    count_scope='published_revision_all_transitions', start=start, target='', mode='explore', max_steps=1,
                     max_paths=max_paths, anchor_offset=offset,
                     quality_view=quality_view,
                     return_window_frames=return_window_frames, return_basis=return_basis,
@@ -577,7 +605,8 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
     routes_complete = not reasons
     paths = _sample_first_transfer_branches(paths_examined, list(branches), max_paths)
     return dict(schema_version=SCHEMA,
-                query=dict(start=start, target=target, mode='target', max_steps=max_steps,
+                query=dict(direction_view=reader.direction_view,
+                    count_scope='published_revision_all_transitions', start=start, target=target, mode='target', max_steps=max_steps,
                     max_paths=max_paths, max_expansions=max_expansions,
                     max_frontier=max_frontier, max_seconds=max_seconds,
                     max_prefixes=max_prefixes,
@@ -612,6 +641,8 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
                                 max_frontier: int = 5000, max_seconds: float = 5,
                                 max_prefixes: int = 10000,
                                 max_candidates_examined: int = 2000,
+                                direction_view: str = 'observed',
+                                count_scope: str = 'published_revision_all_transitions',
                                 quality_view: str = 'persistent', return_window_frames: int = 3,
                                 return_basis: str = 'topology') -> dict[str, Any]:
     if mode not in {'target', 'explore', 'reverse'}:
@@ -620,6 +651,14 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
         raise ValueError('请选择原始/往返折叠视图和精确键级/连接关系返回规则')
     if isinstance(return_window_frames, bool) or not isinstance(return_window_frames, int) or not 1 <= return_window_frames <= 100:
         raise ValueError('往返窗口必须为 1–100 个分析帧间隔')
+    if count_scope != 'published_revision_all_transitions':
+        raise ValueError('候选方向计数仅支持当前已发布修订的全部观测区间')
+    if direction_view not in {'observed', 'net'}:
+        raise ValueError('请选择全部观测方向或净转化方向')
+    reader.direction_view = direction_view
+    # Net counts use all recorded occurrences, independently of temporal returns.
+    if direction_view == 'net':
+        quality_view = 'raw'
     reader.quality_view = quality_view
     reader.return_window_frames = return_window_frames
     reader.return_basis = return_basis
@@ -727,7 +766,8 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
     finally:
         reader.connection.set_progress_handler(None, 0)
     return dict(schema_version=SCHEMA,
-                query=dict(start=start, target='', mode='explore', max_steps=max_steps,
+                query=dict(direction_view=reader.direction_view,
+                    count_scope='published_revision_all_transitions', start=start, target='', mode='explore', max_steps=max_steps,
                     max_paths=max_paths, max_expansions=max_expansions,
                     max_frontier=max_frontier, max_seconds=max_seconds,
                     max_prefixes=max_prefixes,
