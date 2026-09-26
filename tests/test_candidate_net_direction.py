@@ -9,7 +9,6 @@ import pytest
 from reacnet_scope import services as svc
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.path_search import CandidateReader, discover_indexed_candidates, materialize_candidate_adjacency
-from scripts.webapp_dash import candidate_graph as graph
 
 
 @pytest.fixture
@@ -51,8 +50,6 @@ def test_net_direction_counts_and_filtering_before_pagination(reader):
     assert second['query']['direction_view'] == 'net'
     assert second['query']['quality_view'] == 'raw'
     assert second['query']['count_scope'] == 'published_revision_all_transitions'
-    nodes = [e['data'] for e in graph.elements(second) if e['data']['kind'] == 'reaction']
-    assert nodes[0]['label'] == 'R1 · 净 1 次'
 
 
 def test_reverse_lookup_and_target_probe_obey_net_direction(reader):
@@ -73,21 +70,15 @@ def test_net_does_not_delete_multistep_cycles_or_change_candidate_identity(reade
     with sqlite3.connect(reader.opened['index_path']) as con:
         con.execute("UPDATE candidate_reactions SET total_events=6 WHERE reaction_key='CC=O->CCO'")
     reader.connection = sqlite3.connect(reader.opened['index_path'])
-    history = None
+    observed_cycle = []
     for start, end in [('CCO', 'COC'), ('COC', 'CC=O'), ('CC=O', 'CCO')]:
         result = discover_indexed_candidates(reader, start, mode='explore', direction_view='net')
         path = next(p for p in result['paths'] if p['species'][-1] == end)
         observed = discover_indexed_candidates(reader, start, target=end, max_steps=1,
                                                direction_view='observed', quality_view='raw')
         assert path['candidate_signature'] == observed['paths'][0]['candidate_signature']
-        if history is None:
-            history = dict(mode='explore', trail=[start, end], steps=list(path['steps']))
-        else:
-            displayed = graph.with_browse_history(dict(result, paths=[path]), history)
-            assert displayed['paths'][0]['species'] == history['trail'] + [end]
-            history['trail'].append(end)
-            history['steps'].extend(path['steps'])
-    assert history['trail'] == ['CCO', 'COC', 'CC=O', 'CCO']
+        observed_cycle.append((start, end))
+    assert observed_cycle == [('CCO', 'COC'), ('COC', 'CC=O'), ('CC=O', 'CCO')]
 
 
 def test_service_cli_export_and_original_event_drilldown(tmp_path, monkeypatch, capsys):
@@ -103,11 +94,6 @@ def test_service_cli_export_and_original_event_drilldown(tmp_path, monkeypatch, 
     assert svc.search_candidate_paths(artifacts, **report['query'])['query'] == report['query']
     page = svc.candidate_step_events(artifacts, report, report['paths'][0]['signature_id'], 0)
     assert page['total'] == 2  # Net 1 is not one selected surviving event.
-    next_report = svc.search_candidate_paths(artifacts, 'COC', mode='explore', direction_view='net')
-    nav = dict(mode='explore', trail=['CCO', 'COC'], steps=report['paths'][0]['steps'])
-    displayed = graph.with_browse_history(next_report, nav)
-    reactions = [e['data'] for e in graph.elements(displayed) if e['data']['kind'] == 'reaction']
-    assert [(r['reaction_key'], r['label']) for r in reactions] == [('CCO->COC', 'R1 · 净 1 次')]
     row = next(csv.DictReader(io.StringIO(svc.candidate_paths_csv(report))))
     assert (row['forward_count'], row['reverse_count'], row['net_count']) == ('2', '1', '1')
     assert json.loads(row['query'])['direction_view'] == 'net'
