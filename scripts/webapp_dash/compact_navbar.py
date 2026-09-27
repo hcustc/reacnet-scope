@@ -6,7 +6,9 @@ import dash_bootstrap_components as dbc
 from .navigation import (
     NAV_GROUPS,
     PAGE_ICONS,
+    PAGE_DESCRIPTIONS,
     PAGE_LABELS,
+    PAGE_SECTIONS,
     START_PAGE,
 )
 from . import dataset_library
@@ -16,7 +18,7 @@ def build_navbar() -> dbc.Navbar:
     """
     Build a compact horizontal navbar combining:
     - Logo and brand
-    - Main navigation items (物种发现, 反应路径, 证据核查, 趋势对比)
+    - Five peer entries (RNG 数据, 物种, 反应, 演化, 事件)
     - Current dataset indicator and selector
     - Data management link
 
@@ -24,7 +26,16 @@ def build_navbar() -> dbc.Navbar:
     """
 
     # Build main navigation items from NAV_GROUPS
-    nav_items = []
+    nav_items = [dbc.NavItem(html.Button(
+        [html.Img(src=PAGE_ICONS["data-management"], className="rs-nav-icon-compact", alt=""),
+         html.Span(PAGE_LABELS["data-management"])],
+        id="nav-data-management", type="button", n_clicks=0,
+        title=PAGE_LABELS["data-management"],
+        className="rs-top-nav-item active",
+        **{"aria-current": "page",
+           "data-page-description": PAGE_DESCRIPTIONS["data-management"],
+           "data-page-section": PAGE_SECTIONS["data-management"]},
+    ))]
     for _group_label, page_ids in NAV_GROUPS:
         for page_id in page_ids:
             nav_items.append(
@@ -43,84 +54,23 @@ def build_navbar() -> dbc.Navbar:
                         n_clicks=0,
                         title=PAGE_LABELS[page_id],
                         className="rs-top-nav-item",
-                        **{"aria-current": "false"},
+                        **{"aria-current": "false",
+                           "data-page-description": PAGE_DESCRIPTIONS[page_id],
+                           "data-page-section": PAGE_SECTIONS[page_id]},
                     )
                 )
             )
-
-    # Dataset context section
-    dataset_context = html.Div(
-        [
-            html.Span(
-                className="rs-dataset-indicator-compact",
-                **{"aria-hidden": "true"},
-            ),
-            html.Div(
-                [
-                    html.Span(id="topbar-rungroup", children="未选择", className="rs-dataset-name"),
-                    html.Span(
-                        id="topbar-status",
-                        className="rs-badge rs-bad",
-                        children="未加载",
-                        role="status",
-                        **{"aria-live": "polite"},
-                    ),
-                ],
-                className="rs-dataset-info",
-            ),
-        ],
-        className="rs-dataset-context-compact",
-    )
-
-    # Right-side actions
-    nav_right = dbc.Nav(
-        [
-            dbc.NavItem(dataset_library.selector()),
-            html.Span(id="topbar-index-status", className="rs-index-global-state"),
-            dbc.NavItem(
-                dbc.Button(
-                    "选择数据",
-                    id="data-pick-btn",
-                    color="secondary",
-                    size="sm",
-                    outline=True,
-                    className="ms-2",
-                )
-            ),
-            dbc.NavItem(
-                dbc.DropdownMenu(
-                    [
-                        dbc.DropdownMenuItem("RNG 数据与准备任务", id="open-data-modal"),
-                        dbc.DropdownMenuItem("刷新索引状态", id="data-prep-refresh-btn"),
-                    ],
-                    label="数据与任务",
-                    color="secondary",
-                    size="sm",
-                    toggle_style={"background": "white", "color": "#445166"},
-                    align_end=True,
-                    className="rs-data-menu ms-2",
-                )
-            ),
-        ],
-        className="rs-navbar-actions ms-auto",
-        navbar=True,
-    )
 
     return dbc.Navbar(
         dbc.Container(
             [
                 # Brand/Logo
-                html.Button(
+                html.Div(
                     [
                         html.Span("RS", className="rs-brand-mark-compact"),
                         html.Span("ReacNet Scope", className="rs-brand-compact"),
                     ],
-                    type="button",
-                    n_clicks=0,
-                    title="RNG 数据",
-                    className="rs-top-nav-item rs-nav-utility active",
-                    id="nav-data-management",
-                    **{"aria-current": "page", "aria-label": "RNG 数据"},
+                    className="rs-brand-lockup",
                 ),
 
                 # Main navigation
@@ -131,13 +81,12 @@ def build_navbar() -> dbc.Navbar:
                 ),
 
                 # Dataset context
-                dataset_context,
+                dataset_library.current_dataset_menu(),
 
                 # Right-side actions
-                nav_right,
+                dataset_library.toolbar_actions(),
                 html.Div(
                     [
-                        html.Span(id="topbar-folder", children="未选择"),
                         html.Span(id="topbar-page-context", children=PAGE_LABELS[START_PAGE]),
                         html.Button(id="data-open-batch-compare-btn", n_clicks=0),
                     ],

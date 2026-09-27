@@ -1798,8 +1798,7 @@ body {
     align-items: center;
 }
 .rs-page-header.is-title-only .rs-page-eyebrow,
-.rs-page-header.is-title-only #page-description,
-.rs-page-header.is-title-only .rs-page-capability-status {
+.rs-page-header.is-title-only #page-description {
     display: none;
 }
 .rs-channel-detail {
@@ -4449,10 +4448,6 @@ summary:focus-visible,
   color: var(--rs-text);
   font-size: 20px;
 }
-.rs-current-dataset-empty-copy {
-  color: var(--rs-muted);
-  font-size: var(--rs-font-sm);
-}
 .rs-data-primary-analysis-action {
   display: inline-flex;
 }
@@ -5763,14 +5758,29 @@ summary:focus-visible,
 .rs-workflow-grid { grid-template-columns: minmax(0, 1fr); }
 .rs-workflow-card { padding: 14px; } }
 
-/* Evolution: keep the chart beside the controls on wide workspaces. */
-#page-evolution.active {
+/* Evolution: one object browser selects the series shown in one chart. */
+#page-evolution.active { display: flex; flex-direction: column; gap: 18px; }
+#evolution-current-panel {
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(400px, 36%) minmax(0, 1fr);
   align-items: start;
   gap: 18px;
 }
-#page-evolution > .rs-card { min-width: 0; margin: 0; }
+#evolution-rank-panel .card-body { display: flex; flex-direction: column; gap: 12px; }
+#evolution-species-browser, #evolution-group-browser { min-width: 0; }
+#evolution-species-browser .rs-result-grid-container,
+#evolution-group-browser .rs-result-grid-container { margin: 10px 0; }
+#evolution-group-browser > label { display: block; margin: 10px 0 4px; font-weight: 600; }
+#evolution-group-count { width: 100%; min-height: 36px; }
+#evolution-group-browser > .btn { margin: 8px 8px 0 0; }
+#evolution-group-members-status { margin-top: 12px; color: var(--rs-muted); font-size: var(--rs-font-sm); }
+#evolution-trend-panel { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+/* Restore a saved comparison before Dash's session Store callbacks settle. */
+html.rs-restored-compare #page-evolution.active #evolution-current-panel,
+html.rs-restored-compare #page-evolution.active #evolution-open-compare-btn { display: none !important; }
+html.rs-restored-compare #page-evolution.active #compare-species-panel { display: grid !important; }
+html.rs-restored-compare #page-evolution.active #evolution-close-compare-btn { display: inline-block !important; }
+#page-evolution > *, #evolution-current-panel > .rs-card { min-width: 0; margin: 0; width: 100%; }
 #page-evolution .card-body { padding: 20px; }
 .rs-evolution-controls .card-body { display: flex; flex-direction: column; gap: 14px; }
 .rs-evolution-section-title { display: flex; align-items: center; gap: 9px; }
@@ -5840,7 +5850,7 @@ summary:focus-visible,
 #evolution-catalog-alert:empty { display: none; }
 #page-evolution .rs-evolution-results:not(:has(.rs-species-structure-list)) .rs-structure-h-toggle { display: none; }
 @media (max-width: 1050px) {
-#page-evolution.active { grid-template-columns: minmax(0, 1fr); }
+#evolution-current-panel { grid-template-columns: minmax(0, 1fr); }
 #page-evolution .card-body { padding: 16px; }
 #evolution-graph { height: 440px; }
 }
@@ -5965,24 +5975,6 @@ summary:focus-visible,
   gap: .5rem 1rem;
 }
 .rs-candidate-event-status { color: var(--bs-secondary-color); }
-.rs-candidate-instance-nav {
-  display: grid;
-  grid-template-columns: auto minmax(220px, 1fr) auto auto;
-  align-items: center;
-  gap: .5rem;
-  margin-top: .85rem;
-}
-.rs-candidate-instance-position {
-  min-width: 7rem;
-  color: var(--bs-secondary-color);
-  text-align: right;
-}
-.rs-candidate-instance-actions { justify-content: flex-end; }
-.rs-candidate-instance-detail {
-  margin-top: .75rem;
-  padding-top: .75rem;
-  border-top: 1px solid var(--rs-border, var(--rs-border));
-}
 .rs-candidate-continuity-details {
   margin-top: 1rem;
   padding-top: .75rem;
@@ -5998,19 +5990,12 @@ summary:focus-visible,
 }
 @media (max-width: 850px) {
 .rs-candidate-evidence-heading { grid-template-columns: 1fr; }
-.rs-candidate-instance-nav { grid-template-columns: auto minmax(0, 1fr) auto; }
-.rs-candidate-instance-position { grid-column: 1 / -1; text-align: left; }
 }
 @media (max-width: 600px) {
 .rs-candidate-route-nav { flex-wrap: wrap; }
 .rs-candidate-route-nav label { width: 100%; }
 .rs-candidate-graph-panel { padding: .6rem; }
 .rs-candidate-evidence-workspace { padding: .7rem; }
-.rs-candidate-instance-nav { grid-template-columns: 1fr 1fr; }
-.rs-candidate-instance-nav .dash-dropdown-wrapper { grid-column: 1 / -1; grid-row: 1; }
-.rs-candidate-instance-position { grid-column: 1 / -1; }
-.rs-candidate-instance-actions { justify-content: stretch; }
-.rs-candidate-instance-actions button { flex: 1 1 100%; }
 }
 
 /* RNG file collection: one draft, independent of source directories. */

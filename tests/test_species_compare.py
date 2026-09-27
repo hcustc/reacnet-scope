@@ -609,10 +609,54 @@ def test_evolution_handoff_adds_current_source_and_exact_species(tmp_path):
 def test_comparison_pages_belong_to_their_analysis_workspaces():
     from scripts.webapp_dash.navigation import PAGE_WORKSPACES
     client = create_app().server.test_client()
-    assert PAGE_WORKSPACES['batch-compare'] == 'batch-compare'
+    assert PAGE_WORKSPACES['evolution'] == 'evolution'
     assert PAGE_WORKSPACES['reaction-compare'] == 'reactions'
-    for page, nav in [('batch-compare', 'batch-compare'), ('reaction-compare', 'reactions')]:
+    for page, nav in [('evolution', 'evolution'), ('batch-compare', 'evolution'), ('reaction-compare', 'reactions')]:
         response = _post_callback(client, 'page-title.children@', 'page-store.data',
                                   {'page-store': {'page': page}})
-        assert response[f'page-{page}']['className'].endswith(' active')
+        mounted_page = 'evolution' if page == 'batch-compare' else page
+        assert response[f'page-{mounted_page}']['className'].endswith(' active')
         assert response[f'nav-{nav}']['aria-current'] == 'page'
+
+
+@pytest.mark.parametrize("page, comparing", [
+    ({"page": "evolution"}, False),
+    ({"page": "evolution", "compare_sources": True}, True),
+    ({"page": "batch-compare"}, True),
+    ({"page": "species"}, False),
+])
+def test_abundance_view_restores_source_mode_without_running_analysis(page, comparing):
+    client = create_app().server.test_client()
+    result = _post_callback(client, "evolution-current-panel.style", "page-store.data",
+                            {"page-store": page})
+    assert (result["evolution-current-panel"]["style"].get("display") == "none") == comparing
+    assert (result["compare-species-panel"]["style"].get("display") != "none") == comparing
+    assert "species-compare-result-store" not in result
+    assert "evolution-payload-store" not in result
+    poll = _post_callback(client, "species-compare-index-refresh.disabled", "page-store.data",
+                          {"page-store": page, "species-compare-sources-store": [{"species_file": "a.species"}]})
+    assert poll["species-compare-index-refresh"]["disabled"] is not comparing
+
+
+def test_compare_button_shows_comparison_without_waiting_for_page_store() -> None:
+    client = create_app().server.test_client()
+    result = _post_callback(
+        client, "evolution-current-panel.style", "evolution-open-compare-btn.n_clicks",
+        {"page-store": {"page": "evolution"}, "evolution-open-compare-btn": 1},
+    )
+    assert result["compare-species-panel"]["style"] == {}
+    assert result["evolution-current-panel"]["style"] == {"display": "none"}
+
+
+def test_evolution_comparison_handoff_uses_current_detail_species(tmp_path):
+    source = tmp_path / "current.species"
+    source.write_text("Timestep 0: C 1 O 2\n")
+    dataset = {"dataset_id": "a", "source_revision": {"fingerprint": "r1"},
+               "selected_smiles": "O", "artifacts": {"species": str(source)}}
+    client = create_app().server.test_client()
+    result = _post_callback(client, "species-compare-sources-store.data",
+                            "evolution-open-compare-btn.n_clicks",
+                            {"evolution-open-compare-btn": 1},
+                            {"app-store": dataset, "species-compare-sources-store": []})
+    assert result["species-compare-sources-store"]["data"][0]["target_smiles"] == "O"
+    assert "app-store" not in result

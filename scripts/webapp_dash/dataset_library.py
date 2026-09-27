@@ -181,13 +181,41 @@ def stores():
 
 
 def selector():
-    # Hidden selector kept for callback dependencies (library-use trigger from list)
     return html.Div([
-        html.Label('选择已导入数据', htmlFor='library-select', className='visually-hidden'),
+        html.Label('切换到已导入数据', htmlFor='library-select'),
         dcc.Dropdown(id='library-select', options=[], placeholder='选择已导入的 RNG 文件夹', clearable=False),
-        dbc.Button('使用', id='library-use', color='primary', size='sm', disabled=True),
-        html.Span(id='library-switch-status', role='status'),
-    ], style={'display': 'none'})
+        html.Small('选择后点击切换，验证成功才更新当前数据。'),
+        dbc.Button('切换数据', id='library-use', color='primary', size='sm', disabled=True),
+        html.Div(id='library-switch-status', role='status', **{'aria-live': 'polite'}),
+    ], className='rs-dataset-switch-options')
+
+
+def current_dataset_menu():
+    """One current-data identity and an explicit switch, shared by both shells."""
+    return html.Details([
+        html.Summary([
+            html.Span('当前 RNG 数据', className='rs-dataset-caption'),
+            html.Span(id='topbar-rungroup', children='未选择', className='rs-dataset-label'),
+            html.Span(id='topbar-status', children='未加载数据', className='rs-badge rs-bad',
+                      role='status', **{'aria-live': 'polite'}),
+            html.Span('▾', className='rs-dataset-chevron', **{'aria-hidden': 'true'}),
+        ], title='查看当前数据或切换已导入数据'),
+        html.Div(selector(), className='rs-dataset-popover'),
+        html.Span(id='topbar-folder', children='未选择', hidden=True),
+    ], id='current-dataset-menu', className='rs-dataset-menu')
+
+
+def toolbar_actions():
+    return html.Div([
+        html.Span(id='topbar-index-status', className='rs-index-global-state'),
+        dbc.Button('添加数据', id='data-pick-btn', color='secondary', size='sm', outline=True),
+        dbc.DropdownMenu([
+            dbc.DropdownMenuItem('RNG 数据与准备任务', id='open-data-modal'),
+            dbc.DropdownMenuItem('刷新索引状态', id='data-prep-refresh-btn'),
+        ], label='数据与任务', color='secondary', size='sm',
+            toggle_style={'background': 'white', 'color': 'var(--rs-muted)'},
+            align_end=True, className='rs-data-menu'),
+    ], className='rs-dataset-actions ms-auto')
 
 
 def import_panel():
@@ -254,7 +282,8 @@ def register_callbacks(app):
                               **{'aria-live': 'polite'}),
                 ], className='rs-library-use-control'),
                 dbc.Button('移出列表', id={'type': 'library-forget-entry', 'base': entry['base']},
-                           n_clicks=0, color='link', disabled=active),
+                           n_clicks=0, color='link', disabled=active,
+                           title='仅移出列表，不删除原始文件'),
             ], className='rs-library-item'))
         return rows or html.P('尚未导入RNG 数据。点击”添加数据”导入 RNG 文件夹。')
 
@@ -578,11 +607,11 @@ def register_callbacks(app):
         return {**entry, 'kind': trigger['kind'], 'message': message}
 
 
-def management_panel():
+def management_panel(*, current_summary=None):
     return html.Section([
         html.Div([html.H3('RNG 数据管理'),
                   dbc.Button('添加数据', id='library-add-more', color='primary')],
                  className='rs-library-heading'),
-        html.P('切换会更新当前分析数据；移出列表不会删除原始文件。'),
+        *([current_summary] if current_summary is not None else []),
         html.Div(id='library-management-list'),
     ], id='library-management-panel', className='rs-library-management')

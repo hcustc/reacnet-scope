@@ -1,6 +1,19 @@
 # ADR-0025: Reuse imported RNG folders across analysis and comparison
 
-Status: Accepted (2026-09-22). Extends ADR-0024.
+Status: Partially Superseded (navigation only, 2026-09-25).
+Originally accepted 2026-09-22; extends ADR-0024.
+
+- Still accepted: Dataset Library, Current Dataset independence, preparation,
+  and comparison-source decisions.
+- Superseded: navigation grouping and the placement of comparison tasks. Use
+  [software design baseline §10](../software-design-baseline.md#10-dash-信息架构与会话)
+  and [ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md).
+
+Navigation supersession (2026-09-25): the historical groupings below were
+replaced in stages. The current design baseline §10 and ADR-0029 define five
+peer entries: “RNG 数据”, “物种”, “反应”, “演化”, and “事件”. This supersedes only
+navigation grouping and task placement; the Dataset Library and independent
+comparison-source decisions below remain accepted.
 
 ## Context
 

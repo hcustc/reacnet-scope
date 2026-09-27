@@ -582,19 +582,26 @@ def preparation_layout():
         html.Div([html.Span(id="import-auto-message"),
                   dbc.Button("取消准备", id="import-auto-cancel", size="sm", outline=True, color="secondary")],
                  id="import-auto-panel", className="rs-import-auto", style={"display": "none"}, role="status"),
-    ])
+    ], id="import-auto-host")
 
 
-def defer_query(kind: str, output_count: int):
+def defer_query(kind: str, output_count: int, *, submit_triggers: frozenset[str] = frozenset(),
+                replay_trigger_kw: str | None = None):
     """Keep one explicit query until its preparation result is available.
 
     The extra input is the preparation result; the extra state/output holds a
     snapshot of the submitted arguments. Switching datasets invalidates that
-    snapshot. Readers themselves never build indexes or scan missing evidence.
+    snapshot. An optional keyword preserves the initiating action when the
+    question is replayed. Readers never build indexes or scan missing evidence.
     """
     from functools import wraps
 
     def decorate(function):
+        def invoke(args, submitted_trigger):
+            if replay_trigger_kw:
+                return function(*args, **{replay_trigger_kw: submitted_trigger})
+            return function(*args)
+
         @wraps(function)
         def run(clicks, prepared, *states):
             original_states, pending = states[:-1], states[-1]
@@ -610,14 +617,19 @@ def defer_query(kind: str, output_count: int):
                 # Preserve the exact submitted question; replace only the
                 # capability snapshot with the current revision's status.
                 original_args = [*pending["args"][:-1], current]
-                return (*function(*original_args), None)
+                return (*invoke(original_args, pending.get("trigger")), None)
             capability = "species_abundance" if kind == "composition" else "event_search"
             artifacts = current.get("artifacts") or {}
             source = artifacts.get("species") if kind == "composition" else artifacts.get("timeline") or (artifacts.get("reactionevent") and artifacts.get("molecules"))
             evidence = (current.get("analysis_capabilities") or {}).get(capability) or {}
             completed = prepared and prepared.get("kind") == kind and svc.is_same_dataset_revision(current, prepared.get("current"))
-            if clicks and source and not completed and svc.is_collection_path(current.get("base", "")) and evidence.get("state") != "ready":
-                return (*(no_update for _ in range(output_count)), {"args": original_args, "current": current})
-            return (*function(*original_args), None)
+            triggered_id = ctx.triggered_id
+            submitted = bool(clicks) or (
+                isinstance(triggered_id, str) and triggered_id in submit_triggers
+            )
+            if submitted and source and not completed and svc.is_collection_path(current.get("base", "")) and evidence.get("state") != "ready":
+                return (*(no_update for _ in range(output_count)), {"args": original_args, "current": current,
+                                                                      "trigger": triggered_id})
+            return (*invoke(original_args, triggered_id), None)
         return run
     return decorate
