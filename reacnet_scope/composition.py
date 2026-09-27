@@ -870,6 +870,34 @@ class SpeciesCompositionStore:
         finally:
             connection.close()
 
+    def ranked_species_totals(self, species_file: str, *, limit: int = 50) -> dict[str, Any]:
+        """Read one bounded abundance ranking from the published index."""
+        meta = self.open_required(species_file)
+        connection = _readonly_connection(Path(meta["index_path"]))
+        try:
+            first, last, sampled_frames = connection.execute(
+                "SELECT MIN(timestep),MAX(timestep),COUNT(*) FROM timepoints"
+            ).fetchone()
+            total_species = int(connection.execute(
+                "SELECT COUNT(*) FROM species_summary"
+            ).fetchone()[0])
+            bounded_limit = max(1, min(int(limit), 100))
+            rows = [
+                {"smiles": str(smiles), "formula": str(formula), "total_count": int(total)}
+                for smiles, formula, total in connection.execute(
+                    "SELECT smiles,formula,total_count FROM species_summary "
+                    "ORDER BY total_count DESC,smiles LIMIT ?", (bounded_limit,)
+                )
+            ]
+            return {
+                "rows": rows, "total_species": total_species,
+                "sampled_frames": int(sampled_frames),
+                "first_timestep": first, "last_timestep": last,
+                "limit": bounded_limit,
+            }
+        finally:
+            connection.close()
+
     def has_species(self, species_file: str, smiles: str) -> bool:
         """Check one exact Species identity without loading the catalogue."""
         meta = self.open_required(species_file)

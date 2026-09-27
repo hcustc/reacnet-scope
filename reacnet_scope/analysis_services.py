@@ -1055,6 +1055,19 @@ def search_species_catalog(
     }
 
 
+def ranked_species_abundance(artifacts: Mapping[str, Any], *, limit: int = 50) -> dict[str, Any]:
+    """Return exact Species ranked by cumulative sampled abundance."""
+    species_file = str((artifacts or {}).get("species") or "").strip()
+    if not species_file:
+        raise ServiceError("缺少 .species 文件，无法读取丰度排行", reason="missing_species_file")
+    try:
+        return SPECIES_COMPOSITION_STORE.ranked_species_totals(species_file, limit=limit)
+    except (IndexNotReadyError, IndexBuildInProgressError) as exc:
+        raise ServiceError("丰度索引尚未就绪；请先在 RNG 数据页准备元素分布索引。", reason="missing_species_index") from exc
+    except (IndexStaleError, IndexInvalidError) as exc:
+        raise ServiceError(f"丰度索引需要重建：{exc}", reason="invalid_species_index") from exc
+
+
 def detect_query_kind(query: str) -> str:
     """Auto-detect the query kind: ``mass`` / ``formula`` / ``smiles``."""
     text = (query or "").strip()
