@@ -172,7 +172,7 @@ def test_cli_shares_indexed_query(source, tmp_path, capsys):
     assert main(['candidate-search', '--source', source['reactionevent'], '--start', 'CCO',
                  '--target', 'CC(=O)O', '--out-json', str(out)]) == 0
     report = json.loads(out.read_text())
-    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v4')
+    assert len(report['paths']) == 2 and report['schema_version'].endswith('/v5')
     assert report['query']['max_steps'] is None
     assert report['reachability_status'] == 'found'
     reverse_out = tmp_path / 'reverse.json'

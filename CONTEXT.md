@@ -24,6 +24,14 @@ _Avoid_: Molecular formula, formula group
 A directed, stoichiometry-preserving equation of exact species identities shared by any number of reaction occurrences; ordering within each reaction side is not significant.
 _Avoid_: Reaction event, event row
 
+**Net Reaction Count**:
+The recorded occurrence count of one directed Reaction Type minus that of its
+strict reverse, pairing complete exact Species multisets with stoichiometry.
+In Candidate Path Discovery it covers all transitions of the current published
+revision. Its sign defines the observed net conversion direction for that pair;
+it is not a selected subset of events, a rate constant, or a molecular return.
+_Avoid_: Surviving events, net pathway occurrences, molecular return evidence
+
 **Direct Reaction Channel**:
 A reaction type viewed relative to one focal species and classified as a production channel when that species is on the product side or a consumption channel when it is on the reactant side; it is a one-step query and does not recursively expand a path.
 _Avoid_: Path Verification, Event Path
@@ -81,7 +89,7 @@ The exact product Species of one Candidate Path step that is used as a reactant 
 _Avoid_: Focal Species, inferred intermediate, ranker-selected product
 
 **Cycle Closure Evidence**:
-An observed expansion that would revisit a Carried Species already present in an ordinary Candidate Path. It is retained for audit but is not itself an ordinary Candidate or a Fast Recrossing Episode.
+An observed expansion that would revisit a Carried Species already present in an ordinary Candidate Path. It is retained for graph-search audit but does not show that any concrete molecule returned. It is not itself an ordinary Candidate or a Fast Recrossing Episode.
 _Avoid_: Reaction Cycle Candidate, Fast Recrossing Episode
 
 **Step Evidence**:

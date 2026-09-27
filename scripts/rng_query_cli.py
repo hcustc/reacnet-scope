@@ -609,6 +609,7 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
             artifacts, args.start, target=args.target, mode=args.mode,
             max_steps=args.max_steps, max_paths=args.max_paths,
             anchor_offset=args.anchor_offset,
+            direction_view=args.direction_view,
             quality_view=args.quality_view, return_window_frames=args.return_window_frames,
             return_basis=args.return_basis, max_expansions=args.max_expansions,
             max_frontier=args.max_frontier, max_prefixes=args.max_prefixes,
@@ -1716,6 +1717,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
     sp_candidate_search.add_argument("--anchor-offset", type=_bounded_int("anchor-offset", 0, 1000000), default=0,
                                      help="仅单端一步探索：跳过前 N 条候选转移")
+    sp_candidate_search.add_argument("--direction-view", choices=["observed", "net"], default="observed",
+                                     help="net 按完整正逆反应的全观测区间净计数筛选方向，不作短时返回折叠")
     sp_candidate_search.add_argument("--quality-view", choices=['persistent', 'raw'], default='persistent', help='默认折叠有证据的短暂往返；raw 保留全部事件')
     sp_candidate_search.add_argument("--return-window-frames", type=_bounded_int('return-window-frames', 1, 100), default=3)
     sp_candidate_search.add_argument("--return-basis", choices=['topology', 'exact'], default='topology', help='连接关系返回或精确键级返回')
