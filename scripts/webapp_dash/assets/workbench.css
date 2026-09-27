@@ -80,7 +80,7 @@
 .rs-dataset-switch-options { display: grid; gap: 10px; }
 .rs-dataset-switch-options label { font-weight: 600; }
 .rs-dataset-switch-options small { color: var(--rs-muted); white-space: normal; }
-.rs-dataset-switch-options .btn { justify-self: end; }
+.rs-dataset-switch-action { display: grid; justify-items: end; border: 0; margin: 0; padding: 0; min-width: 0; }
 .rs-dataset-switch-options #library-switch-status {
   position: static; max-width: 100%; margin: 0; white-space: normal; overflow-wrap: anywhere;
 }

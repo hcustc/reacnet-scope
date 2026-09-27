@@ -99,8 +99,8 @@ def test_using_imported_folder_uses_existing_switch_transaction_and_preserves_or
     client = create_app().server.test_client()
     entry = svc.inspect_dataset_folders([folders[1]])['entries'][0]
     response = post(client, 'dataset-switch-request.data', 'library-use.n_clicks',
-                    {'library-use': 1, 'page-store': {'page': 'reactions'}},
-                    {'dataset-library': [entry], 'library-select': entry['base'],
+                    {'library-use': 1},
+                    {'page-store': {'page': 'reactions'}, 'dataset-library': [entry], 'library-select': entry['base'],
                      'dataset-switch-transaction': {}})
     assert response.status_code == 200
     request = response.get_json()['response']['dataset-switch-request']['data']
@@ -139,7 +139,7 @@ def test_library_row_click_starts_switch_without_hidden_selector(folders, monkey
             triggered_id=triggered_id, triggered=changed,
         ))
         transaction, request = reducer(
-            0, 0, [1], 0, 0, None, {'page': 'reactions'},
+            0, [1], 0, 0, None, {'page': 'reactions'},
             None, None, [entry], {}, [],
         )
         assert request == transaction
@@ -255,15 +255,15 @@ def test_library_switch_failure_focuses_its_visible_row():
     assert json.loads(target) == {'base': '/data/B', 'type': 'library-switch-feedback'}
 
 
-def test_library_use_is_not_swallowed_by_batched_page_navigation(folders):
+def test_library_menu_click_uses_current_page_state(folders):
     client = create_app().server.test_client()
     entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
     payload = _payload(client, output_contains='dataset-switch-request.data',
-                       changed='page-store.data',
-                       inputs={'page-store': {'page': 'data-management'}, 'library-use': 1},
-                       states={'library-select': entry['base'], 'dataset-library': [entry],
+                       changed='library-use.n_clicks',
+                       inputs={'library-use': 1},
+                       states={'page-store': {'page': 'data-management'},
+                               'library-select': entry['base'], 'dataset-library': [entry],
                                'dataset-switch-transaction': {}})
-    payload['changedPropIds'] = ['page-store.data', 'library-use.n_clicks']
     response = client.post('/_dash-update-component', json=payload)
     assert response.status_code == 200
     assert response.get_json()['response']['dataset-switch-request']['data']['candidate']['base'] == entry['base']
@@ -569,3 +569,48 @@ def test_library_status_shows_workspace_read_error_instead_of_500(folders, monke
         shown = shown[0]
     assert shown['props']['role'] == 'status'
     assert 'Read-only file system' in shown['props']['children']
+
+
+def test_completed_library_switch_survives_late_candidate_clear():
+    """A late browser-candidate update must not erase success before commit."""
+    client = create_app().server.test_client()
+    transaction = {
+        'state': 'succeeded', 'request_id': 'completed-library-switch',
+        'origin': {'page': 'species', 'library': True},
+        'validation': {'dataset_id': 'new-dataset'},
+    }
+    response = post(
+        client, 'dataset-switch-transaction.data', 'dataset-browser-candidate.data',
+        {'dataset-browser-candidate': None, 'page-store': {'page': 'species'}},
+        {'dataset-switch-transaction': transaction, 'dataset-library': []},
+    )
+    assert response.status_code == 204
+
+
+def test_library_menu_click_is_independent_of_candidate_refresh():
+    """Navigation and candidate refreshes must not queue ahead of a menu click."""
+    dependencies = create_app().server.test_client().get('/_dash-dependencies').get_json()
+    click = next(
+        item for item in dependencies
+        if 'dataset-switch-request.data' in str(item.get('output') or '')
+        and any(value['id'] == 'library-use' for value in item['inputs'])
+    )
+    input_ids = {value['id'] for value in click['inputs'] if isinstance(value['id'], str)}
+    assert 'page-store' not in input_ids
+    assert 'dataset-browser-candidate' not in input_ids
+
+
+def test_library_switch_survives_late_page_navigation():
+    """An in-flight global library switch is not cancelled by page hydration."""
+    client = create_app().server.test_client()
+    transaction = {
+        'state': 'validating', 'request_id': 'active-library-switch',
+        'origin': {'page': 'species', 'library': True},
+        'candidate': {'base': '/data/B'},
+    }
+    response = post(
+        client, 'dataset-switch-transaction.data', 'page-store.data',
+        {'page-store': {'page': 'reactions'}},
+        {'dataset-switch-transaction': transaction},
+    )
+    assert response.status_code == 204
