@@ -40,6 +40,7 @@ from .rng_events import (
     reaction_key,
 )
 from .path_search import materialize_candidate_adjacency
+from .datasets import is_native_timeline_path
 from .timed_evidence import (
     NativeHdf5EvidenceAdapter,
     TimedEvidenceDataError,
@@ -1573,7 +1574,7 @@ class EventEvidenceStore:
         index_path = self._expected_path(reactionevent_file)
         building_path = Path(f"{index_path}.building")
         reaction_path = Path(reactionevent_file)
-        native_path = str(reaction_path).lower().endswith(".timeline.h5")
+        native_path = is_native_timeline_path(reaction_path)
         native_selection = None
         molecule_text = str(molecules_file or "").strip()
         molecule_path = Path(molecule_text) if molecule_text else None
@@ -2725,7 +2726,7 @@ class EventEvidenceStore:
         *,
         progress_callback: Any = None,
     ) -> dict[str, Any]:
-        is_native = str(reactionevent_file).lower().endswith(".timeline.h5")
+        is_native = is_native_timeline_path(reactionevent_file)
         selection = select_timed_evidence(
             timeline_file=reactionevent_file if is_native else "",
             reactionevent_file="" if is_native else reactionevent_file,

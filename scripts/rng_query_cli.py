@@ -39,6 +39,7 @@ from reacnet_scope.network import (  # noqa: E402
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
+from reacnet_scope.datasets import is_native_timeline_path  # noqa: E402
 
 
 def detect_default_reaction_file() -> Path:
@@ -602,7 +603,7 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
     """Run the same indexed, single-source query as the Web workbench."""
     from reacnet_scope import services as svc
     artifacts = {"reactionevent": args.source, "molecules": args.molecules}
-    if args.source.endswith(".timeline.h5"):
+    if is_native_timeline_path(args.source):
         artifacts["timeline"] = args.source
     try:
         result = svc.search_candidate_paths(
@@ -641,12 +642,12 @@ def cmd_candidate_paths(args: argparse.Namespace) -> int:
             "reaction": os.path.abspath(args.reac),
             "timeline": (
                 current.reactionevent_file
-                if current.reactionevent_file.endswith(".timeline.h5")
+                if is_native_timeline_path(current.reactionevent_file)
                 else ""
             ),
             "reactionevent": (
                 ""
-                if current.reactionevent_file.endswith(".timeline.h5")
+                if is_native_timeline_path(current.reactionevent_file)
                 else current.reactionevent_file
             ),
             "molecules": current.molecules_file,
@@ -707,6 +708,7 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         IndexStaleError,
     )
     from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.timed_evidence import select_timed_evidence
     from reacnet_scope.trajectory import (
         TrajectoryDependencyError,
         TrajectoryFrameError,
@@ -716,15 +718,14 @@ def cmd_export_event(args: argparse.Namespace) -> int:
 
     try:
         dataset = discover_dataset(args.case, args.base)
-        reactionevent = dataset["reactionevent"]
-        molecules = (
-            dataset["molecules"]
-            if Path(dataset["molecules"]).is_file()
-            else ""
+        selection = select_timed_evidence(
+            timeline_file=dataset["timeline"],
+            reactionevent_file=dataset["reactionevent"],
+            molecules_file=dataset["molecules"],
         )
         event = EVENT_EVIDENCE_STORE.get_event(
-            reactionevent,
-            molecules,
+            selection.primary_file,
+            selection.molecules_file,
             args.event_id,
         )
         explicit_mapping = svc.parse_event_type_element_map(args.type_map)

@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Iterable
 
-from .datasets import ARTIFACT_SUFFIXES
+from .datasets import ARTIFACT_SUFFIXES, OFFICIAL_ARTIFACT_NAMES
 from .dir_browser import validate_browse_path, DirBrowserError
 from .service_types import ServiceError
 
@@ -47,6 +47,8 @@ def artifact_role(path: str | Path) -> tuple[str, str]:
     name = Path(path).name
     if name.startswith("._"):
         return "", ""
+    if name.lower() in OFFICIAL_ARTIFACT_NAMES:
+        return OFFICIAL_ARTIFACT_NAMES[name.lower()], "timeline.h5"
     for suffix, role in ARTIFACT_SUFFIXES:
         if name.lower().endswith(suffix):
             stem = name[:-len(suffix)]

@@ -116,10 +116,17 @@ Species 连接；事件索引只为候选涉及的步骤提供独立证据，不
 完整的信息架构、功能归属与后续去重计划见
 [`docs/usage-logic-redesign.md`](docs/usage-logic-redesign.md)。
 
-ReacNetGenerator 生成的 schema-1/2 `.timeline.h5` 会被自动识别，其中
-Reaction Evidence 是事件检索所需能力，Molecular Evidence 是原子、键与物理
-timestep 的增强证据。schema 2 的逐事件 Transition Evidence 会被直接用于索引，
-无需重建完整的帧—原子成员矩阵。旧版本仍可生成 CSV：
+ReacNetGenerator 官方 schema `1.1` 和既有 fork schema `1`/`2` 的
+`.timeline.h5` 会被自动识别；这两套版本编号属于各自的格式契约。其中
+Reaction Evidence 是事件检索所需能力，Molecular Evidence 是原子、键、帧与
+timestep 的增强证据。官方 `1.1` 与 fork `2` 的逐事件 Transition Evidence
+会被直接用于索引，无需重建完整的帧—原子成员矩阵。适配只读原始文件，统一字典
+ID、分子定义与键端点列，并在离线准备阶段检查聚合计数和逐事件证据的一致性。
+目前仍仅支持单输入来源的 timeline；多来源和未知版本会明确报告不支持。
+HDF5 不包含坐标，几何导出还需要对应原始轨迹、元素映射和长度单位确认。
+官方 `--output-dir` 生成的 `timeline.h5`、`reactionabcd` 和 `species` 也可直接
+发现和导入；坐标轨迹位于其他目录时，使用现有的轨迹关联功能明确指定来源。
+旧版本仍可生成 CSV：
 
 ```bash
 # 添加到原 ReacNetGenerator 命令
