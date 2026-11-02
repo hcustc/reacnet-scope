@@ -94,6 +94,7 @@ from reacnet_scope.rng_events import (  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
+    is_native_timeline_path,
 )
 from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
@@ -1030,7 +1031,7 @@ def locate_rng_events(
         "reactionevent_file": os.path.abspath(reactionevent_file),
         "source_kind": (
             "native_hdf5"
-            if reactionevent_file.endswith(".timeline.h5")
+            if is_native_timeline_path(reactionevent_file)
             else "legacy_csv"
         ),
         "molecules_file": (

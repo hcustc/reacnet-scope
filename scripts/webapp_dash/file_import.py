@@ -586,13 +586,15 @@ def preparation_layout():
 
 
 def defer_query(kind: str, output_count: int, *, submit_triggers: frozenset[str] = frozenset(),
-                replay_trigger_kw: str | None = None):
+                replay_trigger_kw: str | None = None,
+                trigger_priority: tuple[str, ...] = ()):
     """Keep one explicit query until its preparation result is available.
 
     The extra input is the preparation result; the extra state/output holds a
     snapshot of the submitted arguments. Switching datasets invalidates that
     snapshot. An optional keyword preserves the initiating action when the
-    question is replayed. Readers never build indexes or scan missing evidence.
+    question is replayed. Explicit buttons may take priority over derived
+    controls in the same Dash batch. Readers never build indexes or scan missing evidence.
     """
     from functools import wraps
 
@@ -607,7 +609,11 @@ def defer_query(kind: str, output_count: int, *, submit_triggers: frozenset[str]
             original_states, pending = states[:-1], states[-1]
             current = original_states[-1] or {}
             original_args = [clicks, *original_states]
-            if ctx.triggered_id == "import-auto-result":
+            triggered_id = ctx.triggered_id
+            if trigger_priority:
+                changed = tuple(ctx.triggered_prop_ids.values())
+                triggered_id = next((value for value in trigger_priority if value in changed), triggered_id)
+            if triggered_id == "import-auto-result":
                 if not pending or not prepared or prepared.get("kind") != kind:
                     raise PreventUpdate
                 if not svc.is_same_dataset_revision(current, pending.get("current")) or not svc.is_same_dataset_revision(current, prepared.get("current")):
@@ -623,7 +629,6 @@ def defer_query(kind: str, output_count: int, *, submit_triggers: frozenset[str]
             source = artifacts.get("species") if kind == "composition" else artifacts.get("timeline") or (artifacts.get("reactionevent") and artifacts.get("molecules"))
             evidence = (current.get("analysis_capabilities") or {}).get(capability) or {}
             completed = prepared and prepared.get("kind") == kind and svc.is_same_dataset_revision(current, prepared.get("current"))
-            triggered_id = ctx.triggered_id
             submitted = bool(clicks) or (
                 isinstance(triggered_id, str) and triggered_id in submit_triggers
             )

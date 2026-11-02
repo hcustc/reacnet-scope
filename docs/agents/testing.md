@@ -44,6 +44,18 @@ REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/br
 
 Linux CI 安装浏览器系统库时使用 `playwright install --with-deps chromium`。可设置 `REACNET_SCOPE_SCREENSHOTS=/tmp/reacnet-ui-screenshots` 保存截图。测试服务器绑定本机临时端口，数据源和 Dataset Workspace 均位于 pytest 临时目录；页面请求必须保持本机来源。
 
+CI 在 PR、`main` 推送和手动运行时执行；新提交会取消同一 PR/分支的旧运行。
+浏览器用例按收集顺序分成四片，包含 classic/compact 两种导航和独立浏览器模块，
+每个用例只运行一次。`browser` 汇总检查要求四片全部成功，失败、取消或跳过均不会放行。
+每片遇到首个失败即输出断言，并保存独立的截图与 JUnit 报告；`--durations=15`
+报告最慢阶段，30 分钟超时仍作为兜底。复现单片可运行：
+
+```bash
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -x -vv --tb=short tests/browser --browser-shard=1/4
+```
+
+省略 `--browser-shard` 仍运行完整浏览器套件；分片不会将失败用例标记为可忽略。
+
 ## 可观察的验收
 
 - CLI 改动通过安装入口 `uv run --locked reacnet-scope ...` 验证参数、错误和导出；

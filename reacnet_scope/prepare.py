@@ -30,6 +30,7 @@ from .timed_evidence import (
     select_timed_evidence,
 )
 from .trajectory import load_linked_trajectory
+from .datasets import OFFICIAL_ARTIFACT_NAMES
 
 
 def discover_dataset(case: str, base: str = "") -> dict[str, str]:
@@ -56,7 +57,7 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             if not base_path.is_absolute():
                 base_path = root / base_path
             stem = os.path.abspath(os.fspath(base_path))
-        elif len(candidates) == 1:
+        elif len(candidates) == 1 and not (root / "timeline.h5").is_file():
             stem = str(candidates[0])[: -len(".reactionabcd")]
         else:
             reaction_stems = {
@@ -81,6 +82,8 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
                 str(path)[: -len(".timeline.h5")]
                 for path in root.glob("*.timeline.h5")
             }
+            if (root / "timeline.h5").is_file():
+                timeline_stems.add(str(root / "timeline.h5"))
             stems = (
                 reaction_stems
                 | species_stems
@@ -94,6 +97,13 @@ def discover_dataset(case: str, base: str = "") -> dict[str, str]:
             stem = stems.pop()
     else:
         raise FileNotFoundError(f"dataset path not found: {root}")
+    if Path(stem).name.lower() == "timeline.h5":
+        folder = Path(stem).parent
+        return {
+            "base": stem, "table": str(folder / "table"),
+            "trajectory": load_linked_trajectory(stem) or "",
+            **{role: str(folder / name) for name, role in OFFICIAL_ARTIFACT_NAMES.items()},
+        }
     if stem.endswith(".reactionabcd"):
         stem = stem[: -len(".reactionabcd")]
     if stem.endswith(".reactionevent.csv"):

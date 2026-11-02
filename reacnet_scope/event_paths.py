@@ -28,6 +28,7 @@ from .event_index import (
 )
 from .indexes import IndexInvalidError, _readonly_connection
 from .rng_events import canonical_reaction_key, reaction_key
+from .datasets import is_native_timeline_path
 
 
 EVENT_PATH_SCHEMA_VERSION = "event-path/v1"
@@ -86,7 +87,7 @@ class EventPathSource:
             raise ValueError("reactionevent_file is required")
         if (
             not molecules_file
-            and not reactionevent_file.lower().endswith(".timeline.h5")
+            and not is_native_timeline_path(reactionevent_file)
         ):
             raise ValueError(
                 "molecules_file is required for legacy CSV evidence"

@@ -3642,18 +3642,20 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("dataset-switch-transaction", "data"),
         Output("dataset-switch-request", "data"),
-        Input("data-apply-btn", "n_clicks"),
-        Input("library-use", "n_clicks"),
-        Input({"type": "library-use-entry", "base": ALL}, "n_clicks"),
-        Input("data-browser-index-btn", "n_clicks"),
-        Input("dir-browser-cancel-btn", "n_clicks"),
-        Input("dataset-browser-candidate", "data"),
-        Input("page-store", "data"),
-        Input("species-compare-switch-request", "data"),
-        State("library-select", "value"),
-        State("dataset-library", "data"),
-        State("dataset-switch-transaction", "data"),
-        State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        inputs=(
+            Input("data-apply-btn", "n_clicks"),
+            Input("library-use", "n_clicks"),
+            Input({"type": "library-use-entry", "base": ALL}, "n_clicks"),
+            Input("data-browser-index-btn", "n_clicks"),
+            Input("dir-browser-cancel-btn", "n_clicks"),
+            State("dataset-browser-candidate", "data"),
+            State("page-store", "data"),
+            Input("species-compare-switch-request", "data"),
+            State("library-select", "value"),
+            State("dataset-library", "data"),
+            State("dataset-switch-transaction", "data"),
+            State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        ),
         prevent_initial_call=True,
     )
     def _reduce_dataset_switch(
@@ -3787,26 +3789,42 @@ def register_callbacks(app: Any) -> None:
                 no_update,
             )
 
-        if triggered == "page-store":
-            if (page_store or {}).get("page") == "data-management":
-                raise PreventUpdate
-            superseded = svc.supersede_dataset_switch(current, reason="left_workspace")
-            if superseded == current:
-                raise PreventUpdate
-            return superseded, no_update
-
-        if triggered == "dataset-browser-candidate":
-            if current.get("state") == "validating" and (current.get("origin") or {}).get("library"):
-                raise PreventUpdate
-            if current.get("state") == "validating":
-                return (
-                    svc.supersede_dataset_switch(current, reason="candidate_changed"),
-                    no_update,
-                )
-            if selected:
-                return {"state": "candidate-selected", "candidate": selected}, no_update
-            return {"state": "idle"}, no_update
         raise PreventUpdate
+
+    # Preview/page updates must not delay or overwrite an explicit switch.
+    # Cancellation is local and immediate; late validation is rejected by the
+    # existing server resolver using the authoritative transaction state.
+    preview_switch_transaction = """function(candidate, page, transaction) {
+            const none = window.dash_clientside.no_update;
+            const current = transaction || {};
+            const origin = current.origin || {};
+            const changed = window.dash_clientside.callback_context.triggered
+                .map(item => item.prop_id);
+            const supersede = reason =>
+                ['validating', 'candidate-selected', 'failed'].includes(current.state)
+                ? {...current, state: 'superseded', reason} : none;
+            if (changed.includes('page-store.data')) {
+                if ((page || {}).page === 'data-management' ||
+                    (origin.library && origin.page === (page || {}).page)) return none;
+                return supersede('left_workspace');
+            }
+            if (origin.library || current.state === 'succeeded') return none;
+            if (current.state === 'validating') return supersede('candidate_changed');
+            return candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+        }"""
+    app.clientside_callback(
+        preview_switch_transaction,
+        Output("dataset-switch-transaction", "data", allow_duplicate=True),
+        Input("dataset-browser-candidate", "data"), State("page-store", "data"),
+        State("dataset-switch-transaction", "data"), prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(page, candidate, transaction) { return (" +
+        preview_switch_transaction + ")(candidate, page, transaction); }",
+        Output("dataset-switch-transaction", "data", allow_duplicate=True),
+        Input("page-store", "data"), State("dataset-browser-candidate", "data"),
+        State("dataset-switch-transaction", "data"), prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("dataset-switch-validation", "data"),
@@ -6362,7 +6380,8 @@ def register_callbacks(app: Any) -> None:
         "species-to-evolution-btn",
         "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
         "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid",
-    }), replay_trigger_kw="submitted_trigger")
+    }), replay_trigger_kw="submitted_trigger",
+        trigger_priority=("evolution-search-btn", "species-to-evolution-btn"))
     def _build_evolution(
         n_clicks,
         shortcut_clicks,
@@ -6392,7 +6411,8 @@ def register_callbacks(app: Any) -> None:
         store,
         submitted_trigger=None,
     ):
-        if n_clicks is None and ctx.triggered_id not in {
+        trigger = submitted_trigger or ctx.triggered_id
+        if n_clicks is None and trigger not in {
             "species-to-evolution-btn",
             "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
             "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid", "import-auto-result",
@@ -6405,7 +6425,7 @@ def register_callbacks(app: Any) -> None:
             browse_mode = "species"
             species_file = ""
             species_files = ""
-        if browse_mode != "group" and ctx.triggered_id in {
+        if browse_mode != "group" and trigger in {
             "evolution-group-element", "evolution-group-count", "evolution-group-members-grid",
         }:
             raise PreventUpdate
@@ -6424,7 +6444,7 @@ def register_callbacks(app: Any) -> None:
                 )
                 reference = (
                     str((member or {}).get("smiles") or "")
-                    if member_context_matches and ctx.triggered_id in {
+                    if member_context_matches and trigger in {
                         "evolution-group-members-grid", "evolution-xaxis", "import-auto-result",
                     }
                     else ""
@@ -6461,7 +6481,7 @@ def register_callbacks(app: Any) -> None:
             and rank_store.get("context") == context_key(store)
         )
         selected_rank = _selected_table_row(rank_selection, rank_rows) if rank_context_matches else None
-        if ctx.triggered_id == "evolution-rank-grid" and selected_rank is None:
+        if trigger == "evolution-rank-grid" and selected_rank is None:
             raise PreventUpdate
         picked_targets = [
             str(item).strip()
@@ -6479,13 +6499,13 @@ def register_callbacks(app: Any) -> None:
             if not species:
                 raise PreventUpdate
             targets = [species]
-        elif selected_rank and ctx.triggered_id != "evolution-search-btn":
+        elif selected_rank and trigger != "evolution-search-btn":
             targets = [str(selected_rank.get("smiles") or "")]
         if not targets:
             targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
             targets = [targets_text_default] if targets_text_default else []
         if not targets:
-            message = "请先选择或输入目标物种。" if ctx.triggered_id == "evolution-search-btn" else None
+            message = "请先选择或输入目标物种。" if trigger == "evolution-search-btn" else None
             return empty_chart_figure("尚未选择目标物种", "从排行选择物种，或展开设置手动输入目标。"), message, None, None
         try:
             payload = svc.build_species_evolution(
@@ -9343,14 +9363,19 @@ def register_callbacks(app: Any) -> None:
         Output("species-compare-managed", "options"),
         Output("species-compare-managed", "value"),
         Input("batch-managed-store", "data"),
-        Input("species-compare-catalog-store", "data"),
+        State("species-compare-catalog-store", "data"),
         State("species-compare-sources-store", "data"),
+        State("species-compare-managed", "options"),
     )
-    def _species_compare_managed_options(managed, _catalogs, sources):
+    def _species_compare_managed_options(managed, _catalogs, sources, previous_options):
         options = []
+        # Keep option identities in one order as Current Dataset changes, so an
+        # open picker does not move entries underneath a user's selection.
+        datasets = sorted((managed or {}).get("datasets", []),
+                          key=lambda item: str(item.get("id") or ""))
         managed_paths = {
             _managed_species_file(item)
-            for item in (managed or {}).get("datasets", [])
+            for item in datasets
             if item.get("base")
         }
         selected_paths = {
@@ -9363,7 +9388,7 @@ def register_callbacks(app: Any) -> None:
             )
         }
         selected = []
-        for item in (managed or {}).get("datasets", []):
+        for item in datasets:
             if not item.get("id"):
                 continue
             species_file = _managed_species_file(item)
@@ -9385,7 +9410,23 @@ def register_callbacks(app: Any) -> None:
                     "value": str(item["id"]),
                 }
             )
-        return options, no_update if ctx.triggered_id == "species-compare-catalog-store" else selected
+        same_ids = ({str(option.get("value")) for option in previous_options or []}
+                    == {option["value"] for option in options})
+        # Status/current-dataset refreshes must not apply a stale selection
+        # snapshot after the user has changed the browser's current value.
+        keep_selection = ctx.triggered_id == "species-compare-catalog-store" or same_ids
+        return options, no_update if keep_selection else selected
+
+    @app.callback(
+        Output("species-compare-managed", "options", allow_duplicate=True),
+        Input("species-compare-catalog-store", "data"),
+        State("batch-managed-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_species_compare_managed_status(catalogs, managed):
+        # Capability refreshes follow source edits. Keeping this separate avoids
+        # blocking initial source options behind their own downstream catalog.
+        return _species_compare_managed_options(managed, catalogs, [], [])[0]
 
     @app.callback(
         Output("species-compare-sources-store", "data"),

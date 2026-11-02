@@ -24,7 +24,17 @@ from reacnet_scope import dir_browser
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash.background import SpawnDiskcacheManager
 from scripts.webapp_dash.callbacks import _event_columns, _event_table_rows
+
+
+def wait_for_initial_callbacks(page):
+    # Session restoration can finish after the first visible frame.
+    page.wait_for_function("""() => {
+        const callbacks = window.store?.getState().callbacks;
+        return callbacks && ['requested', 'prioritized', 'executing', 'watched', 'blocked']
+            .every(key => callbacks[key].length === 0);
+    }""", timeout=60000)
 
 
 @pytest.fixture(scope="module", params=["0", "1"], ids=["classic", "compact"])
@@ -70,6 +80,7 @@ def page(workbench, request):
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1366, "height": 768})
+        expect.set_options(timeout=15000)
         errors, external = [], []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
@@ -83,6 +94,7 @@ def page(workbench, request):
             expect(page.locator("#topbar-rungroup")).to_have_text(dataset["label"], timeout=30000)
             expect(page.locator("#species-search-btn")).to_be_enabled(timeout=15000)
             expect(page).to_have_title("ReacNet Scope (Dash)", timeout=30000)
+            wait_for_initial_callbacks(page)
             yield page
             assert not errors, errors
             assert not external, external
@@ -341,6 +353,7 @@ def test_empty_data_page_lists_imports_and_shows_switch_feedback(workbench):
                 'sessionStorage.setItem("page-store", JSON.stringify({page:"data-management"}));'
             )
             page.goto(url)
+            wait_for_initial_callbacks(page)
             expect(page.locator('#page-data-management.active')).to_be_visible(timeout=30000)
             expect(page.locator('.rs-current-dataset-empty')).to_be_visible(timeout=15000)
             workspace = page.locator('#data-library-workspace')
@@ -517,12 +530,9 @@ def test_selected_species_opens_candidate_then_chooses_path_mode(page):
     expect(page.locator('#nav-species')).to_have_attribute('aria-current', 'page')
     expect(page.locator('#cp-path-panel')).to_be_visible()
     expect(page.locator('#cp-mode label')).to_have_count(3)
-    start_message = page.locator('#cp-start-message').inner_text()
-    assert '已带入当前选中的精确物种' in start_message, {
-        'message': start_message,
-        'start': page.locator('#cp-start').inner_text(),
-        'handoff': page.evaluate('JSON.parse(sessionStorage.getItem("cp-species-handoff") || "null")'),
-    }
+    expect(page.locator('#cp-start-message')).to_contain_text(
+        '已带入当前选中的精确物种', timeout=15000,
+    )
     expect(page.locator('#cp-start')).to_contain_text(species)
     assert page.locator('#cp-mode input:checked').input_value() == 'explore'
 
@@ -611,6 +621,22 @@ def test_species_shortcuts_keep_context_and_compact_header(page, workbench):
 
     page.locator('#analysis-back-btn').click()
     expect(page.locator('#species-detail-stage')).to_be_visible()
+
+    def batch_shortcut_after_derived_controls(route):
+        payload = route.request.post_data_json or {}
+        changed = payload.get('changedPropIds') or []
+        if ('evolution-graph.figure' in str(payload.get('output') or '')
+                and 'species-to-evolution-btn.n_clicks' in changed):
+            # Dash can batch the button after the controls it updates. Make
+            # that order deterministic instead of relying on request timing.
+            payload['changedPropIds'] = ['evolution-group-element.value', *[
+                value for value in changed if value != 'evolution-group-element.value'
+            ]]
+            route.continue_(post_data=json.dumps(payload))
+        else:
+            route.continue_()
+
+    page.route('**/_dash-update-component', batch_shortcut_after_derived_controls)
     page.locator('#species-to-evolution-btn').click()
     expect(page.locator('#page-evolution.active')).to_be_visible()
     expect(page.locator('#evolution-targets')).to_have_value(species)
@@ -956,6 +982,7 @@ def test_compare_imported_species_without_current_dataset(workbench):
                              + json.dumps(entries) + '));')
         try:
             page.goto(url)
+            wait_for_initial_callbacks(page)
             page.locator('#nav-species').click()
             expect(page.locator('#species-empty-state')).to_contain_text(
                 '多来源趋势对比可直接选择多个已导入来源', timeout=15000,
@@ -966,6 +993,7 @@ def test_compare_imported_species_without_current_dataset(workbench):
                 "sessionStorage.setItem('page-store', JSON.stringify({page:'batch-compare'}))"
             )
             page.reload()
+            wait_for_initial_callbacks(page)
             expect(page.locator('#page-evolution')).to_be_visible(timeout=20000)
             expect(page.locator('#page-description')).to_have_text(
                 '查看累计采样丰度、丰度趋势与元素分布。'
@@ -1086,9 +1114,23 @@ def test_imported_index_builds_for_two_entries_finish_independently(page, workbe
 
     monkeypatch.setattr(svc, 'prepare_dataset_workspace', slow_prepare)
     monkeypatch.setattr(svc, 'dataset_preparation_status', preparing_status)
+    original_dispatch = SpawnDiskcacheManager.call_job_fn
+
+    def dispatch_slow_worker(manager, key, job_fn, args, context):
+        # Spawned workers import their own modules; install the slow operation
+        # at the worker boundary instead of relying on inherited parent patches.
+        def slow_job(*job_args):
+            svc.prepare_dataset_workspace = slow_prepare
+            job_fn(*job_args)
+
+        return original_dispatch(manager, key, slow_job, args, context)
+
+    monkeypatch.setattr(SpawnDiskcacheManager, 'call_job_fn', dispatch_slow_worker)
     page.evaluate('(entries) => localStorage.setItem("dataset-library", JSON.stringify(entries))', entries)
     page.reload()
+    expect(page.locator('#topbar-rungroup')).to_have_text(workbench[1]['label'], timeout=30000)
     page.locator('#nav-data-management').click()
+    expect(page.locator('#page-data-management')).to_be_visible()
     rows = [page.locator('#library-management-list .rs-library-item').filter(has_text=str(folder))
             for folder in folders]
     for row in rows:
@@ -1610,8 +1652,15 @@ def test_candidate_long_route_reading_overview_and_step_location(page, workbench
     EVENT_EVIDENCE_STORE.build(str(events), str(molecules))
     dataset = svc.validate_dataset_candidate(str(folder), str(base))
     dataset.update(context_state='active', ready=True)
-    page.evaluate('dataset => window.dash_clientside.set_props("app-store", {data: dataset})', dataset)
     page.locator('#species-direct-route-btn').click()
+    # Direct fixture injection skips the normal switch transaction. Wait for
+    # its picker reset before typing into the newly activated dataset.
+    with page.expect_response(lambda response: response.request.post_data is not None
+                              and 'cp-start.options' in response.request.post_data_json.get('output', '')
+                              and 'cp-context.data' in response.request.post_data_json.get('changedPropIds', [])) as reset:
+        page.evaluate('dataset => window.dash_clientside.set_props("app-store", {data: dataset})', dataset)
+    reset.value.finished()
+    expect(page.locator('#topbar-rungroup')).to_have_text(dataset['label'])
     for side, query in [('start', species[0]), ('target', species[-1])]:
         page.locator(f'#cp-{side}-query').fill(query)
         page.locator(f'#cp-{side}-find').click()

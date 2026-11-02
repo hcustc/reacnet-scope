@@ -29,6 +29,7 @@ _TOOL_ROOT = Path(__file__).resolve().parents[2]
 if str(_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_TOOL_ROOT))
 
+from scripts.webapp_dash.background import SpawnDiskcacheManager
 from scripts.webapp_dash.chart_presentation import empty_chart_figure as _empty_chart_figure
 from scripts.webapp_dash import candidate_workbench
 from scripts.webapp_dash import lineage_explorer
@@ -62,7 +63,7 @@ def _background_callback_manager() -> Any:
         f"reacnet-scope-dash-background-{user_id}"
     )
     cache = diskcache.Cache(str(task_cache), size_limit=64 * 1024**2)
-    return dash.DiskcacheManager(cache, expire=3600)
+    return SpawnDiskcacheManager(cache, expire=3600)
 
 
 # ---------------------------------------------------------------------------

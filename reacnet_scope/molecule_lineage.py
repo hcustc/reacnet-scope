@@ -20,6 +20,7 @@ from hashlib import sha1
 from typing import Any, Iterable, Mapping
 
 from .event_index import EVENT_EVIDENCE_STORE, EventNotFoundError
+from .datasets import is_native_timeline_path
 
 
 MOLECULE_LINEAGE_SCHEMA_VERSION = "molecule-lineage/v2"
@@ -1404,7 +1405,7 @@ def build_molecule_lineage(
     }
     source_label = (
         "timeline"
-        if str(reactionevent_file).lower().endswith(".timeline.h5")
+        if is_native_timeline_path(reactionevent_file)
         else "reactionevent"
     )
     report["source_signatures"] = {
@@ -1434,7 +1435,7 @@ def _validate_continuation_context(
 ) -> dict[str, Any]:
     source_label = (
         "timeline"
-        if str(reactionevent_file).lower().endswith(".timeline.h5")
+        if is_native_timeline_path(reactionevent_file)
         else "reactionevent"
     )
     current_signatures = {

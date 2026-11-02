@@ -15,11 +15,16 @@ import h5py
 import numpy as np
 
 from .rng_events import MoleculeRow, reaction_key
+from ._official_timeline import (
+    OfficialTimelineError,
+    OfficialTimelineView,
+    inspect_official_timeline,
+)
 
 
 TimedEvidenceKind = Literal["native_hdf5", "legacy_csv"]
 
-_SUPPORTED_NATIVE_TIMELINE_SCHEMAS = frozenset({"1", "2"})
+_SUPPORTED_NATIVE_TIMELINE_SCHEMAS = frozenset({"1", "2", "1.1"})
 
 _MEMBERSHIP_RANGE_CHUNK_SIZE = 262_144
 _MEMBERSHIP_ATOM_PREFETCH_BYTES = 16 * 1024**2
@@ -203,14 +208,24 @@ class NativeHdf5EvidenceAdapter:
         if selection.kind != "native_hdf5":
             raise TypeError("native HDF5 adapter requires native evidence")
         self.selection = selection
-        self._handle: h5py.File | None = None
+        self._handle: h5py.File | OfficialTimelineView | None = None
         self._definition_cache: OrderedDict[int, MoleculeRow] = OrderedDict()
         self._definition_cache_bytes = 0
         self._definition_state_by_id: np.ndarray[Any, Any] | None = None
 
     def __enter__(self) -> "NativeHdf5EvidenceAdapter":
         self._handle = h5py.File(self.selection.timeline_file, "r")
-        self._load_indexes()
+        try:
+            if self.selection.schema_version == "1.1":
+                frames = inspect_official_timeline(self._handle)
+                self._handle = OfficialTimelineView(self._handle, frames)
+            self._load_indexes()
+        except OfficialTimelineError as exc:
+            self.__exit__()
+            raise TimedEvidenceDataError(str(exc), state=exc.state) from exc
+        except BaseException:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -219,7 +234,7 @@ class NativeHdf5EvidenceAdapter:
         self._handle = None
 
     @property
-    def handle(self) -> h5py.File:
+    def handle(self) -> h5py.File | OfficialTimelineView:
         if self._handle is None:
             raise RuntimeError("native HDF5 adapter is not open")
         return self._handle
@@ -285,7 +300,7 @@ class NativeHdf5EvidenceAdapter:
                     handle[exact_names[0]], dtype=np.uint64
                 )
                 self._exact_reaction_ids = np.asarray(
-                    handle[exact_names[1]], dtype=np.uint32
+                    handle[exact_names[1]], dtype=np.uint64
                 )
                 self._exact_participant_offsets = np.asarray(
                     handle[exact_names[2]], dtype=np.uint64
@@ -714,6 +729,17 @@ class NativeHdf5EvidenceAdapter:
         )
         bond_atoms = bond_atom_source[bond_start:bond_end]
         bond_orders = bond_order_source[bond_start:bond_end]
+        if isinstance(self.handle, OfficialTimelineView):
+            if (
+                not atoms or len(atoms) != atom_end - atom_start
+                or min(atoms) < 0 or max(atoms) >= len(self.handle.raw["atoms/type"])
+                or any(int(a) not in atoms or int(b) not in atoms or a >= b or order < 1
+                       for (a, b), order in zip(bond_atoms, bond_orders, strict=True))
+                or len({tuple(pair) for pair in bond_atoms}) != len(bond_atoms)
+            ):
+                raise TimedEvidenceDataError(
+                    "timeline HDF5 1.1: invalid molecule atoms or bonds", state="incompatible"
+                )
         bonds = tuple(
             f"{int(pair[0])}-{int(pair[1])}-{int(order)}"
             for pair, order in zip(bond_atoms, bond_orders, strict=True)
@@ -913,7 +939,7 @@ class NativeHdf5EvidenceAdapter:
     def _exact_transition(
         self, index: int, start: int, stop: int
     ) -> TransitionEvidence:
-        """Read schema-2 occurrence evidence without rebuilding membership."""
+        """Read exact occurrence evidence without rebuilding membership."""
 
         group = self.handle["transition_evidence"]
         transition_source = (
@@ -1008,6 +1034,8 @@ class NativeHdf5EvidenceAdapter:
             local_stop = (
                 int(participant_offsets[position + 1]) - participant_start
             )
+            instance_before: list[MoleculeRow] = []
+            instance_after: list[MoleculeRow] = []
             for molecule_id, side in zip(
                 participant_ids[local_start:local_stop],
                 participant_sides[local_start:local_stop],
@@ -1015,6 +1043,18 @@ class NativeHdf5EvidenceAdapter:
             ):
                 row = self._molecule(int(molecule_id))
                 (before if int(side) == 0 else after).append(row)
+                (instance_before if int(side) == 0 else instance_after).append(row)
+            if isinstance(self.handle, OfficialTimelineView):
+                try:
+                    self.handle.validate_occurrence(
+                        start + position, index,
+                        participant_ids[local_start:local_stop],
+                        participant_sides[local_start:local_stop],
+                        instance_before, instance_after,
+                        reactions[-1].reaction_terms,
+                    )
+                except OfficialTimelineError as exc:
+                    raise TimedEvidenceDataError(str(exc), state=exc.state) from exc
         return TransitionEvidence(
             transition_index=index,
             before_timestep=int(self.timesteps[index]),
@@ -1074,6 +1114,18 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
                 raise TimedEvidenceDataError(
                     f"timeline HDF5 schema is incompatible: {schema_version or 'missing'}",
                     state="incompatible",
+                )
+            if schema_version == "1.1":
+                try:
+                    frames = inspect_official_timeline(handle)
+                except OfficialTimelineError as exc:
+                    raise TimedEvidenceDataError(str(exc), state=exc.state) from exc
+                resolved = str(path.resolve())
+                return TimedEvidenceSelection(
+                    kind="native_hdf5", primary_file=resolved,
+                    source_files=(resolved,), timeline_file=resolved,
+                    schema_version=schema_version, molecule_enabled=True,
+                    transition_evidence_enabled=True, frame_count=frames,
                 )
             status = _attribute_text(handle.attrs.get("status", ""))
             if status != "complete":
@@ -1403,6 +1455,13 @@ def native_membership_bytes(selection: TimedEvidenceSelection) -> int:
 
     if selection.kind != "native_hdf5" or not selection.molecule_enabled:
         return 0
+    if selection.schema_version == "1.1":
+        # Resource estimates must remain metadata-only. Exact-event indexing
+        # does not allocate this matrix; callers can still display its size.
+        with h5py.File(selection.timeline_file, "r") as handle:
+            molecules = len(handle["molecules/species_id"])
+            itemsize = 4 if molecules <= np.iinfo(np.uint32).max else 8
+            return int(selection.frame_count or 0) * len(handle["atoms/type"]) * itemsize
     with NativeHdf5EvidenceAdapter(selection) as adapter:
         return int(np.prod(adapter.membership_shape)) * int(
             adapter.membership_dtype.itemsize

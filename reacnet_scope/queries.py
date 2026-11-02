@@ -579,7 +579,7 @@ def build_dataset_status_payload(
     inferred = {
         "reaction": f"{base}.reactionabcd" if base else "",
         "species": f"{base}.species" if base else "",
-        "trajectory": base,
+        "trajectory": "" if Path(base).name.lower() == "timeline.h5" else base,
         "timeline": f"{base}.timeline.h5" if base else "",
         "reactionevent": f"{base}.reactionevent.csv" if base else "",
         "molecules": f"{base}.molecules.csv" if base else "",

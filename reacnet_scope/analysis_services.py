@@ -74,6 +74,7 @@ from reacnet_scope.rng_events import (  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
+    is_native_timeline_path,
 )
 from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
@@ -185,7 +186,7 @@ def _event_path_source_from_prefix(
             f"{label}: 找不到 {timeline} 或 {reactionevent}",
             reason="missing_event_path_source",
         )
-    if not reactionevent.endswith(".timeline.h5") and not Path(molecules).is_file():
+    if not is_native_timeline_path(reactionevent) and not Path(molecules).is_file():
         raise ServiceError(
             f"{label}: 找不到 {molecules}",
             reason="missing_event_path_source",
@@ -229,7 +230,7 @@ def _event_path_sources_for_dash(
             reason="missing_event_path_source",
         )
     if (
-        not reactionevent.endswith(".timeline.h5")
+        not is_native_timeline_path(reactionevent)
         and (not molecules or not Path(molecules).is_file())
     ):
         raise ServiceError(
