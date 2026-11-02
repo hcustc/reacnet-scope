@@ -720,6 +720,8 @@ def test_cache_build_background_callback_dispatches_and_returns(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("REACNET_SCOPE_CACHE_DIR", raising=False)
+    # A spawned worker reads the same explicit configuration as the server.
+    monkeypatch.setenv("REACNET_SCOPE_ALLOWED_ROOTS", str(tmp_path))
     monkeypatch.setattr(svc, "ALLOWED_ROOTS", [tmp_path])
     monkeypatch.setattr(dir_browser, "ALLOWED_ROOTS", [tmp_path])
     base, _reactionevent, _molecules = _event_only_dataset(tmp_path)
