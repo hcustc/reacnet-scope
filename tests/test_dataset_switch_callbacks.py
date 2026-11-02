@@ -75,7 +75,7 @@ def _payload(
             {
                 "id": item["id"],
                 "property": item["property"],
-                "value": value_for(item, states),
+                "value": value_for(item, {**inputs, **states}),
             }
             for item in dependency["state"]
         ],
@@ -118,6 +118,9 @@ def test_validation_result_is_resolved_by_a_distinct_dash_callback() -> None:
 
     assert click_writer["output"] != validation_writer["output"]
     assert "dataset-switch-request.data" in _dependency_outputs(click_writer)
+    assert not {"dataset-browser-candidate", "page-store"} & {
+        value["id"] for value in click_writer["inputs"]
+    }
 
     validation_worker = next(
         item

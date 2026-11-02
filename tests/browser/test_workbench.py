@@ -621,6 +621,22 @@ def test_species_shortcuts_keep_context_and_compact_header(page, workbench):
 
     page.locator('#analysis-back-btn').click()
     expect(page.locator('#species-detail-stage')).to_be_visible()
+
+    def batch_shortcut_after_derived_controls(route):
+        payload = route.request.post_data_json or {}
+        changed = payload.get('changedPropIds') or []
+        if ('evolution-graph.figure' in str(payload.get('output') or '')
+                and 'species-to-evolution-btn.n_clicks' in changed):
+            # Dash can batch the button after the controls it updates. Make
+            # that order deterministic instead of relying on request timing.
+            payload['changedPropIds'] = ['evolution-group-element.value', *[
+                value for value in changed if value != 'evolution-group-element.value'
+            ]]
+            route.continue_(post_data=json.dumps(payload))
+        else:
+            route.continue_()
+
+    page.route('**/_dash-update-component', batch_shortcut_after_derived_controls)
     page.locator('#species-to-evolution-btn').click()
     expect(page.locator('#page-evolution.active')).to_be_visible()
     expect(page.locator('#evolution-targets')).to_have_value(species)
