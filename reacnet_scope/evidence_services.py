@@ -466,6 +466,8 @@ def build_species_evolution(
     formula_mode: str = "sum",
     max_smiles_per_formula: int = 0,
     time_align: str = "raw",
+    start_timestep: int | None = None,
+    end_timestep: int | None = None,
 ) -> dict[str, Any]:
     """Wrap ``build_species_plot_payload`` for the time evolution page.
 
@@ -548,6 +550,8 @@ def build_species_evolution(
         "formula_mode": [formula_mode if formula_mode in {"sum", "split", "both"} else "sum"],
         "max_smiles_per_formula": [str(max(0, int(max_smiles_per_formula)))],
         "time_align": [time_align if time_align in {"raw", "truncate", "relative"} else "raw"],
+        "start_timestep": [str(start_timestep) if start_timestep is not None else ""],
+        "end_timestep": [str(end_timestep) if end_timestep is not None else ""],
     }
     try:
         return build_species_plot_payload(params)
@@ -564,13 +568,23 @@ def build_species_evolution(
         raise ServiceError(f"构建时间演化数据失败: {exc}") from exc
 
 
-def evolution_to_csv(payload: dict[str, Any]) -> str:
-    """Serialize unprocessed indexed abundances with both source coordinates."""
+def evolution_to_csv(payload: dict[str, Any], *, curve_names: Iterable[str] | None = None) -> str:
+    """Serialize complete raw series, optionally restricted to named curves.
+
+    Display downsampling, normalization and smoothing do not alter these values.
+    The default continues to export every curve, including for CLI callers.
+    """
     import csv
     import io
 
     x_values = payload.get("raw_x_values") or payload.get("x_values") or []
-    curves = payload.get("curves") or []
+    curves = [{**curve, "name": curve.get("name") or curve.get("query") or f"curve_{index}"}
+              for index, curve in enumerate(payload.get("curves") or [])]
+    if curve_names is not None:
+        selected = set(curve_names)
+        curves = [curve for curve in curves if curve["name"] in selected]
+        if not curves:
+            return ""
     x_name = payload.get("x_name") or "x"
     if int((payload.get("meta") or {}).get("n_input_species_files", 1)) > 1:
         buf = io.StringIO()

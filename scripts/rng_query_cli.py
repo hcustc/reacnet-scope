@@ -1278,6 +1278,8 @@ def cmd_species_evolution(args: argparse.Namespace) -> int:
             max_curves=1_000_000,
             formula_mode=args.formula_mode,
             max_smiles_per_formula=args.max_smiles_per_formula,
+            start_timestep=args.start_timestep,
+            end_timestep=args.end_timestep,
         )
     except svc.ServiceError as exc:
         print(f"[ERROR] {exc.message}")
@@ -1969,7 +1971,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_plot = sub.add_parser(
         "species-evolution",
-        help="绘制物种随时间变化曲线 (支持 formula/SMILES 混合输入与多曲线)",
+        help="绘制物种随时间变化曲线 (支持元素原子数、分子式及 SMILES 多曲线)",
     )
     add_reac_flags(sp_plot)
     sp_plot.add_argument(
@@ -1982,21 +1984,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "目标物种, 可重复传入或用逗号分隔; 支持 formula/SMILES 混输, "
-            "支持 label::query, 支持前缀 formula:/f: 与 smiles:/smi:"
+            "曲线目标, 可重复传入或用逗号分隔; C6 汇总所有六碳物种（其他元素不限）; "
+            "支持 label::query; 精确分子式用 formula:/f:（如 formula:O2），精确结构用 smiles:/smi:"
         ),
     )
     sp_plot.add_argument(
         "--formula-mode",
         choices=["sum", "split", "both"],
         default="sum",
-        help="formula 输入如何展开: sum(聚合), split(拆分每个SMILES), both",
+        help="分子式或元素条件匹配多个物种时: sum(聚合), split(拆分每个 SMILES), both",
     )
     sp_plot.add_argument(
         "--max-smiles-per-formula",
         type=int,
         default=0,
-        help="限制每个 formula 展开的 SMILES 数, 0 表示不限制",
+        help="每个目标的成员显示上限，0 不限制；元素条件合计始终包含全部匹配物种",
     )
     sp_plot.add_argument(
         "--x-axis",
@@ -2016,6 +2018,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="曲线归一化方式",
     )
+    sp_plot.add_argument("--start-timestep", type=int, default=None, help="包含的 source timestep 下界；留空使用全部")
+    sp_plot.add_argument("--end-timestep", type=int, default=None, help="包含的 source timestep 上界；归一化与平滑在窗口内计算")
     sp_plot.add_argument(
         "--smooth-window",
         type=int,

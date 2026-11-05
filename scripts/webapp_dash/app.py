@@ -38,6 +38,7 @@ from scripts.webapp_dash import callbacks as cb  # noqa: E402
 from scripts.webapp_dash import ui_components as ui
 from scripts.webapp_dash import ui_state
 from scripts.webapp_dash import dataset_library
+from scripts.webapp_dash import evolution_workbench
 from reacnet_scope import services as svc  # noqa: E402
 from scripts.webapp_dash.navigation import (  # noqa: E402
     NAV_GROUPS,
@@ -1006,139 +1007,181 @@ def _reactions_page() -> html.Div:
 
 def _evolution_page() -> html.Div:
     def field(label: str, control: Any, hint: str = "") -> html.Div:
-        return html.Div(
-            [dbc.Label(label, html_for=control.id), control,
-             *([html.Small(hint, className="rs-evolution-hint")] if hint else [])],
-            className="rs-evolution-field",
-        )
+        return html.Div([dbc.Label(label, html_for=control.id), control,
+                         *([html.Small(hint, className="rs-evolution-hint")] if hint else [])],
+                        className="rs-evolution-field")
 
-    query_card = dbc.Card(
-        dbc.CardBody([
-            html.Div([html.Span("01", className="rs-evolution-step"),
-                      html.H2("选择物种")], className="rs-evolution-section-title"),
-            field("目标物种或分子式", dcc.Textarea(
-                id="evolution-targets", value="",
-                placeholder="每行一个 SMILES 或分子式\n例如：CO2",
-                className="rs-multiline-input",
-            ), "支持多个目标；自定义名称可写为 名称::查询。"),
-            html.Div("或从RNG 数据中选择", className="rs-evolution-divider"),
-            dbc.Button("读取物种目录", id="evolution-load-species-btn",
-                       color="secondary", size="sm", outline=True),
-            html.Div(id="evolution-catalog-alert", className="rs-inline-status",
-                     role="status", **{"aria-live": "polite"}),
-            field("物种目录", dcc.Dropdown(
-                id="evolution-species-picker", options=[], value=[], multi=True,
-                searchable=True, placeholder="读取目录后搜索分子式", optionHeight=42,
-            )),
-            html.Div([html.Span("02", className="rs-evolution-step"),
-                      html.H2("绘图设置")], className="rs-evolution-section-title"),
-            html.Div([
-                field("平滑窗口", dcc.Input(id="evolution-smooth", value="1",
-                      type="number", min=1, step=1), "1 表示不平滑"),
-            ], className="rs-evolution-settings-grid"),
-            dbc.Accordion([
-                dbc.AccordionItem([
-                    field("分子式显示方式", dcc.Dropdown(
-                        id="evolution-formula-mode", options=[
-                            {"label": "合并同分子式", "value": "sum"},
-                            {"label": "拆分 SMILES", "value": "split"},
-                            {"label": "同时显示", "value": "both"}],
-                        value="sum", clearable=False,
-                    )),
-                    field("每式 SMILES 上限", dcc.Input(id="evolution-max-smiles", value="0", type="number", min=0)),
-                    field("归一化", dcc.Dropdown(id="evolution-normalize", options=[
-                        {"label": "无", "value": "none"}, {"label": "初始值", "value": "initial"},
-                        {"label": "最大值", "value": "max"}], value="none", clearable=False)),
-                    field("时间对齐", dcc.Dropdown(id="evolution-time-align", options=[
-                        {"label": "原始时间", "value": "raw"}, {"label": "截断交集", "value": "truncate"},
-                        {"label": "相对起点", "value": "relative"}], value="raw", clearable=False)),
-                    field("timestep → ps（确认后保存）", dcc.Input(
-                        id="evolution-timestep", value=None, type="number", min=0,
-                        placeholder="使用RNG 数据已保存的换算")),
-                    field("下采样", dcc.Input(id="evolution-downsample", value="1800", type="number", min=0)),
-                    field("最大曲线数", dcc.Input(id="evolution-max-curves", value="30", type="number", min=1)),
-                    field("曲线筛选", dcc.Input(id="evolution-curve-filter", placeholder="按名称筛选")),
-                ], title="曲线处理设置"),
-            ], start_collapsed=True, className="rs-evolution-advanced"),
-            dbc.Button("绘制演化曲线", id="evolution-search-btn", color="primary",
-                       className="rs-evolution-submit"),
-            html.Small("手动输入与目录选择的目标会合并绘制。", className="rs-evolution-hint"),
-        ]), className="rs-card rs-evolution-controls",
-    )
-    chart_card = dbc.Card(dbc.CardBody([
+    curve_settings = html.Div([
+        html.H3("时间范围"),
         html.Div([
-            html.Div([html.H2("丰度随时间变化"),
-                      html.P("选择精确物种或元素分组；曲线使用逐帧数量，左侧排序使用全程累计数量。")]),
-            dbc.Button("导出 CSV", id="evolution-csv-btn", color="secondary",
-                       size="sm", outline=True, disabled=True),
-            dcc.Download(id="evolution-csv-download"),
+            field("起始步数", dbc.Input(id="evolution-start-timestep", type="number", step=1, placeholder="不限")),
+            field("结束步数", dbc.Input(id="evolution-end-timestep", type="number", step=1, placeholder="不限")),
+        ], className="rs-evolution-settings-grid"),
+        html.Small("原始步数，包含两端；留空不限。", className="rs-evolution-hint"),
+        html.Details([
+            html.Summary(["曲线处理", html.Small("归一化 · 平滑")]),
+            html.Div([
+                field("归一化", dcc.Dropdown(id="evolution-normalize", options=[
+                    {"label": "无", "value": "none"}, {"label": "窗口初始值", "value": "initial"},
+                    {"label": "窗口最大值", "value": "max"}], value="none", clearable=False, searchable=False)),
+                field("平滑帧数", dbc.Input(id="evolution-smooth", value=1, type="number", min=1, step=1)),
+            ], className="rs-evolution-settings-grid"),
+            html.Small("窗口内按分析帧处理；1 帧不平滑。CSV 保留原始计数。", className="rs-evolution-hint"),
+        ], id="evolution-processing-settings", className="rs-evolution-disclosure"),
+        html.Details([
+            html.Summary(["高级设置", html.Small("时间 · 显示")]),
+            html.Div([
+                field("时间对齐", dcc.Dropdown(id="evolution-time-align", options=[
+                    {"label": "原始时间", "value": "raw"}, {"label": "截断交集", "value": "truncate"},
+                    {"label": "相对窗口起点", "value": "relative"}], value="raw", clearable=False)),
+                field("timestep → ps（确认后保存）", dcc.Input(id="evolution-timestep", value=None, type="number", min=0,
+                      placeholder="使用当前数据已保存的换算")),
+                field("下采样点数（0 为全部）", dcc.Input(id="evolution-downsample", value=1800, type="number", min=0)),
+                field("最大曲线数", dcc.Input(id="evolution-max-curves", value=30, type="number", min=1)),
+                field("成员显示上限（0 为全部）", dcc.Input(id="evolution-max-smiles", value=0, type="number", min=0)),
+                html.Div(field("曲线名称筛选", dcc.Input(id="evolution-curve-filter", placeholder="可选")), id="evolution-curve-filter-field"),
+            ], className="rs-evolution-filter-fields"),
+            dbc.Button("查看多组元素分布 →", id="evolution-distribution-tab", size="sm", color="link",
+                       className="rs-evolution-related-link"),
+        ], id="evolution-settings-section", className="rs-evolution-disclosure"),
+    ], id="evolution-manual-settings", className="rs-evolution-curve-settings")
+    ranking = dbc.Accordion([dbc.AccordionItem([
+        html.Div(id="evolution-rank-status", role="status", className="rs-evolution-rank-meta"),
+        _grid("evolution-rank-grid", page_size=20),
+        dbc.Button("到物种页继续分析", id="evolution-rank-open-btn", size="sm", outline=True, disabled=True),
+    ], title="按累计丰度浏览", item_id="ranking")],
+        id="evolution-ranking", active_item=None, start_collapsed=True, className="rs-evolution-ranking")
+    conditions = dbc.Card(dbc.CardBody([
+        html.Div([
+            html.Div([
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.Div([dbc.Label("查询目标", html_for="evolution-target-entry"),
+                                      html.Span(id="evolution-target-count")], className="rs-evolution-target-label"),
+                            html.Div([
+                                dbc.Button("批量编辑", id="evolution-batch-open", color="link", size="sm"),
+                                html.Details([
+                                    html.Summary("输入说明"),
+                                    html.Div([
+                                        html.P("输入后回车添加；多个目标可用逗号、分号分隔，也可使用批量编辑。"),
+                                        html.P([html.Code("C6"), "：6 个碳原子，其他元素不限。"]),
+                                        html.P([html.Code("formula:O2"), "：完整分子式匹配。"]),
+                                        html.P([html.Code("smiles:…"), "：精确结构匹配。"]),
+                                    ]),
+                                ], className="rs-evolution-input-help"),
+                            ], className="rs-evolution-target-tools"),
+                        ], className="rs-evolution-target-heading"),
+                        html.Div([
+                            html.Div(id="evolution-target-preview", className="rs-evolution-target-list"),
+                            html.Div([
+                                dcc.Input(id="evolution-target-entry", value="", type="text", debounce=False,
+                                          placeholder="输入 C6、分子式或 SMILES，回车添加", autoComplete="off"),
+                                dbc.Button("添加", id="evolution-target-add", size="sm", outline=True),
+                                dbc.Button("取消编辑", id="evolution-target-cancel", size="sm", color="link", style={"display": "none"}),
+                            ], className="rs-evolution-target-entry-row"),
+                        ], id="evolution-target-editor", className="rs-evolution-target-editor"),
+                        html.Div(id="evolution-target-message", role="alert", className="rs-evolution-target-message"),
+                        html.Div(id="evolution-target-meaning", role="status", className="rs-evolution-target-meaning"),
+                    ], className="rs-evolution-target-field"),
+                    html.Div([
+                        field("绘制方式", dcc.Dropdown(id="evolution-formula-mode", options=[
+                            {"label": "合计丰度", "value": "sum"}, {"label": "分别显示物种", "value": "split"},
+                            {"label": "合计与各物种", "value": "both"}], value="sum", clearable=False, searchable=False)),
+                        dbc.Button("查询并绘图", id="evolution-query-run", color="primary", className="rs-evolution-submit"),
+                    ], className="rs-evolution-query-actions"),
+                ], id="evolution-target-settings", className="rs-evolution-target-settings"),
+            ], id="evolution-species-browser"),
+        ], id="evolution-browse-controls"),
+    ]), className="rs-card rs-evolution-conditions", id="evolution-rank-panel")
+    drawers = html.Div([
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle("批量编辑目标")),
+            dbc.ModalBody([
+                html.P("每行一个目标，也可用逗号或分号分隔。保存后替换当前目标列表。", className="rs-evolution-hint"),
+                dbc.Label("批量查询目标", html_for="evolution-batch-text", className="visually-hidden"),
+                dbc.Textarea(id="evolution-batch-text", value="", rows=8),
+                html.Div(id="evolution-batch-message", role="alert", className="rs-evolution-target-message"),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button("取消", id="evolution-batch-cancel", outline=True),
+                dbc.Button("保存目标", id="evolution-batch-save", color="primary"),
+            ]),
+        ], id="evolution-batch-modal", is_open=False, centered=True, size="lg", className="rs-evolution-batch-modal"),
+        dbc.Offcanvas(
+            evolution_workbench.finder_layout(ranking=ranking),
+            id="evolution-finder-drawer", title="查找物种", placement="end", is_open=False,
+            className="rs-evolution-drawer", backdrop=True, keyboard=True,
+        ),
+        dbc.Offcanvas([
+            curve_settings,
+            html.Div(dbc.Button("应用并绘图", id="evolution-settings-apply", color="primary"),
+                     className="rs-evolution-drawer-footer"),
+        ], id="evolution-settings-drawer", title="曲线设置", placement="end", is_open=False,
+           className="rs-evolution-drawer", backdrop=True, keyboard=True),
+    ], style={"display": "contents"})
+    legacy_controls = html.Div([
+        dbc.RadioItems(id="evolution-browse-mode", value="species", options=[
+            {"label": "物种曲线", "value": "species"}, {"label": "元素分组", "value": "group"}]),
+        html.Div([
+            field("分组元素", dcc.Dropdown(id="evolution-group-element", options=[{"label": "C", "value": "C"}], value="C", clearable=False)),
+            field("元素原子数", dcc.Input(id="evolution-group-count", type="number", min=0, max=200, step=1, value=1)),
+            evolution_workbench.element_controls("evolution-group-filter"),
+            html.Div("点击曲线时间点查看组内精确物种。", id="evolution-group-members-status", role="status"),
+            _grid("evolution-group-members-grid", page_size=15),
+            dbc.Button("到物种页继续分析", id="evolution-group-member-open-btn", size="sm", outline=True, disabled=True),
+        ], id="evolution-group-browser", style={"display": "none"}, hidden=True),
+    ], hidden=True)
+    chart = dbc.Card(dbc.CardBody([
+        html.Div([
+            html.Div([html.H2("丰度随时间变化"), html.P("点击曲线查看成员结构。", id="evolution-chart-description")]),
+            html.Div([
+                dbc.Button("查找物种", id="evolution-open-finder", size="sm", outline=True),
+                dbc.Button("曲线设置", id="evolution-open-settings", size="sm", outline=True),
+                field("横轴", dcc.Dropdown(id="evolution-xaxis", options=[
+                    {"label": "步数", "value": "step"}, {"label": "时间 / ps", "value": "ps"},
+                    {"label": "时间 / ns", "value": "ns"}], value="step", clearable=False, searchable=False)),
+                dbc.Button("下载数据 CSV", id="evolution-csv-btn", size="sm", color="primary", outline=True, disabled=True,
+                           title="下载已绘制曲线的全部原始数据点，含分析帧和时间步；不应用归一化、平滑或下采样。"),
+            ], className="rs-evolution-chart-tools"), dcc.Download(id="evolution-csv-download"),
+            dcc.Store(id="evolution-csv-busy", data=False),
         ], className="rs-evolution-chart-heading"),
+        html.Div(id="evolution-focus", style={"display": "none"}),
         html.Div(id="evolution-alert", role="alert"),
         html.Div(id="evolution-progress", className="rs-analysis-progress", role="status"),
-        dcc.Loading(dcc.Graph(
-            id="evolution-graph",
-            figure=_empty_chart_figure("选择对象，开始查看时间演化", "从左侧选择物种或元素分组。"),
-            config={"displaylogo": False, "responsive": True},
-            className="rs-evolution-chart",
-        ), type="circle"),
-        dbc.Checkbox(id="evolution-structure-show-h", value=True, label="显示 H",
-                     className="rs-structure-h-toggle"),
+        html.Div(dcc.Loading(dcc.Graph(id="evolution-graph", figure=_empty_chart_figure("选择目标，查看丰度演化", "在上方输入目标，或打开查找物种。"),
+                              config={"displaylogo": False, "responsive": True}, responsive=True, className="rs-evolution-chart"),
+                    type="circle", parent_style={"height": "100%"},
+                    overlay_style={"visibility": "visible", "opacity": 0.55}), className="rs-evolution-chart-stage"),
+        dbc.Checkbox(id="evolution-structure-show-h", value=True, label="显示 H", className="rs-structure-h-toggle"),
         html.Div(id="evolution-structure-detail", className="rs-channel-detail rs-channel-detail-empty"),
     ]), className="rs-card rs-evolution-results")
     return html.Div([
-        dbc.Card(dbc.CardBody([
-            html.Span("当前数据", id="evolution-current-label"),
-            dbc.Button("添加对比来源", id="evolution-open-compare-btn",
-                       color="secondary", size="sm", outline=True),
-            dbc.Button("返回当前数据", id="evolution-close-compare-btn",
-                       color="secondary", size="sm", outline=True,
-                       style={"display": "none"}),
-        ], className="rs-query-row"), className="rs-card"),
         html.Div([
-            dbc.Card(dbc.CardBody([
-                html.H2("浏览丰度"),
-                dbc.Label("浏览方式", html_for="evolution-browse-mode"),
-                dcc.Dropdown(id="evolution-browse-mode", clearable=False, value="species", options=[
-                    {"label": "精确物种", "value": "species"},
-                    {"label": "按元素原子数分组", "value": "group"},
-                ]),
-                field("横轴", dcc.Dropdown(
-                    id="evolution-xaxis", options=[
-                        {"label": "步数", "value": "step"},
-                        {"label": "时间 / ps", "value": "ps"},
-                        {"label": "时间 / ns", "value": "ns"}],
-                    value="step", clearable=False,
-                )),
-                html.Div([
-                    html.P("按全部已分析帧的丰度计数之和排序；选中一行即在右侧绘制该物种。",
-                           className="rs-step-note"),
-                    html.Div(id="evolution-rank-status", role="status"),
-                    _grid("evolution-rank-grid", page_size=20),
-                    dbc.Button("到物种页继续分析", id="evolution-rank-open-btn", size="sm", color="secondary", outline=True, disabled=True),
-                ], id="evolution-species-browser"),
-                html.Div([
-                    dbc.Label("分组元素", html_for="evolution-group-element"),
-                    dcc.Dropdown(id="evolution-group-element", options=[{"label": "C", "value": "C"}], value="C", clearable=False),
-                    dbc.Label("元素原子数", html_for="evolution-group-count"),
-                    dcc.Input(id="evolution-group-count", type="number", min=0, max=200, step=1, value=1),
-                    html.Div("选择分组后在右侧绘制数量随时间的变化；点击曲线上的时间点查看组内精确物种。物理时间须先确认换算。", className="rs-step-note"),
-                    html.Div("点击曲线上的时间点，查看组内精确物种。", id="evolution-group-members-status", role="status"),
-                    _grid("evolution-group-members-grid", page_size=15),
-                    dbc.Button("到物种页继续分析", id="evolution-group-member-open-btn", size="sm", color="secondary", outline=True, disabled=True),
-                    dbc.Button("高级元素筛选", id="evolution-distribution-tab", size="sm", color="secondary", outline=True),
-                ], id="evolution-group-browser", style={"display": "none"}),
-            ]), className="rs-card", id="evolution-rank-panel"),
             html.Div([
-                chart_card,
-                html.Div(dbc.Accordion(dbc.AccordionItem(query_card, title="手动输入物种与曲线处理设置"), start_collapsed=True),
-                         id="evolution-manual-settings"),
-            ], id="evolution-trend-panel"),
-        ], id="evolution-current-panel"),
+                dbc.Button("← 返回物种", id="evolution-back-btn", size="sm", outline=True, style={"display": "none"}),
+                html.H2("丰度演化"), html.Span("当前数据", id="evolution-current-label"),
+            ], className="rs-evolution-toolbar-title"),
+            html.Div([
+                dbc.Button("添加对比来源", id="evolution-open-compare-btn", size="sm", outline=True),
+                dbc.Button("返回当前数据", id="evolution-close-compare-btn", size="sm", outline=True, style={"display": "none"}),
+            ]),
+        ], className="rs-evolution-toolbar"),
+        dcc.Store(id="evolution-focus-store"),
+        html.Div([conditions, html.Div(chart, id="evolution-trend-panel")], id="evolution-current-panel"),
+        drawers,
+        legacy_controls,
         _species_compare_panel(),
-        # Retain callback plumbing for the public core's file overrides; the
-        # ordinary UI now has one explicit, per-source comparison flow.
-        html.Div([dcc.Input(id="evolution-species-file", value=""),
-                  dcc.Textarea(id="evolution-species-files", value="")], hidden=True),
+        html.Div([
+            dcc.Textarea(id="evolution-targets", value=""),
+            dbc.Button(id="evolution-search-btn"),
+            dcc.Store(id="evolution-editor-state"),
+            dcc.Store(id="evolution-editor-focus"),
+            dcc.Input(id="evolution-species-file", value=""), dcc.Textarea(id="evolution-species-files", value=""),
+            dbc.Button("读取物种目录", id="evolution-load-species-btn"), html.Div(id="evolution-catalog-alert"),
+            dcc.Dropdown(id="evolution-species-picker", options=[], value=[], multi=True),
+            html.Small(id="evolution-settings-note"),
+        ], hidden=True),
     ], className="rs-page", id="page-evolution")
 
 
@@ -3254,6 +3297,7 @@ def build_layout() -> html.Div:
             dcc.Store(id="workspace-context-sync", storage_type="memory"),
             dcc.Store(id="navigation-command", storage_type="memory", data=None),
             dcc.Store(id="evolution-rank-store", storage_type="memory", data=None),
+            dcc.Store(id="evolution-rank-request", storage_type="memory", data=None),
             dcc.Store(id="species-search-btn-response"),
             dcc.Store(id="rxn-search-btn-response"),
             dcc.Store(id="species-grid-store", storage_type="memory", data={"rows": []}),
@@ -3344,6 +3388,7 @@ def create_app() -> dash.Dash:
     lineage_explorer.register_callbacks(app)
     file_import.register_callbacks(app)
     dataset_library.register_callbacks(app)
+    evolution_workbench.register_callbacks(app)
 
     @app.server.get("/api/structure.svg")
     def _structure_svg():

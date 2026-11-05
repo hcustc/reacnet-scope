@@ -19,6 +19,16 @@ def test_sorted_selection_resolves_exact_structure_and_current_values():
     assert selected_row([0], current) is None
 
 
+def test_programmatic_selection_resolves_stable_grid_ids_against_current_rows():
+    rows = [{"formula": "C6H5ClO", "smiles": "Oc1ccc(Cl)cc1", "total_count": 9},
+            {"formula": "C6H5ClO", "smiles": "Oc1ccccc1Cl", "total_count": 100}]
+    selection = {"ids": ['["smiles","Oc1ccccc1Cl"]']}
+    assert selected_row(selection, rows) == rows[1]
+    assert selected_row(selection, list(reversed(rows))) == rows[1]
+    assert selected_row(selection, rows[:1]) is None
+    assert selected_row({"ids": []}, rows) is None
+
+
 def test_aggregate_and_source_rows_have_distinct_stable_identities():
     assert row_identity({"formula": "C2O", "structure_count": 3}) == '["formula","C2O"]'
     assert row_identity({"id": "path-4", "smiles": "CCO"}) == '["id","path-4"]'

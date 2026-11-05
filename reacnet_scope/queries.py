@@ -40,11 +40,12 @@ from reacnet_scope.datasets import (  # noqa: E402
 )
 from reacnet_scope.formula import (  # noqa: E402
     formula_exact_mass,
+    parse_formula,
     formula_isotopic_masses,
     formula_nominal_mass,
 )
 from reacnet_scope.reaction import canonical_smiles  # noqa: E402
-from reacnet_scope.composition import SPECIES_COMPOSITION_STORE  # noqa: E402
+from reacnet_scope.composition import SPECIES_COMPOSITION_STORE, element_count_query  # noqa: E402
 from reacnet_scope.indexes import (  # noqa: E402
     TRAJECTORY_INDEX_STORE as PREPARED_TRAJECTORY_INDEX_STORE,
     TrajectoryFrameIndex as PreparedTrajectoryFrameIndex,
@@ -418,7 +419,7 @@ def align_time_axis_for_comparison(
 
 
 def parse_target_item(item: str) -> tuple[str, str, str]:
-    """Return (qtype, query, label), qtype in {'formula', 'smiles'}."""
+    """Return an exact structure, exact formula, or element-count condition."""
     label = ""
     query = item.strip()
     if "::" in query:
@@ -442,11 +443,20 @@ def parse_target_item(item: str) -> tuple[str, str, str]:
     elif low.startswith("s:"):
         query = query[2:].strip()
         qtype = "smiles"
+    elif low.startswith("element:"):
+        query = query[len("element:"):].strip()
+        if element_count_query(query) is None:
+            raise ValueError("元素条件请写为 C6、Cl1 或 C=6")
+        qtype = "element"
+    elif element_count_query(query) is not None:
+        qtype = "element"
     else:
         qtype = "formula" if looks_like_formula(query) else "smiles"
 
     if not label:
-        label = query
+        label = (
+            f"formula:{query}" if qtype == "formula" and element_count_query(query) else query
+        )
     return qtype, query, label
 
 
@@ -740,6 +750,7 @@ def collect_species_totals(
     species_file: str,
     *,
     progress_callback: Any = None,
+    targets: list[tuple[str, str, str]] | None = None,
 ) -> dict[str, int]:
     if progress_callback is not None:
         progress_callback(
@@ -748,7 +759,8 @@ def collect_species_totals(
                 "message": "Reading prepared Species catalog",
             }
         )
-    totals = SPECIES_COMPOSITION_STORE.species_totals(species_file)
+    totals = (SPECIES_COMPOSITION_STORE.species_totals(species_file) if targets is None
+              else SPECIES_COMPOSITION_STORE.matching_species_totals(species_file, targets))
     if progress_callback is not None:
         progress_callback(
             {
@@ -821,6 +833,42 @@ def resolve_plot_series_from_species_totals(
                     "tp_total": species_totals.get(query, 0),
                 }
             )
+            continue
+
+        if qtype == "element":
+            element, count = element_count_query(query)
+            members = sorted(
+                (smi for smi, formula in formula_by_smiles.items()
+                 if parse_formula(formula).get(element, 0) == count),
+                key=lambda smi: (-species_totals[smi], smi),
+            )
+            if not members:
+                warnings.append(f"没有符合 {element} 原子数 = {count} 的物种")
+                continue
+            condition = {"element": element, "count": count}
+            definitions = []
+            if formula_mode in {"sum", "both"}:
+                definitions.append((label, "element_sum", members, None))
+            if formula_mode in {"split", "both"}:
+                displayed = members
+                if max_smiles_per_formula > 0 and len(members) > max_smiles_per_formula:
+                    displayed = members[:max_smiles_per_formula]
+                    warnings.append(
+                        f"{query}: {len(members)} 个匹配物种，仅展示 {len(displayed)} 条成员曲线；"
+                        f"省略 {len(members) - len(displayed)} 条成员曲线，合计仍包含全部成员"
+                    )
+                definitions.extend((f"{label}[{i}]", "element_member", [smi], formula_by_smiles[smi])
+                                   for i, smi in enumerate(displayed, 1))
+            for name, kind, selected, formula in definitions:
+                masses = formula_mass_fields(formula) if formula else {"exact_mass": None, "nominal_mass": None}
+                common = {"series_name": name, "query_type": kind, "query": query,
+                          "element_condition": condition, "formula": formula,
+                          "formula_exact_mass": masses["exact_mass"], "formula_nominal_mass": masses["nominal_mass"]}
+                series_defs.append({**common, "members": selected})
+                for smi in selected:
+                    member_formula = formula_by_smiles[smi]
+                    mapping_rows.append({**common, "smiles": smi, "member_formula": member_formula,
+                                         **formula_mass_fields(member_formula), "tp_total": species_totals[smi]})
             continue
 
         smiles_list = list(formula_to_smiles.get(query, []))
@@ -1023,18 +1071,16 @@ def parse_species_selected(
     species_file: str,
     selected_smiles: list[str],
     progress_callback: Any = None,
+    *,
+    start_timestep: int | None = None,
+    end_timestep: int | None = None,
 ) -> tuple[list[int], dict[str, list[int]]]:
     selected = list(dict.fromkeys(selected_smiles))
-    timesteps = SPECIES_COMPOSITION_STORE.timesteps(species_file)
-    series = {
-        smiles: [
-            int(value)
-            for value in SPECIES_COMPOSITION_STORE.species_count_series(
-                species_file, timesteps, smiles
-            ).values()
-        ]
-        for smiles in selected
-    }
+    timesteps = SPECIES_COMPOSITION_STORE.timesteps(
+        species_file, start_timestep=start_timestep, end_timestep=end_timestep,
+    )
+    matrix = SPECIES_COMPOSITION_STORE.species_count_matrix(species_file, timesteps, selected)
+    series = {smiles: values.tolist() for smiles, values in matrix.items()}
     if progress_callback is not None:
         progress_callback(
             {
@@ -1046,6 +1092,22 @@ def parse_species_selected(
         )
     return timesteps, series
 
+
+def _read_plot_groups(
+    species_file: str,
+    member_groups: dict[str, list[str]],
+    *,
+    start_timestep: int | None,
+    end_timestep: int | None,
+    progress_callback: Any,
+):
+    timesteps = SPECIES_COMPOSITION_STORE.timesteps(
+        species_file, start_timestep=start_timestep, end_timestep=end_timestep,
+    )
+    series = SPECIES_COMPOSITION_STORE.aggregate_species_count_matrix(species_file, timesteps, member_groups)
+    progress_callback({"progress": 1.0, "message": "Loaded prepared abundance curves",
+                       "timesteps": len(timesteps), "frame": timesteps[-1] if timesteps else None})
+    return timesteps, series
 
 
 def collect_trajectory_timestep_index(
@@ -1324,6 +1386,23 @@ def build_species_plot_payload(
     if not raw_targets:
         raise ValueError("missing target")
 
+    def window_bound(name: str) -> int | None:
+        from decimal import Decimal, InvalidOperation
+        raw = (params.get(name) or [""])[0]
+        if raw is None or raw == "":
+            return None
+        try:
+            value = Decimal(str(raw))
+        except InvalidOperation as exc:
+            raise ValueError(f"{name} must be an integer source timestep") from exc
+        if not value.is_finite() or value != value.to_integral_value():
+            raise ValueError(f"{name} must be an integer source timestep")
+        return int(value)
+
+    start_timestep, end_timestep = window_bound("start_timestep"), window_bound("end_timestep")
+    if start_timestep is not None and end_timestep is not None and start_timestep > end_timestep:
+        raise ValueError("start_timestep must not exceed end_timestep")
+
     reac_input = (params.get("reac", [""])[0] or "").strip()
     min_tp = int_param(params, "min_tp", 1)
     species_file_raw = (params.get("species_file", [""])[0] or "").strip()
@@ -1432,6 +1511,7 @@ def build_species_plot_payload(
     report(0.08, "resolving_targets", "Reading prepared Species catalog")
 
     species_totals: dict[str, int] = {}
+    group_species_totals: dict[tuple[str, str], dict[str, int]] = {}
     if species_file_specs:
         total_files = len(species_file_specs)
         for file_idx, spec in enumerate(species_file_specs, 1):
@@ -1439,6 +1519,7 @@ def build_species_plot_payload(
             this_system = str(spec["system"])
             totals_one = collect_species_totals(
                 this_path,
+                targets=targets,
                 progress_callback=lambda update, file_idx=file_idx, total_files=total_files, this_system=this_system: report(
                     0.08 + 0.12 * (((file_idx - 1) + float(update.get("progress", 0.0))) / float(total_files)),
                     "resolving_targets",
@@ -1448,11 +1529,14 @@ def build_species_plot_payload(
                     system=this_system,
                 ),
             )
+            group_totals = group_species_totals.setdefault((this_system, str(spec.get("replicate") or "")), {})
             for smi, count in totals_one.items():
                 species_totals[smi] = species_totals.get(smi, 0) + int(count)
+                group_totals[smi] = group_totals.get(smi, 0) + int(count)
     else:
         species_totals = collect_species_totals(
             species_file,
+            targets=targets,
             progress_callback=lambda update: report(
                 0.08 + 0.12 * float(update.get("progress", 0.0)),
                 "resolving_targets",
@@ -1472,6 +1556,7 @@ def build_species_plot_payload(
     report(0.22, "resolving_targets", f"Resolved {len(series_defs)} plot series")
     if not series_defs:
         return {
+            "schema_version": 2,
             "ok": True,
             "mode": "species",
             "query": {
@@ -1483,6 +1568,8 @@ def build_species_plot_payload(
                 "species_files": species_specs_payload(),
                 "source_mode": source_mode,
                 "targets": raw_targets,
+                "resolved_targets": [{"kind": kind, "query": query, "label": label} for kind, query, label in targets],
+                "start_timestep": start_timestep, "end_timestep": end_timestep,
             },
             "meta": {"rows": 0, "warnings": warnings},
             "mapping": mapping_rows,
@@ -1500,6 +1587,7 @@ def build_species_plot_payload(
         selected_smiles.extend(definition["members"])
     selected_smiles = list(dict.fromkeys(selected_smiles))
 
+    member_groups = {str(index): definition["members"] for index, definition in enumerate(series_defs)}
     mapping_rows_out = [] if species_file_specs else list(mapping_rows)
     time_align_meta: dict[str, Any] = {"time_align": time_align, "group_by": []}
     curves: list[dict[str, Any]] = []
@@ -1538,11 +1626,16 @@ def build_species_plot_payload(
                     replicate=this_replicate,
                 )
 
-            indexed_timesteps, indexed_series = parse_species_selected(
+            indexed_timesteps, indexed_series = _read_plot_groups(
                 this_path,
-                selected_smiles,
+                member_groups,
                 progress_callback=species_progress,
+                start_timestep=start_timestep, end_timestep=end_timestep,
             )
+            first_frame = (SPECIES_COMPOSITION_STORE.analyzed_frame_index(this_path, indexed_timesteps[0])
+                           if indexed_timesteps and start_timestep is not None else 0)
+            if not indexed_timesteps:
+                warnings.append(f"{this_system}：所选时间窗口内没有已分析帧")
             source_index_meta.append(
                 SPECIES_COMPOSITION_STORE.open_required(this_path)
             )
@@ -1559,14 +1652,14 @@ def build_species_plot_payload(
                 for timestep in indexed_timesteps
             ]
             records = []
-            for smiles in selected_smiles:
-                values = indexed_series.get(smiles, [])
+            for series_key in member_groups:
+                values = indexed_series.get(series_key, [])
                 records.extend(
                     {
                         "time": indexed_times[index],
                         "source_timestep": indexed_timesteps[index],
-                        "analyzed_frame": index,
-                        "species": smiles,
+                        "analyzed_frame": first_frame + index,
+                        "series_key": series_key,
                         "count": int(values[index]),
                         "system": this_system,
                         "replicate": this_replicate,
@@ -1579,6 +1672,7 @@ def build_species_plot_payload(
         source = pd.concat(tables, ignore_index=True)
         if source.empty:
             return {
+                "schema_version": 2,
                 "ok": True,
                 "mode": "species",
                 "query": {
@@ -1590,6 +1684,8 @@ def build_species_plot_payload(
                     "species_files": species_specs_payload(),
                     "source_mode": source_mode,
                     "targets": raw_targets,
+                    "resolved_targets": [{"kind": kind, "query": query, "label": label} for kind, query, label in targets],
+                    "start_timestep": start_timestep, "end_timestep": end_timestep,
                 },
                 "meta": {"rows": 0, "warnings": warnings + ["no target species rows found in provided species files"]},
                 "mapping": mapping_rows_out,
@@ -1628,15 +1724,15 @@ def build_species_plot_payload(
             if replicate_text:
                 group_label = f"{group_label}@{replicate_text}"
 
-            counts_by_species: dict[str, dict[float, float]] = {}
-            for smi, smi_df in subset.groupby("species", sort=False):
+            counts_by_series: dict[str, dict[float, float]] = {}
+            for series_key, smi_df in subset.groupby("series_key", sort=False):
                 timeline = (
                     smi_df.groupby("time", dropna=False)["count"]
                     .sum()
                     .astype(float)
                     .to_dict()
                 )
-                counts_by_species[str(smi)] = {float(k): float(v) for k, v in timeline.items()}
+                counts_by_series[str(series_key)] = {float(k): float(v) for k, v in timeline.items()}
             source_timestep_by_time = {
                 float(row["time"]): int(row["source_timestep"])
                 for row in subset.to_dict(orient="records")
@@ -1646,12 +1742,11 @@ def build_species_plot_payload(
                 for row in subset.to_dict(orient="records")
             }
 
-            for definition in series_defs:
-                vals = [0.0] * len(x_vals)
-                for smi in definition["members"]:
-                    smi_map = counts_by_species.get(str(smi), {})
-                    for idx, time_value in enumerate(x_vals):
-                        vals[idx] += float(smi_map.get(float(time_value), 0.0))
+            local_totals = group_species_totals.get((system_text, replicate_text), {})
+            for index, definition in enumerate(series_defs):
+                local_members = [member for member in definition["members"] if member in local_totals]
+                timeline = counts_by_series.get(str(index), {})
+                vals = [float(timeline.get(float(value), 0.0)) for value in x_vals]
 
                 raw_vals = list(vals)
 
@@ -1674,11 +1769,12 @@ def build_species_plot_payload(
                         "replicate": replicate_text or None,
                         "query_type": definition["query_type"],
                         "query": definition["query"],
+                        "element_condition": definition.get("element_condition"),
                         "formula": definition["formula"],
                         "formula_exact_mass": definition.get("formula_exact_mass"),
                         "formula_nominal_mass": definition.get("formula_nominal_mass"),
-                        "n_members": len(definition["members"]),
-                        "members": definition["members"],
+                        "n_members": len(local_members),
+                        "members": local_members,
                         "values": vals,
                         "raw_values": raw_vals,
                         "raw_x_values": list(x_vals),
@@ -1695,7 +1791,9 @@ def build_species_plot_payload(
                 )
 
                 for map_row in mapping_by_series.get(base_name, []):
-                    row_copy = dict(map_row)
+                    if map_row["smiles"] not in local_totals:
+                        continue
+                    row_copy = {**map_row, "tp_total": local_totals[map_row["smiles"]]}
                     row_copy["series_name"] = curve_name
                     row_copy["base_series_name"] = base_name
                     row_copy["system"] = system_text or None
@@ -1708,9 +1806,10 @@ def build_species_plot_payload(
             f"Reading prepared Species index: {os.path.basename(species_file)}",
             selected_smiles=len(selected_smiles),
         )
-        timesteps, base_series = parse_species_selected(
+        timesteps, base_series = _read_plot_groups(
             species_file,
-            selected_smiles,
+            member_groups,
+            start_timestep=start_timestep, end_timestep=end_timestep,
             progress_callback=lambda update: report(
                 0.34 + 0.24 * float(update.get("progress", 0.0)),
                 "reading_species",
@@ -1723,8 +1822,11 @@ def build_species_plot_payload(
         source_index_meta.append(
             SPECIES_COMPOSITION_STORE.open_required(species_file)
         )
+        first_frame = (SPECIES_COMPOSITION_STORE.analyzed_frame_index(species_file, timesteps[0])
+                       if timesteps and start_timestep is not None else 0)
         if not timesteps:
             return {
+                "schema_version": 2,
                 "ok": True,
                 "mode": "species",
                 "query": {
@@ -1736,8 +1838,10 @@ def build_species_plot_payload(
                     "species_files": species_specs_payload(),
                     "source_mode": source_mode,
                     "targets": raw_targets,
+                    "resolved_targets": [{"kind": kind, "query": query, "label": label} for kind, query, label in targets],
+                    "start_timestep": start_timestep, "end_timestep": end_timestep,
                 },
-                "meta": {"rows": 0, "warnings": warnings + ["no timestep rows parsed"]},
+                "meta": {"rows": 0, "warnings": warnings + ["所选时间窗口内没有已分析帧"]},
                 "mapping": mapping_rows_out,
                 "x_name": {"step": "timestep", "ps": "time_ps", "ns": "time_ns"}[x_axis],
                 "x_values": [],
@@ -1754,15 +1858,14 @@ def build_species_plot_payload(
             x_vals = [ts * timestep_ps for ts in timesteps]
             x_name = "time_ps"
 
+        if time_align == "relative" and x_vals:
+            origin = x_vals[0]
+            x_vals = [value - origin for value in x_vals]
+            x_name += "_relative"
+
         report(0.62, "building_curves", "Aggregating selected targets")
-        for definition in series_defs:
-            vals = [0.0] * len(timesteps)
-            for smi in definition["members"]:
-                arr = base_series.get(smi, [])
-                if len(arr) != len(vals):
-                    continue
-                for idx, value in enumerate(arr):
-                    vals[idx] += float(value)
+        for index, definition in enumerate(series_defs):
+            vals = [float(value) for value in base_series[str(index)]]
 
             raw_vals = list(vals)
 
@@ -1780,6 +1883,7 @@ def build_species_plot_payload(
                     "name": definition["series_name"],
                     "query_type": definition["query_type"],
                     "query": definition["query"],
+                    "element_condition": definition.get("element_condition"),
                     "formula": definition["formula"],
                     "formula_exact_mass": definition.get("formula_exact_mass"),
                     "formula_nominal_mass": definition.get("formula_nominal_mass"),
@@ -1789,7 +1893,7 @@ def build_species_plot_payload(
                     "raw_values": raw_vals,
                     "raw_x_values": list(x_vals),
                     "source_timesteps": list(timesteps),
-                    "analyzed_frames": list(range(len(timesteps))),
+                    "analyzed_frames": list(range(first_frame, first_frame + len(timesteps))),
                     "max_value": max(vals) if vals else 0.0,
                 }
             )
@@ -1806,7 +1910,7 @@ def build_species_plot_payload(
 
     report(0.95, "serializing", "Preparing plot payload")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "ok": True,
         "mode": "species",
         "query": {
@@ -1819,6 +1923,8 @@ def build_species_plot_payload(
             "species_files": species_specs_payload(),
             "source_mode": source_mode,
             "targets": raw_targets,
+            "resolved_targets": [{"kind": kind, "query": query, "label": label} for kind, query, label in targets],
+            "start_timestep": start_timestep, "end_timestep": end_timestep,
             "formula_mode": formula_mode,
             "max_smiles_per_formula": max_smiles_per_formula,
             "x_axis": x_axis,
