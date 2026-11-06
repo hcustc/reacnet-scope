@@ -46,7 +46,7 @@
       return new Set((groups.core || []).map(Number));
     }
     if (scope === "participants") {
-      const values = groups.participants || groups.reactant || groups.product || [];
+      const values = groups.participants ?? [...(groups.reactant || []), ...(groups.product || [])];
       return new Set(values.map(Number));
     }
     return new Set((groups.context || []).map(Number));
@@ -124,7 +124,7 @@
     });
   }
 
-  function renderAtomInspector(atom, frame, evidence, mode, onClear) {
+  function renderAtomInspector(atom, frame, evidence, mode, onClear, coordinateUnit) {
     const body = document.getElementById("event-atom-inspector-body");
     if (!body) {
       return;
@@ -167,7 +167,7 @@
     addDetail("Frame", frame && frame.frame !== undefined ? frame.frame : "—");
     addDetail(
       "显示坐标",
-      `(${numeric(atom.x, 0).toFixed(3)}, ${numeric(atom.y, 0).toFixed(3)}, ${numeric(atom.z, 0).toFixed(3)}) Å`
+      `(${numeric(atom.x, 0).toFixed(3)}, ${numeric(atom.y, 0).toFixed(3)}, ${numeric(atom.z, 0).toFixed(3)}) ${coordinateUnit === "angstrom" ? "Å" : "单位未确认"}`
     );
     const formed = changedBonds(Number(atom.serial), evidence.formed);
     const broken = changedBonds(Number(atom.serial), evidence.broken);
@@ -251,6 +251,21 @@
     renderAtomInspector(null, null, {}, "hover", function () {});
   }
 
+  function clearTrajectory() {
+    resetInspector();
+    state.lastCameraKey = "";
+    state.hoverLabel = null;
+    state.selectedShape = null;
+    if (state.viewer) {
+      state.viewer.removeAllModels();
+      state.viewer.removeAllShapes();
+      state.viewer.removeAllLabels();
+      state.viewer.render();
+    } else if (state.container) {
+      state.container.replaceChildren();
+    }
+  }
+
   namespace.renderEventTrajectory = function (frameIndex, scope, viewerData, labelOptions) {
     const container = document.getElementById("event-trajectory-3dmol");
     if (!container) {
@@ -265,15 +280,7 @@
       ? viewerData.frames
       : [];
     if (!frames.length) {
-      resetInspector();
-      if (state.viewer) {
-        state.viewer.removeAllModels();
-        state.viewer.removeAllShapes();
-        state.viewer.removeAllLabels();
-        state.viewer.render();
-      } else {
-        container.replaceChildren();
-      }
+      clearTrajectory();
       return "";
     }
 
@@ -290,12 +297,13 @@
       }
       const allowedIds = selectedIds(viewerData, scope || "context");
       let sourceAtoms = Array.isArray(frame.atoms) ? frame.atoms : [];
-      if (allowedIds.size) {
+      if (scope === "core" || scope === "participants" || allowedIds.size) {
         sourceAtoms = sourceAtoms.filter(function (atom) {
           return allowedIds.has(Number(atom.id));
         });
       }
       if (!sourceAtoms.length) {
+        clearTrajectory();
         return "当前显示范围没有可渲染原子";
       }
 
@@ -387,6 +395,7 @@
       });
 
       const evidence = viewerData.bond_evidence || {};
+      const coordinateUnit = (viewerData.meta || {}).coordinate_length_unit;
       const bondState = String(frame.bond_state || "intermediate");
       (evidence.broken || []).forEach(function (bondValue) {
         addChangedBond(viewer, atomsById, bondValue, "#dc2626", bondState !== "before");
@@ -411,7 +420,7 @@
         }
         state.selectedShape = null;
         renderCoreAtomList(coreAtoms, selectAtom);
-        renderAtomInspector(null, frame, evidence, "hover", clearSelection);
+        renderAtomInspector(null, frame, evidence, "hover", clearSelection, coordinateUnit);
         viewer.render();
       };
       const selectAtom = function (atom) {
@@ -421,17 +430,17 @@
         }
         state.selectedShape = addCoreHalo(viewer, atom, true);
         renderCoreAtomList(coreAtoms, selectAtom);
-        renderAtomInspector(atom, frame, evidence, "pinned", clearSelection);
+        renderAtomInspector(atom, frame, evidence, "pinned", clearSelection, coordinateUnit);
         viewer.render();
       };
 
       const selectedAtom = atomsById.get(Number(state.selectedAtomId));
       if (selectedAtom) {
         state.selectedShape = addCoreHalo(viewer, selectedAtom, true);
-        renderAtomInspector(selectedAtom, frame, evidence, "pinned", clearSelection);
+        renderAtomInspector(selectedAtom, frame, evidence, "pinned", clearSelection, coordinateUnit);
       } else {
         state.selectedAtomId = null;
-        renderAtomInspector(null, frame, evidence, "hover", clearSelection);
+        renderAtomInspector(null, frame, evidence, "hover", clearSelection, coordinateUnit);
       }
       renderCoreAtomList(coreAtoms, selectAtom);
 
@@ -444,16 +453,16 @@
             if (!(showCoreLabels && atom.chain === "C")) {
               state.hoverLabel = addAtomLabel(viewer, atom);
             }
-            renderAtomInspector(atom, frame, evidence, "hover", clearSelection);
+            renderAtomInspector(atom, frame, evidence, "hover", clearSelection, coordinateUnit);
             viewer.render();
           },
           function () {
             clearHoverLabel(viewer);
             const pinned = atomsById.get(Number(state.selectedAtomId));
             if (pinned) {
-              renderAtomInspector(pinned, frame, evidence, "pinned", clearSelection);
+              renderAtomInspector(pinned, frame, evidence, "pinned", clearSelection, coordinateUnit);
             } else {
-              renderAtomInspector(null, frame, evidence, "hover", clearSelection);
+              renderAtomInspector(null, frame, evidence, "hover", clearSelection, coordinateUnit);
             }
             viewer.render();
           }
