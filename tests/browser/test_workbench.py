@@ -2141,3 +2141,49 @@ def test_candidate_graph_downloads_offline(page):
     assert len(overview['routes']) == 3
     assert overview['provenance']['source_revision'] == selected['provenance']['source_revision']
     assert {v['species'] for v in overview['species']} == {'CCO', 'COC', 'CC=O', 'CC(=O)O', 'O', '[H][H]'}
+
+
+@pytest.mark.browser_area("candidate")
+def test_candidate_history_rebuild_requires_new_search(page, workbench):
+    _, dataset = workbench
+    artifacts = dataset['artifacts']
+    source = Path(artifacts['reactionevent'])
+    original = source.read_text()
+    page.locator('#species-direct-route-btn').click()
+    page.locator('#cp-mode').get_by_text('从起点看后续', exact=True).click()
+    page.locator('#cp-start-query').fill('CCO')
+    page.locator('#cp-start-find').click()
+    expect(page.locator('#cp-start-message')).to_contain_text('匹配 1')
+    page.locator('#cp-search').click()
+    expect(page.locator('#cp-result-summary')).to_contain_text('候选路线', timeout=30000)
+    expect(page.locator('#cp-continue')).to_be_enabled()
+    page.locator('#cp-continue').click()
+    expect(page.locator('#cp-trail-view')).to_contain_text('已选浏览路径')
+    expect(page.locator('#cp-continue')).to_be_enabled(timeout=30000)
+    page.locator('#cp-export-menu button.dropdown-toggle').click()
+    with page.expect_download() as downloaded:
+        page.locator('#cp-json').click()
+    current = json.loads(Path(downloaded.value.path()).read_text())
+    start = current['paths'][0]['species'][-1]
+    try:
+        source.write_text(f'Timestep_Index,Reactant,Product\n0,{start},CCO\n')
+        EVENT_EVIDENCE_STORE.build(str(source), artifacts.get('molecules', ''))
+        page.locator('#cp-continue').click()
+        expect(page.locator('#cp-result-summary')).to_contain_text('来源版本已变化', timeout=30000)
+        expect(page.locator('#cp-results')).not_to_be_visible()
+        page.locator('#cp-start-query').fill(start)
+        page.locator('#cp-start-find').click()
+        expect(page.locator('#cp-start-message')).to_contain_text('匹配 1')
+        page.locator('#cp-search').click()
+        expect(page.locator('#cp-result-summary')).to_contain_text('1 条候选路线', timeout=30000)
+        expect(page.locator('#cp-graph-summary')).not_to_contain_text('浏览步骤')
+        page.locator('#cp-export-menu button.dropdown-toggle').click()
+        with page.expect_download() as downloaded:
+            page.locator('#cp-hypergraph-json').click()
+        graph = json.loads(Path(downloaded.value.path()).read_text())
+        assert [reaction['reaction_key'] for reaction in graph['hyperedges']] == [f'{start}->CCO']
+        assert graph['browse_history_step_count'] == 0
+        assert graph['provenance']['source_revision'] != current['source_revision']
+    finally:
+        source.write_text(original)
+        EVENT_EVIDENCE_STORE.build(str(source), artifacts.get('molecules', ''))

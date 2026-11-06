@@ -23,6 +23,7 @@ def report():
         [step('CCO->COC', 'CCO', 'COC', 3), step('COC->CC=O', 'COC', 'CC=O', 1), shared],
     ]
     return dict(context=context_key({'dataset_id': 'one'}), query_request_id='search-one',
+                source_revision={'sample.csv': {'size': 42, 'mtime_ns': '123'}},
                 query={'start': 'CCO', 'target': 'CC(=O)O'}, query_complete=False,
                 paths=[dict(signature_id=f'path-{i}', step_count=len(s), steps=s,
                             species=[s[0]['carried_from'], *[t['carried_to'] for t in s]])
@@ -239,6 +240,7 @@ def test_browse_history_is_joined_to_current_branches_without_becoming_current_e
     nav = {
         'context': report['context'], 'mode': 'explore',
         'trail': history['species'], 'steps': history['steps'],
+        'segments': [dict(history, query=report['query'], source_revision=report['source_revision'])],
     }
     current_step = dict(reaction_key='CC(=O)O->CO2', carried_from='CC(=O)O',
                         carried_to='CO2', reactants=['CC(=O)O'], products=['CO2'],
@@ -271,6 +273,7 @@ def test_empty_next_search_still_displays_selected_browse_history(report):
     display = graph.with_browse_history(current, {
         'context': report['context'], 'mode': 'explore',
         'trail': history['species'], 'steps': history['steps'],
+        'segments': [dict(history, query=report['query'], source_revision=report['source_revision'])],
     })
     assert display['paths'][0]['signature_id'] == graph.BROWSE_HISTORY_SIGNATURE
     assert display['paths'][0]['species'] == history['species']

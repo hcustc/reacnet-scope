@@ -55,6 +55,16 @@ def step_id(step):
     return element_id('reaction', step['reaction_key'])
 
 
+def validate_browse_history(nav, source_revision):
+    """Every saved segment must belong to the report's published revision."""
+    segments = (nav or {}).get('segments') or []
+    if not segments and not (nav or {}).get('steps'):
+        return
+    if (not source_revision or not segments
+            or any(segment.get('source_revision') != source_revision for segment in segments)):
+        raise ValueError('浏览历史的来源版本已变化或无法核验，请重新搜索。')
+
+
 def with_browse_history(report, nav):
     """Prepend/append the selected browsing chain to current one-step results.
 
@@ -71,6 +81,7 @@ def with_browse_history(report, nav):
             or nav.get('mode') != mode
             or nav.get('context') != report.get('context')):
         return report
+    validate_browse_history(nav, report.get('source_revision'))
     history_species = list(nav.get('trail') or [])
     history_steps = list(nav.get('steps') or [])
     if not history_steps or len(history_species) != len(history_steps) + 1:

@@ -120,7 +120,8 @@ def test_browse_history_stays_separate_from_current_step_and_identity(report):
         paths=[dict(signature_id='current', candidate_signature='original-current-candidate',
             species=['CC=O', 'CCO'], steps=[report['paths'][-1]['steps'][0]])])
     nav = dict(context='dataset', mode='explore', trail=['CCO', 'CC=O'],
-               steps=[report['paths'][0]['steps'][0]])
+               steps=[report['paths'][0]['steps'][0]],
+               segments=[dict(report['paths'][0], source_revision=report['source_revision'])])
     graph = build_candidate_hypergraph(candidate_graph.with_browse_history(current, nav))
     assert graph['routes'][0]['candidate_signature'] == 'original-current-candidate'
     assert [s['step_index'] for s in graph['routes'][0]['display_steps']] == [None, 0]

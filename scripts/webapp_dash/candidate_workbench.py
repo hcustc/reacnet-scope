@@ -580,6 +580,10 @@ def register_callbacks(app):
             return [], '搜索后显示路径合并图。'
         if report.get('error'):
             return [], '查询失败，未生成路径图。'
+        try:
+            display_report = candidate_graph.with_browse_history(report, nav)
+        except ValueError as exc:
+            return [], str(exc)
         # Do not reset dragged positions or zoom just to highlight another route.
         if ctx.triggered_id in {'cp-focus', 'cp-routes'} and scope == 'all':
             return no_update, no_update
@@ -588,7 +592,6 @@ def register_callbacks(app):
             selected = set(ui.selected_ids(selected)) | {focus}
             paths = [p for p in paths if p['signature_id'] in selected]
         visible = {p['signature_id'] for p in paths}
-        display_report = candidate_graph.with_browse_history(report, nav)
         if not report.get('paths') and display_report.get('browse_history_step_count'):
             visible.add(candidate_graph.BROWSE_HISTORY_SIGNATURE)
         graph_elements = [e for e in candidate_graph.elements(display_report)
@@ -935,6 +938,17 @@ def register_callbacks(app):
         trigger = ctx.triggered_id
         if trigger not in {'cp-search', 'cp-continue', 'cp-back', 'cp-page-prev', 'cp-page-next'}:
             return None, '已取消搜索。' if trigger == 'cp-cancel' else '', None
+        valid_nav = (previous_nav or {}) if (
+            (previous_nav or {}).get('context') == context_key(store)
+            and (previous_nav or {}).get('mode') == mode) else {}
+        if trigger != 'cp-search':
+            segments = valid_nav.get('segments') or []
+            revision = ((report or {}).get('source_revision')
+                        or (segments[-1].get('source_revision') if segments else None))
+            try:
+                candidate_graph.validate_browse_history(valid_nav, revision)
+            except ValueError as exc:
+                return no_update, str(exc), None
         if trigger in {'cp-page-prev', 'cp-page-next'}:
             if (not report or report.get('context') != context_key(store)
                     or (report.get('query') or {}).get('mode') not in {'explore', 'reverse'}):
@@ -944,12 +958,10 @@ def register_callbacks(app):
                 return no_update, '已经到达当前分支列表边界。', no_update
             query = dict(report['query'], anchor_offset=offset)
             return dict(request_id=uuid4().hex, context=context_key(store),
+                        expected_source_revision=report.get('source_revision'),
                         artifacts=(store or {}).get('artifacts') or {}, query=query), '正在读取分支…', no_update
         nav = None
         if trigger == 'cp-back':
-            valid_nav = (previous_nav or {}) if (
-                (previous_nav or {}).get('context') == context_key(store)
-                and (previous_nav or {}).get('mode') == mode) else {}
             segments = list(valid_nav.get('segments') or [])
             if mode not in {'explore', 'reverse'} or not segments:
                 return no_update, '当前没有可返回的浏览步骤。', no_update
@@ -960,6 +972,7 @@ def register_callbacks(app):
             anchor = query.get('start') if mode == 'explore' else query.get('target')
             nav = _browse_navigation(segments, mode, context_key(store), anchor)
             return dict(request_id=uuid4().hex, context=context_key(store),
+                        expected_source_revision=previous.get('source_revision'),
                         artifacts=(store or {}).get('artifacts') or {}, query=query), '正在返回上一步…', nav
         if trigger == 'cp-continue':
             if (mode not in {'explore', 'reverse'} or not report
@@ -969,9 +982,6 @@ def register_callbacks(app):
             path = next((p for p in report.get('paths', []) if p['signature_id'] == focus), None)
             if path is None:
                 return no_update, '请先选择一条路线。', no_update
-            valid_nav = (previous_nav or {}) if (
-                (previous_nav or {}).get('context') == context_key(store)
-                and (previous_nav or {}).get('mode') == mode) else {}
             segments = list(valid_nav.get('segments') or [])
             old_trail, old_steps = _browse_chain(segments, mode)
             if segments and not old_trail:
@@ -989,12 +999,15 @@ def register_callbacks(app):
                 start = species
             else:
                 target = species
-            segments.append({'query': dict(report['query']), 'species': list(path['species']),
+            segments.append({'query': dict(report['query']),
+                             'source_revision': report.get('source_revision'),
+                             'species': list(path['species']),
                              'steps': list(path['steps'])})
             nav = _browse_navigation(segments, mode, context_key(store))
             query = dict(report['query'], start=start if mode != 'reverse' else '',
                          target=target if mode != 'explore' else '', anchor_offset=0, max_steps=1)
             return dict(request_id=uuid4().hex, context=context_key(store),
+                        expected_source_revision=report.get('source_revision'),
                         artifacts=(store or {}).get('artifacts') or {}, query=query), '正在搜索…', nav
         if (mode != 'reverse' and not start) or (mode != 'explore' and not target):
             return None, '请先明确选择本次搜索所需的精确结构。', nav
@@ -1021,6 +1034,9 @@ def register_callbacks(app):
         result = {k: request[k] for k in ('request_id', 'context')}
         try:
             result['report'] = svc.search_candidate_paths(request['artifacts'], **request['query'])
+            expected = request.get('expected_source_revision')
+            if expected and result['report'].get('source_revision') != expected:
+                result['report'] = {'error': '浏览期间来源版本已变化，请重新搜索。'}
         except svc.ServiceError as exc:
             result['report'] = {'error': exc.message}
         return result
@@ -1274,12 +1290,12 @@ def register_callbacks(app):
         if ctx.triggered_id == 'cp-csv':
             return dict(content=svc.candidate_paths_csv(report), filename='candidate-path-steps.csv', type='text/csv'), '已导出逐步 CSV。'
         if ctx.triggered_id in {'cp-hypergraph-json', 'cp-svg'}:
-            display_report = candidate_graph.with_browse_history(report, nav)
-            paths = display_report.get('paths') or []
-            if scope == 'selected' and report.get('paths'):
-                visible = set(ui.selected_ids(selected)) | {focus}
-                paths = [p for p in paths if p['signature_id'] in visible]
             try:
+                display_report = candidate_graph.with_browse_history(report, nav)
+                paths = display_report.get('paths') or []
+                if scope == 'selected' and report.get('paths'):
+                    visible = set(ui.selected_ids(selected)) | {focus}
+                    paths = [p for p in paths if p['signature_id'] in visible]
                 graph = svc.build_candidate_hypergraph(display_report,
                     signature_ids=[p['signature_id'] for p in paths] if scope == 'selected' else None)
                 if ctx.triggered_id == 'cp-svg':

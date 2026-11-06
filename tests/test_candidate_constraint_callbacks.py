@@ -56,9 +56,11 @@ def test_navigation_uses_submitted_constraints_not_edited_controls(app, action):
     query = dict(start='CCO', target='', mode='explore', max_steps=1,
                  excluded_species=['O'], via_species=[])
     path = dict(signature_id='route', species=['CCO', 'COC'], steps=[{}])
-    report = dict(context=context_key(store), query=query, paths=[path], next_offset=20)
+    revision = {'sample.csv': {'size': 42, 'mtime_ns': '123'}}
+    report = dict(context=context_key(store), query=query, paths=[path], next_offset=20,
+                  source_revision=revision)
     nav = dict(context=context_key(store), mode='explore', segments=[dict(
-        query=query, species=['CCO', 'COC'], steps=[{}])])
+        query=query, source_revision=revision, species=['CCO', 'COC'], steps=[{}])])
     args = request_args(store, report, nav, via=['CC=O'], excluded=['COC'])
     args[10] = 'explore'
     result, _, _ = invoke(request, action + '.n_clicks', *args)
