@@ -1,8 +1,6 @@
 """A bounded display projection of returned candidates, never a new path search."""
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import Counter, defaultdict
 from urllib.parse import urlencode
 
@@ -11,6 +9,7 @@ import dash_cytoscape as cyto
 from dash import dcc, html
 
 from reacnet_scope import services as svc
+from reacnet_scope.candidate_hypergraph import hypergraph_id as element_id
 
 
 STYLESHEET = [
@@ -48,11 +47,6 @@ STYLESHEET = [
 
 
 BROWSE_HISTORY_SIGNATURE = '__browse_history__'
-
-
-def element_id(kind, *identity):
-    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
-    return f'{kind}-{digest}'
 
 
 def step_id(step):
@@ -116,118 +110,54 @@ def with_browse_history(report, nav):
 
 
 def elements(report):
-    """Show complete reaction participants while retaining route membership."""
-    paths = (report or {}).get('paths') or []
-    nodes = {}
-    edges = {}
-    layers = defaultdict(list)
-    ranks = {}
-    reaction_numbers = {}
-    species_number = 0
-
-    def species_node(species, rank):
-        nonlocal species_number
-        sid = element_id('species', species)
-        if sid not in nodes:
-            species_number += 1
-            nodes[sid] = {'data': {
-                'id': sid, 'kind': 'species', 'species': species,
-                'label': f'S{species_number} · {svc.candidate_formula(species) or species}',
-                'image': '/api/structure.svg?' + urlencode({'smiles': species, 'width': 180, 'height': 110}),
-                'members': [], 'carrier_members': [],
-            }}
-        ranks[sid] = min(ranks.get(sid, rank), rank)
-        return sid
-
-    def add_member(items, member):
-        if member not in items:
-            items.append(member)
-
-    for path in paths:
-        signature = path['signature_id']
-        display_step_indexes = path.get('_display_step_indexes')
-        for depth, species in enumerate(path['species']):
-            sid = species_node(species, depth * 2)
-            member = {'signature_id': signature, 'step_index': min(depth, len(path['steps']) - 1)}
-            add_member(nodes[sid]['data']['members'], member)
-            add_member(nodes[sid]['data']['carrier_members'], member)
-        for depth, step in enumerate(path['steps']):
-            rid = step_id(step)
-            current_step_index = (display_step_indexes[depth]
-                                  if display_step_indexes is not None else depth)
-            member = {'signature_id': signature, 'step_index': current_step_index}
-            if current_step_index is None:
-                member['historical'] = True
-            if rid not in nodes:
-                reaction_numbers[rid] = len(reaction_numbers) + 1
-                count = step['event_count']
-                count_label = (f"净 {step['net_count']} 次"
-                               if (report.get('query') or {}).get('direction_view') == 'net'
-                               else f'类型 {count} 次')
-                nodes[rid] = {'data': {
-                    'id': rid, 'kind': 'reaction', 'reaction_key': step['reaction_key'],
-                    'label': f'R{reaction_numbers[rid]} · {count_label}',
-                    'forward_count': step.get('forward_count'),
-                    'reverse_count': step.get('reverse_count'), 'net_count': step.get('net_count'),
-                    'event_count': count, 'members': [],
-                }}
-            add_member(nodes[rid]['data']['members'], member)
-            ranks[rid] = min(ranks.get(rid, depth * 2 + 1), depth * 2 + 1)
-            for side, participants, carrier, rank in (
-                ('reactant', step.get('reactants') or [step['carried_from']],
-                 step['carried_from'], depth * 2),
-                ('product', step.get('products') or [step['carried_to']],
-                 step['carried_to'], depth * 2 + 2),
-            ):
-                for species, multiplicity in Counter(participants).items():
-                    sid = species_node(species, rank)
-                    add_member(nodes[sid]['data']['members'], member)
-                    if species == carrier:
-                        add_member(nodes[sid]['data']['carrier_members'], member)
-                    eid = element_id('edge', step['reaction_key'], side, species)
-                    if eid not in edges:
-                        edges[eid] = {'data': {
-                            'id': eid, 'source': sid if side == 'reactant' else rid,
-                            'target': rid if side == 'reactant' else sid,
-                            'kind': 'edge', 'reaction_id': rid, 'side': side,
-                            'species': species, 'multiplicity': multiplicity,
-                            'label': f'×{multiplicity}' if multiplicity > 1 else '',
-                            'members': [], 'carrier_members': [],
-                        }}
-                    add_member(edges[eid]['data']['members'], member)
-                    if species == carrier:
-                        add_member(edges[eid]['data']['carrier_members'], member)
-    for nid, layer in ranks.items():
-        layers[layer].append(nid)
-    # Stable left-to-right positions preserve orientation while highlighting routes.
-    # The union may have back edges; it is not asserted to be a DAG or a new route.
-    for layer, ids in layers.items():
-        spacing = 145 if layer % 2 == 0 else 100
-        for row, nid in enumerate(ids):
-            nodes[nid]['data'].update(layout_layer=layer, layout_order=row)
-            nodes[nid]['position'] = {'x': layer * 120, 'y': (row - (len(ids) - 1) / 2) * spacing}
+    """Adapt the shared core hypergraph to Cytoscape without new analysis."""
+    if (report or {}).get('error'):
+        return []
+    projection = svc.build_candidate_hypergraph(report or {})
+    nodes, edges = [], []
     query = (report or {}).get('query') or {}
-    for node in nodes.values():
-        species = node['data'].get('species')
-        classes = []
-        if species and species == query.get('start'):
-            classes.append('anchor')
-        elif species and species == query.get('target'):
-            classes.append('target')
-        if (node['data']['kind'] == 'reaction' and node['data']['members']
-                and all(m.get('historical') for m in node['data']['members'])):
-            node['data']['historical'] = True
-            classes.append('browse-history')
-        node['classes'] = ' '.join(classes)
-    for edge in edges.values():
-        if edge['data']['members'] and all(m.get('historical') for m in edge['data']['members']):
-            edge['data']['historical'] = True
-            edge['classes'] = 'browse-history'
-    result = [*nodes.values(), *edges.values()]
-    for element in result:
-        element['data'].update(context=(report or {}).get('context'),
-                               query_request_id=(report or {}).get('query_request_id'))
-    return result
+    layers = defaultdict(list)
+    for vertex in projection['species']:
+        species = vertex['species']
+        nodes.append({'data': dict(vertex, kind='species',
+            label=f"S{vertex['display_number']} · {svc.candidate_formula(species) or species}",
+            image='/api/structure.svg?' + urlencode({'smiles': species, 'width': 180, 'height': 110}))})
+    for reaction in projection['hyperedges']:
+        count_label = (f"净 {reaction['net_count']} 次" if query.get('direction_view') == 'net'
+                       else f"类型 {reaction['event_count']} 次")
+        nodes.append({'data': dict(
+            {k: v for k, v in reaction.items() if k not in {'tail', 'head'}},
+            kind='reaction', label=f"R{reaction['display_number']} · {count_label}")})
+        for side, field in [('reactant', 'tail'), ('product', 'head')]:
+            for term in reaction[field]:
+                edges.append({'data': dict(
+                    {k: v for k, v in term.items() if k not in {'coefficient', 'species_id'}},
+                    source=term['species_id'] if side == 'reactant' else reaction['id'],
+                    target=reaction['id'] if side == 'reactant' else term['species_id'],
+                    kind='edge', reaction_id=reaction['id'], side=side,
+                    multiplicity=term['coefficient'],
+                    label=f"×{term['coefficient']}" if term['coefficient'] > 1 else '')})
+    for node in nodes:
+        layers[node['data']['layout_layer']].append(node)
+    for layer, items in layers.items():
+        spacing = 145 if layer % 2 == 0 else 100
+        for row, node in enumerate(items):
+            node['position'] = {'x': layer * 120, 'y': (row - (len(items) - 1) / 2) * spacing}
+            species = node['data'].get('species')
+            classes = []
+            if species and species == query.get('start'):
+                classes.append('anchor')
+            elif species and species == query.get('target'):
+                classes.append('target')
+            node['classes'] = ' '.join(classes)
+    for element in [*nodes, *edges]:
+        data = element['data']
+        if data['kind'] != 'species' and data['members'] and all(m.get('historical') for m in data['members']):
+            data['historical'] = True
+            element['classes'] = 'browse-history'
+        data.update(context=(report or {}).get('context'),
+                    query_request_id=(report or {}).get('query_request_id'))
+    return [*nodes, *edges]
 
 
 def participant_node(edge, species_node):

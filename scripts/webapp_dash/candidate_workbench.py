@@ -245,14 +245,16 @@ def actual_event_view(row):
         html.P(evidence['duration_note'])])
 
 
-def _picker(side, label):
+def _picker(side, label, *, multiple=False):
     return html.Div([
         dbc.Label(label, html_for=f'cp-{side}'),
         html.Div([dcc.Input(id=f'cp-{side}-query', placeholder='分子式或精确 RNG SMILES', debounce=True),
                   dbc.Button('检索', id=f'cp-{side}-find', size='sm'),
                   dbc.Button('使用当前物种', id=f'cp-{side}-current', size='sm', outline=True)],
                  className='rs-query-row'),
-        dcc.Dropdown(id=f'cp-{side}', options=[], placeholder='先检索，再明确选择一个结构',
+        dcc.Dropdown(id=f'cp-{side}', options=[],
+                     placeholder='检索并选择结构，可继续添加' if multiple else '先检索，再明确选择一个结构',
+                     multi=multiple, value=[] if multiple else None,
                      clearable=True, searchable=False, optionHeight=72),
         dcc.Store(id=f'cp-{side}-manual-search', data=False),
         html.Div(id=f'cp-{side}-message', role='status', className='rs-candidate-picker-message'),
@@ -273,6 +275,16 @@ def layout():
         html.Div([html.Div(_picker('start', '起始结构'), id='cp-start-wrap'),
                   html.Div(_picker('target', '终点结构'), id='cp-target-wrap')],
                  className='rs-candidate-pickers'),
+        html.Details([
+            html.Summary('途经与排除（可选）'),
+            html.P('途经物种按添加顺序进入主线；移除后重新添加可调整顺序。'
+                   '排除仅限制主线，完整反应中的共同反应物和副产物仍保留。'),
+            html.Div([
+                html.Div(_picker('via', '按顺序途经的中间物种', multiple=True), id='cp-via-wrap'),
+                _picker('excluded', '排除的主线物种', multiple=True),
+            ], className='rs-candidate-pickers'),
+            html.P('途经条件仅用于起点到终点搜索；各列表最多 100 个精确物种。修改后点击搜索生效。'),
+        ], id='cp-constraints'),
         dcc.RadioItems(id='cp-direction-view', options=[
             {'label': '净转化方向', 'value': 'net'},
             {'label': '全部观测方向', 'value': 'observed'}], value='net', inline=True),
@@ -320,6 +332,8 @@ def layout():
         dbc.DropdownMenu([
             dbc.DropdownMenuItem('候选路线 JSON', id='cp-json', disabled=True),
             dbc.DropdownMenuItem('逐步证据 CSV', id='cp-csv', disabled=True),
+            dbc.DropdownMenuItem('当前图超图 JSON', id='cp-hypergraph-json', disabled=True),
+            dbc.DropdownMenuItem('当前图 SVG', id='cp-svg', disabled=True),
         ], label='导出', id='cp-export-menu', size='sm', align_end=True,
            toggle_style={'whiteSpace': 'nowrap'}, className='rs-candidate-export'),
         dcc.Download(id='cp-download'),
@@ -417,6 +431,15 @@ def route_summary(report):
                 if report.get('carrier_policy') == 'event_local_dominant_atom_descendant'
                 else '当前仅有物种名称连通性，不得解读为物质转化路线。')
     query = report['query']
+    via_species = query.get('via_species') or []
+    excluded_species = query.get('excluded_species') or []
+    constraints = []
+    if via_species:
+        constraints.append('按顺序途经：' + ' → '.join(via_species))
+    if excluded_species:
+        constraints.append('排除主线物种：' + '、'.join(excluded_species))
+    if constraints:
+        status = '本次途经与排除条件内：' + status
     direction = ('净转化方向：按当前 RNG 数据全部观测区间的完整正逆反应计数相减，只展开净值为正的方向。'
                  if query.get('direction_view') == 'net' else '全部观测方向：保留有事件记录的方向。')
     quality = (f"往返折叠视图：窗口 {query.get('return_window_frames', 3)} 个分析帧间隔；"
@@ -432,6 +455,8 @@ def route_summary(report):
             if report.get('carrier_policy') != 'event_local_dominant_atom_descendant' else None,
         ], className='rs-candidate-result-limits') if count else None,
         html.Div(direction, className='rs-candidate-result-limits'),
+        html.Div([html.Div(text) for text in constraints], id='cp-applied-constraints',
+                 className='rs-candidate-result-limits') if constraints else None,
         html.Details([html.Summary('搜索依据'), html.Div(quality), html.Div(transfer)],
                      className='rs-candidate-result-rules'),
     ], className='rs-candidate-result-note')
@@ -462,6 +487,52 @@ def comparison(paths):
 
 
 def register_callbacks(app):
+    @app.callback(Output('cp-via-wrap', 'style'), Input('cp-mode', 'value'))
+    def waypoint_mode(mode):
+        return {} if mode == 'target' else {'display': 'none'}
+
+    for side in ('via', 'excluded'):
+        def register_constraint_picker(side):
+            @app.callback(Output(f'cp-{side}', 'options'), Output(f'cp-{side}', 'value'),
+                          Output(f'cp-{side}-message', 'children'), Output(f'cp-{side}-query', 'value'),
+                          Input(f'cp-{side}-find', 'n_clicks'), Input(f'cp-{side}-current', 'n_clicks'),
+                          Input('cp-context', 'data'), State('app-store', 'data'),
+                          State(f'cp-{side}-query', 'value'), State(f'cp-{side}', 'options'),
+                          State(f'cp-{side}', 'value'), prevent_initial_call=True)
+            def find_constraint(_find, _current, _context, store, query, options, selected):
+                if ctx.triggered_id == 'cp-context':
+                    return [], [], '', ''
+                selected = list(selected or [])
+                kept = [option for option in options or [] if option['value'] in selected]
+                if ctx.triggered_id == f'cp-{side}-current':
+                    query = str((store or {}).get('selected_smiles') or '').strip()
+                text = str(query or '').strip()
+                if not text:
+                    return kept, selected, '请输入分子式或精确 RNG SMILES，或先选定当前物种。', no_update
+                try:
+                    result = svc.search_candidate_species((store or {}).get('artifacts') or {}, text)
+                except svc.ServiceError as exc:
+                    return kept, selected, exc.message, no_update
+                matches = [species_option(row['species']) for row in result['rows']]
+                known = {option['value'] for option in kept}
+                choices = kept + [option for option in matches if option['value'] not in known]
+                if not matches:
+                    return choices, selected, '当前候选索引中无匹配；已选约束保留。', no_update
+                if len(matches) == 1 and matches[0]['value'] not in selected:
+                    if len(selected) >= 100:
+                        return choices, selected, '最多选择 100 个精确物种，请先移除不需要的项。', no_update
+                    selected.append(matches[0]['value'])
+                message = ('显示前 100 个匹配，请用精确标签缩小范围。' if result['has_more'] else
+                           f'匹配 {len(matches)} 个精确结构。' +
+                           ('请选择需要的结构。' if len(matches) > 1 else '已添加到约束。'))
+                return choices, selected, message, no_update
+
+            @app.callback(Output(f'cp-{side}-preview', 'children'), Input(f'cp-{side}', 'value'))
+            def constraint_preview(values):
+                return html.Ol([html.Li([html.Code(species), structure(species)])
+                                for species in values or []])
+        register_constraint_picker(side)
+
     @app.callback(Output('cp-return-controls', 'style'), Input('cp-direction-view', 'value'))
     def return_controls(direction):
         return {'display': 'none'} if direction == 'net' else {}
@@ -507,6 +578,8 @@ def register_callbacks(app):
     def graph(report, store, scope, selected, focus, nav):
         if not report or report.get('context') != context_key(store):
             return [], '搜索后显示路径合并图。'
+        if report.get('error'):
+            return [], '查询失败，未生成路径图。'
         # Do not reset dragged positions or zoom just to highlight another route.
         if ctx.triggered_id in {'cp-focus', 'cp-routes'} and scope == 'all':
             return no_update, no_update
@@ -853,11 +926,12 @@ def register_callbacks(app):
                   State('cp-return-basis', 'value'), State('cp-expansions', 'value'), State('cp-frontier', 'value'),
                   State('cp-prefixes', 'value'), State('cp-examined', 'value'), State('cp-seconds', 'value'),
                   State('cp-report', 'data'), State('cp-focus', 'value'),
-                  State('cp-nav-anchor', 'data'), prevent_initial_call=True)
+                  State('cp-nav-anchor', 'data'), State('cp-via', 'value'),
+                  State('cp-excluded', 'value'), prevent_initial_call=True)
     def request(_run, _continue, _back, _page_prev, _page_next, _cancel, _context,
                 store, start, target, mode, depth, limit,
                 direction_view, quality_view, window, basis, expansions, frontier, prefixes, examined, seconds,
-                report, focus, previous_nav):
+                report, focus, previous_nav, via_species=None, excluded_species=None):
         trigger = ctx.triggered_id
         if trigger not in {'cp-search', 'cp-continue', 'cp-back', 'cp-page-prev', 'cp-page-next'}:
             return None, '已取消搜索。' if trigger == 'cp-cancel' else '', None
@@ -928,6 +1002,8 @@ def register_callbacks(app):
                     query=dict(start=start if mode != 'reverse' else '',
                                target=target if mode != 'explore' else '', mode=mode,
                                max_steps=depth if mode == 'target' else 1, max_paths=limit,
+                               via_species=list(via_species or []) if mode == 'target' else [],
+                               excluded_species=list(excluded_species or []),
                                direction_view=direction_view or 'net',
                                quality_view='raw' if (direction_view or 'net') == 'net' else quality_view,
                                return_window_frames=window, return_basis=basis,
@@ -1036,7 +1112,9 @@ def register_callbacks(app):
     @app.callback(Output('cp-result-summary', 'children'), Output('cp-routes', 'rowData'),
                   Output('cp-routes', 'selectedRows'), Output('cp-focus', 'options'), Output('cp-focus', 'value'),
                   Output('cp-json', 'disabled'), Output('cp-csv', 'disabled'),
-                  Output('cp-message', 'children', allow_duplicate=True), Input('cp-report', 'data'), Input('app-store', 'data'),
+                  Output('cp-message', 'children', allow_duplicate=True),
+                  Output('cp-hypergraph-json', 'disabled'), Output('cp-svg', 'disabled'),
+                  Input('cp-report', 'data'), Input('app-store', 'data'),
                   State('cp-focus', 'value'), prevent_initial_call=True)
     def results(report, store, previous_focus=None):
         if report and report.get('context') != context_key(store):
@@ -1051,7 +1129,8 @@ def register_callbacks(app):
         options = [{'label': f"路线 {i} · {p['step_count']} 步", 'value': p['signature_id']}
                    for i, p in enumerate(paths, 1)]
         focus = previous_focus if any(o['value'] == previous_focus for o in options) else options[0]['value'] if options else None
-        return route_summary(report), rows, [], options, focus, not bool(report and not report.get('error')), not bool(paths), ''
+        valid = bool(report and not report.get('error'))
+        return route_summary(report), rows, [], options, focus, not valid, not bool(paths), '', not valid, not valid
 
     @app.callback(Output('cp-comparison', 'children'), Input('cp-routes', 'selectedRows'), Input('cp-report', 'data'), Input('app-store', 'data'))
     def compare(selected, report, store):
@@ -1177,9 +1256,13 @@ def register_callbacks(app):
             bookmark = None
         return selected, bookmark, None, {'display': 'none'}, None, None, {'display': 'none'}
 
-    @app.callback(Output('cp-download', 'data'), Output('cp-message', 'children', allow_duplicate=True), Input('cp-json', 'n_clicks'), Input('cp-csv', 'n_clicks'),
-                  State('cp-report', 'data'), State('app-store', 'data'), prevent_initial_call=True)
-    def export(_json, _csv, report, store):
+    @app.callback(Output('cp-download', 'data'), Output('cp-message', 'children', allow_duplicate=True),
+                  Input('cp-json', 'n_clicks'), Input('cp-csv', 'n_clicks'),
+                  Input('cp-hypergraph-json', 'n_clicks'), Input('cp-svg', 'n_clicks'),
+                  State('cp-report', 'data'), State('app-store', 'data'),
+                  State('cp-graph-scope', 'value'), State('cp-routes', 'selectedRows'),
+                  State('cp-focus', 'value'), State('cp-nav-anchor', 'data'), prevent_initial_call=True)
+    def export(_json, _csv, _hypergraph, _svg, report, store, scope, selected, focus, nav):
         if not report or report.get('error') or report.get('context') != context_key(store):
             raise PreventUpdate
         try:
@@ -1190,4 +1273,29 @@ def register_callbacks(app):
             return no_update, '来源版本已变化，请重新搜索后导出。'
         if ctx.triggered_id == 'cp-csv':
             return dict(content=svc.candidate_paths_csv(report), filename='candidate-path-steps.csv', type='text/csv'), '已导出逐步 CSV。'
+        if ctx.triggered_id in {'cp-hypergraph-json', 'cp-svg'}:
+            display_report = candidate_graph.with_browse_history(report, nav)
+            paths = display_report.get('paths') or []
+            if scope == 'selected' and report.get('paths'):
+                visible = set(ui.selected_ids(selected)) | {focus}
+                paths = [p for p in paths if p['signature_id'] in visible]
+            try:
+                graph = svc.build_candidate_hypergraph(display_report,
+                    signature_ids=[p['signature_id'] for p in paths] if scope == 'selected' else None)
+                if ctx.triggered_id == 'cp-svg':
+                    content = svc.candidate_hypergraph_svg(graph)
+                    download = dict(content=content, filename='candidate-network.svg', type='image/svg+xml')
+                else:
+                    download = dict(content=json.dumps(graph, ensure_ascii=False, indent=2),
+                                    filename='candidate-hypergraph.json', type='application/json')
+            except ValueError as exc:
+                return no_update, str(exc)
+            # Rendering can take longer than a JSON download. Check again so
+            # a source change during drawing cannot produce an unmarked export.
+            try:
+                if svc.candidate_source_revision((store or {}).get('artifacts') or {}) != current_revision:
+                    return no_update, '导出期间来源版本已变化，请重新搜索。'
+            except svc.ServiceError as exc:
+                return no_update, exc.message
+            return download, '已导出当前图；保留完整参与物、查询范围和来源版本。'
         return dict(content=json.dumps(report, ensure_ascii=False, indent=2), filename='candidate-paths.json', type='application/json'), '已导出 JSON。'

@@ -29,6 +29,11 @@ from .candidate_identity import (
     SpeciesKey,
     candidate_identity_from_route,
 )
+from .candidate_hypergraph import (
+    CANDIDATE_HYPERGRAPH_SCHEMA_VERSION,
+    build_candidate_hypergraph,
+)
+from .hypergraph_svg import candidate_hypergraph_svg
 from .reaction_readiness import (
     REACTION_READINESS_SCHEMA_VERSION,
     ReactionReadinessRequest,
@@ -53,6 +58,8 @@ from .lineage_explorer import (
 )
 
 __all__ = [
+    "CANDIDATE_HYPERGRAPH_SCHEMA_VERSION", "build_candidate_hypergraph",
+    "candidate_hypergraph_svg",
     "lineage_explorer_status", "start_lineage_explorer", "expand_lineage_explorer",
     "observed_lineage_paths", "lineage_frame_reference", "lineage_frame_data",
     "lineage_occurrence_record", "export_lineage_explorer",

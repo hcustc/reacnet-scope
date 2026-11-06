@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from threading import Thread
 
@@ -2036,3 +2037,107 @@ def test_abundance_csv_download_keeps_raw_points_for_the_drawn_curves(prepared_a
     assert [row[:2] for row in rows[1:]] == [['0', '0'], ['1', '10'], ['2', '20']]
     assert [float(row[2]) for row in rows[1:]] == [2, 1, 1]
     expect(page.locator('#evolution-csv-btn')).to_be_enabled()
+
+
+@pytest.mark.browser_area("candidate")
+def test_candidate_waypoints_and_exclusions(page):
+    page.locator('#species-direct-route-btn').click()
+    for side, species in [('start', 'CCO'), ('target', 'CC(=O)O')]:
+        page.locator(f'#cp-{side}-query').fill(species)
+        page.locator(f'#cp-{side}-find').click()
+        expect(page.locator(f'#cp-{side}-message')).to_contain_text('匹配 1')
+    page.locator('#cp-constraints > summary').click()
+    for side, species in [('via', 'COC'), ('via', 'CC=O'), ('excluded', 'O'), ('excluded', '[H][H]')]:
+        page.locator(f'#cp-{side}-query').fill(species)
+        page.locator(f'#cp-{side}-find').click()
+        expect(page.locator(f'#cp-{side}')).to_contain_text(species)
+    screenshots = os.environ.get('REACNET_SCOPE_SCREENSHOTS')
+    if screenshots:
+        folder = Path(screenshots)
+        folder.mkdir(parents=True, exist_ok=True)
+        page.locator('#cp-constraints').screenshot(path=str(folder / 'candidate-constraints-desktop.png'))
+    page.set_viewport_size({'width': 390, 'height': 900})
+    expect(page.locator('#cp-via')).to_be_visible()
+    bounds = page.evaluate('({viewport: innerWidth, width: document.documentElement.scrollWidth})')
+    assert bounds['width'] <= bounds['viewport'] + 1, bounds
+    if screenshots:
+        page.locator('#cp-constraints').screenshot(path=str(folder / 'candidate-constraints-mobile.png'))
+    page.set_viewport_size({'width': 1366, 'height': 768})
+    page.locator('#cp-search').click()
+    expect(page.locator('#cp-result-summary')).to_contain_text('1 条候选路线', timeout=30000)
+    expect(page.locator('#cp-applied-constraints')).to_contain_text('COC → CC=O')
+    expect(page.locator('#cp-applied-constraints')).to_contain_text('排除主线物种')
+    page.locator('#cp-export-menu button.dropdown-toggle').click()
+    with page.expect_download() as downloaded:
+        page.locator('#cp-json').click()
+    report = json.loads(Path(downloaded.value.path()).read_text())
+    assert [p['species'] for p in report['paths']] == [['CCO', 'COC', 'CC=O', 'CC(=O)O']]
+    assert report['query']['via_species'] == ['COC', 'CC=O']
+    assert report['query']['excluded_species'] == ['O', '[H][H]']
+    page.locator('#cp-search-settings > summary').click()
+    page.locator('#cp-excluded-query').fill('COC')
+    page.locator('#cp-excluded-find').click()
+    expect(page.locator('#cp-excluded')).to_contain_text('COC')
+    # Unsubmitted edits leave the currently applied query visible.
+    expect(page.locator('#cp-applied-constraints')).not_to_contain_text('排除主线物种：COC')
+    page.locator('#cp-search').click()
+    expect(page.locator('#cp-result-summary')).to_contain_text('不能同时被排除', timeout=30000)
+    expect(page.locator('#cp-results')).not_to_be_visible()
+
+
+@pytest.mark.browser_area("candidate")
+def test_candidate_graph_downloads_offline(page):
+    page.locator('#species-direct-route-btn').click()
+    for side, species in [('start', 'CCO'), ('target', 'CC(=O)O')]:
+        page.locator(f'#cp-{side}-query').fill(species)
+        page.locator(f'#cp-{side}-find').click()
+        expect(page.locator(f'#cp-{side}-message')).to_contain_text('匹配 1')
+    page.locator('#cp-search').click()
+    expect(page.locator('#cp-result-summary')).to_contain_text('3 条候选路线', timeout=30000)
+    expect(page.locator('#cp-graph-summary')).to_contain_text('1 条路线')
+    selected = None
+    for trigger in ('cp-hypergraph-json', 'cp-svg'):
+        page.locator('#cp-export-menu button.dropdown-toggle').click()
+        with page.expect_download() as graph_download:
+            page.locator('#' + trigger).click()
+        content = Path(graph_download.value.path()).read_text()
+        if trigger == 'cp-svg':
+            root = ET.fromstring(content)
+            graph_content = root.find('{http://www.w3.org/2000/svg}metadata').text
+            # The standalone file needs no app structure endpoint or CDN.
+            preview_context = page.context.browser.new_context()
+            preview = preview_context.new_page()
+            external = []
+            preview.on('request', lambda req: external.append(req.url) if req.url.startswith('http') else None)
+            try:
+                preview.set_content(content)
+                expect(preview.locator('svg image').first).to_be_visible()
+                expect(preview.locator('svg')).to_contain_text('净')
+                screenshots = os.environ.get('REACNET_SCOPE_SCREENSHOTS')
+                if screenshots:
+                    folder = Path(screenshots)
+                    folder.mkdir(parents=True, exist_ok=True)
+                    preview.screenshot(path=str(folder / 'candidate-network-export.png'), full_page=True)
+                assert external == []
+            finally:
+                preview_context.close()
+        else:
+            graph_content = content
+        exported = json.loads(graph_content)
+        assert len(exported['routes']) == 1
+        assert len(exported['hyperedges']) == 2
+        assert exported['provenance']['query']['start'] == 'CCO'
+        assert exported['provenance']['source_revision']
+        if selected is None:
+            selected = exported
+        else:
+            assert exported == selected
+    page.locator('#cp-graph-scope').get_by_text('返回路线总览').click()
+    expect(page.locator('#cp-graph-summary')).to_contain_text('3 条路线')
+    page.locator('#cp-export-menu button.dropdown-toggle').click()
+    with page.expect_download() as graph_download:
+        page.locator('#cp-hypergraph-json').click()
+    overview = json.loads(Path(graph_download.value.path()).read_text())
+    assert len(overview['routes']) == 3
+    assert overview['provenance']['source_revision'] == selected['provenance']['source_revision']
+    assert {v['species'] for v in overview['species']} == {'CCO', 'COC', 'CC=O', 'CC(=O)O', 'O', '[H][H]'}
