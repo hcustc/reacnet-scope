@@ -30,8 +30,11 @@ def row_identity(row: dict[str, Any]) -> str:
     return json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def selected_row(selected: list[dict] | None, rows: list[dict] | None) -> dict | None:
+def selected_row(selected: list[dict] | dict | None, rows: list[dict] | None) -> dict | None:
     """Re-resolve a selection against the current result, never a visible index."""
+    if isinstance(selected, dict):
+        identities = set(selected.get("ids") or [])
+        return next((dict(row) for row in rows or [] if row_identity(row) in identities), None)
     if not selected or not rows or not isinstance(selected[0], dict):
         return None
     key = row_identity(selected[0])

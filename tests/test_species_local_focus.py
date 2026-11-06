@@ -45,6 +45,47 @@ def test_channel_focus_stays_bound_to_displayed_channel():
     assert callbacks._channel_focus_species(focus, {**dataset, "source_revision": "v2"}) == "B"
 
 
+def test_abundance_shortcut_prefills_the_standard_species_browser(monkeypatch):
+    app = create_app()
+    shortcut = _callback(app, "_open_species_abundance")
+    dataset = {"dataset_id": "run-1", "source_revision": "v1", "selected_smiles": "Oc1ccccc1Cl"}
+    monkeypatch.setattr(callbacks, "ctx", SimpleNamespace(triggered_id="species-to-evolution-btn"))
+    context = candidate_workbench.context_key(dataset)
+    row = {"smiles": "Oc1ccccc1Cl", "formula": "C6H5ClO", "total_count": 100}
+    mode, focus, target, picker, curve_filter, single, multiple, selected, ranking_open = shortcut(
+        1, dataset, {"context": context}, [row],
+    )
+    assert mode == "species"
+    assert focus == {"species": "Oc1ccccc1Cl", "targets": ["Oc1ccccc1Cl"], "context": context}
+    assert (target, picker, curve_filter, single, multiple, selected) == (
+        "smiles:Oc1ccccc1Cl", [], "", "", "", {"ids": []},
+    )
+    assert ranking_open is None
+
+    render = _callback(app, "_render_species_abundance_focus")
+    identity = str(render(focus, {**dataset, "selected_smiles": "Oc1ccc(Cl)cc1"}, mode)[0])
+    assert "Oc1ccccc1Cl" in identity
+    assert "Oc1ccc(Cl)cc1" not in identity
+    assert "来源已变化" in render(focus, {**dataset, "source_revision": "v2"}, mode)[0]
+    assert render(focus, dataset, "group") == ([], {"display": "none"})
+
+    # A target outside the bounded ranking still pre-fills the exact query.
+    result = shortcut(1, dataset, {"context": context}, [])
+    assert result[2] == "smiles:" + row["smiles"]
+    assert result[-2:] == ({"ids": []}, None)
+
+
+@pytest.mark.parametrize("trigger", ["evolution-open-compare-btn", "evolution-close-compare-btn"])
+def test_species_abundance_comparison_keeps_the_return_to_species(monkeypatch, trigger):
+    navigate = _callback(create_app(), "_navigate")
+    monkeypatch.setattr(callbacks, "ctx", SimpleNamespace(
+        triggered_id=trigger, triggered=[{"prop_id": f"{trigger}.n_clicks", "value": 1}],
+    ))
+    result = navigate(None, {"page": "evolution", "version": 2, "entry": "species"})
+    state = next(item for item in result if isinstance(item, dict) and item.get("page") == "evolution")
+    assert state["entry"] == "species"
+
+
 def test_stale_event_page_cannot_render_or_open_after_new_query(monkeypatch):
     app = create_app()
     dataset = {"dataset_id": "run-1", "source_revision": "v1", "artifacts": {}}

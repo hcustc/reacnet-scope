@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from reacnet_scope.network import count_atoms_fast, formula_from_counts
+from reacnet_scope.formula import ELEMENT_SYMBOLS, formula_exact_mass
 
 from .indexes import (
     IndexBuildInProgressError,
@@ -109,6 +110,17 @@ def _sample_values(values: list[int], limit: int) -> list[int]:
     stride = (len(values) - 1) / float(limit - 1)
     indices = sorted({min(len(values) - 1, int(round(index * stride))) for index in range(limit)})
     return [values[index] for index in indices]
+
+
+def element_count_query(query: str) -> tuple[str, int] | None:
+    """Recognize one element-count condition, without inferring a molecule."""
+    match = re.fullmatch(r"([A-Z][a-z]?)\s*(?:=\s*)?(\d+)", str(query).strip())
+    if not match:
+        return None
+    element, raw_count = match.groups()
+    if element not in ELEMENT_SYMBOLS:
+        raise ValueError(f"未知元素符号：{element}")
+    return element, int(raw_count)
 
 
 def matches_element_filters(
@@ -810,7 +822,8 @@ class SpeciesCompositionStore:
             )
         return {"timestep": int(timestep), "records": records}
 
-    def timesteps(self, species_file: str) -> list[int]:
+    def timesteps(self, species_file: str, *, start_timestep: int | None = None,
+                  end_timestep: int | None = None) -> list[int]:
         """Return every prepared source timestep in deterministic order."""
         meta = self.open_required(species_file)
         connection = _readonly_connection(Path(meta["index_path"]))
@@ -818,11 +831,91 @@ class SpeciesCompositionStore:
             return [
                 int(row[0])
                 for row in connection.execute(
-                    "SELECT timestep FROM timepoints ORDER BY timestep"
+                    "SELECT timestep FROM timepoints WHERE (? IS NULL OR timestep>=?) "
+                    "AND (? IS NULL OR timestep<=?) ORDER BY timestep",
+                    (start_timestep, start_timestep, end_timestep, end_timestep),
                 )
             ]
         finally:
             connection.close()
+
+    def analyzed_frame_index(self, species_file: str, timestep: int) -> int:
+        """Keep original analyzed-frame coordinates when selecting a time window."""
+        meta = self.open_required(species_file)
+        connection = _readonly_connection(Path(meta["index_path"]))
+        try:
+            return int(connection.execute("SELECT COUNT(*) FROM timepoints WHERE timestep<?", (timestep,)).fetchone()[0])
+        finally:
+            connection.close()
+
+    def search_catalog(self, species_file: str, *, query: str = "", kind: str = "all",
+                       mass_tolerance: float = 0.5,
+                       element_filters: dict[str, dict[str, Any]] | None = None,
+                       limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """Filter prepared catalogue metadata without materializing the catalogue.
+
+        Each result is an exact Species, including isomers sharing a formula or
+        neutral monoisotopic mass. At most limit+1 matching rows are returned by
+        SQLite; timepoint abundance JSON and original source files are not read.
+        """
+        meta = self.open_required(species_file)
+        if kind not in {"all", "formula", "smiles", "mass", "element"}:
+            raise ValueError("未知检索类型")
+        text = str(query or "").strip()
+        conditions, parameters = [], []
+        if kind in {"formula", "smiles"}:
+            if not text:
+                raise ValueError("请输入分子式或精确 SMILES")
+            conditions.append(f"{kind}=?")
+            parameters.append(text)
+        elif kind == "mass":
+            target, tolerance = float(text), float(mass_tolerance)
+            if not math.isfinite(target) or target <= 0 or not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError("质量须为正数，容差须为有限非负数")
+            conditions.append("ABS(formula_mass(formula)-?)<=?")
+            parameters.extend([target, tolerance])
+        elif kind == "element":
+            condition = element_count_query(text)
+            if condition is None:
+                raise ValueError("元素条件请写为 C6、Cl1 或 C=6")
+            element, count = condition
+            conditions.append("COALESCE(json_extract(elements_json, ?),0)=?")
+            parameters.extend([f"$.{element}", count])
+        filters = dict(element_filters or {})
+        for element, rule in filters.items():
+            matches_element_filters({}, {element: rule})
+            for bound in (rule.get("min"), rule.get("max")):
+                if bound is not None and (not math.isfinite(float(bound)) or float(bound) != int(bound)):
+                    raise ValueError("元素原子数须为整数")
+            mode = rule.get("mode", "all")
+            expression = "COALESCE(json_extract(elements_json, ?), 0)"
+            path = f"$.{element}"
+            if mode in {"present", "absent"}:
+                conditions.append(expression + (">0" if mode == "present" else "=0"))
+                parameters.append(path)
+            elif mode == "range":
+                for key, operator in (("min", ">="), ("max", "<=")):
+                    if rule.get(key) is not None:
+                        conditions.append(expression + operator + "?")
+                        parameters.extend([path, int(rule[key])])
+        bounded_limit = min(100, max(1, int(limit)))
+        bounded_offset = max(0, int(offset))
+        where = " AND ".join(conditions) or "1"
+        connection = _readonly_connection(Path(meta["index_path"]))
+        connection.create_function("formula_mass", 1, formula_exact_mass, deterministic=True)
+        try:
+            values = connection.execute(
+                "SELECT smiles,formula,formula_mass(formula),elements_json FROM species_summary WHERE "
+                + where + " ORDER BY formula,smiles LIMIT ? OFFSET ?",
+                [*parameters, bounded_limit + 1, bounded_offset],
+            ).fetchall()
+        finally:
+            connection.close()
+        return {"rows": [{"smiles": row[0], "formula": row[1], "exact_mass": row[2],
+                          "elements": json.loads(row[3])} for row in values[:bounded_limit]],
+                "has_more": len(values) > bounded_limit, "offset": bounded_offset, "limit": bounded_limit,
+                "query": {"text": text, "kind": kind, "mass_tolerance": mass_tolerance,
+                          "element_filters": filters}, "source_mode": "prepared_index"}
 
     def species_totals(self, species_file: str) -> dict[str, int]:
         """Return the prepared Species catalog and total abundance."""
@@ -837,6 +930,31 @@ class SpeciesCompositionStore:
             }
         finally:
             connection.close()
+
+    def matching_species_totals(self, species_file: str, targets: Sequence[tuple[str, str, str]]) -> dict[str, int]:
+        """Resolve only the catalogue identities requested for plotting."""
+        meta = self.open_required(species_file)
+        connection = _readonly_connection(Path(meta["index_path"]))
+        totals: dict[str, int] = {}
+        try:
+            for kind, column in (("smiles", "smiles"), ("formula", "formula")):
+                values = sorted({query for query_kind, query, _label in targets if query_kind == kind})
+                for start in range(0, len(values), 500):
+                    batch = values[start:start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    totals.update((str(smiles), int(total)) for smiles, total in connection.execute(
+                        f"SELECT smiles,total_count FROM species_summary WHERE {column} IN ({placeholders})", batch))
+            for query in sorted({query for kind, query, _label in targets if kind == "element"}):
+                condition = element_count_query(query)
+                if condition is None:
+                    raise ValueError("无效的元素原子数条件")
+                element, count = condition
+                totals.update((str(smiles), int(total)) for smiles, total in connection.execute(
+                    "SELECT smiles,total_count FROM species_summary "
+                    "WHERE COALESCE(json_extract(elements_json, ?),0)=?", (f"$.{element}", count)))
+        finally:
+            connection.close()
+        return totals
 
     def search_species_totals(
         self, species_file: str, *, query: str = "", selected: str = "", limit: int = 50
@@ -994,10 +1112,16 @@ class SpeciesCompositionStore:
         ``species_count_series`` calls, each encoded timepoint is decoded at
         most once regardless of how many Species are requested.
         """
-        requested = tuple(sorted({int(value) for value in timesteps}))
-        selected_species = tuple(
-            sorted({str(value) for value in smiles_values if str(value)})
+        return self.aggregate_species_count_matrix(
+            species_file, timesteps, {str(value): [str(value)] for value in smiles_values if str(value)},
         )
+
+    def aggregate_species_count_matrix(
+        self, species_file: str, timesteps: Sequence[int], member_groups: Mapping[str, Sequence[str]],
+    ) -> dict[str, np.ndarray]:
+        """Accumulate requested curves directly, without a members × frames matrix."""
+        requested = tuple(sorted({int(value) for value in timesteps}))
+        selected_species = tuple(sorted(member_groups))
         if not selected_species:
             return {}
         matrix = np.zeros(
@@ -1011,9 +1135,10 @@ class SpeciesCompositionStore:
             }
 
         meta = self.open_required(species_file)
-        species_positions = {
-            smiles: index for index, smiles in enumerate(selected_species)
-        }
+        species_positions: dict[str, list[int]] = {}
+        for index, key in enumerate(selected_species):
+            for smiles in set(member_groups[key]):
+                species_positions.setdefault(smiles, []).append(index)
         timestep_positions = {
             timestep: index for index, timestep in enumerate(requested)
         }
@@ -1026,9 +1151,8 @@ class SpeciesCompositionStore:
                     continue
                 counts = json.loads(str(encoded))
                 for smiles, count in counts.items():
-                    row = species_positions.get(str(smiles))
-                    if row is not None:
-                        matrix[row, column] = int(count)
+                    for row in species_positions.get(str(smiles), []):
+                        matrix[row, column] += int(count)
 
         try:
             if len(requested) == int(meta.get("timepoints") or 0):
