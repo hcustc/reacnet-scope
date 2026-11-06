@@ -54,7 +54,12 @@ CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 P
 | 已划分的页面模块 | 全量 | 关键流程 + 对应领域流程 |
 | 共享布局、回调、服务、依赖、CI 规则，或未归类的 Dash/浏览器测试文件 | 全量 | 完整套件 |
 
-局部模块覆盖 abundance、species、candidate、dataset、events；一个文件可以触发多个领域。
+局部模块覆盖 abundance、species、candidate、dataset、events、reactions；一个文件可以触发多个领域。
+浏览器用例按领域放在 `tests/browser/test_<领域>_workbench.py`，共享样例与就绪操作在
+`tests/browser/workbench.py`，由 `conftest.py` 提供夹具。领域测试文件只触发关键流程及
+对应领域；共享夹具、导航回归或 CI 规则变化仍触发完整套件。重载页面后使用
+`reload_workbench(page)` 等待会话恢复和初始化回调完成，再填写查询条件；不靠固定延迟
+判断就绪。视口边界断言允许至多 1 个 CSS 像素的浮点/亚像素舍入误差，仍检查实际溢出。
 新增局部模块时同步路径映射，并用 `browser_area` 标记相关用例；未归类的 UI 文件默认全量。
 关键/局部流程使用 compact 导航，分别使用 1/2 个 job；全量覆盖 classic/compact 并分为 4 个 job。
 分片在选测之后进行，每个入选用例只运行一次。

@@ -1,8 +1,13 @@
 """Select related browser workflows, then distribute them across CI jobs."""
 
 from pathlib import Path
+import os
 
 import pytest
+
+
+if os.environ.get('REACNET_SCOPE_BROWSER_TESTS') == '1':
+    from tests.browser.workbench import page, prepared_abundance_page, workbench
 
 
 def _parse_shard(value: str) -> tuple[int, int]:
