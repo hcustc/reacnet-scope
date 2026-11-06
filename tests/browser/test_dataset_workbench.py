@@ -205,6 +205,9 @@ def test_import_multiple_folders_switch_and_compare(page, workbench):
         row = page.locator('#library-management-list .rs-library-item').filter(has_text=path)
         row.get_by_role('button', name='切换到此数据').click()
         expect(page.locator('#topbar-rungroup')).to_have_text(Path(path).name, timeout=20000)
+        # The label commits before dataset-bound initialization has settled;
+        # the next switch must wait for that work, just as the UI guard requires.
+        wait_for_initial_callbacks(page)
         expect(page.locator('#page-data-management')).to_be_visible()
     expect(page.locator('#library-compare-selection')).to_have_count(0)
     expect(page.locator('#data-open-batch-compare-btn')).not_to_be_visible()
