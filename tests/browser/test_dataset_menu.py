@@ -11,9 +11,6 @@ if os.environ.get("REACNET_SCOPE_BROWSER_TESTS") != "1":
 
 from playwright.sync_api import expect
 
-from tests.browser.test_workbench import page, workbench
-
-
 @pytest.mark.browser_area('dataset')
 def test_switch_menu_selection_does_not_wait_for_server_feedback(page, workbench):
     _, current = workbench

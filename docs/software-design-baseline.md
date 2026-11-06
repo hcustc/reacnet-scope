@@ -301,7 +301,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 ### 11.5 Candidate Path Discovery
 
 - [ADR-0031](adr/0031-show-net-reaction-directions-in-candidate-workbench.md)：Dash 默认 `direction_view=net`，按完整精确 Species 多重集合配对严格正逆反应，只展开 `forward_count - reverse_count > 0` 的记录方向；净零与完全自反类型不连边，不推导未观测方向。可切换 `observed`；Python/CLI 保留 observed 兼容默认。
-- 净计数统计当前发布修订的全部观测区间（`count_scope=published_revision_all_transitions`），包含 unresolved；不按展示页、主线转移支持数或时间返回分类相减。净视图固定有效 `quality_view=raw`，不作短时折叠。方向过滤在邻接分页之前，正逆总数、净数和原始支持事件在步骤详情及 JSON/CSV 保留。结果 schema 为 indexed-candidates/v5；结构身份与现有邻接版本不变，无需因此重建索引。
+- 净计数统计当前发布修订的全部观测区间（`count_scope=published_revision_all_transitions`），包含 unresolved；不按展示页、主线转移支持数或时间返回分类相减。净视图固定有效 `quality_view=raw`，不作短时折叠。方向过滤在邻接分页之前，正逆总数、净数和原始支持事件在步骤详情及 JSON/CSV 保留。结果 schema 为 indexed-candidates/v6（增加途经与排除查询条件）；结构身份与现有邻接版本不变，无需因此重建索引。
 - 图的物种重复只表示网络或浏览历史中的循环，不称为具体分子的返回；净值为正的多步循环不因此隐藏。普通候选的 simple-path 约束是路线枚举边界，不是化学禁环规则。继续、翻页及返回使用已提交查询口径，修改控件后新搜索才生效。
 
 - ADR-0017 增加离线 Candidate Return Evidence，区分精确键级返回与仅拓扑返回；同 Transition 无内部先后，相关原子上的中间事件或 unresolved 屏障不能跳过。
@@ -315,6 +315,9 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 #### 11.5.1 Discovery modes 与完成状态
 
+- [ADR-0032](adr/0032-constrain-candidate-carriers-by-waypoints-and-exclusions.md)：双端查询可指定有序 `via_species`，要求主线按顺序经过每个精确中间 Species。共同反应物或非载体产物中出现不算途经；起终点、重复项不能作为途经列表。必须在同一条 simple route 前缀上检查，不能拼接各自可达但整体需要重复物种的分段路线。单端探索不接受途经条件。
+- 各模式可指定 `excluded_species`，仅禁止这些精确 Species 进入主线，不删改完整反应参与物、计量、正逆总数或原始事件。排除在邻接分页和搜索展开前生效；与起点、终点或途经物种冲突时明确拒绝。每种列表最多 100 项，物种须存在于当前候选索引；不按分子式合并，超限或无效标签不静默忽略。
+- 约束属于 Query Result，不进入 Candidate 结构身份；JSON、CSV 及超图来源记录保留提交的完整条件。带途经约束时，仅找到完整合格路线才可报告 `reachability_status=found`；完整查无结果才报告 `not_found`，预算截断后的无命中仍为 `inconclusive`。CLI/API、Dash 使用相同规则；单端继续、分页、返回沿用已提交排除条件，新搜索才应用编辑后的控件值，切换 RNG 数据清空约束选择。
 - `target-constrained` 查询从 anchor Species 寻找一个或多个 target Species。只有 carried endpoint 到达 target 才形成结果；target 仅作为其他 product 出现不算到达，首次到达任一 target 后停止扩展该分支，未到达的中间状态不输出，且普通路径拒绝 `target_species == anchor_species`。
 - 仅起点查询分页展开原方向的合格 carried transfers；仅终点查询在相同正向转移上按产物查前驱，结果与导出仍写正向 Reaction Type。二者逐步展开，重复 Carried Species 只作 cycle closure evidence，不把网络前驱说成实际分子来源。
 - 双端查询先在有界局部图中判断可达性，再从可达子图枚举 simple routes；至少一条路线被找到即可确认当前证据视图中的网络连接，但不代表备选路线查全。只有可达搜索完整且未命中，才能报告当前视图中不可达；预算截断后的无命中是 inconclusive。显式步数上限下的无命中仅针对该 horizon。
@@ -324,6 +327,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 - 正式数据流是 `raw MD evidence → offline indexed substrate → online bounded local discovery → selective Continuous MD Support → paged evidence drill-down`。
 - Online Candidate Discovery 只读已发布的 hypergraph adjacency、aggregate metrics 和 canonical identity indexes，围绕 exact Carried Species 局部展开。
+- Candidate 网络图与超图导出仅投影已返回的有界路线及显式选择的浏览历史；完整有向 Reaction Type 保留全部参与物与计量数，同一类型计数不因多条路线重复累加。导出包含查询、来源修订、完成/截断状态和每条路线的独立载体支持；历史步骤不得改写当前 Candidate 身份或冒充当前 Step Evidence。SVG 内嵌结构并使用显式图规模上限，超限报错而非静默删节点；Python、CLI 与 Dash 共用核心转换。见 [超图导出契约](candidate-hypergraph.md)。
 - 双端目标检索按唯一 Species 读取有界局部邻接，在已读取子图中用到目标的剩余距离剪枝并枚举 simple routes；不同前缀的已访问集合仍独立保留。邻接、目标探测、frontier、路线前缀和已检查候选各有显式预算，截断原因保留。仅终点的在线查询使用 product-leading 的准备期逆邻接索引，不扫描全局转移表或把边反向发布。结果记录 `search_algorithm` 和实际预算/消耗；结构身份不变。
 - 在线请求不得扫描 raw event source、加载全部 occurrences 或 continuity segments、构造全局 occurrence graph，也不得预枚举或持久化全部 Candidate Paths。
 - `reacnet_scope/event_paths.py` 当前从完整事件集合构建 occurrence graph 的 Candidate discovery 只能作为原型/兼容实现保留。正式 production endpoint 上线并完成兼容迁移前不删除；上线后不得作为默认或百万级发布路径。

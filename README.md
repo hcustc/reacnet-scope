@@ -403,11 +403,15 @@ uv run --locked reacnet-scope candidate-search \
   --source /data/run.lammpstrj.timeline.h5 \
   --start '精确起始 RNG SMILES' --target '精确目标 RNG SMILES' \
   --max-steps 4 --max-paths 20 \
-  --out-json candidate-paths.json --out-csv candidate-steps.csv
+  --out-json candidate-paths.json --out-csv candidate-steps.csv \
+  --out-hypergraph-json candidate-hypergraph.json --out-svg candidate-network.svg
 ```
 
 这里的路径与 SMILES 是占位符。探索模式使用 `--mode explore` 并省略 `--target`。
 CSV 事件源可加 `--molecules`，须与准备索引时的来源一致。
+Web 导出菜单提供“当前图超图 JSON”和“当前图 SVG”，可导出本页或当前与勾选路线。
+SVG 内嵌分子结构，可离线打开；JSON 保留完整反应物、产物、计量数与查询来源，
+适合后续网络分析。范围和 Python 接口见 [超图与网络图导出](docs/candidate-hypergraph.md)。
 旧 `candidate-paths` 命令保留兼容，和本版 `candidate-search` 的 schema/排序口径不同。
 
 ## 依赖

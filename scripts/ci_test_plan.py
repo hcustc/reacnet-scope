@@ -16,11 +16,14 @@ AREA_PATHS = {
         "reacnet_scope/composition.py",
         "reacnet_scope/formula.py",
         "tests/test_abundance_workbench.py",
+        "tests/browser/test_abundance_",
     ),
     "candidate": (
         "scripts/webapp_dash/candidate_",
         "scripts/webapp_dash/assets/candidate_",
         "reacnet_scope/path_search",
+        "reacnet_scope/candidate_",
+        "reacnet_scope/hypergraph_svg.py",
         "tests/browser/test_candidate_",
     ),
     "dataset": (
@@ -36,11 +39,13 @@ AREA_PATHS = {
         "scripts/webapp_dash/assets/3Dmol-min.js",
         "tests/browser/test_event_",
     ),
-    "species": ("reacnet_scope/composition.py", "reacnet_scope/formula.py"),
+    "species": ("reacnet_scope/composition.py", "reacnet_scope/formula.py",
+                "tests/browser/test_species_"),
+    "reactions": ("tests/browser/test_reaction_",),
 }
 SHARED_PATHS = (
     ".github/workflows/", "scripts/ci_test_plan.py", "pyproject.toml", "uv.lock",
-    "tests/browser/conftest.py", "tests/browser/test_workbench.py",
+    "tests/browser/conftest.py", "tests/browser/workbench.py", "tests/browser/test_workbench.py",
     "tests/test_ci_test_plan.py", "reacnet_scope/services.py",
     "reacnet_scope/analysis_services.py", "reacnet_scope/evidence_services.py",
     "reacnet_scope/queries.py",

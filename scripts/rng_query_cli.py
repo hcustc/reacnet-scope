@@ -610,6 +610,7 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
             artifacts, args.start, target=args.target, mode=args.mode,
             max_steps=args.max_steps, max_paths=args.max_paths,
             anchor_offset=args.anchor_offset,
+            via_species=args.via_species, excluded_species=args.exclude_species,
             direction_view=args.direction_view,
             quality_view=args.quality_view, return_window_frames=args.return_window_frames,
             return_basis=args.return_basis, max_expansions=args.max_expansions,
@@ -623,6 +624,23 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
     except svc.ServiceError as exc:
         print(f"[ERROR] {exc.message}", file=sys.stderr)
         return 2
+    if args.out_hypergraph_json or args.out_svg:
+        try:
+            graph = svc.build_candidate_hypergraph(result)
+            svg = svc.candidate_hypergraph_svg(graph) if args.out_svg else None
+            if svc.candidate_source_revision(artifacts) != result.get('source_revision'):
+                raise ValueError('导出期间来源版本已变化，请重新搜索。')
+        except svc.ServiceError as exc:
+            print(f"[ERROR] {exc.message}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 2
+        if args.out_hypergraph_json:
+            Path(args.out_hypergraph_json).write_text(
+                json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.out_svg:
+            Path(args.out_svg).write_text(svg, encoding="utf-8")
     if args.out_json:
         Path(args.out_json).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.out_csv:
@@ -1715,6 +1733,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--start", default="", help="精确 RNG 起始 Species 标签；终点前驱查询可省略")
     sp_candidate_search.add_argument("--target", default="", help="精确 RNG 目标 Species 标签")
     sp_candidate_search.add_argument("--mode", choices=["target", "explore", "reverse"], default="target")
+    sp_candidate_search.add_argument("--via-species", action="append", default=[],
+                                     help="按顺序必须途经的精确 Species；可重复传入，仅用于双端搜索")
+    sp_candidate_search.add_argument("--exclude-species", action="append", default=[],
+                                     help="不允许进入主线的精确 Species；可重复传入，完整反应参与物仍保留")
     sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 100), default=None,
                                      help="可选查询步数上限；双端搜索默认不设步数上限")
     sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
@@ -1732,6 +1754,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--check-top", type=_bounded_int('check-top', 0, 10), default=0, help='独立检查前 N 条路线的连续历史，每条最多 1000 状态/5 秒')
     sp_candidate_search.add_argument("--out-json", default="")
     sp_candidate_search.add_argument("--out-csv", default="")
+    sp_candidate_search.add_argument("--out-hypergraph-json", default="",
+                                     help="本次返回路线的有向超图 JSON，保留完整计量与来源")
+    sp_candidate_search.add_argument("--out-svg", default="",
+                                     help="本次返回路线的离线网络 SVG（最多 500 个节点）")
     sp_candidate_search.set_defaults(func=cmd_candidate_search)
 
     sp_candidate_paths = sub.add_parser(

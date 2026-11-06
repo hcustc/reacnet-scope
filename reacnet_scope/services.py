@@ -32,6 +32,8 @@ from reacnet_scope.file_collections import (
     read_collection, is_collection_path, ROLE_LABELS, artifact_role,
 )
 from reacnet_scope.path_search import candidate_formula
+from reacnet_scope.candidate_hypergraph import build_candidate_hypergraph
+from reacnet_scope.hypergraph_svg import candidate_hypergraph_svg
 from reacnet_scope.reaction_timing import (
     reaction_time_distribution,
     reaction_time_events,
@@ -197,6 +199,7 @@ from reacnet_scope.path_search_services import (
 
 
 __all__ = [
+    "build_candidate_hypergraph", "candidate_hypergraph_svg",
     "browse_import_files", "collect_files", "preview_file_collection", "collection_candidate",
     "read_collection", "is_collection_path", "ROLE_LABELS", "artifact_role", "candidate_formula",
     "validate_file_collection_candidate", "commit_file_collection",

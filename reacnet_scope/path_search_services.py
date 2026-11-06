@@ -144,7 +144,7 @@ def check_candidate_continuity(artifacts: Mapping[str, Any], report: Mapping[str
 
 def candidate_paths_csv(report: Mapping[str, Any]) -> str:
     output = io.StringIO()
-    fields = ['signature_id', 'candidate_signature', 'candidate_evidence_key',
+    fields = ['record_type', 'schema_version', 'signature_id', 'candidate_signature', 'candidate_evidence_key',
               'candidate_identity_schema', 'step_count', 'step', 'carried_from', 'carried_to', 'reaction_key',
               'reactants', 'products', 'event_count', 'forward_count', 'reverse_count', 'net_count', 'transfer_event_count',
               'max_shared_atoms', 'transfer_basis', 'continuous_md', 'query_complete',
@@ -154,9 +154,20 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
               'search_algorithm', 'path_prefix_budget', 'path_prefixes_examined']
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
+    metadata = {field: report.get(field) for field in (
+        'schema_version', 'query_complete', 'reachability_status', 'routes_complete',
+        'graph_exhaustive', 'horizon_limited', 'display_truncated', 'candidates_examined',
+        'next_offset', 'previous_offset', 'search_algorithm',
+        'path_prefix_budget', 'path_prefixes_examined')}
+    metadata.update(query=json.dumps(report['query']),
+                    source_revision=json.dumps(report['source_revision']),
+                    truncation_reasons=json.dumps(report['truncation_reasons']))
+    if not report.get('paths'):
+        # Preserve why a constrained query has no steps, without inventing a route.
+        writer.writerow(dict(record_type='query', **metadata))
     for path in report.get('paths', []):
         for index, step in enumerate(path['steps'], 1):
-            writer.writerow(dict(signature_id=path['signature_id'],
+            writer.writerow(dict(record_type='step', **metadata, signature_id=path['signature_id'],
                 candidate_signature=path.get('candidate_signature'),
                 candidate_evidence_key=None,
                 candidate_identity_schema=(path.get('candidate_identity') or {}).get('schema_version'),
@@ -169,20 +180,7 @@ def candidate_paths_csv(report: Mapping[str, Any]) -> str:
                 net_count=step.get('net_count'), transfer_event_count=step.get('transfer_event_count'),
                 max_shared_atoms=step.get('max_shared_atoms'),
                 transfer_basis=step.get('transfer_basis'),
-                continuous_md=path['continuous_md'], query_complete=report['query_complete'],
-                reachability_status=report.get('reachability_status'),
-                routes_complete=report.get('routes_complete'),
-                graph_exhaustive=report.get('graph_exhaustive'),
-                horizon_limited=report.get('horizon_limited'),
-                display_truncated=report.get('display_truncated'),
-                candidates_examined=report.get('candidates_examined'),
-                next_offset=report.get('next_offset'),
-                previous_offset=report.get('previous_offset'),
+                continuous_md=path['continuous_md'],
                 quality=json.dumps(step.get('quality', {})),
-                continuous_support=json.dumps(path.get('continuous_support')),
-                query=json.dumps(report['query']), source_revision=json.dumps(report['source_revision']),
-                truncation_reasons=json.dumps(report['truncation_reasons']),
-                search_algorithm=report.get('search_algorithm'),
-                path_prefix_budget=report.get('path_prefix_budget'),
-                path_prefixes_examined=report.get('path_prefixes_examined')))
+                continuous_support=json.dumps(path.get('continuous_support'))))
     return output.getvalue()
