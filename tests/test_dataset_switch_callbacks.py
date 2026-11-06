@@ -75,7 +75,7 @@ def _payload(
             {
                 "id": item["id"],
                 "property": item["property"],
-                "value": value_for(item, states),
+                "value": value_for(item, {**inputs, **states}),
             }
             for item in dependency["state"]
         ],

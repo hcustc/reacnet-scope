@@ -139,7 +139,7 @@ def test_library_row_click_starts_switch_without_hidden_selector(folders, monkey
             triggered_id=triggered_id, triggered=changed,
         ))
         transaction, request = reducer(
-            0, [1], 0, 0, None, {'page': 'reactions'},
+            0, 0, [1], 0, 0, None, {'page': 'reactions'},
             None, None, [entry], {}, [],
         )
         assert request == transaction
@@ -571,22 +571,6 @@ def test_library_status_shows_workspace_read_error_instead_of_500(folders, monke
     assert 'Read-only file system' in shown['props']['children']
 
 
-def test_completed_library_switch_survives_late_candidate_clear():
-    """A late browser-candidate update must not erase success before commit."""
-    client = create_app().server.test_client()
-    transaction = {
-        'state': 'succeeded', 'request_id': 'completed-library-switch',
-        'origin': {'page': 'species', 'library': True},
-        'validation': {'dataset_id': 'new-dataset'},
-    }
-    response = post(
-        client, 'dataset-switch-transaction.data', 'dataset-browser-candidate.data',
-        {'dataset-browser-candidate': None, 'page-store': {'page': 'species'}},
-        {'dataset-switch-transaction': transaction, 'dataset-library': []},
-    )
-    assert response.status_code == 204
-
-
 def test_library_menu_click_is_independent_of_candidate_refresh():
     """Navigation and candidate refreshes must not queue ahead of a menu click."""
     dependencies = create_app().server.test_client().get('/_dash-dependencies').get_json()
@@ -598,19 +582,17 @@ def test_library_menu_click_is_independent_of_candidate_refresh():
     input_ids = {value['id'] for value in click['inputs'] if isinstance(value['id'], str)}
     assert 'page-store' not in input_ids
     assert 'dataset-browser-candidate' not in input_ids
+    assert 'data-apply-btn' in input_ids
 
 
-def test_library_switch_survives_late_page_navigation():
-    """An in-flight global library switch is not cancelled by page hydration."""
-    client = create_app().server.test_client()
-    transaction = {
-        'state': 'validating', 'request_id': 'active-library-switch',
-        'origin': {'page': 'species', 'library': True},
-        'candidate': {'base': '/data/B'},
-    }
-    response = post(
-        client, 'dataset-switch-transaction.data', 'page-store.data',
-        {'page-store': {'page': 'reactions'}},
-        {'dataset-switch-transaction': transaction},
-    )
-    assert response.status_code == 204
+def test_preview_transaction_updates_cannot_return_from_the_server_late():
+    """Refresh behavior is exercised in browser/test_dataset_switch_races.py."""
+    dependencies = create_app().server.test_client().get('/_dash-dependencies').get_json()
+    previews = [
+        item for item in dependencies
+        if 'dataset-switch-transaction.data' in str(item.get('output') or '')
+        and any(value['id'] in {'page-store', 'dataset-browser-candidate'}
+                for value in item['inputs'] if isinstance(value['id'], str))
+    ]
+    assert previews
+    assert all(item.get('clientside_function') for item in previews)

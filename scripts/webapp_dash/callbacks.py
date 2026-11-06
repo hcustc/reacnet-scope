@@ -3640,62 +3640,27 @@ def register_callbacks(app: Any) -> None:
 
 
     @app.callback(
-        Output("dataset-switch-transaction", "data", allow_duplicate=True),
-        Output("dataset-switch-request", "data", allow_duplicate=True),
-        Input("library-use", "n_clicks"),
-        State("library-select", "value"),
-        State("dataset-library", "data"),
-        State("page-store", "data"),
-        State("dataset-switch-transaction", "data"),
-        State({"type": "dataset-bound-operation", "name": ALL}, "data"),
-        prevent_initial_call=True,
-    )
-    def _begin_library_menu_switch(clicks, selected_base, records, page_store,
-                                   transaction, bound_operations):
-        """Keep the explicit menu click independent of browser and page refreshes."""
-        if not clicks:
-            raise PreventUpdate
-        selected = next((entry for entry in svc.normalise_dataset_library(records)
-                         if entry["base"] == selected_base), {})
-        if not selected.get("dataset_id"):
-            return ({"state": "failed", "candidate": selected,
-                     "reason": "missing_dataset_identity",
-                     "message": "RNG 数据身份缺失，请重新导入。"}, no_update)
-        current = transaction if isinstance(transaction, dict) else {}
-        if current.get("state") == "validating":
-            raise PreventUpdate
-        if any(bool(value) for value in bound_operations or []):
-            return ({"state": "failed", "candidate": selected,
-                     "reason": "analysis_in_progress",
-                     "message": "当前分析仍在完成，暂不能切换RNG 数据。等待该分析结束后重试；"
-                                "当前RNG 数据和所选RNG 数据均已保留。"}, no_update)
-        if not selected.get("folder") or not selected.get("base"):
-            return ({"state": "failed", "candidate": selected,
-                     "reason": "missing_candidate",
-                     "message": "请先选择要加载的RNG 数据。当前RNG 数据未改变。"}, no_update)
-        request = svc.begin_dataset_switch(
-            selected, origin={"page": (page_store or {}).get("page"), "library": True},
-        )
-        return request, request
-
-    @app.callback(
         Output("dataset-switch-transaction", "data"),
         Output("dataset-switch-request", "data"),
-        Input("data-apply-btn", "n_clicks"),
-        Input({"type": "library-use-entry", "base": ALL}, "n_clicks"),
-        Input("data-browser-index-btn", "n_clicks"),
-        Input("dir-browser-cancel-btn", "n_clicks"),
-        Input("dataset-browser-candidate", "data"),
-        Input("page-store", "data"),
-        Input("species-compare-switch-request", "data"),
-        State("library-select", "value"),
-        State("dataset-library", "data"),
-        State("dataset-switch-transaction", "data"),
-        State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        inputs=(
+            Input("data-apply-btn", "n_clicks"),
+            Input("library-use", "n_clicks"),
+            Input({"type": "library-use-entry", "base": ALL}, "n_clicks"),
+            Input("data-browser-index-btn", "n_clicks"),
+            Input("dir-browser-cancel-btn", "n_clicks"),
+            State("dataset-browser-candidate", "data"),
+            State("page-store", "data"),
+            Input("species-compare-switch-request", "data"),
+            State("library-select", "value"),
+            State("dataset-library", "data"),
+            State("dataset-switch-transaction", "data"),
+            State({"type": "dataset-bound-operation", "name": ALL}, "data"),
+        ),
         prevent_initial_call=True,
     )
     def _reduce_dataset_switch(
         _apply_clicks,
+        _library_clicks,
         _entry_clicks,
         _index_clicks,
         _cancel_clicks,
@@ -3711,11 +3676,8 @@ def register_callbacks(app: Any) -> None:
         triggered = ctx.triggered_id
         # A click can arrive in the same Dash update as page hydration.
         # Process the explicit action rather than dropping it as a page change.
-        for action, prop_id in (
-            ("dir-browser-cancel-btn", "dir-browser-cancel-btn.n_clicks"),
-            ("data-apply-btn", "data-apply-btn.n_clicks"),
-        ):
-            if any(item["prop_id"] == prop_id and item.get("value") for item in ctx.triggered):
+        for action in ("dir-browser-cancel-btn", "library-use", "data-apply-btn"):
+            if any(item["prop_id"] == action + ".n_clicks" and item.get("value") for item in ctx.triggered):
                 triggered = action
                 break
         if triggered != "dir-browser-cancel-btn":
@@ -3827,34 +3789,34 @@ def register_callbacks(app: Any) -> None:
                 no_update,
             )
 
-        if triggered == "page-store":
-            if (current.get("origin") or {}).get("library") and current.get("state") in {
-                "validating", "succeeded"
-            }:
-                raise PreventUpdate
-            if (page_store or {}).get("page") == "data-management":
-                raise PreventUpdate
-            superseded = svc.supersede_dataset_switch(current, reason="left_workspace")
-            if superseded == current:
-                raise PreventUpdate
-            return superseded, no_update
-
-        if triggered == "dataset-browser-candidate":
-            # The library switch owns its transaction through the commit callback.
-            # A late browser candidate refresh must not replace a completed result.
-            if (current.get("origin") or {}).get("library") and current.get("state") in {
-                "validating", "succeeded"
-            }:
-                raise PreventUpdate
-            if current.get("state") == "validating":
-                return (
-                    svc.supersede_dataset_switch(current, reason="candidate_changed"),
-                    no_update,
-                )
-            if selected:
-                return {"state": "candidate-selected", "candidate": selected}, no_update
-            return {"state": "idle"}, no_update
         raise PreventUpdate
+
+    # A synchronous browser refresh reads the live transaction, so an older
+    # HTTP response cannot overwrite a switch started after that refresh.
+    app.clientside_callback(
+        """function(candidate, page, transaction) {
+            const none = window.dash_clientside.no_update;
+            const current = transaction || {};
+            if ((current.origin || {}).library &&
+                ['validating', 'succeeded'].includes(current.state)) return none;
+            const changed = window.dash_clientside.callback_context.triggered
+                .map(item => item.prop_id);
+            const supersede = reason =>
+                ['validating', 'candidate-selected', 'failed'].includes(current.state)
+                ? {...current, state: 'superseded', reason} : none;
+            if (changed.includes('page-store.data')) {
+                if ((page || {}).page === 'data-management') return none;
+                return supersede('left_workspace');
+            }
+            if (current.state === 'validating') return supersede('candidate_changed');
+            return candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+        }""",
+        Output("dataset-switch-transaction", "data", allow_duplicate=True),
+        Input("dataset-browser-candidate", "data"),
+        Input("page-store", "data"),
+        State("dataset-switch-transaction", "data"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("dataset-switch-validation", "data"),
