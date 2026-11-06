@@ -1364,25 +1364,19 @@ def _event_frame_figure(viewer: dict[str, Any], frame_index: int, scope: str, *,
     atoms = list(frame.get("atoms") or [])
     groups = viewer.get("atom_groups") or {}
     core_ids = {int(value) for value in (groups.get("core") or [])}
+    participant_values = groups.get("participants")
+    if participant_values is None:
+        participant_values = [*(groups.get("reactant") or []), *(groups.get("product") or [])]
     participant_ids = {
         int(value)
-        for value in (
-            groups.get("participants")
-            or groups.get("reactant")
-            or groups.get("product")
-            or []
-        )
+        for value in participant_values
     }
     if scope == "core":
-        core_atoms = [atom for atom in atoms if int(atom.get("id") or -1) in core_ids]
-        atoms = core_atoms or atoms
+        atoms = [atom for atom in atoms if atom.get("id") is not None and int(atom["id"]) in core_ids]
     elif scope == "participants":
-        participant_atoms = [
-            atom
-            for atom in atoms
-            if int(atom.get("id") or -1) in participant_ids
-        ]
-        atoms = participant_atoms or atoms
+        atoms = [atom for atom in atoms if atom.get("id") is not None and int(atom["id"]) in participant_ids]
+    if not atoms:
+        return _empty_plotly_figure("当前显示范围没有可渲染原子")
 
     def coordinate(atom: dict[str, Any], axis: str) -> Any:
         return atom.get(f"display_{axis}", atom.get(axis))
