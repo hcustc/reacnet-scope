@@ -27,7 +27,7 @@ instance. Replacing its label globally would change Species and reaction identit
   hydrogens only when the original SMILES valence rules resolve their counts;
   otherwise report incomplete input. Ignore original bond orders and stereochemical
   annotations for this inference, but retain the original label and its provenance.
-- Use the independent `neutral-main-group-milp/v4` core with the existing SciPy and
+- Use the independent `neutral-main-group-milp/v5` core with the existing SciPy and
   RDKit dependencies. The RNG prototype mentioned in the issue was unavailable in
   the inspected local checkout; this implementation does not import an unpublished
   RNG interface or claim numerical equivalence with that prototype.
@@ -43,9 +43,10 @@ instance. Replacing its label globally would change Species and reaction identit
   restrictions after RDKit sanitization. These are deliberately narrow model-domain
   assumptions, not universal chemistry; they exclude valid ionic representations.
 - Replace weighted penalties with lexicographic integer minimization, in this order:
-  charged-atom shell deficit, non-carbon shell deficit, small-ring unsaturation,
-  model unpaired electrons, total shell deficit, number of charged atoms,
-  expanded-shell excess, charge-location electronegativity. Shell targets
+  charged-atom shell deficit, small-ring unsaturation, model unpaired electrons,
+  total shell deficit, number of charged atoms, unmatched eligible aromatic six-rings,
+  expanded-shell excess, charge-location electronegativity. There is no separate
+  non-carbon shell objective: neutral C/N/O shell deficits share one total. Shell targets
   are a duet for H, a sextet for neutral B, otherwise an octet; allowed P/S expanded
   states remain versioned in the core. Lock each optimum before solving the next
   objective, sharing the remaining wall-time/node budget across all stages.
@@ -53,7 +54,18 @@ instance. Replacing its label globally would change Species and reaction identit
   bonds once, including cycles omitted by a ring basis. Minimize this count before
   unpaired electrons; isolated ring double bonds, exocyclic double bonds and acyclic
   multiple bonds are not penalized. This is a naming preference, not strain energy
-  or a blanket prohibition: higher-priority shell objectives can still prevail.
+  or a blanket prohibition: the higher-priority charged-shell objective can still prevail.
+- After minimizing charge count, prefer alternating single/double assignments on
+  eligible chordless six-membered C/N cycles. With all hydrogens explicit, eligible
+  carbon has degree three and nitrogen degree two; each selected ring atom must be
+  neutral, closed-shell and octet-complete. This bounded six-pi naming preference
+  is not a general aromaticity detector or Clar-sextet model. Input bond orders and
+  aromatic flags do not decide eligibility. Hydrogen counts, valence states and
+  earlier objectives can prevent a ring from receiving the preference.
+- Cycle discovery shares the structure wall-time budget and admits at most 64
+  eligible cycles. Exceeding either bound returns an explicit timeout/truncation
+  without a candidate. `eligible_six_ring_count` reports the number considered;
+  schema remains v2 and method metadata publishes the rule and cap.
 - As the final tie-break, minimize the sum of formal charge times integer-scaled
   Pauling electronegativity. At fixed earlier objectives this favors negative
   charge on more electronegative atoms and positive charge on less electronegative
@@ -132,7 +144,7 @@ spin-resolved validation remain deferred.
 
 The [remaining review examples](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6703813400)
 reproduced two omissions: no tie-break for equal-charge-count representations, and
-no small-ring multiple-bond penalty. The three charge-location and four ring
+no small-ring multiple-bond penalty. The two charge-location cases, one N2O naming convention and four ring
 regressions pass with the two added priorities. CO and earlier acyclic carbon
 examples retain their intended representations. These preferences do not identify
 an electronic ground state.
@@ -149,3 +161,35 @@ the two fixes as a general reference-accuracy improvement.
 
 Method v4 invalidates v1/v2/v3 annotations. The result schema stays v2; its named
 objectives and method metadata expose the new rules. No source identity changes.
+
+## Oxygen radicals and resonance interpretation (v5)
+
+The [next review](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6705484722)
+identifies an element-dependent bias: satisfying neutral O shells before counting
+charges moves peroxy radicals onto carbon and can select non-aromatic phenoxyl
+representations. It also corrects the earlier N2O example: both octet-complete
+charge-separated representations are valid resonance drawings, not a right/wrong pair.
+
+Four fixed-input comparisons isolate v4, removal of the non-carbon preference,
+aromatic preference alone, and their combination. Removing the element bias restores
+all 12 reported peroxy references; the combination additionally selects the readable
+aromatic phenoxyl representations. Existing CO, carbene, halogen and small-ring
+regressions pass. Neutral carbon lone-pair states and the charged-shell priority remain.
+
+Strict reference agreement is 7439/7775 for v4 and aromatic-only, and 7371/7775 for
+unbiased-only and v5. Of 93 newly non-matching entries, 91 have a single two-bond
+radical shift with unchanged atom-level charge and lone-pair counts. Two more complex
+electron assignments remain unclassified. These are reported without erasing strict
+mismatches or claiming identical energies/electronic states. The benchmark separately
+labels the two explicitly accepted N2O resonance forms; other mismatches are not
+called chemical errors. See the [report](../research/lewis-reference-validation.md)
+for denominators, every peroxy entry, remaining differences and reproducible ablations.
+A separately reported pinned SABIC aromatic library improves from 263/365 to 281/365,
+including its phenoxyl and phenylperoxy references. It is not pooled with the original
+7775-entry denominator. Two fused-radical entries expose limitations of the comparator
+that clears radical counts; they agree after ordinary normalization retaining the
+assigned radicals. The report retains both discrepancies explicitly.
+
+Method v5 invalidates earlier prepared annotations. Original Species identities,
+reaction evidence and alias-to-original handoff remain unchanged. The result is one
+readable model candidate, not a unique electronic-state determination or a filter.

@@ -165,6 +165,22 @@ def comparison_keys(molecule, *, reference=False):
     return structure, electrons
 
 
+def representation_relation(reference, candidate, reference_key, candidate_key):
+    """Keep exact agreement separate from explicitly accepted N2O resonance.
+
+    This tiny declared set is not a general resonance/electronic-state oracle.
+    Other mismatches remain unclassified, never automatically chemical errors.
+    """
+    if reference_key == candidate_key:
+        return "exact_structure"
+    n2o_keys = {"[N]#[N+][O-]", "[N-]=[N+]=[O]"}
+    if (reference_key in n2o_keys and candidate_key in n2o_keys
+            and all(a.GetNumRadicalElectrons() == 0
+                    for m in (reference, candidate) for a in m.GetAtoms())):
+        return "accepted_n2o_resonance"
+    return "unclassified_difference"
+
+
 def evaluate_entry(entry, backend, options):
     result = {"index": entry["index"], "label": entry["label"]}
     try:
@@ -194,6 +210,7 @@ def evaluate_entry(entry, backend, options):
     except (ValueError, RuntimeError) as exc:
         return {**result, "comparison_error": str(exc)}
     result.update(structure_match=structure == ref_structure, local_electrons_match=electrons == ref_electrons,
+                  representation_relation=representation_relation(reference, candidate, ref_structure, structure),
                   positive_halogen=any(a.GetFormalCharge() > 0 and a.GetSymbol() in {"F", "Cl", "Br", "I"}
                                        for a in candidate.GetAtoms()),
                   positive_carbon=any(a.GetSymbol() == "C" and a.GetFormalCharge() > 0 for a in candidate.GetAtoms()),
@@ -216,6 +233,8 @@ def summarize_rows(rows):
     return {"entries": len(rows), "status_counts": dict(counts),
             "exclusion_reasons": dict(Counter(row["reason"] for row in rows if row["status"] == "reference_excluded")),
             "structure_matches": sum(bool(row.get("structure_match")) for row in rows),
+            "representation_relations": dict(Counter(row["representation_relation"] for row in rows
+                                                      if "representation_relation" in row)),
             "local_electrons_matches": sum(bool(row.get("local_electrons_match")) for row in rows),
             "comparison_errors": sum(bool(row.get("comparison_error")) for row in rows),
             "positive_halogen_candidates": sum(bool(row.get("positive_halogen")) for row in rows),
@@ -278,6 +297,8 @@ def main(argv=None):
         summaries[library["name"]] = summarize_rows(rows)
     summary = {"reference_revision": args.revision, "sources": manifest, "method": backend.method_metadata(),
                "implementation_sha256": hashlib.sha256(Path(backend.__file__).read_bytes()).hexdigest(),
+               "comparison_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+               "declared_resonance_scope": "two_closed_shell_N2O_representations_only",
                "complete": not any(row["status"] == "not_evaluated" for row in results), "libraries": summaries,
                "reference_strata": reference_strata(results),
                "denominators": "all declared entries; generated-only rates must separately report coverage",

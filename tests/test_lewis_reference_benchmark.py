@@ -4,7 +4,7 @@ from rdkit import Chem
 
 from reacnet_scope.lewis import LewisOptions, annotate_lewis, lewis_model_molecule
 
-from scripts.benchmark_lewis_rmg import adjacency_molecule, comparison_keys, library_entries, reference_strata
+from scripts.benchmark_lewis_rmg import adjacency_molecule, comparison_keys, library_entries, reference_strata, representation_relation
 
 
 def test_carbene_bond_graph_agreement_does_not_count_as_local_electron_agreement():
@@ -57,3 +57,14 @@ def test_small_fragment_strata_use_reference_features_not_success():
     assert strata["small_CNO"]["structure_matches"] == 1
     assert strata["small_CNO_unpaired_or_carbon_lone_pair"]["entries"] == 2
     assert strata["small_CNO_carbon_lone_pair"]["entries"] == 1
+
+
+def test_nitrous_oxide_resonance_is_not_counted_as_exact_agreement_or_error():
+    reference = Chem.MolFromSmiles("[N-]=[N+]=O")
+    candidate = Chem.MolFromSmiles("N#[N+][O-]")
+    ref_key = comparison_keys(reference)[0]
+    candidate_key = comparison_keys(candidate)[0]
+    assert ref_key != candidate_key
+    assert representation_relation(reference, candidate, ref_key, candidate_key) == "accepted_n2o_resonance"
+    unrelated = Chem.MolFromSmiles("[C-]#[O+]")
+    assert representation_relation(reference, unrelated, ref_key, comparison_keys(unrelated)[0]) == "unclassified_difference"

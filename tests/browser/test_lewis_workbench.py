@@ -17,12 +17,14 @@ from tests.browser.workbench import wait_for_initial_callbacks
 @pytest.mark.parametrize("original,other,alias", [
     ("[C][O]", "[C]=[O]", "[C-]#[O+]"),
     ("[F][C][F]", "F[C]F", "F[C]F"),
+    ("[O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[H]", "[O]c1ccccc1", "[O]c1ccccc1"),
+    ("[O][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", "[O]Oc1ccccc1Cl", "[O]Oc1ccccc1Cl"),
 ])
 def test_prepare_search_export_and_open_original_species(page, workbench, original, other, alias):
     _, previous = workbench
     folder = Path(previous["folder"]) / "lewis-demo"
     folder.mkdir(exist_ok=True)
-    base = folder / "carbon-monoxide"
+    base = folder / "lewis-examples"
     base.with_suffix(".reactionabcd").write_text(f"2 {original}->{other}\n")
     base.with_suffix(".species").write_text(f"Timestep 0: {original} 2 {other} 3\n")
     (folder / "rng_run.json").write_text('{"parameters":{"miso":1}}')
@@ -53,6 +55,12 @@ def test_prepare_search_export_and_open_original_species(page, workbench, origin
             carbon = next(atom for atom in row["model_graph"]["atoms"] if atom["element"] == "C")
             assert carbon["lone_pairs"] == 1
             assert row["unique_electronic_state"] == "not_established"
+    if alias.startswith("[O]"):
+        for row in report["rows"]:
+            assert row["model_unpaired_electrons"] == 1
+            assert all(atom["formal_charge"] == 0 for atom in row["model_graph"]["atoms"])
+            assert sum(atom["unpaired_electrons"] for atom in row["model_graph"]["atoms"]
+                       if atom["element"] == "O") == 1
     page.locator("#lewis-results").get_by_role("button", name=original, exact=True).click()
     expect(page.locator("#lewis-workbench")).not_to_be_visible()
     expect(page.locator("#species-result-stage")).not_to_be_visible()
@@ -64,7 +72,7 @@ def test_prepare_search_export_and_open_original_species(page, workbench, origin
     screenshots = os.environ.get("REACNET_SCOPE_SCREENSHOTS")
     if screenshots:
         Path(screenshots).mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(Path(screenshots) / f"lewis-detail-{'carbene' if alias == 'F[C]F' else 'co'}.png"))
+        page.screenshot(path=str(Path(screenshots) / f"lewis-detail-{'oxygen' if alias.startswith('[O]') else 'carbene' if alias == 'F[C]F' else 'co'}.png"))
     page.set_viewport_size({"width": 390, "height": 844})
     expect(page.locator("#detail-body .rs-detail-smiles")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

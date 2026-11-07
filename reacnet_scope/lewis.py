@@ -20,14 +20,15 @@ from rdkit import Chem, rdBase
 
 
 LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v2"
-LEWIS_METHOD = "neutral-main-group-milp/v4"
-_OBJECTIVES = ("charged_shell_deficit", "hetero_shell_deficit", "small_ring_unsaturation",
-               "unpaired_electrons", "shell_deficit", "formal_charge_count",
+LEWIS_METHOD = "neutral-main-group-milp/v5"
+_OBJECTIVES = ("charged_shell_deficit", "small_ring_unsaturation",
+               "unpaired_electrons", "shell_deficit", "formal_charge_count", "nonaromatic_six_rings",
                "expanded_shell_excess", "charge_electronegativity")
 # Pauling electronegativities x100, integer-scaled for exact lexicographic locks.
 # Source: https://periodic-table.rsc.org/ (element atomic data).
 _ELECTRONEGATIVITY = {"H": 220, "B": 204, "C": 255, "N": 304, "O": 344, "F": 398,
                       "Si": 190, "P": 219, "S": 258, "Cl": 316, "Br": 296, "I": 266}
+_MAX_AROMATIC_SIX_CYCLES = 64
 _HALOGENS = frozenset({"F", "Cl", "Br", "I"})
 # Valence electrons and closed-shell bond-order sums by formal charge.
 # Lower sums retain unpaired electrons; P/S additionally permit expanded shells.
@@ -83,6 +84,11 @@ def method_metadata() -> dict:
                                   "objective": "triple_bonds_plus_adjacent_double_bond_pairs",
                                   "counting": "unique_bonds_and_pairs_in_any_small_cycle",
                                   "claim": "naming_preference_not_strain_energy"},
+            "aromatic_preference": {"scope": "chordless_six_membered_C_N_cycles",
+                                    "states": "neutral_closed_shell_C_degree3_N_degree2",
+                                    "pattern": "alternating_single_double_ring_bonds",
+                                    "max_cycles": _MAX_AROMATIC_SIX_CYCLES,
+                                    "claim": "bounded_naming_preference_not_general_aromaticity"},
             "charge_location_policy": {"objective": "min_sum_formal_charge_times_electronegativity",
                                        "scale": "Pauling_x100", "values": dict(_ELECTRONEGATIVITY)},
             "radical_electrons_basis": "RDKit_representation_not_electronic_state",
@@ -274,6 +280,40 @@ def _small_ring_bond_pairs(graph):
     return sorted(pairs)
 
 
+def _aromatic_six_cycles(graph, deadline):
+    """Bounded topology-only candidates for neutral six-pi C/N rings.
+
+    Explicit hydrogens count toward degree. Actual bond orders and neutral,
+    closed-shell states must still satisfy the MILP; membership is no mandate
+    to make a ring aromatic. Input aromatic flags are deliberately not used.
+    """
+    eligible = {a.GetIdx() for a in graph.GetAtoms()
+                if (a.GetSymbol(), a.GetDegree()) in {("C", 3), ("N", 2)}}
+    neighbors = {i: {n.GetIdx() for n in graph.GetAtomWithIdx(i).GetNeighbors()} & eligible
+                 for i in eligible}
+    rings = []
+    def visit(path):
+        if time.monotonic() >= deadline:
+            raise _InputProblem("timeout", "aromatic_cycle_search_budget")
+        start, last = path[0], path[-1]
+        if len(path) == 6:
+            if start not in neighbors[last] or path[1] > last:
+                return
+            # A chord would not be part of this six-membered ring preference.
+            if any(len(neighbors[i] & set(path)) != 2 for i in path):
+                return
+            if len(rings) >= _MAX_AROMATIC_SIX_CYCLES:
+                raise _InputProblem("truncated", "aromatic_cycle_count_budget")
+            rings.append(tuple(path))
+            return
+        for next_atom in sorted(neighbors[last]):
+            if next_atom > start and next_atom not in path:
+                visit(path + [next_atom])
+    for start in sorted(eligible):
+        visit([start])
+    return sorted(rings)
+
+
 def _solve(graph, options: LewisOptions, seconds: float) -> dict:
     started = time.monotonic()
     atoms = list(graph.GetAtoms())
@@ -288,15 +328,22 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
     pairing_offset = width
     width += 2 * len(bonds)
     ring_pairs = _small_ring_bond_pairs(graph)
-    ring_bonds = sorted({j for pair in ring_pairs for j in pair})
+    small_ring_bonds = {j for pair in ring_pairs for j in pair}
+    aromatic_rings = _aromatic_six_cycles(graph, started + seconds)
+    aromatic_edges = [[graph.GetBondBetweenAtoms(ring[i], ring[(i + 1) % 6]).GetIdx()
+                       for i in range(6)] for ring in aromatic_rings]
+    ring_bonds = sorted(small_ring_bonds | {j for ring in aromatic_edges for j in ring})
     ring_offsets = {j: width + 3 * k for k, j in enumerate(ring_bonds)}
     width += 3 * len(ring_bonds)
     cumulene_offset = width
     width += 2 * len(ring_pairs)
+    aromatic_offset = width
+    width += 27 * len(aromatic_rings)
     fragments = Chem.GetMolFrags(graph)
     pairing_row = 2 * len(atoms) + len(fragments)
     ring_row = pairing_row + 2 * len(atoms)
-    matrix = np.zeros((ring_row + 2 * len(ring_bonds) + len(ring_pairs), width))
+    aromatic_row = ring_row + 2 * len(ring_bonds) + len(ring_pairs)
+    matrix = np.zeros((aromatic_row + 25 * len(aromatic_rings), width))
     rhs = np.zeros(len(matrix))
     objectives = np.zeros((len(_OBJECTIVES), width))
     lower, upper = np.zeros(width), np.ones(width)
@@ -324,8 +371,7 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
             if charge:
                 matrix[pairing_row + (0 if charge > 0 else len(atoms)) + i, j] = -1
             objectives[:, j] = (deficit if charge else 0,
-                                 deficit if atoms[i].GetSymbol() != "C" else 0,
-                                 0, radicals, deficit, abs(charge), expanded,
+                                 0, radicals, deficit, abs(charge), 0, expanded,
                                  charge * _ELECTRONEGATIVITY[atoms[i].GetSymbol()])
     ring_objective = _OBJECTIVES.index("small_ring_unsaturation")
     for k, j in enumerate(ring_bonds):
@@ -335,7 +381,8 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
         rhs[row] = 1
         matrix[row + 1, j] = 1
         matrix[row + 1, column:column + 3] = (-1, -2, -3)
-        objectives[ring_objective, column + 2] = 1
+        if j in small_ring_bonds:
+            objectives[ring_objective, column + 2] = 1
     for k, (left, right) in enumerate(ring_pairs):
         row = ring_row + 2 * len(ring_bonds) + k
         column = cumulene_offset + 2 * k
@@ -344,8 +391,31 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
         # d_left + d_right = 2 * both + exactly_one (all binary).
         matrix[row, column:column + 2] = (-2, -1)
         objectives[ring_objective, column] = 1
+    aromatic_objective = _OBJECTIVES.index("nonaromatic_six_rings")
+    for k, (ring, edges) in enumerate(zip(aromatic_rings, aromatic_edges, strict=True)):
+        row, column = aromatic_row + 25 * k, aromatic_offset + 27 * k
+        for phase in range(2):
+            flag = column + 13 * phase
+            for i, bond in enumerate(edges):
+                # flag <= the indicator for this phase's alternating bond order.
+                target = row + 12 * phase + i
+                matrix[target, flag] = 1
+                matrix[target, flag + 1 + i] = 1  # binary slack
+                matrix[target, ring_offsets[bond] + (i + phase) % 2] = -1
+            for i, atom in enumerate(ring):
+                target = row + 12 * phase + 6 + i
+                matrix[target, flag] = 1
+                matrix[target, flag + 7 + i] = 1
+                for j, (_b, charge, radicals, deficit, _expanded) in enumerate(states[atom]):
+                    if charge == radicals == deficit == 0:
+                        matrix[target, offsets[atom] + j] = -1
+        # Exactly one of the two valid Kekule patterns or the unmatched option.
+        matrix[row + 24, [column, column + 13, column + 26]] = 1
+        rhs[row + 24] = 1
+        objectives[aromatic_objective, column + 26] = 1
     values, fields = _optimize(objectives, matrix, rhs, lower, upper, options,
                                seconds - (time.monotonic() - started))
+    fields["eligible_six_ring_count"] = len(aromatic_rings)
     if values is None:
         return fields
     molecule = Chem.RWMol(graph)
@@ -433,7 +503,7 @@ def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
                 _cache[key] = solved
         result.update(solved)
     except _InputProblem as exc:
-        result.update(status=exc.status, reason=exc.reason, truncated=exc.status == "timeout")
+        result.update(status=exc.status, reason=exc.reason, truncated=exc.status in {"timeout", "truncated"})
     result["elapsed_seconds"] = time.monotonic() - started
     return result
 

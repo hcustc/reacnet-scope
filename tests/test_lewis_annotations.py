@@ -31,9 +31,66 @@ def neutral(**kwargs):
 
 
 @pytest.mark.parametrize("smiles,expected", [
+    ("[H][C]1[C]([H])[C]([H])[C]([O])[C]([H])[C]1[H]", "[O]c1ccccc1"),
+    ("[H][C]1[C]([H])[C]([H])[C]([O][O])[C]([H])[C]1[H]", "[O]Oc1ccccc1"),
+    ("[O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", "[O]c1ccccc1Cl"),
+    ("[O][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", "[O]Oc1ccccc1Cl"),
+    ("[H][C]([H])[C]([H])[O][O]", "[O]OC=C"),
+    ("CO[O]", "CO[O]"), ("CCO[O]", "CCO[O]"), ("[H]O[O]", "[O]O"),
+])
+def test_oxygen_radicals_prefer_readable_neutral_representations(smiles, expected):
+    # Preferred names for this model, not assertions of a unique resonance form.
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    candidate = Chem.MolFromSmiles(result["candidate_smiles"])
+    assert Chem.MolToSmiles(candidate) == Chem.MolToSmiles(Chem.MolFromSmiles(expected))
+    assert all(atom["formal_charge"] == 0 for atom in result["model_graph"]["atoms"])
+    assert sum(atom["unpaired_electrons"] for atom in result["model_graph"]["atoms"]
+               if atom["element"] == "O") == 1
+    assert result["original_species"] == smiles
+    assert result["unique_electronic_state"] == "not_established"
+
+
+@pytest.mark.parametrize("smiles", ["[N][N][O]", "N#[N+][O-]", "[N-]=[N+]=O"])
+def test_nitrous_oxide_accepts_both_reference_resonance_representations(smiles):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    candidate = Chem.MolToSmiles(Chem.MolFromSmiles(result["candidate_smiles"]))
+    assert candidate in {"N#[N+][O-]", "[N-]=[N+]=O"}
+
+
+@pytest.mark.parametrize("smiles", [
+    "c1ccccc1", "n1ccccc1", "c1ccc2ccccc2c1", "C1CCCCC1", "C1=CCCCC1", "O=C1C=CC(=O)C=C1",
+])
+def test_six_ring_preference_respects_hydrogens_and_electron_states(smiles):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    assert Chem.MolToSmiles(Chem.MolFromSmiles(result["candidate_smiles"])) == Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+    assert result["model_unpaired_electrons"] == 0
+
+
+def test_phenoxy_alias_is_independent_of_original_bond_orders_and_atom_order():
+    originals = ["[O]c1ccccc1", "O=C1C=C[CH]C=C1",
+                 "[H][C]1[C]([H])[C]([H])[C]([O])[C]([H])[C]1[H]"]
+    results = [annotate_lewis(s, options=neutral()) for s in originals]
+    assert len({r["input_graph_id"] for r in results}) == 1
+    assert {Chem.MolToSmiles(Chem.MolFromSmiles(r["candidate_smiles"])) for r in results} == {"[O]c1ccccc1"}
+    assert {r["original_species"] for r in results} == set(originals)
+
+
+def test_aromatic_cycle_budget_does_not_publish_a_partial_candidate(monkeypatch):
+    from reacnet_scope import lewis
+    monkeypatch.setattr(lewis, "_MAX_AROMATIC_SIX_CYCLES", 0)
+    result = annotate_lewis("c1ccccc1", options=neutral())
+    assert (result["status"], result["reason"]) == ("truncated", "aromatic_cycle_count_budget")
+    assert result["candidate_smiles"] is None
+    assert result["truncated"] is True
+    assert result["optimization_complete"] is False
+
+
+@pytest.mark.parametrize("smiles,expected", [
     ("[H][C]([H])[O][O]", "C=[O+][O-]"),
     ("[H][C]([H])[N]([H])[O]", "C=[NH+][O-]"),
-    ("[N][N][O]", "N#[N+][O-]"),
 ])
 def test_charge_location_prefers_electronegative_negative_site(smiles, expected):
     result = annotate_lewis(smiles, options=neutral())
@@ -105,7 +162,7 @@ def test_halogen_restriction_preserves_co_charge_pair_and_exposes_model_rules():
     assert result["model_objectives"]["charged_shell_deficit"] == 0
     assert result["method"]["charge_policy"]["positive_halogen"] == "forbidden"
     assert result["method"]["radical_electrons_basis"] == "RDKit_representation_not_electronic_state"
-    assert result["method"]["method"] == "neutral-main-group-milp/v4"
+    assert result["method"]["method"] == "neutral-main-group-milp/v5"
 
 
 def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
@@ -133,9 +190,9 @@ def test_lexicographic_passes_share_budget_and_do_not_publish_partial_optima(mon
     result = annotate_lewis("[C][O]", options=neutral(max_nodes=10))
     assert result["status"] == ("timeout" if limit == "time" else "truncated")
     assert result["candidate_smiles"] is None
-    assert result["optimization_stages_completed"] == 1
+    assert result["optimization_stages_completed"] == 2  # no-ring objective is identically zero
     assert result["optimization_complete"] is False
-    assert result["model_objectives"] == {"charged_shell_deficit": 0}
+    assert result["model_objectives"] == {"charged_shell_deficit": 0, "small_ring_unsaturation": 0}
     assert len(calls) == (2 if limit == "time" else 1)
     if limit == "time":
         assert calls[1]["time_limit"] < calls[0]["time_limit"]
@@ -260,8 +317,8 @@ def test_revision_and_assumption_changes_invalidate_results(sources):
     assert get_lewis_annotation(sources, "[C][O]")["coverage"] == "selected_representative_only"
 
 
-@pytest.mark.parametrize("old_method", ["v1", "v2", "v3"])
-def test_old_publication_is_rejected_and_rebuilt_with_v4_rules(sources, old_method):
+@pytest.mark.parametrize("old_method", ["v1", "v2", "v3", "v4"])
+def test_old_publication_is_rejected_and_rebuilt_with_v5_rules(sources, old_method):
     import sqlite3
     prepare_lewis_annotations(sources, options=neutral())
     with sqlite3.connect(annotation_path(sources)) as db:
@@ -272,7 +329,7 @@ def test_old_publication_is_rejected_and_rebuilt_with_v4_rules(sources, old_meth
     with pytest.raises(IndexStaleError):
         get_lewis_annotation(sources, "[C][O]")
     prepare_lewis_annotations(sources, options=neutral())
-    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v4"
+    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v5"
 
 
 def test_carbene_model_graph_retains_pairing_lost_by_smiles_roundtrip():
