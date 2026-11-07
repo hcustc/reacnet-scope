@@ -99,8 +99,8 @@ def test_using_imported_folder_uses_existing_switch_transaction_and_preserves_or
     client = create_app().server.test_client()
     entry = svc.inspect_dataset_folders([folders[1]])['entries'][0]
     response = post(client, 'dataset-switch-request.data', 'library-use.n_clicks',
-                    {'library-use': 1, 'page-store': {'page': 'reactions'}},
-                    {'dataset-library': [entry], 'library-select': entry['base'],
+                    {'library-use': 1},
+                    {'page-store': {'page': 'reactions'}, 'dataset-library': [entry], 'library-select': entry['base'],
                      'dataset-switch-transaction': {}})
     assert response.status_code == 200
     request = response.get_json()['response']['dataset-switch-request']['data']
@@ -255,15 +255,15 @@ def test_library_switch_failure_focuses_its_visible_row():
     assert json.loads(target) == {'base': '/data/B', 'type': 'library-switch-feedback'}
 
 
-def test_library_use_is_not_swallowed_by_batched_page_navigation(folders):
+def test_library_menu_click_uses_current_page_state(folders):
     client = create_app().server.test_client()
     entry = svc.inspect_dataset_folders([folders[0]])['entries'][0]
     payload = _payload(client, output_contains='dataset-switch-request.data',
-                       changed='page-store.data',
-                       inputs={'page-store': {'page': 'data-management'}, 'library-use': 1},
-                       states={'library-select': entry['base'], 'dataset-library': [entry],
+                       changed='library-use.n_clicks',
+                       inputs={'library-use': 1},
+                       states={'page-store': {'page': 'data-management'},
+                               'library-select': entry['base'], 'dataset-library': [entry],
                                'dataset-switch-transaction': {}})
-    payload['changedPropIds'] = ['page-store.data', 'library-use.n_clicks']
     response = client.post('/_dash-update-component', json=payload)
     assert response.status_code == 200
     assert response.get_json()['response']['dataset-switch-request']['data']['candidate']['base'] == entry['base']
@@ -569,3 +569,30 @@ def test_library_status_shows_workspace_read_error_instead_of_500(folders, monke
         shown = shown[0]
     assert shown['props']['role'] == 'status'
     assert 'Read-only file system' in shown['props']['children']
+
+
+def test_library_menu_click_is_independent_of_candidate_refresh():
+    """Navigation and candidate refreshes must not queue ahead of a menu click."""
+    dependencies = create_app().server.test_client().get('/_dash-dependencies').get_json()
+    click = next(
+        item for item in dependencies
+        if 'dataset-switch-request.data' in str(item.get('output') or '')
+        and any(value['id'] == 'library-use' for value in item['inputs'])
+    )
+    input_ids = {value['id'] for value in click['inputs'] if isinstance(value['id'], str)}
+    assert 'page-store' not in input_ids
+    assert 'dataset-browser-candidate' not in input_ids
+    assert 'data-apply-btn' in input_ids
+
+
+def test_preview_transaction_updates_cannot_return_from_the_server_late():
+    """Refresh behavior is exercised in browser/test_dataset_switch_races.py."""
+    dependencies = create_app().server.test_client().get('/_dash-dependencies').get_json()
+    previews = [
+        item for item in dependencies
+        if 'dataset-switch-transaction.data' in str(item.get('output') or '')
+        and any(value['id'] in {'page-store', 'dataset-browser-candidate'}
+                for value in item['inputs'] if isinstance(value['id'], str))
+    ]
+    assert previews
+    assert all(item.get('clientside_function') for item in previews)
