@@ -27,24 +27,39 @@ instance. Replacing its label globally would change Species and reaction identit
   hydrogens only when the original SMILES valence rules resolve their counts;
   otherwise report incomplete input. Ignore original bond orders and stereochemical
   annotations for this inference, but retain the original label and its provenance.
-- Use the independent `neutral-main-group-milp/v2` core with the existing SciPy and
+- Use the independent `neutral-main-group-milp/v3` core with the existing SciPy and
   RDKit dependencies. The RNG prototype mentioned in the issue was unavailable in
   the inspected local checkout; this implementation does not import an unpublished
   RNG interface or claim numerical equivalence with that prototype.
 - The model supports H/B/C/N/O/F/Si/P/S/Cl/Br/I. Each connected fragment must be
   neutral. Unknown charge requires an explicit neutral assumption; known nonzero
   fragment or requested net charge is unsupported. Any specified spin multiplicity
-  is unsupported. Formal charges are restricted to -1, 0, +1; atom-state rules,
-  expanded P/S shells and heuristic weights are versioned in the core.
-- Positive F/Cl/Br/I formal charges are excluded from the v2 candidate domain,
-  including a check after RDKit sanitization. This is a conservative model
-  restriction, not a universal statement about halogen chemistry. Retain the
-  weighted objective and expose its weights in method metadata.
-- Solve for one minimum-penalty assignment of single/double/triple bond orders,
-  formal charges and radical electrons. Check the serialized candidate with RDKit
-  and verify composition/connectivity/fragment charge are preserved. This is a
-  representation check, not scientific validation. One optimum neither enumerates
-  all alternatives nor establishes a unique electronic state or resonance class.
+  is unsupported. Formal charges are restricted to -1, 0, +1. Neutral carbon can
+  partition its nonbonding electrons between lone pairs and unpaired electrons;
+  the optimizer selects one assignment, without identifying spin or ground state.
+- Exclude positive F/Cl/Br/I charges. Permit negative charges only on N/O/halogens
+  or carbon with exactly one heavy-atom neighbor. Each charged atom must participate
+  in a one-to-one opposite-charge pairing along an existing edge. Recheck these
+  restrictions after RDKit sanitization. These are deliberately narrow model-domain
+  assumptions, not universal chemistry; they exclude valid ionic representations.
+- Replace weighted penalties with lexicographic integer minimization, in this order:
+  charged-atom shell deficit, non-carbon shell deficit, model unpaired electrons,
+  total shell deficit, number of charged atoms, expanded-shell excess. Shell targets
+  are a duet for H, a sextet for neutral B, otherwise an octet; allowed P/S expanded
+  states remain versioned in the core. Lock each optimum before solving the next
+  objective, sharing the remaining wall-time/node budget across all stages.
+- Preserve the selected atom-level charge, unpaired electrons, lone pairs, isotope
+  and integer bond orders in `model_graph`. Indices are local zero-based diagram
+  indices, never RNG Atom IDs. Draw from this graph without reinferring radicals
+  from SMILES; show neutral bonded carbon lone pairs as an LP annotation.
+  `candidate_smiles` remains a searchable serialization that may lose electron
+  pairing, and `radical_electrons` remains its RDKit representation property.
+  `model_unpaired_electrons` is the selected model assignment, not a spin measurement.
+- Check the serialized candidate with RDKit and verify composition, connectivity
+  and fragment charge are preserved. This is a representation check, not scientific
+  validation. One optimum neither enumerates all alternatives nor establishes a
+  unique electronic state or resonance class. Export named `model_objectives`
+  instead of the old weighted `model_score`.
 - Record optimization completion separately from candidate enumeration.
   `candidate_search_complete=false` explicitly means alternatives were not
   exhaustively enumerated, even when optimization completed. Do not publish a
@@ -74,22 +89,30 @@ models, automatic species filtering and scientific validation against a curated
 real-trajectory set remain separate work. This annotation feature does not
 constitute a validated filter or change candidate-route eligibility.
 
-## PR review validation and v2 selection
+## PR review validation and v3 selection
 
-The [PR #73 feedback](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6702833099)
-reproduced positive-halogen candidates for small halocarbon fragments in v1.
-Increasing the charge penalty alone also changed the intended CO representation.
-We therefore tested the positive-halogen restriction independently, as well as a
-larger exploratory combination of negative-charge-site restrictions, adjacent
-charge pairing and lexicographic objectives. The latter did not establish better
-strict reference agreement and is not enabled by this revision.
+v2 addressed [positive-halogen candidates](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6702833099)
+while retaining v1's weighted objective. The [next review](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6703323546)
+showed that the radical penalty still favored carbon cations with incomplete shells,
+and that the earlier reference set overrepresented halogenated closed-shell species.
 
-The selected minimal change removes the observed positive-halogen candidates and
-improves strict bond/formal-charge agreement on the pinned reference collection;
-it still disagrees with some reference representations and cannot identify spin
-or carbene electronic states. Local unpaired-electron/lone-pair agreement is a
-separate, weaker result than establishing the electronic state. See the
-[reference validation](../research/lewis-reference-validation.md) for denominators,
-exclusions, sources and reproduction. The result schema remains v1; the method
-changes to v2, invalidating v1 prepared annotations through the existing version
-check. No original Species or reaction identity is migrated.
+v3 admits neutral-carbon lone-pair assignments and explicitly prioritizes avoiding
+charged shell deficits and preserving heteroatom shells. It returns neutral cumulene
+representations for the four reported carbon-chain examples while retaining the
+charge-separated CO representation. This is a naming convention under declared
+assumptions, not evidence that the selected carbene arrangement is a ground state.
+The reference collection includes triplet C2/C2O assignments that v3 does not match.
+
+The [reference validation](../research/lewis-reference-validation.md) now publishes
+v1, v2, the previously unreported combined experiment, and v3 on the same denominators,
+plus predeclared small-C/N/O and reactive-fragment strata. v3 has lower aggregate
+strict agreement than v2 (7449 versus 7487 of 7775), although it removes the observed
+carbon-charge pathologies and preserves some previously lost lone-pair assignments.
+This tradeoff prevents claiming a general accuracy improvement or validated filter.
+The historical combined experiment is reproducible from a checked-in patch and
+remains a comparison, not another selectable production method.
+
+Result schema v2 introduces the model graph and named objectives. Method v3 and
+schema v2 invalidate older prepared annotations; users explicitly rebuild them.
+Original Species and reaction identities are never migrated. Real-trajectory and
+spin-resolved validation remain deferred.

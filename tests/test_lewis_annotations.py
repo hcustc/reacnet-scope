@@ -31,6 +31,19 @@ def neutral(**kwargs):
 
 
 @pytest.mark.parametrize("smiles,expected", [
+    ("[C][C]", "[C]=[C]"), ("[C][C][C]", "[C]=C=[C]"),
+    ("[C][C][O]", "[C]=C=O"), ("[C][C][C][O]", "[C]=C=C=O"),
+])
+def test_carbon_fragment_naming_does_not_trade_radicals_for_charge_separation(smiles, expected):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    candidate = Chem.MolFromSmiles(result["candidate_smiles"])
+    assert Chem.MolToSmiles(candidate) == Chem.MolToSmiles(Chem.MolFromSmiles(expected))
+    assert all(a.GetFormalCharge() == 0 for a in candidate.GetAtoms())
+    assert result["unique_electronic_state"] == "not_established"
+
+
+@pytest.mark.parametrize("smiles,expected", [
     ("[C][F]", "[C]F"), ("[C][Cl]", "[C]Cl"),
     ("[H][C][Cl]", "[CH]Cl"), ("[F][C][F]", "F[C]F"),
     ("[C][Br]", "[C]Br"), ("[C][I]", "[C]I"),
@@ -48,10 +61,11 @@ def test_halocarbon_candidates_do_not_charge_separate_to_quench_radicals(smiles,
 def test_halogen_restriction_preserves_co_charge_pair_and_exposes_model_rules():
     result = annotate_lewis("[C][O]", options=neutral())
     assert result["candidate_smiles"] == "[C-]#[O+]"
-    assert result["model_score"] == 20
-    assert result["method"]["charge_policy"] == {"positive_halogen": "forbidden"}
+    assert result["model_objectives"]["formal_charge_count"] == 2
+    assert result["model_objectives"]["charged_shell_deficit"] == 0
+    assert result["method"]["charge_policy"]["positive_halogen"] == "forbidden"
     assert result["method"]["radical_electrons_basis"] == "RDKit_representation_not_electronic_state"
-    assert result["method"]["method"] == "neutral-main-group-milp/v2"
+    assert result["method"]["method"] == "neutral-main-group-milp/v3"
 
 
 def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
@@ -60,6 +74,31 @@ def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
     charged = [a for a in mol.GetAtoms() if a.GetFormalCharge()]
     assert sorted((a.GetSymbol(), a.GetFormalCharge()) for a in charged) == [("N", 1), ("O", -1)]
     assert mol.GetBondBetweenAtoms(charged[0].GetIdx(), charged[1].GetIdx()) is not None
+
+
+@pytest.mark.parametrize("limit", ["time", "nodes"])
+def test_lexicographic_passes_share_budget_and_do_not_publish_partial_optima(monkeypatch, limit):
+    from reacnet_scope import lewis
+    solve = lewis.milp
+    calls = []
+    def budgeted(*args, **kwargs):
+        calls.append(kwargs["options"])
+        if len(calls) == 1:
+            result = solve(*args, **kwargs)
+            if limit == "nodes":
+                result.mip_node_count = 10
+            return result
+        return SimpleNamespace(status=1, message="Time limit reached", x=None)
+    monkeypatch.setattr(lewis, "milp", budgeted)
+    result = annotate_lewis("[C][O]", options=neutral(max_nodes=10))
+    assert result["status"] == ("timeout" if limit == "time" else "truncated")
+    assert result["candidate_smiles"] is None
+    assert result["optimization_stages_completed"] == 1
+    assert result["optimization_complete"] is False
+    assert result["model_objectives"] == {"charged_shell_deficit": 0}
+    assert len(calls) == (2 if limit == "time" else 1)
+    if limit == "time":
+        assert calls[1]["time_limit"] < calls[0]["time_limit"]
 
 
 @pytest.mark.parametrize("miso", [0, 1, 2, None])
@@ -181,18 +220,47 @@ def test_revision_and_assumption_changes_invalidate_results(sources):
     assert get_lewis_annotation(sources, "[C][O]")["coverage"] == "selected_representative_only"
 
 
-def test_v1_publication_is_rejected_and_rebuilt_with_v2_rules(sources):
+@pytest.mark.parametrize("old_method", ["v1", "v2"])
+def test_old_publication_is_rejected_and_rebuilt_with_v3_rules(sources, old_method):
     import sqlite3
     prepare_lewis_annotations(sources, options=neutral())
     with sqlite3.connect(annotation_path(sources)) as db:
         method = json.loads(db.execute("SELECT value FROM meta WHERE key='method'").fetchone()[0])
-        method["method"] = "neutral-main-group-milp/v1"
+        method["method"] = "neutral-main-group-milp/" + old_method
         db.execute("UPDATE meta SET value=? WHERE key='method'", (json.dumps(method),))
     assert annotation_status(sources)["state"] == "stale"
     with pytest.raises(IndexStaleError):
         get_lewis_annotation(sources, "[C][O]")
     prepare_lewis_annotations(sources, options=neutral())
-    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v2"
+    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v3"
+
+
+def test_carbene_model_graph_retains_pairing_lost_by_smiles_roundtrip():
+    from reacnet_scope.lewis import lewis_model_molecule
+    result = annotate_lewis("[F][C][F]", options=neutral())
+    assert result["model_unpaired_electrons"] == 0
+    assert result["radical_electrons"] == 2  # RDKit SMILES representation, not the model assignment.
+    model = lewis_model_molecule(result)
+    carbon = next(a for a in model.GetAtoms() if a.GetSymbol() == "C")
+    assert carbon.GetNumRadicalElectrons() == 0
+    assert carbon.GetIntProp("model_lone_pairs") == 1
+    assert result["model_graph"]["index_basis"] == "local_zero_based_not_RNG_atom_ids"
+    assert result["schema_version"] == "reacnet-scope/lewis-annotation/v2"
+    assert result["unique_electronic_state"] == "not_established"
+    rendered = svc.render_lewis_svg(result)
+    assert rendered["ok"] and "<svg" in rendered["svg"]
+
+
+def test_legacy_result_schema_requires_repreparation(sources):
+    import sqlite3
+    from reacnet_scope.indexes import IndexInvalidError
+    prepare_lewis_annotations(sources, options=neutral())
+    with sqlite3.connect(annotation_path(sources)) as db:
+        db.execute("UPDATE meta SET value=? WHERE key='schema'", (json.dumps("reacnet-scope/lewis-annotation/v1"),))
+    with pytest.raises(IndexInvalidError):
+        get_lewis_annotation(sources, "[C][O]")
+    prepare_lewis_annotations(sources, options=neutral())
+    assert get_lewis_annotation(sources, "[C][O]")["schema_version"] == "reacnet-scope/lewis-annotation/v2"
 
 
 def test_queued_request_rejects_changed_source_before_reusing_publication(sources):

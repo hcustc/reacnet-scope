@@ -2,7 +2,9 @@
 import pytest
 from rdkit import Chem
 
-from scripts.benchmark_lewis_rmg import adjacency_molecule, comparison_keys, library_entries
+from reacnet_scope.lewis import LewisOptions, annotate_lewis, lewis_model_molecule
+
+from scripts.benchmark_lewis_rmg import adjacency_molecule, comparison_keys, library_entries, reference_strata
 
 
 def test_carbene_bond_graph_agreement_does_not_count_as_local_electron_agreement():
@@ -17,6 +19,11 @@ multiplicity 1
     assert structure == candidate_structure
     assert electrons != candidate_electrons
     assert spin == 1 and added == 0
+    annotation = annotate_lewis("F[C]F", options=LewisOptions(assume_neutral=True))
+    model_structure, model_electrons = comparison_keys(lewis_model_molecule(annotation))
+    assert model_structure == structure
+    assert model_electrons == electrons
+    assert annotation["unique_electronic_state"] == "not_established"
 
 
 def test_reference_hydrogen_inference_uses_declared_electron_bookkeeping():
@@ -36,3 +43,17 @@ def test_reference_library_is_parsed_without_executing_python(tmp_path):
 def test_reference_bond_asymmetry_is_reported_instead_of_silently_repaired():
     with pytest.raises(ValueError, match="inconsistent_bond_pair"):
         adjacency_molecule("1 H u0 p0 c0 {2,S}\n2 H u0 p0 c0")
+
+
+def test_small_fragment_strata_use_reference_features_not_success():
+    base = {"status": "generated", "elements": ["C", "H", "O"], "heavy_atoms": 3,
+            "reference_unpaired_electrons": 0, "reference_carbon_lone_pairs": 0}
+    rows = [dict(base, structure_match=True),
+            dict(base, reference_carbon_lone_pairs=1, structure_match=False),
+            dict(base, reference_unpaired_electrons=1, structure_match=False),
+            dict(base, heavy_atoms=5), dict(base, elements=["C", "F"])]
+    strata = reference_strata(rows)
+    assert strata["small_CNO"]["entries"] == 3
+    assert strata["small_CNO"]["structure_matches"] == 1
+    assert strata["small_CNO_unpaired_or_carbon_lone_pair"]["entries"] == 2
+    assert strata["small_CNO_carbon_lone_pair"]["entries"] == 1

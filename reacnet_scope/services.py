@@ -11,7 +11,7 @@ from typing import Any
 
 from reacnet_scope import analysis_services as _analysis
 from reacnet_scope.lewis_services import (lewis_status, lewis_detail, lewis_search, lewis_export,
-                                        lewis_task_status, lewis_source_fingerprint)
+                                        lewis_task_status, lewis_source_fingerprint, render_lewis_svg)
 from reacnet_scope.dft_geometry import (
     DFT_GEOMETRY_SCHEMA_VERSION,
     DftGeometryBundle,

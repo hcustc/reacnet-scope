@@ -45,3 +45,34 @@ def lewis_export(artifacts, *, format="json", alias=""):
         return export_lewis_annotations(artifacts, format=format, alias=alias)
     except IndexNotReadyError as exc:
         raise ServiceError(str(exc), reason="lewis_index_not_ready") from exc
+
+
+def render_lewis_svg(annotation, *, width=280, height=200):
+    """Draw the stored model assignment, retaining carbene lone-pair choices."""
+    from rdkit import Chem
+    from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D
+    from .lewis import lewis_model_molecule
+    try:
+        molecule = lewis_model_molecule(annotation)
+        # Prepare rings/aromaticity but do not overwrite the model's u/p
+        # assignment with RDKit's SMILES valence-deficit radical inference.
+        Chem.SanitizeMol(molecule, sanitizeOps=(Chem.SanitizeFlags.SANITIZE_ALL
+                         ^ Chem.SanitizeFlags.SANITIZE_FINDRADICALS))
+        rdDepictor.Compute2DCoords(molecule)
+        drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+        options = drawer.drawOptions()
+        options.addStereoAnnotation = False
+        options.padding = 0.08
+        # Carbon lone pairs are otherwise invisible in a skeletal diagram.
+        # This is the selected model convention, not an asserted spin state.
+        for atom in molecule.GetAtoms():
+            pairs = atom.GetIntProp("model_lone_pairs")
+            if atom.GetSymbol() == "C" and atom.GetFormalCharge() == 0 and atom.GetDegree() > 0 and pairs:
+                atom.SetProp("atomLabel", "C")
+                atom.SetProp("atomNote", f"LP={pairs}")
+        drawer.DrawMolecule(molecule)
+        drawer.FinishDrawing()
+        return {"ok": True, "svg": drawer.GetDrawingText(), "message": ""}
+    except (ValueError, RuntimeError, TypeError, KeyError) as exc:
+        return {"ok": False, "svg": "", "message": str(exc)}

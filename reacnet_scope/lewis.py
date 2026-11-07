@@ -18,14 +18,12 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 from rdkit import Chem, rdBase
 
 
-LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v1"
-LEWIS_METHOD = "neutral-main-group-milp/v2"
-_SCORE_WEIGHTS = {"unpaired_electrons": 100, "absolute_formal_charge": 10,
-                  "shell_deficit": 10, "expanded_shell_excess": 1}
+LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v2"
+LEWIS_METHOD = "neutral-main-group-milp/v3"
+_OBJECTIVES = ("charged_shell_deficit", "hetero_shell_deficit", "unpaired_electrons", "shell_deficit", "formal_charge_count", "expanded_shell_excess")
+_HALOGENS = frozenset({"F", "Cl", "Br", "I"})
 # Valence electrons and closed-shell bond-order sums by formal charge.
 # Lower sums retain unpaired electrons; P/S additionally permit expanded shells.
-# Positive halogen states are outside this naming model. This restriction is
-# a conservative domain choice, not a universal statement about halogen chemistry.
 _STATES = {
     "H": (1, {-1: (0,), 0: (1,), 1: (0,)}),
     "B": (3, {-1: (4,), 0: (3,), 1: (2,)}),
@@ -70,10 +68,13 @@ def method_metadata() -> dict:
     return {"method": LEWIS_METHOD, "rdkit_version": rdBase.rdkitVersion,
             "scipy_version": scipy.__version__, "elements": sorted(_STATES),
             "fragment_charge": 0, "spin_model": "unspecified",
-            "charge_policy": {"positive_halogen": "forbidden"},
-            "objective_policy": "weighted_heuristic",
-            "score_weights": dict(_SCORE_WEIGHTS),
+            "objective_order": list(_OBJECTIVES),
+            "charge_policy": {"positive_halogen": "forbidden",
+                              "negative_sites": "N_O_halogen_or_C_with_one_heavy_neighbor",
+                              "pairing": "one_to_one_opposite_charges_on_existing_edges"},
             "radical_electrons_basis": "RDKit_representation_not_electronic_state",
+            "neutral_carbon_pairing": "all_allowed_unpaired_lone_pair_partitions",
+            "electron_assignment_claim": "one_model_assignment_not_spin_identification",
             "candidate_policy": "one_model_optimum_not_exhaustive_enumeration"}
 
 
@@ -140,28 +141,109 @@ def _atom_states(atom):
     element, degree = atom.GetSymbol(), atom.GetDegree()
     electrons, targets = _STATES[element]
     states = set()
+    heavy_degree = sum(neighbor.GetAtomicNum() != 1 for neighbor in atom.GetNeighbors())
     for charge, closed_sums in targets.items():
+        # Conservative model domain, not universal chemistry: e.g. borate,
+        # phosphide and chloronium representations require a different model.
+        if charge < 0 and not (element in {"N", "O"} | _HALOGENS
+                               or element == "C" and heavy_degree == 1):
+            continue
         for closed_sum in closed_sums:
             for bond_sum in range(degree, min(closed_sum, 3 * degree) + 1):
-                radicals = closed_sum - bond_sum
                 nonbonding = electrons - charge - bond_sum
-                if nonbonding < radicals or (nonbonding - radicals) % 2:
-                    continue
-                occupancy = 2 * bond_sum + nonbonding
-                shell = 2 if element == "H" else 6 if element == "B" and charge == 0 else 8
-                if element in {"P", "S"}:
-                    shell = max(8, 2 * math.ceil(occupancy / 2))
-                if occupancy > shell or shell > 12:
-                    continue
-                penalty = (_SCORE_WEIGHTS["unpaired_electrons"] * radicals
-                           + _SCORE_WEIGHTS["absolute_formal_charge"] * abs(charge)
-                           + _SCORE_WEIGHTS["shell_deficit"] * (shell - occupancy)
-                           + _SCORE_WEIGHTS["expanded_shell_excess"] * max(0, shell - 8))
-                states.add((bond_sum, charge, radicals, penalty))
+                candidates = range(nonbonding % 2, nonbonding + 1, 2) if element == "C" and charge == 0 else (closed_sum - bond_sum,)
+                for radicals in candidates:
+                    if nonbonding < radicals or (nonbonding - radicals) % 2:
+                        continue
+                    occupancy = 2 * bond_sum + nonbonding
+                    shell = 2 if element == "H" else 6 if element == "B" and charge == 0 else 8
+                    if element in {"P", "S"}:
+                        shell = max(8, 2 * math.ceil(occupancy / 2))
+                    if occupancy > shell or shell > 12:
+                        continue
+                    states.add((bond_sum, charge, radicals, shell - occupancy, max(0, shell - 8)))
     return sorted(states)
 
 
+def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
+    """Prove each integer objective optimal before considering the next one.
+
+    All passes share the same time/node budget. An incumbent, or even a proven
+    optimum for only a prefix of objectives, is never a finished annotation.
+    """
+    deadline = time.monotonic() + seconds
+    used_nodes, scores, values = 0, {}, None
+    fields = {"optimization_complete": False, "model_objectives": scores,
+              "optimization_stages_completed": 0, "solver_nodes_used": 0}
+    for name, objective in zip(_OBJECTIVES, objectives, strict=True):
+        if values is not None and not np.any(objective):
+            scores[name] = 0
+            fields["optimization_stages_completed"] += 1
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or used_nodes >= options.max_nodes:
+            return None, {**fields, "status": "timeout" if remaining <= 0 else "truncated",
+                          "reason": "solver_budget", "truncated": True}
+        result = milp(objective, integrality=np.ones(len(objective)), bounds=Bounds(lower, upper),
+                      constraints=LinearConstraint(matrix, rhs, rhs),
+                      options={"time_limit": remaining, "node_limit": options.max_nodes - used_nodes,
+                               "mip_rel_gap": 0.0})
+        used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
+        fields.update(solver_status=int(result.status), solver_message=str(result.message),
+                      solver_nodes_used=used_nodes)
+        if result.status == 1:
+            return None, {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
+                          "reason": "solver_budget", "truncated": True}
+        if result.status != 0 or result.x is None:
+            infeasible = result.status == 2 and not scores
+            return None, {**fields, "optimization_complete": infeasible,
+                          "status": "no_candidate" if infeasible else "solver_failed",
+                          "reason": "model_infeasible" if infeasible else "solver_failed"}
+        values = np.rint(result.x)
+        if (not np.allclose(values, result.x, atol=1e-5)
+                or not np.allclose(matrix @ values, rhs)
+                or np.any(values < lower) or np.any(values > upper)):
+            return None, {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}
+        optimum = int(round(float(objective @ values)))
+        scores[name] = optimum
+        fields["optimization_stages_completed"] += 1
+        # Exact integer equality prevents lower-priority improvements from
+        # buying even one unit of a higher-priority objective.
+        matrix = np.vstack((matrix, objective))
+        rhs = np.append(rhs, optimum)
+    return values, {**fields, "optimization_complete": True}
+
+
+def _charge_policy_holds(molecule):
+    """Recheck the emitted representation, since sanitization may change it."""
+    positives, negatives = [], set()
+    for atom in molecule.GetAtoms():
+        charge, element = atom.GetFormalCharge(), atom.GetSymbol()
+        if charge not in (-1, 0, 1) or (charge > 0 and element in _HALOGENS):
+            return False
+        if charge < 0:
+            heavy_degree = sum(n.GetAtomicNum() != 1 for n in atom.GetNeighbors())
+            if not (element in {"N", "O"} | _HALOGENS or element == "C" and heavy_degree == 1):
+                return False
+            negatives.add(atom.GetIdx())
+        if charge > 0:
+            positives.append(atom.GetIdx())
+    matched = {}
+    def pair(positive, seen):
+        for neighbor in molecule.GetAtomWithIdx(positive).GetNeighbors():
+            negative = neighbor.GetIdx()
+            if negative not in negatives or negative in seen:
+                continue
+            seen.add(negative)
+            if negative not in matched or pair(matched[negative], seen):
+                matched[negative] = positive
+                return True
+        return False
+    return len(positives) == len(negatives) and all(pair(i, set()) for i in positives)
+
+
 def _solve(graph, options: LewisOptions, seconds: float) -> dict:
+    started = time.monotonic()
     atoms = list(graph.GetAtoms())
     bonds = list(graph.GetBonds())
     states = [_atom_states(atom) for atom in atoms]
@@ -171,51 +253,59 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
     for items in states:
         offsets.append(width)
         width += len(items)
+    pairing_offset = width
+    width += 2 * len(bonds)
     fragments = Chem.GetMolFrags(graph)
-    matrix = np.zeros((2 * len(atoms) + len(fragments), width))
+    pairing_row = 2 * len(atoms) + len(fragments)
+    matrix = np.zeros((pairing_row + 2 * len(atoms), width))
     rhs = np.zeros(len(matrix))
-    objective = np.zeros(width)
+    objectives = np.zeros((len(_OBJECTIVES), width))
     lower, upper = np.zeros(width), np.ones(width)
     lower[:len(bonds)], upper[:len(bonds)] = 1, 3
     for j, bond in enumerate(bonds):
-        matrix[bond.GetBeginAtomIdx(), j] = 1
-        matrix[bond.GetEndAtomIdx(), j] = 1
+        left, right = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        matrix[left, j] = 1
+        matrix[right, j] = 1
+        # Each directed pairing binary contributes once to a positive atom's
+        # row and once to an adjacent negative atom's row.
+        for direction, (positive, negative) in enumerate(((left, right), (right, left))):
+            column = pairing_offset + 2 * j + direction
+            matrix[pairing_row + positive, column] = 1
+            matrix[pairing_row + len(atoms) + negative, column] = 1
         if bond.GetBeginAtom().GetSymbol() == "H" or bond.GetEndAtom().GetSymbol() == "H":
             upper[j] = 1
     fragment_for = {i: j for j, fragment in enumerate(fragments) for i in fragment}
     for i, items in enumerate(states):
         rhs[len(atoms) + i] = 1
-        for k, (bond_sum, charge, _radicals, penalty) in enumerate(items):
+        for k, (bond_sum, charge, radicals, deficit, expanded) in enumerate(items):
             j = offsets[i] + k
             matrix[i, j] = -bond_sum
             matrix[len(atoms) + i, j] = 1
             matrix[2 * len(atoms) + fragment_for[i], j] = charge
-            objective[j] = penalty
-    result = milp(objective, integrality=np.ones(width), bounds=Bounds(lower, upper),
-                  constraints=LinearConstraint(matrix, rhs, rhs),
-                  options={"time_limit": seconds, "node_limit": options.max_nodes, "mip_rel_gap": 0.0})
-    fields = {"optimization_complete": result.status in (0, 2),
-              "solver_status": int(result.status), "solver_message": str(result.message)}
-    if result.status == 1:
-        # Keep no incumbent: a bounded search cannot silently replace the name
-        # with a candidate dependent on when the solver happened to stop.
-        return {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
-                "reason": "solver_budget", "truncated": True}
-    if result.status != 0 or result.x is None:
-        return {**fields, "status": "no_candidate" if result.status == 2 else "solver_failed",
-                "reason": "model_infeasible" if result.status == 2 else "solver_failed"}
-    values = np.rint(result.x)
-    if not np.allclose(values, result.x, atol=1e-5) or not np.allclose(matrix @ values, rhs):
-        return {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}
+            if charge:
+                matrix[pairing_row + (0 if charge > 0 else len(atoms)) + i, j] = -1
+            objectives[:, j] = deficit if charge else 0, deficit if atoms[i].GetSymbol() != "C" else 0, radicals, deficit, abs(charge), expanded
+    values, fields = _optimize(objectives, matrix, rhs, lower, upper, options,
+                               seconds - (time.monotonic() - started))
+    if values is None:
+        return fields
     molecule = Chem.RWMol(graph)
     for j, bond in enumerate(molecule.GetBonds()):
         bond.SetBondType({1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}[int(values[j])])
+    model_atoms = []
     for i, items in enumerate(states):
-        _b, charge, radicals, _p = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
+        _b, charge, radicals, _deficit, _expanded = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
         atom = molecule.GetAtomWithIdx(i)
         atom.SetFormalCharge(charge)
         atom.SetNumRadicalElectrons(radicals)
         atom.SetNoImplicit(True)
+        nonbonding = _STATES[atom.GetSymbol()][0] - charge - _b
+        model_atoms.append({"index": i, "element": atom.GetSymbol(), "isotope": atom.GetIsotope(),
+                            "formal_charge": charge, "unpaired_electrons": radicals,
+                            "lone_pairs": (nonbonding - radicals) // 2})
+    model_graph = {"index_basis": "local_zero_based_not_RNG_atom_ids", "atoms": model_atoms,
+                   "bonds": [[b.GetBeginAtomIdx(), b.GetEndAtomIdx(), int(b.GetBondTypeAsDouble())]
+                             for b in molecule.GetBonds()]}
     try:
         with rdBase.BlockLogs():
             checked = Chem.Mol(molecule)
@@ -223,8 +313,7 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
             if flag != Chem.SanitizeFlags.SANITIZE_NONE:
                 return {**fields, "status": "candidate_rejected", "reason": "candidate_rdkit_check_failed"}
             candidate = Chem.MolToSmiles(checked, canonical=True)
-            if any(atom.GetSymbol() in {"F", "Cl", "Br", "I"} and atom.GetFormalCharge() > 0
-                   for atom in checked.GetAtoms()):
+            if not _charge_policy_holds(checked):
                 return {**fields, "status": "candidate_rejected", "reason": "candidate_charge_policy_failed"}
     except (ValueError, RuntimeError):
         return {**fields, "status": "solver_failed", "reason": "candidate_serialization_failed"}
@@ -236,7 +325,8 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
         return {**fields, "status": "solver_failed", "reason": "candidate_graph_or_charge_changed"}
     return {**fields, "status": "generated", "reason": "one_heuristic_candidate",
             "candidate_smiles": candidate, "candidate_count": 1,
-            "model_score": float(result.fun),
+            "model_graph": model_graph,
+            "model_unpaired_electrons": sum(a["unpaired_electrons"] for a in model_atoms),
             "formal_charge": sum(a.GetFormalCharge() for a in checked.GetAtoms()),
             "radical_electrons": sum(a.GetNumRadicalElectrons() for a in checked.GetAtoms())}
 
@@ -294,3 +384,53 @@ def lewis_alias_key(smiles: str) -> str:
     with rdBase.BlockLogs():
         molecule = Chem.MolFromSmiles(smiles)
     return Chem.MolToSmiles(molecule, canonical=True) if molecule is not None else smiles
+
+
+def lewis_model_molecule(annotation: dict):
+    """Reconstruct the stored model assignment without reparsing lossy SMILES.
+
+    Atom indices here are local diagram indices, never RNG/trajectory Atom IDs.
+    The graph preserves one model u/p assignment, not a determined spin state.
+    """
+    graph = annotation.get("model_graph") or {}
+    if not isinstance(graph, dict):
+        raise ValueError("invalid Lewis model graph")
+    atoms, bonds = graph.get("atoms"), graph.get("bonds")
+    if (graph.get("index_basis") != "local_zero_based_not_RNG_atom_ids"
+            or not isinstance(atoms, list) or not 1 <= len(atoms) <= 500
+            or not isinstance(bonds, list) or len(bonds) > 1500):
+        raise ValueError("invalid Lewis model graph")
+    molecule = Chem.RWMol()
+    for index, row in enumerate(atoms):
+        if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] != index or row.get("element") not in _STATES:
+            raise ValueError("invalid Lewis model atom")
+        if any(type(row.get(k)) is not int for k in ("isotope", "formal_charge", "unpaired_electrons", "lone_pairs")):
+            raise ValueError("invalid Lewis model electron fields")
+        if not 0 <= row["isotope"] <= 300 or row["formal_charge"] not in (-1, 0, 1) or not 0 <= row["unpaired_electrons"] <= 8 or not 0 <= row["lone_pairs"] <= 6:
+            raise ValueError("invalid Lewis model electron values")
+        atom = Chem.Atom(row["element"])
+        atom.SetNoImplicit(True)
+        atom.SetIsotope(row["isotope"])
+        atom.SetFormalCharge(row["formal_charge"])
+        atom.SetNumRadicalElectrons(row["unpaired_electrons"])
+        atom.SetIntProp("model_lone_pairs", row["lone_pairs"])
+        molecule.AddAtom(atom)
+    seen = set()
+    for bond in bonds:
+        if not isinstance(bond, list) or len(bond) != 3 or any(type(v) is not int for v in bond):
+            raise ValueError("invalid Lewis model bond")
+        left, right, order = bond
+        pair = tuple(sorted((left, right)))
+        if not 0 <= left < len(atoms) or not 0 <= right < len(atoms) or left == right or pair in seen or order not in (1, 2, 3):
+            raise ValueError("invalid Lewis model bond")
+        seen.add(pair)
+        molecule.AddBond(left, right, {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}[order])
+    molecule.UpdatePropertyCache(strict=False)
+    for atom in molecule.GetAtoms():
+        assigned = (sum(b.GetBondTypeAsDouble() for b in atom.GetBonds()) + atom.GetFormalCharge()
+                    + atom.GetNumRadicalElectrons() + 2 * atom.GetIntProp("model_lone_pairs"))
+        if assigned != _STATES[atom.GetSymbol()][0]:
+            raise ValueError("inconsistent Lewis electron bookkeeping")
+    if not _charge_policy_holds(molecule):
+        raise ValueError("inconsistent Lewis charge policy")
+    return molecule.GetMol()

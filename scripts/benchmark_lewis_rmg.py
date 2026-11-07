@@ -179,6 +179,10 @@ def evaluate_entry(entry, backend, options):
                   input_graph_id=annotation.get("input_graph_id"), reference_multiplicity=multiplicity,
                   reference_hydrogens_materialized=added_h,
                   reference_unpaired_electrons=sum(a.GetNumRadicalElectrons() for a in reference.GetAtoms()),
+                  elements=sorted({a.GetSymbol() for a in reference.GetAtoms()}),
+                  heavy_atoms=sum(a.GetAtomicNum() != 1 for a in reference.GetAtoms()),
+                  reference_carbon_lone_pairs=sum(a.GetIntProp("rmg_lone_pairs") for a in reference.GetAtoms()
+                                                  if a.GetSymbol() == "C" and a.GetFormalCharge() == 0),
                   spin_comparison="not_evaluated")
     if annotation["status"] != "generated":
         return result
@@ -191,8 +195,48 @@ def evaluate_entry(entry, backend, options):
         return {**result, "comparison_error": str(exc)}
     result.update(structure_match=structure == ref_structure, local_electrons_match=electrons == ref_electrons,
                   positive_halogen=any(a.GetFormalCharge() > 0 and a.GetSymbol() in {"F", "Cl", "Br", "I"}
-                                       for a in candidate.GetAtoms()))
+                                       for a in candidate.GetAtoms()),
+                  positive_carbon=any(a.GetSymbol() == "C" and a.GetFormalCharge() > 0 for a in candidate.GetAtoms()),
+                  charge_without_opposite_neighbor=any(a.GetFormalCharge() and not any(
+                      a.GetFormalCharge() * n.GetFormalCharge() < 0 for n in a.GetNeighbors())
+                      for a in candidate.GetAtoms()))
+    if annotation.get("model_graph"):
+        try:
+            model = lewis.lewis_model_molecule(annotation)
+            model_structure, model_electrons = comparison_keys(model)
+            result.update(model_local_electrons_match=model_electrons == ref_electrons,
+                          model_vs_smiles_structure_match=model_structure == structure)
+        except (ValueError, RuntimeError) as exc:
+            result["comparison_error"] = str(exc)
     return result
+
+
+def summarize_rows(rows):
+    counts = Counter(row["status"] for row in rows)
+    return {"entries": len(rows), "status_counts": dict(counts),
+            "exclusion_reasons": dict(Counter(row["reason"] for row in rows if row["status"] == "reference_excluded")),
+            "structure_matches": sum(bool(row.get("structure_match")) for row in rows),
+            "local_electrons_matches": sum(bool(row.get("local_electrons_match")) for row in rows),
+            "comparison_errors": sum(bool(row.get("comparison_error")) for row in rows),
+            "positive_halogen_candidates": sum(bool(row.get("positive_halogen")) for row in rows),
+            "positive_carbon_candidates": sum(bool(row.get("positive_carbon")) for row in rows),
+            "charge_without_opposite_neighbor": sum(bool(row.get("charge_without_opposite_neighbor")) for row in rows),
+            "model_assignments_compared": sum("model_local_electrons_match" in row for row in rows),
+            "model_local_electrons_matches": sum(bool(row.get("model_local_electrons_match")) for row in rows),
+            "model_vs_smiles_disagreements": sum(row.get("model_vs_smiles_structure_match") is False for row in rows),
+            "unique_input_graphs": len({row["input_graph_id"] for row in rows if row.get("input_graph_id")})}
+
+
+def reference_strata(rows):
+    # Prespecified composition/size strata, selected from reference properties,
+    # never from whether the candidate happened to match.
+    small = [r for r in rows if r.get("elements") and set(r["elements"]) <= {"C", "H", "N", "O"}
+             and r["heavy_atoms"] <= 4]
+    return {"small_CNO": summarize_rows(small),
+            "small_CNO_unpaired_or_carbon_lone_pair": summarize_rows([
+                r for r in small if r["reference_unpaired_electrons"] or r["reference_carbon_lone_pairs"]]),
+            "small_CNO_carbon_lone_pair": summarize_rows([
+                r for r in small if r["reference_carbon_lone_pairs"]])}
 
 
 def main(argv=None):
@@ -231,17 +275,11 @@ def main(argv=None):
     summaries = {}
     for library in manifest:
         rows = [row for row in results if row["library"] == library["name"]]
-        counts = Counter(row["status"] for row in rows)
-        summaries[library["name"]] = {"entries": len(rows), "status_counts": dict(counts),
-            "exclusion_reasons": dict(Counter(row["reason"] for row in rows if row["status"] == "reference_excluded")),
-            "structure_matches": sum(bool(row.get("structure_match")) for row in rows),
-            "local_electrons_matches": sum(bool(row.get("local_electrons_match")) for row in rows),
-            "comparison_errors": sum(bool(row.get("comparison_error")) for row in rows),
-            "positive_halogen_candidates": sum(bool(row.get("positive_halogen")) for row in rows),
-            "unique_input_graphs": len({row["input_graph_id"] for row in rows if row.get("input_graph_id")})}
+        summaries[library["name"]] = summarize_rows(rows)
     summary = {"reference_revision": args.revision, "sources": manifest, "method": backend.method_metadata(),
                "implementation_sha256": hashlib.sha256(Path(backend.__file__).read_bytes()).hexdigest(),
                "complete": not any(row["status"] == "not_evaluated" for row in results), "libraries": summaries,
+               "reference_strata": reference_strata(results),
                "denominators": "all declared entries; generated-only rates must separately report coverage",
                "spin_comparison": "not_evaluated", "real_trajectory_validation": "not_evaluated"}
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -47,7 +47,7 @@ def annotation_panel(annotation):
     candidate = value.get("candidate_smiles")
     if candidate:
         children.append(html.Code(candidate, style={"overflowWrap": "anywhere"}))
-        image = svc.render_species_svg(candidate)
+        image = svc.render_lewis_svg(value)
         if image.get("ok"):
             children.append(html.Iframe(srcDoc=image["svg"], title="Lewis 候选结构",
                                        style={"border": "none", "width": "100%", "height": "220px"}))
@@ -57,7 +57,7 @@ def annotation_panel(annotation):
                  "representative_connectivity": "当前代表结构的元素与连接图"}
         children.append(html.P(scope.get(value["coverage"], value["coverage"]), className="small mb-1"))
         children.append(html.P("模型：中性片段；自旋未确定。候选不替换 RNG 原始身份。", className="small mb-1"))
-        children.append(html.P("自由基点与计数仅是结构表示属性，不能据此判定真实电子态或卡宾自旋。", className="small mb-1"))
+        children.append(html.P("图中电子点与 LP（孤电子对数）是一个模型分配；SMILES 可能不保留该分配，不能据此判定实际自旋。", className="small mb-1"))
         children.append(html.Details([html.Summary("方法、假设与来源"),
                                      html.Pre(json.dumps(value, ensure_ascii=False, indent=2),
                                               style={"maxHeight": "280px", "overflow": "auto"})]))
