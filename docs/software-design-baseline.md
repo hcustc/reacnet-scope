@@ -256,6 +256,22 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 - 仅在真实 source timestep 映射和已确认 `timestep → ps` 换算均存在时显示 ps。缺单位时显示 source timestep；只有分析帧序号时显示 analyzed frame，不套用换算。导出保留精确反应键、事件身份、原始坐标、时间单位与可用换算值。
 - 时间分布在线只读取已发布事件索引；`events_by_reaction_time` 随 Event Evidence schema 5 在 preparation 中建立。旧版索引需重建，缺源、未准备、过期、无效及有效零结果分别报告。
 
+#### 11.1.3 Lewis 候选结构注释
+
+- [ADR-0033](adr/0033-annotate-representative-species-with-lewis-candidates.md) 定义可选的
+  Lewis Candidate Annotation。原始 Species 身份、方向、计量、计数和事件保持不变；
+  候选名称用于对照与别名检索，返回全部关联原物种并按原身份进入分析。
+- 基础版本处理 `.reactionabcd` / `.species` 的完整代表 SMILES，不枚举逐帧分子图。
+  `miso=0/1/2` 都可处理具体代表，`miso=2` 仅覆盖所选代表，模式未知时明确标注。
+- 保留完整原子组成及 SMILES 定义的氢数，忽略原键级后在显式中性片段假设下推断。
+  已知非零电荷、指定自旋、不支持元素、输入不足和预算截断分别报告，不改写原名称。
+- `neutral-main-group-milp/v1` 返回一个启发式候选，优化完成与候选穷举分开记录；
+  成功序列化或通过 RDKit 检查不证明真实电子态、稳定性、唯一性或化学有效性。
+- 批量任务显式启动，受整体及单结构预算限制，在 Dataset Workspace 原子发布。
+  失败/取消不污染已发布结果；源修订、方法版本和假设变化使旧结果失效。
+  在线详情、别名分页及 JSON/CSV 导出只读已准备结果，保留原结构、候选、假设、方法和来源。
+- 本阶段不自动过滤物种；完整 Molecular Evidence 的组级展开和科学有效性验收另行开展。
+
 ### 11.2 Species 时间演化
 
 普通 Dash 查询必须读取持久化 Species Abundance Index，不得每次完整扫描 `.species`。索引至少提供物种目录、时间点定位、峰值摘要和按 Species 读取的时间序列。

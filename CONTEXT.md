@@ -24,6 +24,15 @@ _Avoid_: Molecular formula, formula group
 A directed, stoichiometry-preserving equation of exact species identities shared by any number of reaction occurrences; ordering within each reaction side is not significant.
 _Avoid_: Reaction event, event row
 
+**Lewis Candidate Annotation**:
+A source-revision-bound, explicitly assumed candidate representation inferred from
+one complete representative Species connectivity graph. It retains the original
+Species identity and records method, assumptions, coverage, processing outcome and
+search limits. It neither establishes a real electronic state nor merges original
+Species, reactions or events. In `miso=2`, a representative annotation does not
+cover other connectivity graphs in the group.
+_Avoid_: Corrected Species, validated molecule, automatic noise filter
+
 **Net Reaction Count**:
 The recorded occurrence count of one directed Reaction Type minus that of its
 strict reverse, pairing complete exact Species multisets with stoichiometry.

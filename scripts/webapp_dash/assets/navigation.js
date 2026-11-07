@@ -38,6 +38,7 @@
     let datasetContext = null;
     let restoringScroll = false;
     let restoreFrame = null;
+    let restoreResizeObserver = null;
     const scrollPositions = new Map();
 
     function readScrollPosition() {
@@ -50,17 +51,35 @@
         if (document.scrollingElement) document.scrollingElement.scrollTop = position.document || 0;
     }
 
+    function stopScrollRestoration() {
+        restoreResizeObserver?.disconnect();
+        restoreResizeObserver = null;
+        cancelAnimationFrame(restoreFrame);
+        restoringScroll = false;
+    }
+
     function restorePageScroll(pageId) {
         if (!observedMain || !pageId || pageId === currentPage) return;
+        stopScrollRestoration();
         currentPage = pageId;
-        restoringScroll = true;
-        cancelAnimationFrame(restoreFrame);
         const position = scrollPositions.get(pageId);
-        applyScrollPosition(position);
-        restoreFrame = requestAnimationFrame(() => {
+        const restore = () => {
+            restoringScroll = true;
+            cancelAnimationFrame(restoreFrame);
             applyScrollPosition(position);
-            restoringScroll = false;
-        });
+            restoreFrame = requestAnimationFrame(() => {
+                applyScrollPosition(position);
+                restoringScroll = false;
+            });
+        };
+        // A late capability banner can temporarily reduce the scroll range,
+        // then browser anchoring moves the viewport as the banner returns.
+        // Reapply the saved position on layout changes until user interaction.
+        // There is no timer or polling, and explicit scrolling always wins.
+        restoreResizeObserver = new ResizeObserver(restore);
+        [document.getElementById(pageId), document.getElementById('page-header')]
+            .filter(Boolean).forEach(element => restoreResizeObserver.observe(element));
+        restore();
     }
 
     function watchPageScroll() {
@@ -79,6 +98,9 @@
         main.addEventListener("scroll", savePosition, {passive: true});
         // Narrow layouts scroll the document; desktop layouts scroll main.
         window.addEventListener("scroll", savePosition, {passive: true});
+        ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(name => {
+            window.addEventListener(name, stopScrollRestoration, {passive: true, capture: true});
+        });
         pageObserver = new MutationObserver(() => {
             const activePage = main.querySelector(".rs-page.active")?.id || null;
             restorePageScroll(activePage);
@@ -99,8 +121,7 @@
         if (next === datasetContext) return;
         datasetContext = next;
         scrollPositions.clear();
-        cancelAnimationFrame(restoreFrame);
-        restoringScroll = false;
+        stopScrollRestoration();
         applyScrollPosition();
     }
 

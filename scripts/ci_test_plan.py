@@ -40,6 +40,8 @@ AREA_PATHS = {
         "tests/browser/test_event_",
     ),
     "species": ("reacnet_scope/composition.py", "reacnet_scope/formula.py",
+                "reacnet_scope/lewis", "scripts/webapp_dash/lewis_workbench.py",
+                "tests/browser/test_lewis_", "tests/test_lewis_",
                 "tests/browser/test_species_"),
     "reactions": ("tests/browser/test_reaction_",),
 }

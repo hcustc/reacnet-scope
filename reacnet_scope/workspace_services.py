@@ -619,6 +619,9 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
     else:
         composition = {"state": "missing"}
     composition["source_available"] = bool(species_source)
+    from .lewis_store import annotation_status
+    lewis = annotation_status(artifacts)
+    lewis["source_available"] = bool(artifacts.get("reaction") or species_source)
     tasks: dict[str, dict[str, Any]] = {}
     if selected_base:
         task_dataset = preparation.discover_dataset(
@@ -629,6 +632,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
             ("event", events),
             ("trajectory", trajectory),
             ("composition", composition),
+            ("lewis", lewis),
         ):
             task = preparation.preparation_task_status(
                 str(Path(selected_base).parent),
@@ -729,6 +733,7 @@ def dataset_preparation_status(folder: str, *, base: str = "") -> dict[str, Any]
         "events": events,
         "trajectory": trajectory,
         "composition": composition,
+        "lewis": lewis,
         "analysis_capabilities": capabilities,
         "tasks": list(tasks.values()),
         "rng_event_command": "--reaction-event --show-molecule-time",
@@ -786,7 +791,7 @@ def list_preparation_tasks(
             dataset = preparation.discover_dataset(str(folder_path), base_path.name)
         except (ServiceError, FileNotFoundError, OSError, RuntimeError):
             continue
-        for capability in ("event", "trajectory", "composition"):
+        for capability in ("event", "trajectory", "composition", "lewis"):
             task = preparation._read_preparation_task(dataset, capability)
             if not task:
                 continue
@@ -817,10 +822,12 @@ def prepare_dataset_workspace(
     kind: str,
     automatic: bool = False,
     expected_dataset_id: str = "",
+    lewis_options=None,
+    lewis_expected_revision: str = "",
 ) -> dict[str, Any]:
     """Build or rebuild one derived index in its Dataset Workspace."""
     normalized_kind = str(kind or "").strip().lower()
-    if normalized_kind not in {"event", "trajectory", "composition"}:
+    if normalized_kind not in {"event", "trajectory", "composition", "lewis"}:
         raise ServiceError("无效准备能力", reason="invalid_preparation_kind")
 
     folder_path = validate_browse_path(folder)
@@ -866,6 +873,7 @@ def prepare_dataset_workspace(
         "event": "events",
         "trajectory": "trajectory",
         "composition": "composition",
+        "lewis": "lewis",
     }[normalized_kind]
     item = before.get(item_key) or {}
     if not item.get("source_available"):
@@ -873,6 +881,7 @@ def prepare_dataset_workspace(
             "event": ".timeline.h5 或 .reactionevent.csv",
             "trajectory": "轨迹",
             "composition": ".species",
+            "lewis": ".reactionabcd 或 .species",
         }
         raise ServiceError(
             f"当前数据集缺少 {labels[normalized_kind]} 源文件。",
@@ -880,7 +889,7 @@ def prepare_dataset_workspace(
         )
 
     previous_state = str(item.get("state") or "missing")
-    if automatic and previous_state == "ready":
+    if automatic and previous_state == "ready" and normalized_kind != "lewis":
         return {"ok": True, "kind": normalized_kind, "reused": True, "status": item}
     rebuild = not automatic and previous_state in {"ready", "stale", "invalid"}
     capability = (
@@ -896,6 +905,8 @@ def prepare_dataset_workspace(
                 capability=capability,
                 case=str(folder_path),
                 base=base_path.name,
+                **({"lewis_options": lewis_options, "lewis_expected_revision": lewis_expected_revision}
+                   if normalized_kind == "lewis" else {}),
             )
     except IndexBuildInProgressError as exc:
         raise ServiceError(
@@ -983,7 +994,7 @@ def cancel_dataset_preparation(
 ) -> dict[str, Any]:
     """Request checkpoint-aware cancellation through the persisted task."""
     normalized = str(kind or "all").strip().lower()
-    if normalized not in {"event", "trajectory", "composition", "all"}:
+    if normalized not in {"event", "trajectory", "composition", "lewis", "all"}:
         raise ServiceError("无效准备能力", reason="invalid_preparation_kind")
     folder_path = validate_browse_path(folder)
     base_path = validate_browse_path(base)
@@ -1022,7 +1033,7 @@ def dismiss_dataset_preparation_task(
 ) -> dict[str, Any]:
     """Dismiss one terminal task record while preserving its derived data."""
     normalized = str(kind or "").strip().lower()
-    if normalized not in {"event", "trajectory", "composition"}:
+    if normalized not in {"event", "trajectory", "composition", "lewis"}:
         raise ServiceError("无效准备能力", reason="invalid_preparation_kind")
     folder_path = validate_browse_path(folder)
     base_path = validate_browse_path(base)

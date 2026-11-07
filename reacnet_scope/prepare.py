@@ -213,6 +213,15 @@ def _source_revision(path_text: str) -> dict[str, Any]:
 def _capability_source_revision(
     dataset: dict[str, str], capability: str
 ) -> dict[str, Any]:
+    if capability == "lewis":
+        from .lewis_store import annotation_revision
+        from .file_collections import is_collection_path, read_collection
+        if is_collection_path(dataset["base"]):
+            current = read_collection(dataset["base"])
+            if current is None or any(current["artifact_paths"].get(role, "") != dataset.get(role, "")
+                                      for role in ("reaction", "species", "timeline", "reactionevent", "molecules")):
+                return {"fingerprint": "collection_changed", "artifacts": []}
+        return annotation_revision(dataset)
     if capability == "event":
         primary, molecules = _event_source_paths(dataset)
         paths = [primary, *([molecules] if molecules else [])]
@@ -549,7 +558,7 @@ def request_cancellation(
                 base=base,
                 capability=item,
             )
-            for item in ("event", "trajectory", "composition")
+            for item in ("event", "trajectory", "composition", "lewis")
         ]
         return any(results)
     task_path = _preparation_task_path(dataset, capability)
@@ -648,6 +657,7 @@ def _event_source_paths(dataset: dict[str, str]) -> tuple[str, str]:
 
 
 def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
+    from .lewis_store import annotation_status
     artifacts: dict[str, Any] = {}
     for kind in (
         "reaction",
@@ -710,6 +720,7 @@ def build_manifest(dataset: dict[str, str]) -> dict[str, Any]:
             "composition": composition_status,
             "event": event_status,
             "rng_events": timed_evidence,
+            "lewis": annotation_status(dataset),
         },
         "settings": {
             "path": str(settings_path),
@@ -775,6 +786,10 @@ def run_preparation(
     case: str,
     capability: str = "all",
     base: str = "",
+    lewis_options=None,
+    lewis_expected_revision: str = "",
+    max_task_seconds: float = 300,
+    max_species: int = 10_000,
 ) -> int:
     capability = str(capability or "all")
     internal_capability = (
@@ -797,6 +812,31 @@ def run_preparation(
             if canceled
             else f"No active {capability} Preparation Task."
         )
+        return 0
+    if internal_capability == "lewis":
+        from .lewis import LewisOptions
+        from .lewis_store import annotation_path, annotation_status, prepare_lewis_annotations
+        if action == "clear":
+            from .indexes import _exclusive_build_lock
+            target = annotation_path(dataset, create=True)
+            with _exclusive_build_lock(target):
+                target.unlink(missing_ok=True)
+            return 0
+        options = lewis_options or LewisOptions()
+        try:
+            _run_preparation_task(
+                dataset, capability="lewis", source_file=(dataset["reaction"]
+                    if Path(dataset["reaction"]).is_file() else dataset["species"]), action=action,
+                operation=lambda progress: prepare_lewis_annotations(
+                    dataset, options=options, max_task_seconds=max_task_seconds,
+                    expected_revision=lewis_expected_revision,
+                    max_species=max_species, progress_callback=progress, rebuild=action == "rebuild"),
+                report=lambda update: print(update.get("message", ""), flush=True),
+            )
+        except KeyboardInterrupt:
+            print("Lewis 准备已取消；旧发布结果保留，未完成任务下次重新开始。")
+            return 130
+        print(json.dumps(annotation_status(dataset), ensure_ascii=False))
         return 0
     selected_trajectory = bool(
         action in {"build", "rebuild"}
@@ -1003,8 +1043,14 @@ def configure_parser(
         command = operations.add_parser(action)
         command.add_argument(
             "capability",
-            choices=("trajectory", "element-distribution", "event", "all"),
+            choices=("trajectory", "element-distribution", "event", "lewis", "all"),
         )
+        command.add_argument("--assume-neutral", action="store_true", help="Lewis：明确采用中性片段假设")
+        command.add_argument("--net-charge", type=int, default=None, help="Lewis：已知净电荷（当前仅支持 0）")
+        command.add_argument("--multiplicity", type=int, default=None, help="Lewis：指定自旋约束（当前返回不支持）")
+        command.add_argument("--max-task-seconds", type=float, default=300, help="Lewis 整体任务时间预算")
+        command.add_argument("--max-species", type=int, default=10000, help="Lewis 整体物种数预算")
+        command.add_argument("--max-solve-seconds", type=float, default=5, help="Lewis 单结构求解时间预算")
         add_dataset_arguments(command)
     return parser
 

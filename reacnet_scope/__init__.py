@@ -1,5 +1,9 @@
 """Core preparation and read-only index APIs for ReacNet Scope."""
 
+from .lewis import LewisOptions, annotate_lewis
+from .lewis_store import (prepare_lewis_annotations, get_lewis_annotation,
+                          search_lewis_annotations, export_lewis_annotations)
+
 from .indexes import (
     IndexBuildInProgressError,
     IndexInvalidError,
@@ -58,6 +62,8 @@ from .lineage_explorer import (
 )
 
 __all__ = [
+    "LewisOptions", "annotate_lewis", "prepare_lewis_annotations",
+    "get_lewis_annotation", "search_lewis_annotations", "export_lewis_annotations",
     "CANDIDATE_HYPERGRAPH_SCHEMA_VERSION", "build_candidate_hypergraph",
     "candidate_hypergraph_svg",
     "lineage_explorer_status", "start_lineage_explorer", "expand_lineage_explorer",

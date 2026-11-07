@@ -3,10 +3,27 @@
 import threading
 import time
 
+import psutil
+import pytest
+
 from scripts.webapp_dash.app import _background_callback_manager
 
 
 _SERVER_LOCK = threading.Lock()
+
+
+@pytest.mark.parametrize("operation,expected", [("job_running", False), ("terminate_job", None)])
+def test_worker_exit_between_process_checks_is_normal_completion(monkeypatch, tmp_path, operation, expected):
+    monkeypatch.setattr('scripts.webapp_dash.app.tempfile.gettempdir', lambda: str(tmp_path))
+    manager = _background_callback_manager()
+    monkeypatch.setattr(psutil, 'pid_exists', lambda pid: True)
+    def already_exited(pid):
+        raise psutil.NoSuchProcess(pid)
+    monkeypatch.setattr(psutil, 'Process', already_exited)
+    try:
+        assert getattr(manager, operation)(999999) == expected
+    finally:
+        manager.handle.close()
 
 
 def _locked_callback(progress, token):
