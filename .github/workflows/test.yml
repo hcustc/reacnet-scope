@@ -2,14 +2,37 @@ name: Test
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 19 * * 0" # Weekly full regression; Monday 03:17 Asia/Shanghai.
 
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      pytest: ${{ steps.coverage.outputs.pytest }}
+      browser_scope: ${{ steps.coverage.outputs.browser_scope }}
+      shards: ${{ steps.coverage.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select test coverage
+        id: coverage
+        run: python3 scripts/ci_test_plan.py
+
   pytest:
+    needs: plan
+    if: needs.plan.outputs.pytest == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,8 +54,15 @@ jobs:
       - name: Run complete test suite
         run: uv run --locked pytest -q
 
-  browser:
+  browser-tests:
+    needs: plan
+    if: needs.plan.outputs.browser_scope != 'none'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,10 +78,39 @@ jobs:
         env:
           REACNET_SCOPE_BROWSER_TESTS: "1"
           REACNET_SCOPE_SCREENSHOTS: /tmp/reacnet-ui-screenshots
-        run: uv run --locked --group browser pytest -vv -o faulthandler_timeout=120 tests/browser
+          BROWSER_SCOPE: ${{ needs.plan.outputs.browser_scope }}
+          BROWSER_SHARD: ${{ matrix.shard }}
+          BROWSER_SHARD_COUNT: ${{ strategy.job-total }}
+        run: >-
+          uv run --locked --group browser pytest -x -vv --tb=short
+          --durations=15 -o faulthandler_timeout=120
+          --junitxml=/tmp/reacnet-browser-results.xml
+          tests/browser --browser-scope="$BROWSER_SCOPE"
+          --browser-shard="$BROWSER_SHARD/$BROWSER_SHARD_COUNT"
       - name: Preserve browser evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: workbench-screenshots
-          path: /tmp/reacnet-ui-screenshots
+          name: workbench-browser-${{ matrix.shard }}
+          path: |
+            /tmp/reacnet-ui-screenshots
+            /tmp/reacnet-browser-results.xml
+
+  # Keep the required-check name. Only an explicit docs-only plan may skip it.
+  browser:
+    if: always()
+    needs: [plan, browser-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check planned browser coverage
+        env:
+          BROWSER_RESULT: ${{ needs.browser-tests.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          BROWSER_SCOPE: ${{ needs.plan.outputs.browser_scope }}
+        run: |
+          test "$PLAN_RESULT" = success || exit 1
+          if [ "$BROWSER_SCOPE" = none ]; then
+            test "$BROWSER_RESULT" = skipped
+          else
+            test "$BROWSER_RESULT" = success
+          fi

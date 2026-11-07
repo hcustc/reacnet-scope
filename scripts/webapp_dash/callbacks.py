@@ -586,6 +586,17 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("rxn-timing-event-grid", "rowData", []),
         reset("rxn-timing-card", "style", {"display": "none"}),
         reset("evolution-payload-store", "data", None),
+        reset("evolution-focus-store", "data", None),
+        reset("evolution-browse-mode", "value", "species"),
+        reset("evolution-ranking", "active_item", None),
+        reset("evolution-start-timestep", "value", None),
+        reset("evolution-end-timestep", "value", None),
+        reset("evolution-filter-result", "data", None),
+        reset("evolution-filter-grid", "rowData", []),
+        reset("evolution-filter-grid", "selectedRows", []),
+        *(reset(f"{prefix}-{field}", "value", [] if field in {"required", "excluded"} else None)
+          for prefix in ("evolution-filter", "evolution-group-filter")
+          for field in ("required", "excluded", "element", "min", "max")),
         reset("evolution-group-payload-store", "data", None),
         reset("evolution-rank-store", "data", None),
         reset("evolution-rank-grid", "rowData", []),
@@ -1353,25 +1364,19 @@ def _event_frame_figure(viewer: dict[str, Any], frame_index: int, scope: str, *,
     atoms = list(frame.get("atoms") or [])
     groups = viewer.get("atom_groups") or {}
     core_ids = {int(value) for value in (groups.get("core") or [])}
+    participant_values = groups.get("participants")
+    if participant_values is None:
+        participant_values = [*(groups.get("reactant") or []), *(groups.get("product") or [])]
     participant_ids = {
         int(value)
-        for value in (
-            groups.get("participants")
-            or groups.get("reactant")
-            or groups.get("product")
-            or []
-        )
+        for value in participant_values
     }
     if scope == "core":
-        core_atoms = [atom for atom in atoms if int(atom.get("id") or -1) in core_ids]
-        atoms = core_atoms or atoms
+        atoms = [atom for atom in atoms if atom.get("id") is not None and int(atom["id"]) in core_ids]
     elif scope == "participants":
-        participant_atoms = [
-            atom
-            for atom in atoms
-            if int(atom.get("id") or -1) in participant_ids
-        ]
-        atoms = participant_atoms or atoms
+        atoms = [atom for atom in atoms if atom.get("id") is not None and int(atom["id"]) in participant_ids]
+    if not atoms:
+        return _empty_plotly_figure("当前显示范围没有可渲染原子")
 
     def coordinate(atom: dict[str, Any], axis: str) -> Any:
         return atom.get(f"display_{axis}", atom.get(axis))
@@ -1922,6 +1927,7 @@ def register_callbacks(app: Any) -> None:
         Input("species-to-evolution-btn", "n_clicks"),
         Input("species-direct-route-btn", "n_clicks"),
         Input("analysis-back-btn", "n_clicks"),
+        Input("evolution-back-btn", "n_clicks"),
         Input("evolution-open-compare-btn", "n_clicks"),
         Input("evolution-close-compare-btn", "n_clicks"),
         Input("evolution-distribution-tab", "n_clicks"),
@@ -1995,6 +2001,8 @@ def register_callbacks(app: Any) -> None:
         triggered_string_id = (
             triggered_id if isinstance(triggered_id, str) else None
         )
+        if triggered_string_id == "evolution-back-btn":
+            triggered_string_id = "analysis-back-btn"
         if triggered_string_id == "event-participant-handoff" and not (
             isinstance(triggered.get("value"), dict) and triggered["value"].get("token")
         ):
@@ -2094,6 +2102,7 @@ def register_callbacks(app: Any) -> None:
             "event-participant-handoff", "event-extract-btn", "event-detail-expand-btn",
             "event-back-btn", "trajectory-back-events-btn",
             "rxn-timing-open-events-btn",
+            "evolution-open-compare-btn", "evolution-close-compare-btn",
         } and stored_state.get("entry") == "species":
             page_state["entry"] = "species"
         active_workspace = str(page_state.get("entry") or PAGE_WORKSPACES.get(page_id, DEFAULT_PAGE))
@@ -3791,31 +3800,39 @@ def register_callbacks(app: Any) -> None:
 
         raise PreventUpdate
 
-    # A synchronous browser refresh reads the live transaction, so an older
-    # HTTP response cannot overwrite a switch started after that refresh.
-    app.clientside_callback(
-        """function(candidate, page, transaction) {
+    # Preview/page updates must not delay or overwrite an explicit switch.
+    # Cancellation is local and immediate; late validation is rejected by the
+    # existing server resolver using the authoritative transaction state.
+    preview_switch_transaction = """function(candidate, page, transaction) {
             const none = window.dash_clientside.no_update;
             const current = transaction || {};
-            if ((current.origin || {}).library &&
-                ['validating', 'succeeded'].includes(current.state)) return none;
+            const origin = current.origin || {};
             const changed = window.dash_clientside.callback_context.triggered
                 .map(item => item.prop_id);
             const supersede = reason =>
                 ['validating', 'candidate-selected', 'failed'].includes(current.state)
                 ? {...current, state: 'superseded', reason} : none;
             if (changed.includes('page-store.data')) {
-                if ((page || {}).page === 'data-management') return none;
+                if ((page || {}).page === 'data-management' ||
+                    (origin.library && origin.page === (page || {}).page)) return none;
                 return supersede('left_workspace');
             }
+            if (origin.library || current.state === 'succeeded') return none;
             if (current.state === 'validating') return supersede('candidate_changed');
             return candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
-        }""",
+        }"""
+    app.clientside_callback(
+        preview_switch_transaction,
         Output("dataset-switch-transaction", "data", allow_duplicate=True),
-        Input("dataset-browser-candidate", "data"),
-        Input("page-store", "data"),
-        State("dataset-switch-transaction", "data"),
-        prevent_initial_call=True,
+        Input("dataset-browser-candidate", "data"), State("page-store", "data"),
+        State("dataset-switch-transaction", "data"), prevent_initial_call=True,
+    )
+    app.clientside_callback(
+        "function(page, candidate, transaction) { return (" +
+        preview_switch_transaction + ")(candidate, page, transaction); }",
+        Output("dataset-switch-transaction", "data", allow_duplicate=True),
+        Input("page-store", "data"), State("dataset-browser-candidate", "data"),
+        State("dataset-switch-transaction", "data"), prevent_initial_call=True,
     )
 
     @app.callback(
@@ -4956,7 +4973,7 @@ def register_callbacks(app: Any) -> None:
 
         formula = detail.get("formula") or "?"
         smiles_value = detail.get("smiles") or smiles
-        evolution_target = smiles
+        evolution_target = f"smiles:{smiles}"
 
         info_panel = html.Div(
             [
@@ -6320,11 +6337,15 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-alert", "children"),
         Output("evolution-payload-store", "data"),
         Output("evolution-group-payload-store", "data"),
+        Output("evolution-focus-store", "data", allow_duplicate=True),
+        Output("evolution-targets", "value", allow_duplicate=True),
+        Output("evolution-species-picker", "value", allow_duplicate=True),
+        Output("evolution-curve-filter", "value", allow_duplicate=True),
         Output("import-pending-evolution", "data"),
         Input("evolution-search-btn", "n_clicks"),
         Input("import-auto-result", "data"),
         Input("species-to-evolution-btn", "n_clicks"),
-        Input("evolution-rank-grid", "selectedRows"),
+        Input("evolution-rank-request", "data"),
         Input("evolution-browse-mode", "value"),
         Input("evolution-group-element", "value"),
         Input("evolution-group-count", "value"),
@@ -6347,6 +6368,10 @@ def register_callbacks(app: Any) -> None:
         State("evolution-rank-grid", "rowData"),
         State("evolution-group-payload-store", "data"),
         State("evolution-group-members-grid", "rowData"),
+        State("evolution-focus-store", "data"),
+        State("evolution-start-timestep", "value"),
+        State("evolution-end-timestep", "value"),
+        *[State(f"evolution-group-filter-{field}", "value") for field in ("required", "excluded", "element", "min", "max")],
         State("app-store", "data"),
         State("import-pending-evolution", "data"),
         prevent_initial_call=True,
@@ -6358,7 +6383,7 @@ def register_callbacks(app: Any) -> None:
             ),
             (
                 Output("evolution-progress", "children"),
-                "正在读取时间序列、对齐多体系并生成曲线…",
+                "正在读取当前目标的丰度时间序列…",
                 "",
             ),
             (
@@ -6368,15 +6393,16 @@ def register_callbacks(app: Any) -> None:
             ),
         ],
     )
-    @defer_query("composition", 4, submit_triggers=frozenset({
+    @defer_query("composition", 8, submit_triggers=frozenset({
         "species-to-evolution-btn",
-        "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
+        "evolution-rank-request", "evolution-browse-mode", "evolution-group-element",
         "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid",
-    }), replay_trigger_kw="submitted_trigger")
+    }), replay_trigger_kw="submitted_trigger",
+        trigger_priority=("evolution-search-btn", "species-to-evolution-btn"))
     def _build_evolution(
         n_clicks,
         shortcut_clicks,
-        rank_selection,
+        rank_request,
         browse_mode,
         group_element,
         group_count,
@@ -6399,27 +6425,38 @@ def register_callbacks(app: Any) -> None:
         rank_rows,
         group_payload,
         member_rows,
+        focus,
+        start_timestep,
+        end_timestep,
+        group_required, group_excluded, filter_element, filter_min, filter_max,
         store,
         submitted_trigger=None,
     ):
-        if n_clicks is None and ctx.triggered_id not in {
+        trigger = submitted_trigger or ctx.triggered_id
+        if n_clicks is None and trigger not in {
             "species-to-evolution-btn",
-            "evolution-rank-grid", "evolution-browse-mode", "evolution-group-element",
+            "evolution-rank-request", "evolution-browse-mode", "evolution-group-element",
             "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid", "import-auto-result",
         }:
             raise PreventUpdate
         store = store or {}
+        rank_selection = (
+            rank_request.get("selection")
+            if rank_request and rank_request.get("context") == context_key(store)
+            else None
+        )
         artifacts = store.get("artifacts", {}) or {}
         from_detail = submitted_trigger == "species-to-evolution-btn" and bool(shortcut_clicks)
         if from_detail:
             browse_mode = "species"
             species_file = ""
             species_files = ""
-        if browse_mode != "group" and ctx.triggered_id in {
+        if browse_mode != "group" and trigger in {
             "evolution-group-element", "evolution-group-count", "evolution-group-members-grid",
         }:
             raise PreventUpdate
         if browse_mode == "group":
+            from .evolution_workbench import element_filter_query
             selected_element = str(group_element or "C")
             try:
                 selected_count = int(group_count)
@@ -6434,7 +6471,7 @@ def register_callbacks(app: Any) -> None:
                 )
                 reference = (
                     str((member or {}).get("smiles") or "")
-                    if member_context_matches and ctx.triggered_id in {
+                    if member_context_matches and trigger in {
                         "evolution-group-members-grid", "evolution-xaxis", "import-auto-result",
                     }
                     else ""
@@ -6446,6 +6483,7 @@ def register_callbacks(app: Any) -> None:
                 )
                 payload = svc.build_elemental_composition_evolution(
                     artifacts,
+                    element_filters=element_filter_query(group_required, group_excluded, filter_element, filter_min, filter_max),
                     group_element=selected_element,
                     max_group_count=selected_count,
                     include_zero=selected_count == 0,
@@ -6459,19 +6497,24 @@ def register_callbacks(app: Any) -> None:
                 ]
                 if not any(row.get("series") == group_name for row in visible_rows):
                     return (_empty_plotly_figure(f"{group_name} 没有可显示的丰度"),
-                            f"当前筛选中没有 {group_name} 物种。", None, None)
+                            f"当前筛选中没有 {group_name} 物种。", None, None,
+                            None, no_update, no_update, no_update)
                 figure = _composition_trend_figure({**payload, "distribution_rows": visible_rows})
                 figure.update_layout(title={"text": f"{group_name} · 丰度随时间变化", "x": 0.01})
-                return figure, None, None, {**payload, "context": context_key(store), "selected_group": group_name}
+                return (figure, None, None, {**payload, "context": context_key(store), "selected_group": group_name},
+                        None, no_update, no_update, no_update)
             except (svc.ServiceError, TypeError, ValueError) as exc:
                 message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
-                return _empty_plotly_figure(message), message, None, None
+                return _empty_plotly_figure(message), message, None, None, None, no_update, no_update, no_update
         rank_context_matches = (
             isinstance(rank_store, dict)
             and rank_store.get("context") == context_key(store)
         )
-        selected_rank = _selected_table_row(rank_selection, rank_rows) if rank_context_matches else None
-        if ctx.triggered_id == "evolution-rank-grid" and selected_rank is None:
+        selected_rank = (
+            _selected_table_row(rank_selection, rank_rows)
+            if rank_context_matches and trigger == "evolution-rank-request" else None
+        )
+        if trigger == "evolution-rank-request" and selected_rank is None:
             raise PreventUpdate
         picked_targets = [
             str(item).strip()
@@ -6484,23 +6527,36 @@ def register_callbacks(app: Any) -> None:
             if t.strip()
         ]
         targets = list(dict.fromkeys([*picked_targets, *manual_targets]))
+        species = ""
+        selected_from_rank = selected_rank is not None and trigger == "evolution-rank-request"
         if from_detail:
             species = str(store.get("selected_smiles") or "").strip()
             if not species:
                 raise PreventUpdate
             targets = [species]
-        elif selected_rank and ctx.triggered_id != "evolution-search-btn":
-            targets = [str(selected_rank.get("smiles") or "")]
+        elif selected_from_rank:
+            species = str(selected_rank.get("smiles") or "")
+            targets = [species]
+        elif trigger != "evolution-search-btn" and (focus or {}).get("context") == context_key(store):
+            targets = list(focus.get("targets") or [])
+            species = str(focus.get("species") or "")
         if not targets:
             targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
             targets = [targets_text_default] if targets_text_default else []
         if not targets:
-            message = "请先选择或输入目标物种。" if ctx.triggered_id == "evolution-search-btn" else None
-            return empty_chart_figure("尚未选择目标物种", "从排行选择物种，或展开设置手动输入目标。"), message, None, None
+            message = "请先选择或输入目标物种。" if trigger == "evolution-search-btn" else None
+            return (empty_chart_figure("尚未选择目标物种", "输入元素条件、分子式或精确结构，例如 C6。"),
+                    message, None, None, None, no_update, no_update, no_update)
+        selection = {"context": context_key(store), "targets": targets, "species": species}
+        target_update = f"smiles:{species}" if from_detail or selected_from_rank else no_update
+        picker_update = [] if from_detail or selected_from_rank else no_update
+        filter_update = "" if from_detail or selected_from_rank else no_update
+        if from_detail or selected_from_rank:
+            curve_filter = ""
         try:
             payload = svc.build_species_evolution(
                 artifacts,
-                targets,
+                [f"smiles:{species}"] if species and targets == [species] else targets,
                 species_file=species_file or "",
                 species_files=species_files or "",
                 x_axis=x_axis or "step",
@@ -6512,9 +6568,11 @@ def register_callbacks(app: Any) -> None:
                 formula_mode=formula_mode or "sum",
                 max_smiles_per_formula=int(max_smiles or 0),
                 time_align=time_align or "raw",
+                start_timestep=start_timestep, end_timestep=end_timestep,
             )
         except svc.ServiceError as exc:
-            return empty_chart_figure("本次绘图未完成", "请查看上方提示，调整设置后重试。"), str(exc.message), None, None
+            return (empty_chart_figure("本次绘图未完成", "请查看上方提示，调整设置后重试。"), str(exc.message),
+                    None, None, selection, target_update, picker_update, filter_update)
 
         curves = payload.get("curves") or []
         curve_filter_text = (curve_filter or "").strip().casefold()
@@ -6558,11 +6616,20 @@ def register_callbacks(app: Any) -> None:
             for item in ((payload.get("meta") or {}).get("warnings") or [])
             if str(item).strip()
         ]
+        members = list(dict.fromkeys(member for curve in curves for member in curve.get("members") or []))
+        selection["element_summaries"] = [
+            f"{curve['name']} · {curve['element_condition']['element']} 原子数 = "
+            f"{curve['element_condition']['count']} · 汇总 {curve['n_members']} 个精确物种"
+            for curve in curves if curve.get("query_type") == "element_sum"
+        ]
+        if len(members) == 1 and not selection["element_summaries"]:
+            selection["species"] = members[0]
         return (
             fig,
             "；".join(warnings) if warnings else None,
             {**payload, "visible_curve_names": visible_names},
             None,
+            selection, target_update, picker_update, filter_update,
         )
 
     @app.callback(
@@ -6622,9 +6689,16 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("evolution-csv-btn", "disabled"),
         Input("evolution-payload-store", "data"),
+        Input("evolution-csv-busy", "data"),
     )
-    def _evolution_export_available(payload):
-        return not bool(payload and payload.get("curves"))
+    def _evolution_export_available(payload, busy=False):
+        if busy or not payload or not payload.get("curves"):
+            return True
+        names = payload.get("visible_curve_names")
+        if names is None:
+            return False
+        return not any((curve.get("name") or curve.get("query") or f"curve_{index}") in names
+                       for index, curve in enumerate(payload["curves"]))
 
     # ── CSV export: evolution ───────────────────────────────────────
 
@@ -6633,12 +6707,14 @@ def register_callbacks(app: Any) -> None:
         Input("evolution-csv-btn", "n_clicks"),
         State("evolution-payload-store", "data"),
         prevent_initial_call=True,
+        running=[(Output("evolution-csv-busy", "data"), True, False),
+                 (Output("evolution-csv-btn", "children"), "正在准备 CSV…", "下载数据 CSV")],
     )
     def _export_evolution_csv(n_clicks, payload):
-        if n_clicks is None or not payload:
+        if not n_clicks or _evolution_export_available(payload):
             raise PreventUpdate
-        csv_text = svc.evolution_to_csv(payload)
-        return {"content": csv_text, "filename": "evolution.csv", "type": "text/csv"}
+        csv_text = svc.evolution_to_csv(payload, curve_names=payload.get("visible_curve_names"))
+        return {"content": "\ufeff" + csv_text, "filename": "abundance_raw.csv", "type": "text/csv;charset=utf-8"}
 
     @app.callback(
         Output("evolution-graph", "clickData"),
@@ -6647,13 +6723,14 @@ def register_callbacks(app: Any) -> None:
             "children",
             allow_duplicate=True,
         ),
+        Output("evolution-rank-grid", "selectedRows", allow_duplicate=True),
         Input("evolution-search-btn", "n_clicks"),
         prevent_initial_call=True,
     )
     def _clear_evolution_curve_selection(n_clicks):
         if n_clicks is None:
             raise PreventUpdate
-        return None, "点击一条演化曲线，查看其成员物种结构。"
+        return None, None, []
 
     @app.callback(
         Output("evolution-structure-detail", "children"),
@@ -6664,7 +6741,7 @@ def register_callbacks(app: Any) -> None:
     def _show_evolution_curve_structures(click_data, show_h, payload):
         points = (click_data or {}).get("points") or []
         if not points or not payload:
-            return "点击一条演化曲线，查看其成员物种结构。"
+            return None
         curve_number = int(points[0].get("curveNumber") or 0)
         visible_names = payload.get("visible_curve_names") or []
         if curve_number < 0 or curve_number >= len(visible_names):
@@ -9060,25 +9137,69 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-csv-btn", "style"),
         Output("evolution-structure-detail", "style"),
         Output("evolution-manual-settings", "style"),
+        Output("evolution-structure-show-h", "style"),
         Input("evolution-browse-mode", "value"),
     )
     def _render_abundance_browser(mode):
         grouped = mode == "group"
-        return ({"display": "none"} if grouped else {},
-                {} if grouped else {"display": "none"},
-                {"display": "none"} if grouped else {},
-                {"display": "none"} if grouped else {},
-                {"display": "none"} if grouped else {})
+        hidden = {"display": "none"}
+        return (hidden if grouped else {},
+                {} if grouped else hidden,
+                hidden if grouped else {},
+                hidden if grouped else {},
+                hidden if grouped else {},
+                hidden if grouped else {})
 
     @app.callback(
         Output("evolution-browse-mode", "value"),
+        Output("evolution-focus-store", "data"),
+        Output("evolution-targets", "value", allow_duplicate=True),
+        Output("evolution-species-picker", "value", allow_duplicate=True),
+        Output("evolution-curve-filter", "value"),
+        Output("evolution-species-file", "value", allow_duplicate=True),
+        Output("evolution-species-files", "value", allow_duplicate=True),
+        Output("evolution-rank-grid", "selectedRows", allow_duplicate=True),
+        Output("evolution-ranking", "active_item"),
         Input("species-to-evolution-btn", "n_clicks"),
+        State("app-store", "data"),
+        State("evolution-rank-store", "data"),
+        State("evolution-rank-grid", "rowData"),
         prevent_initial_call=True,
     )
-    def _open_species_abundance(_clicks):
-        if not _clicks:
+    def _open_species_abundance(_clicks, dataset, ranking, rows):
+        species = str((dataset or {}).get("selected_smiles") or "").strip()
+        if not _clicks or not species:
             raise PreventUpdate
-        return "species"
+        context = context_key(dataset or {})
+        return ("species", {"species": species, "targets": [species], "context": context},
+                f"smiles:{species}", [], "", "", "", {"ids": []}, None)
+
+    @app.callback(
+        Output("evolution-focus", "children"),
+        Output("evolution-focus", "style"),
+        Input("evolution-focus-store", "data"),
+        Input("app-store", "data"),
+        Input("evolution-browse-mode", "value"),
+    )
+    def _render_species_abundance_focus(focus, dataset, mode):
+        if not focus or mode == "group":
+            return [], {"display": "none"}
+        if focus.get("context") != context_key(dataset or {}):
+            return "当前物种来源已变化，请重新选择对象。", {}
+        if focus.get("element_summaries"):
+            summaries = focus["element_summaries"]
+            return html.Details([
+                html.Summary(["匹配物种详情", html.Span(f"{len(summaries)} 个条件")]),
+                html.Div([html.Div(item) for item in summaries], className="rs-evolution-match-body"),
+            ], id="evolution-match-details", className="rs-evolution-match-details", open=False), {}
+        species = str(focus.get("species") or "")
+        if not species:
+            return html.Div([html.Strong("当前查询"), html.Code("；".join(focus.get("targets") or []))]), {}
+        item = svc.build_species_structure_items([species], show_h=True, max_items=1)[0]
+        return html.Div([
+            html.Img(src=item.get("structure_url"), alt=f"{item.get('formula') or '?'} 结构"),
+            html.Div([html.Strong(f"当前物种 · {item.get('formula') or '?'}"), html.Code(species)]),
+        ], className="rs-evolution-focus-summary"), {}
 
     @app.callback(
         Output("evolution-group-element", "options"),
@@ -9099,29 +9220,32 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-rank-grid", "columnDefs"),
         Output("evolution-rank-grid-previews", "data"),
         Output("evolution-rank-status", "children"),
+        Output("evolution-rank-grid", "selectedRows", allow_duplicate=True),
         Input("page-store", "data"),
         Input("app-store", "data"),
+        Input("evolution-ranking", "active_item"),
         State("evolution-rank-store", "data"),
+        prevent_initial_call=True,
     )
-    def _load_abundance_ranking(page, dataset, previous):
+    def _load_abundance_ranking(page, dataset, opened, previous):
         state = migrate_page_state(page)
-        if state["page"] != "evolution" or _evolution_comparison_active(state):
+        if not opened or state["page"] != "evolution" or _evolution_comparison_active(state):
             raise PreventUpdate
         store = dataset or {}
         if not store.get("dataset_id"):
-            return None, [], [], [], "请先选择当前 RNG 数据，或选择多个来源进行丰度比较。"
+            return None, [], [], [], "请先选择当前 RNG 数据，或选择多个来源进行丰度比较。", []
         current_context = context_key(store)
-        if isinstance(previous, dict) and previous.get("context") == current_context:
+        if isinstance(previous, dict) and previous.get("context") == current_context and not previous.get("error"):
             raise PreventUpdate
         columns = [
-            {"field": "formula", "headerName": "分子式", "minWidth": 140},
-            {"field": "smiles", "headerName": "精确结构 (RNG SMILES)", "minWidth": 220},
-            {"field": "total_count", "headerName": "累计采样丰度", "minWidth": 150, "type": "numericColumn"},
+            {"field": "formula", "headerName": "分子式", "minWidth": 90, "flex": 0.8},
+            {"field": "smiles", "headerName": "精确结构 (RNG SMILES)", "minWidth": 150, "flex": 1.6},
+            {"field": "total_count", "headerName": "累计采样丰度", "minWidth": 130, "flex": 1, "type": "numericColumn"},
         ]
         try:
             result = svc.ranked_species_abundance(store.get("artifacts") or {}, limit=50)
         except svc.ServiceError as exc:
-            return {"context": current_context, "error": exc.message}, [], columns, [], exc.message
+            return {"context": current_context, "error": exc.message}, [], columns, [], exc.message, []
         rows = result["rows"]
         count = int(result["total_species"])
         shown = len(rows)
@@ -9133,7 +9257,8 @@ def register_callbacks(app: Any) -> None:
             f"显示前 {shown} / {count} 个精确物种；指标为 {result['sampled_frames']} 个已分析帧的丰度计数之和；"
             f"范围：{frame_range}。" + (" 本页仅显示前 50 名。" if count > shown else "")
         )
-        return {"context": current_context, "rows": rows}, rows, columns, _species_preview_tooltips(rows), status
+        return ({"context": current_context, "rows": rows}, rows, columns, _species_preview_tooltips(rows), status,
+                {"ids": []})
 
     @app.callback(
         Output("evolution-rank-open-btn", "disabled"),
@@ -9250,7 +9375,7 @@ def register_callbacks(app: Any) -> None:
         return (updated_store, "detail", {"display": "block"}, {"display": "block"},
                 {"display": "block"}, {"display": "grid"},
                 _species_detail_children(detail, smiles), {"display": "none"},
-                smiles, {"page": "species", "version": 2, "return_stack": stack},
+                f"smiles:{smiles}", {"page": "species", "version": 2, "return_stack": stack},
                 {"page": "species", "token": handoff.get("request_id")},
                 {}, back_label, {"display": "none"}, {"display": "none"},
                 {"display": "none"}, {})
@@ -9353,14 +9478,19 @@ def register_callbacks(app: Any) -> None:
         Output("species-compare-managed", "options"),
         Output("species-compare-managed", "value"),
         Input("batch-managed-store", "data"),
-        Input("species-compare-catalog-store", "data"),
+        State("species-compare-catalog-store", "data"),
         State("species-compare-sources-store", "data"),
+        State("species-compare-managed", "options"),
     )
-    def _species_compare_managed_options(managed, _catalogs, sources):
+    def _species_compare_managed_options(managed, _catalogs, sources, previous_options):
         options = []
+        # Keep option identities in one order as Current Dataset changes, so an
+        # open picker does not move entries underneath a user's selection.
+        datasets = sorted((managed or {}).get("datasets", []),
+                          key=lambda item: str(item.get("id") or ""))
         managed_paths = {
             _managed_species_file(item)
-            for item in (managed or {}).get("datasets", [])
+            for item in datasets
             if item.get("base")
         }
         selected_paths = {
@@ -9373,7 +9503,7 @@ def register_callbacks(app: Any) -> None:
             )
         }
         selected = []
-        for item in (managed or {}).get("datasets", []):
+        for item in datasets:
             if not item.get("id"):
                 continue
             species_file = _managed_species_file(item)
@@ -9395,7 +9525,23 @@ def register_callbacks(app: Any) -> None:
                     "value": str(item["id"]),
                 }
             )
-        return options, no_update if ctx.triggered_id == "species-compare-catalog-store" else selected
+        same_ids = ({str(option.get("value")) for option in previous_options or []}
+                    == {option["value"] for option in options})
+        # Status/current-dataset refreshes must not apply a stale selection
+        # snapshot after the user has changed the browser's current value.
+        keep_selection = ctx.triggered_id == "species-compare-catalog-store" or same_ids
+        return options, no_update if keep_selection else selected
+
+    @app.callback(
+        Output("species-compare-managed", "options", allow_duplicate=True),
+        Input("species-compare-catalog-store", "data"),
+        State("batch-managed-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_species_compare_managed_status(catalogs, managed):
+        # Capability refreshes follow source edits. Keeping this separate avoids
+        # blocking initial source options behind their own downstream catalog.
+        return _species_compare_managed_options(managed, catalogs, [], [])[0]
 
     @app.callback(
         Output("species-compare-sources-store", "data"),

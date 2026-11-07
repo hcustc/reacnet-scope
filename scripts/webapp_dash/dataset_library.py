@@ -185,13 +185,7 @@ def selector():
         html.Label('切换到已导入数据', htmlFor='library-select'),
         dcc.Dropdown(id='library-select', options=[], placeholder='选择已导入的 RNG 文件夹', clearable=False),
         html.Small('选择后点击切换，验证成功才更新当前数据。'),
-        html.Fieldset(
-            html.Fieldset(
-                dbc.Button('切换数据', id='library-use', color='primary', size='sm', n_clicks=0),
-                id='library-switch-busy', disabled=False, className='rs-dataset-switch-action',
-            ),
-            id='library-switch-available', disabled=True, className='rs-dataset-switch-action',
-        ),
+        dbc.Button('切换数据', id='library-use', color='primary', size='sm', disabled=True),
         html.Div(id='library-switch-status', role='status', **{'aria-live': 'polite'}),
     ], className='rs-dataset-switch-options')
 
@@ -466,22 +460,39 @@ def register_callbacks(app):
                                     n_clicks=0, size='sm', color='link')], className='rs-library-item') for e in entries]
         return options, rows or '尚未导入RNG 数据。'
 
-    @app.callback(Output('library-switch-available', 'disabled'),
-                  Input('library-select', 'value'), Input('dataset-library', 'data'),
-                  Input({'type': 'dataset-bound-operation', 'name': ALL}, 'data'))
-    def switch_availability(selected, records, operations):
-        valid = any(e['base'] == selected for e in svc.normalise_dataset_library(records))
-        return not valid or any(operations or [])
-
-    @app.callback(Output('library-switch-busy', 'disabled'),
-                  Output('library-switch-status', 'children'),
-                  Input('dataset-switch-transaction', 'data'))
-    def switch_feedback(transaction):
-        busy = (transaction or {}).get('state') == 'validating'
-        message = '正在切换…' if busy else ''
-        if (transaction or {}).get('state') == 'failed':
-            message = transaction.get('message', '')
-        return busy, message
+    switch_status = """function(selected, options, transaction, operations) {
+            const state = (transaction || {}).state;
+            const busy = state === 'validating';
+            const running = (operations || []).some(Boolean);
+            const valid = (options || []).some(option => option.value === selected);
+            let message = '';
+            if (busy) message = '正在切换…';
+            else if (running) message = '等待当前分析完成后即可切换数据。';
+            else if (state === 'failed') message = transaction.message || '';
+            return [!valid || busy || running, message];
+        }"""
+    # Each change updates feedback without waiting for unrelated upstream
+    # callbacks. The other values are read from the current browser state;
+    # the server still verifies identity and running operations on submission.
+    switch_properties = [
+        ('library-select', 'value'), ('library-select', 'options'),
+        ('dataset-switch-transaction', 'data'),
+        ({'type': 'dataset-bound-operation', 'name': ALL}, 'data'),
+    ]
+    for position, (component_id, prop) in enumerate(switch_properties):
+        app.clientside_callback(
+            """function(changed, ...unchanged) {
+                unchanged.splice(POSITION, 0, changed);
+                return (STATUS)(...unchanged);
+            }""".replace('POSITION', str(position)).replace('STATUS', switch_status),
+            Output('library-use', 'disabled', allow_duplicate=position > 0),
+            Output('library-switch-status', 'children', allow_duplicate=position > 0),
+            Input(component_id, prop),
+            *(State(other_id, other_prop)
+              for index, (other_id, other_prop) in enumerate(switch_properties)
+              if index != position),
+            prevent_initial_call=position > 0,
+        )
 
     @app.callback(
         Output({'type': 'library-index-control', 'base': ALL, 'kind': ALL}, 'children'),

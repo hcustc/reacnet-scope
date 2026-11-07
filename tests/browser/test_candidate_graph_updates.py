@@ -17,6 +17,7 @@ from werkzeug.serving import make_server
 from scripts.webapp_dash import candidate_graph as graph
 
 
+@pytest.mark.browser_area('candidate')
 def test_context_participant_stays_connected_when_switching_views():
     report = dict(context='dataset', query_request_id='query', paths=[dict(
         signature_id='route', species=['[C]', '[C][O]'], steps=[dict(

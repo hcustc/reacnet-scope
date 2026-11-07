@@ -1501,7 +1501,7 @@ def test_evolution_picker_targets_are_forwarded_to_plot_service(monkeypatch) -> 
         "/_dash-update-component",
         json=_callback_payload(
             client,
-            input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid", "evolution-browse-mode",
+            input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request", "evolution-browse-mode",
                        "evolution-group-element", "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid"],
             changed="evolution-search-btn.n_clicks",
             input_values={"evolution-search-btn": 1},
@@ -1533,7 +1533,8 @@ def test_evolution_picker_targets_are_forwarded_to_plot_service(monkeypatch) -> 
     assert payload["visible_curve_names"] == ["2500K | C6H5ClO"]
 
 
-def test_abundance_browser_selects_ranked_species_without_navigation(monkeypatch) -> None:
+@pytest.mark.parametrize("stale", [False, True])
+def test_abundance_browser_selects_ranked_species_without_navigation(monkeypatch, stale) -> None:
     captured: list[str] = []
 
     def fake_evolution(_artifacts, targets, **_kwargs):
@@ -1547,17 +1548,21 @@ def test_abundance_browser_selects_ranked_species_without_navigation(monkeypatch
     row = {"formula": "O2", "smiles": "[O]=[O]", "total_count": 5}
     response = client.post("/_dash-update-component", json=_callback_payload(
         client,
-        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid", "evolution-browse-mode",
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request", "evolution-browse-mode",
                    "evolution-group-element", "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid"],
-        changed="evolution-rank-grid.selectedRows",
-        input_values={"evolution-rank-grid": [row], "evolution-browse-mode": "species"},
+        changed="evolution-rank-request.data",
+        input_values={"evolution-rank-request": {"selection": [row], "context": "old-source" if stale else context_key({"artifacts": {}})}, "evolution-browse-mode": "species"},
         state_values={"evolution-rank-grid": [row],
                       "evolution-rank-store": {"context": context_key({"artifacts": {}})},
                       "app-store": {"artifacts": {}}},
         output_id="evolution-payload-store",
     ))
+    if stale:
+        assert response.status_code == 204
+        assert not captured
+        return
     assert response.status_code == 200
-    assert captured == ["[O]=[O]"]
+    assert captured == ["smiles:[O]=[O]"]
     body = response.get_json()["response"]
     assert body["evolution-graph"]["figure"]["data"][0]["name"] == "O2"
     assert "page-store" not in body
@@ -1576,7 +1581,7 @@ def test_species_detail_abundance_shortcut_plots_exact_species(monkeypatch) -> N
     client = create_app().server.test_client()
     response = client.post("/_dash-update-component", json=_callback_payload(
         client,
-        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid",
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
                    "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
                    "evolution-xaxis", "evolution-group-members-grid"],
         changed="species-to-evolution-btn.n_clicks",
@@ -1588,8 +1593,132 @@ def test_species_detail_abundance_shortcut_plots_exact_species(monkeypatch) -> N
         output_id="evolution-payload-store",
     ))
     assert response.status_code == 200
-    assert captured == [(["COC"], "", "")]
+    assert captured == [(["smiles:COC"], "", "")]
     assert response.get_json()["response"]["evolution-graph"]["figure"]["data"][0]["name"] == "COC"
+
+
+@pytest.mark.parametrize("first_trigger", [
+    "evolution-group-element.value",
+    "evolution-group-members-grid.selectedRows",
+    "evolution-browse-mode.value",
+])
+def test_species_detail_abundance_shortcut_wins_batched_control_changes(monkeypatch, first_trigger):
+    captured = []
+
+    def evolution(_artifacts, targets, **_kwargs):
+        captured.append(targets)
+        return {"x_name": "timestep", "x_values": [0, 1],
+                "curves": [{"name": "COC", "query": targets[0], "values": [1, 2]}],
+                "meta": {"warnings": []}}
+
+    monkeypatch.setattr(svc, "build_species_evolution", evolution)
+    client = create_app().server.test_client()
+    payload = _callback_payload(
+        client,
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
+                   "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
+                   "evolution-xaxis", "evolution-group-members-grid"],
+        changed=first_trigger,
+        input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
+        state_values={"evolution-targets": "CCO", "app-store": {
+            "selected_smiles": "COC", "artifacts": {},
+        }},
+        output_id="evolution-payload-store",
+    )
+    payload["changedPropIds"] = [first_trigger, "species-to-evolution-btn.n_clicks"]
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    assert captured == [["smiles:COC"]]
+    assert len(response.get_json()["response"]["evolution-graph"]["figure"]["data"]) == 1
+
+
+def test_batched_species_shortcut_keeps_its_trigger_while_preparing(monkeypatch):
+    monkeypatch.setattr(svc, "is_collection_path", lambda _path: True)
+    client = create_app().server.test_client()
+    payload = _callback_payload(
+        client,
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
+                   "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
+                   "evolution-xaxis", "evolution-group-members-grid"],
+        changed="evolution-group-element.value",
+        input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
+        state_values={"app-store": {"base": "/collection", "selected_smiles": "COC",
+                      "artifacts": {"species": "/run.species"},
+                      "analysis_capabilities": {"species_abundance": {"state": "needs_preparation"}}}},
+        output_id="evolution-payload-store",
+    )
+    payload["changedPropIds"] = ["evolution-group-element.value", "species-to-evolution-btn.n_clicks"]
+    response = client.post("/_dash-update-component", json=payload)
+    assert response.status_code == 200
+    pending = response.get_json()["response"]["import-pending-evolution"]["data"]
+    assert pending["trigger"] == "species-to-evolution-btn"
+
+
+@pytest.mark.parametrize("trigger,expected", [
+    ("evolution-xaxis.value", "Oc1ccccc1Cl"),
+    ("evolution-search-btn.n_clicks", "Oc1ccc(Cl)cc1"),
+    ("evolution-rank-request.data", "[O]=[O]"),
+])
+def test_abundance_preselection_allows_new_queries_and_settings_follow_current_object(monkeypatch, trigger, expected):
+    captured = []
+    species = "Oc1ccccc1Cl"
+
+    def fake_evolution(_artifacts, targets, **kwargs):
+        captured.append((targets, kwargs["species_file"], kwargs["species_files"]))
+        return {"x_name": "timestep", "x_values": [0, 1],
+                "curves": [{"name": targets[0], "query": targets[0], "members": [target.removeprefix("smiles:") for target in targets], "values": [10, 7]}],
+                "meta": {"warnings": []}}
+
+    monkeypatch.setattr(svc, "build_species_evolution", fake_evolution)
+    dataset = {"dataset_id": "run-1", "source_revision": "v1", "artifacts": {},
+               "selected_smiles": "Oc1ccc(Cl)cc1"}
+    context = context_key(dataset)
+    previous_row = {"smiles": "[O]=[O]", "formula": "O2", "total_count": 1000}
+    client = create_app().server.test_client()
+    response = client.post("/_dash-update-component", json=_callback_payload(
+        client,
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
+                   "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
+                   "evolution-xaxis", "evolution-group-members-grid"],
+        changed=trigger,
+        input_values={"evolution-search-btn": 1, "evolution-browse-mode": "species",
+                      "evolution-xaxis": "step", "evolution-rank-request": {"selection": [previous_row], "context": context}},
+        state_values={"app-store": dataset,
+                      "evolution-focus-store": {"species": species, "targets": [species], "context": context},
+                      "evolution-rank-store": {"context": context}, "evolution-rank-grid": [previous_row],
+                      "evolution-targets": "Oc1ccc(Cl)cc1", "evolution-species-picker": [],
+                      "evolution-species-file": "", "evolution-species-files": "",
+                      "evolution-curve-filter": ""},
+        output_id="evolution-payload-store",
+    ))
+    assert response.status_code == 200
+    assert captured == [([expected if trigger == "evolution-search-btn.n_clicks" else f"smiles:{expected}"], "", "")]
+    body = response.get_json()["response"]
+    assert body["evolution-graph"]["figure"]["data"][0]["y"] == [10, 7]
+    assert body["evolution-focus-store"]["data"]["species"] == expected
+
+
+def test_species_detail_abundance_does_not_aggregate_a_formula_shaped_identity(tmp_path, monkeypatch):
+    from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    source = tmp_path / "atoms.species"
+    source.write_text("Timestep 0: O 2 [O] 5\nTimestep 10: O 1 [O] 3\n")
+    SPECIES_COMPOSITION_STORE.build(str(source))
+    client = create_app().server.test_client()
+    response = client.post("/_dash-update-component", json=_callback_payload(
+        client,
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
+                   "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
+                   "evolution-xaxis", "evolution-group-members-grid"],
+        changed="species-to-evolution-btn.n_clicks",
+        input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
+        state_values={"app-store": {"selected_smiles": "O", "artifacts": {"species": str(source)}}},
+        output_id="evolution-payload-store",
+    ))
+    assert response.status_code == 200
+    payload = response.get_json()["response"]["evolution-payload-store"]["data"]
+    assert payload["curves"][0]["members"] == ["O"]
+    assert payload["curves"][0]["raw_values"] == [2, 1]
 
 
 def test_species_detail_abundance_shortcut_retains_target_after_preparation(monkeypatch) -> None:
@@ -1605,7 +1734,7 @@ def test_species_detail_abundance_shortcut_retains_target_after_preparation(monk
     monkeypatch.setattr(svc, "is_collection_path", lambda _path: True)
     monkeypatch.setattr(svc, "is_same_dataset_revision", lambda *_args: True)
     client = create_app().server.test_client()
-    input_ids = ["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid",
+    input_ids = ["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request",
                  "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
                  "evolution-xaxis", "evolution-group-members-grid"]
     dataset = {"base": "/collection", "artifacts": {"species": "/run.species"},
@@ -1631,7 +1760,7 @@ def test_species_detail_abundance_shortcut_retains_target_after_preparation(monk
         output_id="evolution-payload-store",
     ))
     assert prepared.status_code == 200
-    assert captured == [["COC"]]
+    assert captured == [["smiles:COC"]]
 
 
 def test_abundance_browser_groups_and_separates_selected_member(monkeypatch) -> None:
@@ -1650,7 +1779,7 @@ def test_abundance_browser_groups_and_separates_selected_member(monkeypatch) -> 
     member = {"formula": "C2H2", "smiles": "[H][C][C][H]", "current_count": 2}
     response = client.post("/_dash-update-component", json=_callback_payload(
         client,
-        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid", "evolution-browse-mode",
+        input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request", "evolution-browse-mode",
                    "evolution-group-element", "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid"],
         changed="evolution-group-members-grid.selectedRows",
         input_values={"evolution-browse-mode": "group", "evolution-group-element": "C",
@@ -1979,7 +2108,7 @@ def test_evolution_page_exposes_and_opens_multi_source_comparison() -> None:
     rendered_page = json.dumps(evolution_page, ensure_ascii=False)
     assert "兼容：临时多文件叠加" not in rendered_page
     assert _layout_node_by_id(evolution_page, "species-compare-managed") is not None
-    assert "曲线处理设置" in rendered_page
+    assert _layout_node_by_id(evolution_page, "evolution-processing-settings") is not None
 
     dependency = next(
         item
@@ -2344,7 +2473,7 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
     assert detail_response.status_code == 200
     detail = detail_response.get_json()["response"]
     assert detail["species-to-evolution-btn"]["disabled"] is False
-    assert detail["evolution-targets"]["value"] == smiles
+    assert detail["evolution-targets"]["value"] == f"smiles:{smiles}"
     assert detail["app-store"]["data"]["selected_smiles"] == smiles
     assert "research-species" not in detail
     rendered_detail = json.dumps(
@@ -6331,13 +6460,19 @@ def test_trend_workspace_reports_current_dataset_capabilities(state, label, reas
     assert "请刷新RNG 数据状态" not in rendered
 
 
-@pytest.mark.parametrize("payload, disabled", [(None, True), ({"curves": []}, True), ({"curves": [{"values": [1]}]}, False)])
-def test_evolution_export_requires_result(payload, disabled):
+@pytest.mark.parametrize("payload, busy, disabled", [
+    (None, False, True), ({"curves": []}, False, True), ({"curves": [{"values": [1]}]}, False, False),
+    ({"curves": [{"name": "C6", "values": [1]}], "visible_curve_names": []}, False, True),
+    ({"curves": [{"name": "C6", "values": [1]}], "visible_curve_names": ["C6"]}, False, False),
+    ({"curves": [{"name": "C6", "values": [1]}]}, True, True),
+])
+def test_evolution_export_requires_result(payload, busy, disabled):
     client = create_app().server.test_client()
     response = client.post("/_dash-update-component", json={
         "output": "evolution-csv-btn.disabled",
         "outputs": {"id": "evolution-csv-btn", "property": "disabled"},
-        "inputs": [{"id": "evolution-payload-store", "property": "data", "value": payload}],
+        "inputs": [{"id": "evolution-payload-store", "property": "data", "value": payload},
+                   {"id": "evolution-csv-busy", "property": "data", "value": busy}],
         "state": [], "changedPropIds": ["evolution-payload-store.data"],
     })
     assert response.status_code == 200
@@ -6364,7 +6499,7 @@ def test_evolution_empty_and_failed_queries_do_not_render_default_axes(monkeypat
     monkeypatch.setattr(svc, "build_species_evolution", build)
     client = create_app().server.test_client()
     response = client.post("/_dash-update-component", json=_callback_payload(
-        client, input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-grid", "evolution-browse-mode",
+        client, input_ids=["evolution-search-btn", "species-to-evolution-btn", "evolution-rank-request", "evolution-browse-mode",
                            "evolution-group-element", "evolution-group-count", "evolution-xaxis", "evolution-group-members-grid"],
         changed="evolution-search-btn.n_clicks", input_values={"evolution-search-btn": 1},
         state_values={"evolution-targets": "" if mode == "no-target" else "CO2",

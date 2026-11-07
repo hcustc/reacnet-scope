@@ -32,6 +32,8 @@ from reacnet_scope.file_collections import (
     read_collection, is_collection_path, ROLE_LABELS, artifact_role,
 )
 from reacnet_scope.path_search import candidate_formula
+from reacnet_scope.candidate_hypergraph import build_candidate_hypergraph
+from reacnet_scope.hypergraph_svg import candidate_hypergraph_svg
 from reacnet_scope.reaction_timing import (
     reaction_time_distribution,
     reaction_time_events,
@@ -93,6 +95,8 @@ from reacnet_scope.analysis_services import (
     search_reactions_by_formula,
     search_species,
     search_species_catalog,
+    search_abundance_species,
+    describe_abundance_targets,
     ranked_species_abundance,
     channel_timestep_ps,
     species_detail,
@@ -195,6 +199,7 @@ from reacnet_scope.path_search_services import (
 
 
 __all__ = [
+    "build_candidate_hypergraph", "candidate_hypergraph_svg",
     "browse_import_files", "collect_files", "preview_file_collection", "collection_candidate",
     "read_collection", "is_collection_path", "ROLE_LABELS", "artifact_role", "candidate_formula",
     "validate_file_collection_candidate", "commit_file_collection",
@@ -251,6 +256,8 @@ __all__ = [
     "event_path_occurrence_rows",
     "build_event_path_occurrence_elements",
     "search_species_catalog",
+    "search_abundance_species",
+    "describe_abundance_targets",
     "search_species",
     "species_detail",
     "render_reaction_svg",

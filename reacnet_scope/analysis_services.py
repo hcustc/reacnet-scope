@@ -74,6 +74,7 @@ from reacnet_scope.rng_events import (  # noqa: E402
 from reacnet_scope.datasets import (  # noqa: E402
     ARTIFACT_SUFFIXES,
     discover_dataset_candidates,
+    is_native_timeline_path,
 )
 from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
@@ -120,6 +121,8 @@ from reacnet_scope.queries import (  # noqa: E402
     split_terms,
     parse_type_element_map_specs,
     parse_species_file_specs,
+    parse_target_item,
+    split_target_items,
 )
 
 
@@ -185,7 +188,7 @@ def _event_path_source_from_prefix(
             f"{label}: 找不到 {timeline} 或 {reactionevent}",
             reason="missing_event_path_source",
         )
-    if not reactionevent.endswith(".timeline.h5") and not Path(molecules).is_file():
+    if not is_native_timeline_path(reactionevent) and not Path(molecules).is_file():
         raise ServiceError(
             f"{label}: 找不到 {molecules}",
             reason="missing_event_path_source",
@@ -229,7 +232,7 @@ def _event_path_sources_for_dash(
             reason="missing_event_path_source",
         )
     if (
-        not reactionevent.endswith(".timeline.h5")
+        not is_native_timeline_path(reactionevent)
         and (not molecules or not Path(molecules).is_file())
     ):
         raise ServiceError(
@@ -1053,6 +1056,52 @@ def search_species_catalog(
             "reaction_network_fallback": network_fallback,
         },
     }
+
+
+def describe_abundance_targets(targets: str, *, structured: bool = False) -> list[str] | list[dict[str, Any]]:
+    """Explain the same grammar used by the curve builder without reading data."""
+    from .composition import element_count_query
+    descriptions = []
+    for raw in split_target_items([targets or ""]):
+        kind, query, label = parse_target_item(raw)
+        item = {"kind": kind, "query": query, "label": label}
+        if kind == "element":
+            element, count = element_count_query(query)
+            description = f"{element} 原子数 = {count}，其他元素不限"
+            item.update(element=element, count=count)
+        elif kind == "formula":
+            description = f"完整分子式 {query}"
+        else:
+            description = "精确 RNG 结构"
+        descriptions.append({**item, "description": description})
+    return descriptions if structured else [f"{item['label']} → {item['description']}" for item in descriptions]
+
+
+def search_abundance_species(artifacts: Mapping[str, Any], query: str = "", *, kind: str = "auto",
+                             mass_tolerance: float = 0.5,
+                             element_filters: dict[str, dict[str, Any]] | None = None,
+                             limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Bounded exact-Species selection from the published abundance catalogue."""
+    species_file = str((artifacts or {}).get("species") or "").strip()
+    if not species_file:
+        raise ServiceError("缺少物种丰度文件", reason="missing_species_file")
+    text = str(query or "").strip()
+    if not text and not element_filters:
+        raise ServiceError("请输入检索词或设置元素条件", reason="missing_query")
+    try:
+        effective_kind = kind
+        if kind == "auto":
+            effective_kind = detect_query_kind(text) if text else "all"
+            if text and effective_kind != "mass":
+                effective_kind, text, _label = parse_target_item(text)
+        return SPECIES_COMPOSITION_STORE.search_catalog(
+            species_file, query=text, kind=effective_kind, mass_tolerance=mass_tolerance,
+            element_filters=element_filters, limit=limit, offset=offset,
+        )
+    except (IndexNotReadyError, IndexBuildInProgressError, IndexStaleError, IndexInvalidError) as exc:
+        raise ServiceError("物种丰度索引尚未就绪或已过期，请先准备索引。", reason="species_index_not_ready") from exc
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ServiceError(str(exc), reason="invalid_species_filter") from exc
 
 
 def ranked_species_abundance(artifacts: Mapping[str, Any], *, limit: int = 50) -> dict[str, Any]:

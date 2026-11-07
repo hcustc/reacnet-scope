@@ -39,6 +39,7 @@ from reacnet_scope.network import (  # noqa: E402
     parse_reactionabcd,
     smiles_to_formula_fast,
 )
+from reacnet_scope.datasets import is_native_timeline_path  # noqa: E402
 
 
 def detect_default_reaction_file() -> Path:
@@ -602,13 +603,14 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
     """Run the same indexed, single-source query as the Web workbench."""
     from reacnet_scope import services as svc
     artifacts = {"reactionevent": args.source, "molecules": args.molecules}
-    if args.source.endswith(".timeline.h5"):
+    if is_native_timeline_path(args.source):
         artifacts["timeline"] = args.source
     try:
         result = svc.search_candidate_paths(
             artifacts, args.start, target=args.target, mode=args.mode,
             max_steps=args.max_steps, max_paths=args.max_paths,
             anchor_offset=args.anchor_offset,
+            via_species=args.via_species, excluded_species=args.exclude_species,
             direction_view=args.direction_view,
             quality_view=args.quality_view, return_window_frames=args.return_window_frames,
             return_basis=args.return_basis, max_expansions=args.max_expansions,
@@ -622,6 +624,23 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
     except svc.ServiceError as exc:
         print(f"[ERROR] {exc.message}", file=sys.stderr)
         return 2
+    if args.out_hypergraph_json or args.out_svg:
+        try:
+            graph = svc.build_candidate_hypergraph(result)
+            svg = svc.candidate_hypergraph_svg(graph) if args.out_svg else None
+            if svc.candidate_source_revision(artifacts) != result.get('source_revision'):
+                raise ValueError('导出期间来源版本已变化，请重新搜索。')
+        except svc.ServiceError as exc:
+            print(f"[ERROR] {exc.message}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 2
+        if args.out_hypergraph_json:
+            Path(args.out_hypergraph_json).write_text(
+                json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.out_svg:
+            Path(args.out_svg).write_text(svg, encoding="utf-8")
     if args.out_json:
         Path(args.out_json).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.out_csv:
@@ -641,12 +660,12 @@ def cmd_candidate_paths(args: argparse.Namespace) -> int:
             "reaction": os.path.abspath(args.reac),
             "timeline": (
                 current.reactionevent_file
-                if current.reactionevent_file.endswith(".timeline.h5")
+                if is_native_timeline_path(current.reactionevent_file)
                 else ""
             ),
             "reactionevent": (
                 ""
-                if current.reactionevent_file.endswith(".timeline.h5")
+                if is_native_timeline_path(current.reactionevent_file)
                 else current.reactionevent_file
             ),
             "molecules": current.molecules_file,
@@ -707,6 +726,7 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         IndexStaleError,
     )
     from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.timed_evidence import select_timed_evidence
     from reacnet_scope.trajectory import (
         TrajectoryDependencyError,
         TrajectoryFrameError,
@@ -716,15 +736,14 @@ def cmd_export_event(args: argparse.Namespace) -> int:
 
     try:
         dataset = discover_dataset(args.case, args.base)
-        reactionevent = dataset["reactionevent"]
-        molecules = (
-            dataset["molecules"]
-            if Path(dataset["molecules"]).is_file()
-            else ""
+        selection = select_timed_evidence(
+            timeline_file=dataset["timeline"],
+            reactionevent_file=dataset["reactionevent"],
+            molecules_file=dataset["molecules"],
         )
         event = EVENT_EVIDENCE_STORE.get_event(
-            reactionevent,
-            molecules,
+            selection.primary_file,
+            selection.molecules_file,
             args.event_id,
         )
         explicit_mapping = svc.parse_event_type_element_map(args.type_map)
@@ -1277,6 +1296,8 @@ def cmd_species_evolution(args: argparse.Namespace) -> int:
             max_curves=1_000_000,
             formula_mode=args.formula_mode,
             max_smiles_per_formula=args.max_smiles_per_formula,
+            start_timestep=args.start_timestep,
+            end_timestep=args.end_timestep,
         )
     except svc.ServiceError as exc:
         print(f"[ERROR] {exc.message}")
@@ -1712,6 +1733,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--start", default="", help="精确 RNG 起始 Species 标签；终点前驱查询可省略")
     sp_candidate_search.add_argument("--target", default="", help="精确 RNG 目标 Species 标签")
     sp_candidate_search.add_argument("--mode", choices=["target", "explore", "reverse"], default="target")
+    sp_candidate_search.add_argument("--via-species", action="append", default=[],
+                                     help="按顺序必须途经的精确 Species；可重复传入，仅用于双端搜索")
+    sp_candidate_search.add_argument("--exclude-species", action="append", default=[],
+                                     help="不允许进入主线的精确 Species；可重复传入，完整反应参与物仍保留")
     sp_candidate_search.add_argument("--max-steps", type=_bounded_int("max-steps", 1, 100), default=None,
                                      help="可选查询步数上限；双端搜索默认不设步数上限")
     sp_candidate_search.add_argument("--max-paths", type=_bounded_int("max-paths", 1, 100), default=20)
@@ -1729,6 +1754,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_candidate_search.add_argument("--check-top", type=_bounded_int('check-top', 0, 10), default=0, help='独立检查前 N 条路线的连续历史，每条最多 1000 状态/5 秒')
     sp_candidate_search.add_argument("--out-json", default="")
     sp_candidate_search.add_argument("--out-csv", default="")
+    sp_candidate_search.add_argument("--out-hypergraph-json", default="",
+                                     help="本次返回路线的有向超图 JSON，保留完整计量与来源")
+    sp_candidate_search.add_argument("--out-svg", default="",
+                                     help="本次返回路线的离线网络 SVG（最多 500 个节点）")
     sp_candidate_search.set_defaults(func=cmd_candidate_search)
 
     sp_candidate_paths = sub.add_parser(
@@ -1968,7 +1997,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_plot = sub.add_parser(
         "species-evolution",
-        help="绘制物种随时间变化曲线 (支持 formula/SMILES 混合输入与多曲线)",
+        help="绘制物种随时间变化曲线 (支持元素原子数、分子式及 SMILES 多曲线)",
     )
     add_reac_flags(sp_plot)
     sp_plot.add_argument(
@@ -1981,21 +2010,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "目标物种, 可重复传入或用逗号分隔; 支持 formula/SMILES 混输, "
-            "支持 label::query, 支持前缀 formula:/f: 与 smiles:/smi:"
+            "曲线目标, 可重复传入或用逗号分隔; C6 汇总所有六碳物种（其他元素不限）; "
+            "支持 label::query; 精确分子式用 formula:/f:（如 formula:O2），精确结构用 smiles:/smi:"
         ),
     )
     sp_plot.add_argument(
         "--formula-mode",
         choices=["sum", "split", "both"],
         default="sum",
-        help="formula 输入如何展开: sum(聚合), split(拆分每个SMILES), both",
+        help="分子式或元素条件匹配多个物种时: sum(聚合), split(拆分每个 SMILES), both",
     )
     sp_plot.add_argument(
         "--max-smiles-per-formula",
         type=int,
         default=0,
-        help="限制每个 formula 展开的 SMILES 数, 0 表示不限制",
+        help="每个目标的成员显示上限，0 不限制；元素条件合计始终包含全部匹配物种",
     )
     sp_plot.add_argument(
         "--x-axis",
@@ -2015,6 +2044,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="曲线归一化方式",
     )
+    sp_plot.add_argument("--start-timestep", type=int, default=None, help="包含的 source timestep 下界；留空使用全部")
+    sp_plot.add_argument("--end-timestep", type=int, default=None, help="包含的 source timestep 上界；归一化与平滑在窗口内计算")
     sp_plot.add_argument(
         "--smooth-window",
         type=int,

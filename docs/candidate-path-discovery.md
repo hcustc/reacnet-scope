@@ -9,7 +9,7 @@
 这些展示规则不计算化学重要性评分。见
 [ADR-0026](adr/0026-search-candidates-by-anchor-mode.md)。
 
-当前工作台结果为 `reacnet-scope/indexed-candidates/v5`（与下面兼容命令的 v3 不同）。
+当前工作台结果为 `reacnet-scope/indexed-candidates/v6`（与下面兼容命令的 v3 不同）。
 每条路线还提供版本化 `candidate_signature`；旧 `signature_id` 保留供 v3 交接使用。
 身份字段及证据修订边界见 [Candidate 结构身份](candidate-identity.md)。
 Dash 默认按净转化方向展开：完整正逆反应按精确 Species 及计量配对，正向次数减去逆向次数，只保留净值为正的方向；例如 111−110 显示“净 1 次”。统计范围为当前 RNG 数据全部观测区间，不代表物种在全网络中的总净生成量。步骤详情和导出同时保留正向、逆向、净数及原始支持事件。净值不是从原始事件中挑出的某一个事件。
@@ -23,6 +23,34 @@ Dash 默认按净转化方向展开：完整正逆反应按精确 Species 及计
 CLI 的 `--mode explore|reverse|target` 分别对应仅起点、仅终点、双端。
 `--max-steps` 是双端查询的可选上限；单端每次展开一步，
 可用 `--anchor-offset` 读取下一页转移。
+
+双端查询支持 `--via-species` 按参数出现顺序指定必须途经的精确中间物种；三种模式都支持
+`--exclude-species` 排除主线物种。两个参数可重复传入，每类最多 100 项。途经只匹配
+Carried Species，排除不会删除反应式中的共同反应物或副产物，也不改变原始计数。
+途经列表不能含重复物种或起终点；排除不能与起终点或途经物种冲突。未知标签明确报错。
+
+例如在已准备的事件源中查询按顺序经过 COC、CC=O 且不以 O 为载体的路线：
+
+```bash
+reacnet-scope candidate-search --source run.reactionevent.csv \
+  --start CCO --target 'CC(=O)O' \
+  --via-species COC --via-species 'CC=O' --exclude-species O \
+  --out-json candidates.json --out-csv candidates.csv
+```
+
+Python 使用 `search_candidate_paths(artifacts, 'CCO', target='CC(=O)O',
+via_species=['COC', 'CC=O'], excluded_species=['O'])`。Web 在“途经与排除”中检索并选择
+精确结构，途经顺序按添加顺序；移除后重新添加可调整。结果显示实际提交的条件，继续、
+翻页与返回不读取未提交的编辑；新搜索才生效，切换 RNG 数据清空选择。
+
+约束随查询写入 JSON、逐步 CSV 和超图来源记录，不改变 Candidate 结构身份。
+CSV 用 `record_type=step` 表示步骤；无路线时保留一条 `record_type=query` 的查询元数据行，
+路线与步骤字段留空，保留条件、来源和完成/截断状态。`schema_version` 标记报告版本。
+带途经条件使用 `ordered_waypoints_fair_routes_v1`，在完整路线前缀中检查顺序与物种不重复，
+不拼接独立的分段最短路。找到完整合格路线才确认受约束可达；预算截断的无结果仍是不确定。
+v5 及更早报告中缺少这两个字段表示无约束；本次新增条件不要求重建 v5 邻接索引。
+见 [ADR-0032](adr/0032-constrain-candidate-carriers-by-waypoints-and-exclusions.md)。
+
 `--quality-view raw|persistent`、`--return-window-frames`、`--return-basis topology|exact`、
 `--max-expansions`、`--max-frontier`、`--max-prefixes` 和 `--max-candidates-examined`
 限制在线工作，不是化学筛选。`--check-top N` 单独检查前 N 条路线的连续历史（最多 10 条），
@@ -46,6 +74,12 @@ Web 默认使用路径合并图浏览本次返回的路线：结构卡片按精�
 “路线表格与多路线比较”保留勾选入口，可将图切换到只显示当前与勾选路线；逐步结构链也可展开。
 菱形在净转化视图标注净计数，在全部观测视图标注 Reaction Type 原始事件数，不因多条路线经过而累加；每条主线的支持事件数在步骤证据中单独显示。图仅是已返回 Candidate 的展示投影，
 不从合并后的连接重新组合路线，也不代表连续分子历史；搜索截断与连续历史检查仍单独报告。
+
+图与导出共用核心 `build_candidate_hypergraph`：Web 可下载当前图的超图 JSON 和离线 SVG；
+CLI 使用 `--out-hypergraph-json` / `--out-svg`。完整参与物、重复计量、原始及净计数、
+各条主线的独立支持与来源版本保留，选中路线导出不会把隐藏路线的载体证据混入。
+浏览历史与当前 Candidate 步骤分开标识，图布局和图示编号不改变科学身份。
+详见 [导出契约](candidate-hypergraph.md)。
 
 A → B → C → A 是物种网络循环，不证明同一分子实际返回。净转化不保证网络无环，也不额外隐藏这类多步循环；普通候选枚举仍使用简单路径，单步浏览可回到先前物种。继续、翻页及返回沿用已提交查询口径，修改搜索条件后重新搜索才生效。
 

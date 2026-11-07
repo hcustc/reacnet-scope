@@ -44,6 +44,44 @@ REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/br
 
 Linux CI 安装浏览器系统库时使用 `playwright install --with-deps chromium`。可设置 `REACNET_SCOPE_SCREENSHOTS=/tmp/reacnet-ui-screenshots` 保存截图。测试服务器绑定本机临时端口，数据源和 Dataset Workspace 均位于 pytest 临时目录；页面请求必须保持本机来源。
 
+CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 PR/分支的旧运行。
+规则由 `scripts/ci_test_plan.py` 维护，选测结果显示在 CI 的 plan job 中：
+
+| 改动 | pytest | 浏览器 |
+| --- | --- | --- |
+| 纯文档 | 跳过 | 跳过 |
+| 普通代码 | 全量 | 4 条关键流程：导航、数据切换、检索、CSV 下载 |
+| 已划分的页面模块 | 全量 | 关键流程 + 对应领域流程 |
+| 共享布局、回调、服务、依赖、CI 规则，或未归类的 Dash/浏览器测试文件 | 全量 | 完整套件 |
+
+局部模块覆盖 abundance、species、candidate、dataset、events、reactions；一个文件可以触发多个领域。
+浏览器用例按领域放在 `tests/browser/test_<领域>_workbench.py`，共享样例与就绪操作在
+`tests/browser/workbench.py`，由 `conftest.py` 提供夹具。领域测试文件只触发关键流程及
+对应领域；共享夹具、导航回归或 CI 规则变化仍触发完整套件。重载页面后使用
+`reload_workbench(page)` 等待会话恢复和初始化回调完成，再填写查询条件；不靠固定延迟
+判断就绪。视口边界断言允许至多 1 个 CSS 像素的浮点/亚像素舍入误差，仍检查实际溢出。
+普通顺序切换数据集时，顶部名称变化后仍须等待关联回调结束，再提交下一次切换；
+忙态拒绝和迟到响应专项测试继续按其原定时序验证。
+新增局部模块时同步路径映射，并用 `browser_area` 标记相关用例；未归类的 UI 文件默认全量。
+关键/局部流程使用 compact 导航，分别使用 1/2 个 job；全量覆盖 classic/compact 并分为 4 个 job。
+分片在选测之后进行，每个入选用例只运行一次。
+
+每周一北京时间 03:17 定时跑全量，发布前通过 Actions 的 **Run workflow** 手动跑全量。
+手动和定时运行不按文件缩减范围。默认本地命令仍运行完整套件。
+`browser` 必需检查只允许明确的纯文档计划跳过；计划失败、测试失败、取消或意外跳过均不放行。
+每片遇到首个失败即输出断言和捕获日志，并保存截图与 JUnit 报告；30 分钟超时作为兜底。
+
+复现日常关键流程、相关页面流程或全量单片：
+
+```bash
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke,abundance
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -x -vv --tb=short tests/browser --browser-shard=1/4
+```
+
+省略 `--browser-shard` 运行所有入选用例；省略 `--browser-scope` 选中完整套件。
+选测不豁免已知失败，也不将失败用例标记为可忽略。
+
 ## 可观察的验收
 
 - CLI 改动通过安装入口 `uv run --locked reacnet-scope ...` 验证参数、错误和导出；

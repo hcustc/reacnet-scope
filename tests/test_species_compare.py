@@ -149,6 +149,25 @@ def test_managed_collection_uses_registered_species_artifact(tmp_path, monkeypat
     assert selected["species-compare-sources-store"]["data"][0]["species_file"] == species
 
 
+def test_managed_picker_refresh_keeps_identity_order_and_current_selection(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
+    first = _source(tmp_path, "first", ["Timestep 0: C 1"])
+    second = _source(tmp_path, "second", ["Timestep 0: O 1"])
+    entries = [{"id": path.removesuffix('.species'), "base": path.removesuffix('.species'),
+                "label": Path(path).stem} for path in [first, second]]
+    client = create_app().server.test_client()
+    initial = _post_callback(client, "species-compare-managed.options", "batch-managed-store.data",
+                             {"batch-managed-store": {"datasets": entries}})
+    options = initial['species-compare-managed']['options']
+    refreshed = _post_callback(
+        client, "species-compare-managed.options", "batch-managed-store.data",
+        {"batch-managed-store": {"datasets": entries[::-1]}},
+        {"species-compare-sources-store": [], "species-compare-managed.options": options},
+    )['species-compare-managed']
+    assert [option['value'] for option in refreshed['options']] == [entry['id'] for entry in entries]
+    assert 'value' not in refreshed, 'metadata refresh must not overwrite a newer browser selection'
+
+
 def test_time_conversion_is_per_source_and_query_replacement_has_no_old_curve(tmp_path, monkeypatch):
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "workspace"))
     first = _source(tmp_path, "first", ["Timestep 0: C 1 O 4", "Timestep 10: C 3 O 2"])

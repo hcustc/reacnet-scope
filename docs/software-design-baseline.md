@@ -204,7 +204,7 @@ Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
 - RNG 数据管理导入列表、Current Dataset、各项能力和 Preparation Task。
 - 物种提供分子式、质量和精确结构检索；选择精确结构后显示一份身份、结构与统计详情，并可探索候选路线、一步直接通道或丰度趋势。路线工具带入当前精确物种，在工具内选择后续、前驱或两物种连接模式；检索空态可独立填写候选路线起终点。
 - 反应独立检索 Reaction Type，展示反应结构、事件与时间分布，并提供多来源反应对比；不要求先打开物种详情。
-- 演化使用同一丰度探索器：精确物种列表按累计采样丰度排序，选中一行就在当前页绘制该物种的逐帧曲线；按元素原子数分组时，同一曲线区显示该组的逐帧总量，点击时间点可选择组内精确 Species，并显示所选物种、组内其余物种与组总量。列表选择和组内下钻不自动跳到物种页；继续研究路线或反应须显式进入物种详情。排行必须标注已分析帧范围、显示上限和精确结构身份；分子式或元素分组下钻先确定精确 Species。多来源物种比较仍由演化入口进入。
+- 演化默认展示当前目标、可编辑条件及丰度曲线。物种可按分子式、精确 RNG SMILES、中性单同位素质量与元素包含／排除／计数范围筛选，组合条件取交集；返回按精确 Species 分页，不能以同分子式代表结构替代其他异构体。累计采样丰度排行是按需展开的辅助入口，打开前不执行排行查询；选行仍可在当前页绘制曲线。输入元素原子数条件即可在同一曲线区显示全部匹配物种的逐帧总量，可查看精确成员或按成员拆分，无需切换模式。多组元素分布与指定时间点下钻保留独立高级入口。列表选择和组内下钻不自动跳到物种页；继续研究路线或反应须显式进入物种详情。排行必须标注已分析帧范围、显示上限和精确结构身份；多来源物种比较仍由演化入口进入。
 - 事件独立查询 Reaction Occurrence。同一事件从候选步骤、反应或事件结果打开时共用详情，再按需展开全宽核查、轨迹、事件包、DFT 初始几何或分子变化追踪。
 
 物种详情内的分析结果以该详情的精确 Species 为明确目标，保留输入参数及结果自身的来源与修订；从详情进入丰度趋势时直接绘制该精确物种的曲线，独立工具允许手工输入。没有跨详情持续存在的“研究物种”身份，也不自动设置此身份。浏览 B 不改变已经生成的 A 结果的目标。返回链在会话内有界保存来源、修订、查询与选择位置；返回不重新执行分析。过期来源或修订不得借返回链恢复旧证据。详见 [ADR-0030](adr/0030-use-local-species-focus-in-dash.md)。
@@ -261,12 +261,16 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 普通 Dash 查询必须读取持久化 Species Abundance Index，不得每次完整扫描 `.species`。索引至少提供物种目录、时间点定位、峰值摘要和按 Species 读取的时间序列。
 
 - 精确 SMILES 表示具体 Species。
+- 丰度演化采用统一输入：裸的单元素符号加明确原子数（`C6`、`Cl1`、`O2`，也接受 `C=6`／`element:C6`）是该元素原子数恰好相等、其他元素不限的条件；`C0` 表示不含碳。多元素式（如 `C6H5ClO`）保持完整分子式匹配。`formula:C6`／`formula:O2` 强制完整分子式，`smiles:` 强制精确 Species；详情交接仍传精确身份。输入旁须在绘图前显示解释，不要求切换“物种／元素”模式。
+- 元素条件默认把**全部**匹配 Species 的逐帧分子数量求和，不乘以元素原子数，不受可选排行的 Top-N、目录分页或拆分成员显示上限影响；可选择拆分或合计加拆分。拆分截断显式报告省略数量。聚合从已发布索引直接累加到曲线数组，不分配匹配成员数 × 帧数的中间矩阵。
+- Species plot payload 升为 schema 2，query 保存 `resolved_targets`；元素曲线用 `element_sum`／`element_member` 和 `element_condition={element,count}`，保留精确成员列表。异式聚合的 formula 和 formula mass 为空，成员映射保留各自 `member_formula` 和质量。显式分子式单元素查询的默认标签保留 `formula:`，避免与元素条件曲线重名；旧裸单元素式输入须改用此前缀以保留原完整分子式语义。索引 schema 不变，无需重建。
+- 物种曲线可指定包含两端的 `start_timestep`／`end_timestep` 原始 source timestep 窗口，任一端留空表示不限制。先从已发布索引选择窗口，再聚合、归一化、平滑和降采样；初始值与最大值归一化以选中窗口为依据。窗口内无已分析帧是有效空结果，反向或非整数边界是参数错误。结果 query 保留边界；CSV 只导出窗口内未经处理的计数，保留原始 Analyzed Frame 与 source timestep，不能从零重新编号。物理横轴仍要求确认换算；单源相对时间以窗口首个观测点为零。多源输入将同一原始步数窗口应用于各来源，并显式报告无窗口内观测的来源。
 - 演化入口的累计采样丰度排行读取已发布索引中的 `total_count`，按精确 Species 排序并有界展示；同时显示已分析帧数、source timestep 范围、总物种数和显示截断。该指标不是当前丰度、峰值或事件频率。
-- 同页元素组的逐帧总量是该帧中符合元素条件的精确 Species 丰度之和；选中一个组内物种时，“其余物种”是组总量减去该物种丰度。曲线显示降采样不改变全量帧计算的排行，也不能从显示点反算排行。
+- 元素条件的逐帧总量是该帧中符合条件的精确 Species 丰度之和。高级元素分布入口中选中一个组内物种时，“其余物种”是组总量减去该物种丰度。曲线显示降采样不改变全量帧计算的排行，也不能从显示点反算排行。
 - 分子式查询显式选择合计、分别显示或两者，并列出聚合成员。
 - 归一化、时间对齐、平滑和降采样都记录参数。
 - 平滑与降采样只影响显示，不覆盖原始数值或统计结论。
-- CSV 默认导出未经平滑的原始/聚合序列；处理后导出同时记录变换。
+- CSV 默认导出未经平滑、归一化或显示下采样的完整原始/聚合序列；处理后导出同时记录变换。Dash 的“下载数据 CSV”只导出本次实际绘制的曲线（遵循曲线名称筛选），图例临时隐藏或缩放不改变导出范围；单来源按时间点一行、每曲线一列，保留 analyzed_frame、source_timestep 及已确认的物理横轴。多来源保留 system/replicate/series_name 和各自坐标。下载使用 UTF-8 BOM 以保留中文标签；CLI/API 默认仍导出全部结果曲线。
 - 曲线截断必须显示被省略数量。
 - 多数据集对比要求每个来源的相应索引就绪。
 - 多来源物种丰度对比由用户逐来源选择精确 Species；不同代表 SMILES 只有经用户分别确认后才进入同一比较。来源名称仅用于展示，导出保留文件身份和每个来源的目标。
@@ -297,7 +301,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 ### 11.5 Candidate Path Discovery
 
 - [ADR-0031](adr/0031-show-net-reaction-directions-in-candidate-workbench.md)：Dash 默认 `direction_view=net`，按完整精确 Species 多重集合配对严格正逆反应，只展开 `forward_count - reverse_count > 0` 的记录方向；净零与完全自反类型不连边，不推导未观测方向。可切换 `observed`；Python/CLI 保留 observed 兼容默认。
-- 净计数统计当前发布修订的全部观测区间（`count_scope=published_revision_all_transitions`），包含 unresolved；不按展示页、主线转移支持数或时间返回分类相减。净视图固定有效 `quality_view=raw`，不作短时折叠。方向过滤在邻接分页之前，正逆总数、净数和原始支持事件在步骤详情及 JSON/CSV 保留。结果 schema 为 indexed-candidates/v5；结构身份与现有邻接版本不变，无需因此重建索引。
+- 净计数统计当前发布修订的全部观测区间（`count_scope=published_revision_all_transitions`），包含 unresolved；不按展示页、主线转移支持数或时间返回分类相减。净视图固定有效 `quality_view=raw`，不作短时折叠。方向过滤在邻接分页之前，正逆总数、净数和原始支持事件在步骤详情及 JSON/CSV 保留。结果 schema 为 indexed-candidates/v6（增加途经与排除查询条件）；结构身份与现有邻接版本不变，无需因此重建索引。
 - 图的物种重复只表示网络或浏览历史中的循环，不称为具体分子的返回；净值为正的多步循环不因此隐藏。普通候选的 simple-path 约束是路线枚举边界，不是化学禁环规则。继续、翻页及返回使用已提交查询口径，修改控件后新搜索才生效。
 
 - ADR-0017 增加离线 Candidate Return Evidence，区分精确键级返回与仅拓扑返回；同 Transition 无内部先后，相关原子上的中间事件或 unresolved 屏障不能跳过。
@@ -311,6 +315,9 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 #### 11.5.1 Discovery modes 与完成状态
 
+- [ADR-0032](adr/0032-constrain-candidate-carriers-by-waypoints-and-exclusions.md)：双端查询可指定有序 `via_species`，要求主线按顺序经过每个精确中间 Species。共同反应物或非载体产物中出现不算途经；起终点、重复项不能作为途经列表。必须在同一条 simple route 前缀上检查，不能拼接各自可达但整体需要重复物种的分段路线。单端探索不接受途经条件。
+- 各模式可指定 `excluded_species`，仅禁止这些精确 Species 进入主线，不删改完整反应参与物、计量、正逆总数或原始事件。排除在邻接分页和搜索展开前生效；与起点、终点或途经物种冲突时明确拒绝。每种列表最多 100 项，物种须存在于当前候选索引；不按分子式合并，超限或无效标签不静默忽略。
+- 约束属于 Query Result，不进入 Candidate 结构身份；JSON、CSV 及超图来源记录保留提交的完整条件。带途经约束时，仅找到完整合格路线才可报告 `reachability_status=found`；完整查无结果才报告 `not_found`，预算截断后的无命中仍为 `inconclusive`。CLI/API、Dash 使用相同规则；单端继续、分页、返回沿用已提交排除条件，新搜索才应用编辑后的控件值，切换 RNG 数据清空约束选择。
 - `target-constrained` 查询从 anchor Species 寻找一个或多个 target Species。只有 carried endpoint 到达 target 才形成结果；target 仅作为其他 product 出现不算到达，首次到达任一 target 后停止扩展该分支，未到达的中间状态不输出，且普通路径拒绝 `target_species == anchor_species`。
 - 仅起点查询分页展开原方向的合格 carried transfers；仅终点查询在相同正向转移上按产物查前驱，结果与导出仍写正向 Reaction Type。二者逐步展开，重复 Carried Species 只作 cycle closure evidence，不把网络前驱说成实际分子来源。
 - 双端查询先在有界局部图中判断可达性，再从可达子图枚举 simple routes；至少一条路线被找到即可确认当前证据视图中的网络连接，但不代表备选路线查全。只有可达搜索完整且未命中，才能报告当前视图中不可达；预算截断后的无命中是 inconclusive。显式步数上限下的无命中仅针对该 horizon。
@@ -320,6 +327,7 @@ CLI 默认复用索引，可提供显式一次性流式模式，并在输出中�
 
 - 正式数据流是 `raw MD evidence → offline indexed substrate → online bounded local discovery → selective Continuous MD Support → paged evidence drill-down`。
 - Online Candidate Discovery 只读已发布的 hypergraph adjacency、aggregate metrics 和 canonical identity indexes，围绕 exact Carried Species 局部展开。
+- Candidate 网络图与超图导出仅投影已返回的有界路线及显式选择的浏览历史；完整有向 Reaction Type 保留全部参与物与计量数，同一类型计数不因多条路线重复累加。导出包含查询、来源修订、完成/截断状态和每条路线的独立载体支持；历史步骤不得改写当前 Candidate 身份或冒充当前 Step Evidence。SVG 内嵌结构并使用显式图规模上限，超限报错而非静默删节点；Python、CLI 与 Dash 共用核心转换。见 [超图导出契约](candidate-hypergraph.md)。
 - 双端目标检索按唯一 Species 读取有界局部邻接，在已读取子图中用到目标的剩余距离剪枝并枚举 simple routes；不同前缀的已访问集合仍独立保留。邻接、目标探测、frontier、路线前缀和已检查候选各有显式预算，截断原因保留。仅终点的在线查询使用 product-leading 的准备期逆邻接索引，不扫描全局转移表或把边反向发布。结果记录 `search_algorithm` 和实际预算/消耗；结构身份不变。
 - 在线请求不得扫描 raw event source、加载全部 occurrences 或 continuity segments、构造全局 occurrence graph，也不得预枚举或持久化全部 Candidate Paths。
 - `reacnet_scope/event_paths.py` 当前从完整事件集合构建 occurrence graph 的 Candidate discovery 只能作为原型/兼容实现保留。正式 production endpoint 上线并完成兼容迁移前不删除；上线后不得作为默认或百万级发布路径。

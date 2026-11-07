@@ -5,6 +5,9 @@ date: 2026-09-26
 
 # Show net reaction directions in the candidate workbench
 
+ADR-0032 extends the indexed report to v6 with waypoint/exclusion query controls;
+the direction and count rules below remain in force.
+
 The user requested that the pathway graph show net conversion after comparing
 111 forward occurrences with 110 reverse occurrences. Keeping both arrows in
 the default graph obscures the net contribution. The user also rejected treating

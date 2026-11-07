@@ -230,12 +230,11 @@ def test_host_files_need_no_upload_service_and_preview_does_not_start_analysis(i
                   {'import-browse-go': 1}, {'import-path': str(Path(paths[0]).parent)})
     assert browse['import-location']['data']['files'][0]['value'] == paths[0]
     candidate = svc.collection_candidate(dict(zip(('species', 'reaction'), paths)), 'run')
-    # Preview state is now local; candidate changes cannot start a server switch.
     result = client.post('/_dash-update-component', json=_payload(
         client, output_contains='dataset-switch-request.data',
         changed='dataset-browser-candidate.data',
         inputs={'dataset-browser-candidate': candidate}, states={}))
-    assert result.status_code == 204
+    assert result.status_code == 204  # Preview state is local; no server request starts.
     started = post(client, 'dataset-switch-request.data', 'data-apply-btn.n_clicks',
                    {'data-apply-btn': 1, 'dataset-browser-candidate': candidate})
     assert started['dataset-switch-request']['data']['state'] == 'validating'

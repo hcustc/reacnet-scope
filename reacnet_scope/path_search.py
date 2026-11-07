@@ -14,14 +14,16 @@ from pathlib import Path
 import sqlite3
 import time
 from typing import Any
+from collections.abc import Sequence
 
 from .indexes import IndexInvalidError
 from .network import smiles_to_formula_fast
 from .rng_events import reaction_key
 from .candidate_evidence import materialize_candidate_evidence, quality_summary
 from .candidate_identity import candidate_identity_from_route
+from .candidate_constraints import RouteConstraints
 
-SCHEMA = 'reacnet-scope/indexed-candidates/v5'
+SCHEMA = 'reacnet-scope/indexed-candidates/v6'
 ADJACENCY_VERSION = '5'
 ATOM_TRANSFER_POLICY = 'event_local_dominant_atom_descendant'
 NETWORK_ONLY_POLICY = 'species_connectivity_only'
@@ -208,6 +210,7 @@ class CandidateReader:
             self.quality_view = 'persistent'
             self.return_window_frames = 3
             self.return_basis = 'topology'
+            self.route_constraints = RouteConstraints()
         except Exception:
             self.connection.close()
             raise
@@ -252,16 +255,24 @@ class CandidateReader:
         return dict(forward_count=forward, reverse_count=reverse,
                     net_count=forward - reverse)
 
+    def _carrier_filter(self, column: str) -> tuple[str, tuple[str, ...]]:
+        excluded = self.route_constraints.excluded_species
+        if not excluded:
+            return '', ()
+        # column is an internal SQL expression; Species values are always bound.
+        return f" AND {column} NOT IN ({','.join('?' for _ in excluded)})", excluded
+
     def outgoing(self, species: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
         if self.carrier_policy == ATOM_TRANSFER_POLICY:
             return self._transfers(species, limit, offset=offset)
+        exclusion_sql, excluded = self._carrier_filter('t.product_species')
         rows = self.connection.execute('''
             SELECT r.reaction_key,r.reactants,r.products,r.total_events,t.product_species
             FROM candidate_network_transfers t JOIN candidate_reactions r
             ON r.reaction_key=t.reaction_key WHERE t.source_species=?
-            ''' + self._direction_filter() + '''
+            ''' + self._direction_filter() + exclusion_sql + '''
             ORDER BY r.reaction_key,t.product_species LIMIT ? OFFSET ?
-        ''', (species, limit, offset)).fetchall()
+        ''', (species, *excluded, limit, offset)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
                      event_count=n, **self._counts(k, n), carried_products=[product],
                      transfer_event_count=n, max_shared_atoms=None,
@@ -273,6 +284,8 @@ class CandidateReader:
         Filtering precedes LIMIT so a target after a hub's first page is eligible.
         The search installs a SQLite deadline handler, including JSON filtering.
         """
+        if target in self.route_constraints.excluded_species:
+            return []
         if self.carrier_policy == ATOM_TRANSFER_POLICY:
             return self._transfers(species, limit, target)
         rows = self.connection.execute('''
@@ -292,14 +305,15 @@ class CandidateReader:
         """Read observed forward transfers whose carried product is species."""
         if self.carrier_policy == ATOM_TRANSFER_POLICY:
             return self._transfers(species, limit, incoming=True, offset=offset)
+        exclusion_sql, excluded = self._carrier_filter('t.source_species')
         rows = self.connection.execute('''
             SELECT r.reaction_key,r.reactants,r.products,r.total_events,t.source_species
             FROM candidate_network_transfers t JOIN candidate_reactions r
             ON r.reaction_key=t.reaction_key WHERE t.product_species=?
             AND t.source_species<>t.product_species
-            ''' + self._direction_filter() + '''
+            ''' + self._direction_filter() + exclusion_sql + '''
             ORDER BY t.source_species,r.reaction_key LIMIT ? OFFSET ?
-        ''', (species, limit, offset)).fetchall()
+        ''', (species, *excluded, limit, offset)).fetchall()
         return [dict(reaction_key=k, reactants=json.loads(a), products=json.loads(b),
                      event_count=n, **self._counts(k, n), carried_from=source, carried_to=species,
                      carried_products=[species], transfer_event_count=n,
@@ -314,6 +328,10 @@ class CandidateReader:
             WHERE t.'''+('product_species' if incoming else 'source_species')+'=?'
         sql += self._direction_filter()
         params = [species]
+        exclusion_sql, excluded = self._carrier_filter(
+            't.source_species' if incoming else 't.product_species')
+        sql += exclusion_sql
+        params.extend(excluded)
         if incoming:
             sql += ' AND t.source_species<>t.product_species'
         if target is not None:
@@ -395,7 +413,7 @@ def _discover_incoming(reader: CandidateReader, target: str, *, max_paths: int,
     paths = [_candidate_path([row['carried_from'], target], [row])
              for row in rows[:max_paths]]
     return dict(schema_version=SCHEMA,
-                query=dict(direction_view=reader.direction_view,
+                query=dict(**reader.route_constraints.as_query(), direction_view=reader.direction_view,
                     count_scope='published_revision_all_transitions', start='', target=target, mode='reverse', max_steps=1,
                     max_paths=max_paths, quality_view=quality_view,
                     anchor_offset=offset,
@@ -436,7 +454,7 @@ def _discover_forward_one_step(reader: CandidateReader, start: str, *,
     self_cycles = sum(product == start for row in rows[:max_paths]
                       for product in row['carried_products'])
     return dict(schema_version=SCHEMA,
-                query=dict(direction_view=reader.direction_view,
+                query=dict(**reader.route_constraints.as_query(), direction_view=reader.direction_view,
                     count_scope='published_revision_all_transitions', start=start, target='', mode='explore', max_steps=1,
                     max_paths=max_paths, anchor_offset=offset,
                     quality_view=quality_view,
@@ -473,6 +491,8 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
     cycles: list[dict[str, Any]] = []
     branches: dict[tuple[str, str], deque] = {}
     horizon_limited = False
+    constraints = reader.route_constraints
+    cycle_count = 0
     reader.connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
     try:
         while pending:
@@ -526,14 +546,39 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
                     edges.append((product, reaction))
                     incoming.setdefault(product, set()).add(focal)
             out_edges[focal] = edges
-        distance = {target: 0}
-        reverse = deque([target])
-        while reverse:
-            product = reverse.popleft()
-            for source in sorted(incoming.get(product, ())):
-                if source not in distance:
-                    distance[source] = distance[product] + 1
-                    reverse.append(source)
+        # Relaxed distances only prune impossible prefixes. They do not prove
+        # a simple route through all waypoints: each prefix retains its visited set.
+        stops = (*constraints.via_species, target)
+        distances: list[dict[str, int]] = []
+        for stop in stops:
+            distance = {stop: 0}
+            reverse = deque([stop])
+            while reverse:
+                if time.monotonic() >= deadline:
+                    graph_reasons.add('time_budget')
+                    break
+                product = reverse.popleft()
+                for source in sorted(incoming.get(product, ())):
+                    if source not in distance:
+                        distance[source] = distance[product] + 1
+                        reverse.append(source)
+            distances.append(distance)
+        tail_distances = [0.0] * len(stops)
+        for index in range(len(stops) - 2, -1, -1):
+            tail_distances[index] = (distances[index + 1].get(stops[index], float('inf'))
+                                     + tail_distances[index + 1])
+
+        def can_finish(species: str, progress: int, length: int) -> bool:
+            nonlocal horizon_limited
+            remaining = distances[progress].get(species, float('inf')) + tail_distances[progress]
+            if remaining == float('inf'):
+                return False
+            if constraints.via_species and max_steps is not None and length + remaining > max_steps:
+                horizon_limited = True
+                return False
+            return True
+
+        distance = distances[-1]
         reachability = ('found' if start in distance else
                         'inconclusive' if graph_reasons else 'not_found')
 
@@ -541,14 +586,15 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
         # prevents one high-degree first branch from occupying every result slot.
         active: deque[tuple[str, str]] = deque()
         for product, reaction in out_edges.get(start, []):
-            if product not in distance or product == start:
+            progress = constraints.advance(product, 0, target)
+            if product == start or progress is None or not can_finish(product, progress, 1):
                 continue
             key = (reaction['reaction_key'], product)
             if len(branches) >= max_frontier:
                 route_reasons.add('frontier_budget')
                 continue
             branches[key] = deque([([start, product],
-                                    [dict(reaction, carried_from=start, carried_to=product)])])
+                                    [dict(reaction, carried_from=start, carried_to=product)], progress)])
             active.append(key)
         queued = len(active)
         cycle_count = 0
@@ -560,7 +606,7 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
             if len(paths_examined) >= max_candidates_examined:
                 route_reasons.add('candidate_exam_budget'); break
             branch = active.popleft()
-            species, steps = branches[branch].popleft()
+            species, steps, progress = branches[branch].popleft()
             queued -= 1
             prefixes_examined += 1
             focal = species[-1]
@@ -573,8 +619,6 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
                         active.append(branch)
                     continue
                 for product, reaction in out_edges.get(focal, []):
-                    if product not in distance:
-                        continue
                     if product in species:
                         cycle_count += 1
                         if len(cycles) < 100:
@@ -583,11 +627,14 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
                                 prefix_species=list(species),
                                 prefix_reactions=[step['reaction_key'] for step in steps]))
                         continue
+                    next_progress = constraints.advance(product, progress, target)
+                    if next_progress is None or not can_finish(product, next_progress, len(steps) + 1):
+                        continue
                     if queued >= max_frontier:
                         route_reasons.add('frontier_budget')
                         continue
                     branches[branch].append((species + [product], steps + [
-                        dict(reaction, carried_from=focal, carried_to=product)]))
+                        dict(reaction, carried_from=focal, carried_to=product)], next_progress))
                     queued += 1
             if branches[branch]:
                 active.append(branch)
@@ -602,10 +649,15 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
     finally:
         reader.connection.set_progress_handler(None, 0)
     reasons = graph_reasons | route_reasons
+    if constraints.via_species:
+        # Independent reachable legs can require revisiting a Species. Only a
+        # complete, ordered simple route establishes constrained reachability.
+        reachability = ('found' if paths_examined else
+                        'inconclusive' if reasons else 'not_found')
     routes_complete = not reasons
     paths = _sample_first_transfer_branches(paths_examined, list(branches), max_paths)
     return dict(schema_version=SCHEMA,
-                query=dict(direction_view=reader.direction_view,
+                query=dict(**reader.route_constraints.as_query(), direction_view=reader.direction_view,
                     count_scope='published_revision_all_transitions', start=start, target=target, mode='target', max_steps=max_steps,
                     max_paths=max_paths, max_expansions=max_expansions,
                     max_frontier=max_frontier, max_seconds=max_seconds,
@@ -621,7 +673,8 @@ def _discover_target_routes(reader: CandidateReader, start: str, target: str, *,
                 horizon_limited=horizon_limited, display_truncated=len(paths_examined) > max_paths,
                 truncation_reasons=sorted(reasons),
                 expansions=len(cache), adjacency_rows_read=edges_read,
-                search_algorithm='local_reachability_fair_routes_v1',
+                search_algorithm=('ordered_waypoints_fair_routes_v1' if constraints.via_species
+                                  else 'local_reachability_fair_routes_v1'),
                 path_prefixes_examined=prefixes_examined,
                 path_prefix_budget=max_prefixes,
                 candidates_examined=len(paths_examined),
@@ -644,7 +697,9 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
                                 direction_view: str = 'observed',
                                 count_scope: str = 'published_revision_all_transitions',
                                 quality_view: str = 'persistent', return_window_frames: int = 3,
-                                return_basis: str = 'topology') -> dict[str, Any]:
+                                return_basis: str = 'topology',
+                                via_species: Sequence[str] | None = None,
+                                excluded_species: Sequence[str] | None = None) -> dict[str, Any]:
     if mode not in {'target', 'explore', 'reverse'}:
         raise ValueError('请选择起点到目标、从起点探索或从终点查前驱')
     if quality_view not in {'persistent', 'raw'} or return_basis not in {'exact', 'topology'}:
@@ -687,6 +742,9 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
     if (mode == 'target' or (mode == 'explore' and max_steps not in {None, 1})) and anchor_offset:
         raise ValueError('分页偏移只用于单端的一步探索')
     target = target if mode in {'target', 'reverse'} else ''
+    reader.route_constraints = RouteConstraints.validate(
+        via_species, excluded_species, start=start if mode != 'reverse' else '',
+        target=target, mode=mode, contains=reader.contains)
     if mode == 'reverse':
         return _discover_incoming(reader, target, max_paths=max_paths,
                                   max_seconds=max_seconds, offset=anchor_offset,
@@ -766,7 +824,7 @@ def discover_indexed_candidates(reader: CandidateReader, start: str, *, target: 
     finally:
         reader.connection.set_progress_handler(None, 0)
     return dict(schema_version=SCHEMA,
-                query=dict(direction_view=reader.direction_view,
+                query=dict(**reader.route_constraints.as_query(), direction_view=reader.direction_view,
                     count_scope='published_revision_all_transitions', start=start, target='', mode='explore', max_steps=max_steps,
                     max_paths=max_paths, max_expansions=max_expansions,
                     max_frontier=max_frontier, max_seconds=max_seconds,

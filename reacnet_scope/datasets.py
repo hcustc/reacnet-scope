@@ -17,6 +17,17 @@ ARTIFACT_SUFFIXES = (
     (".species", "species"),
 )
 
+# RNG --output-dir uses these exact names instead of a common input prefix.
+OFFICIAL_ARTIFACT_NAMES = {
+    "timeline.h5": "timeline", "reactionabcd": "reaction", "species": "species",
+    "reactionevent.csv": "reactionevent", "molecules.csv": "molecules",
+}
+
+
+def is_native_timeline_path(value: str | Path) -> bool:
+    name = Path(value).name.lower()
+    return name == "timeline.h5" or name.endswith(".timeline.h5")
+
 
 def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
     """Group recognized dataset artifacts without reading their contents."""
@@ -38,6 +49,8 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
                     "score": len(record["artifact_paths"]), "mtime": reference.stat().st_mtime})
         return sorted(candidates, key=lambda item: item["label"])
     groups: dict[str, dict[str, tuple[Path, float]]] = defaultdict(dict)
+    official_timeline = root / "timeline.h5"
+    has_official_timeline = official_timeline.is_file()
     with os.scandir(root) as entries:
         for entry in entries:
             try:
@@ -55,6 +68,9 @@ def discover_dataset_candidates(directory: str | Path) -> list[dict[str, Any]]:
             if entry.name.startswith("._"):
                 continue
             lower_name = entry.name.lower()
+            if has_official_timeline and lower_name in OFFICIAL_ARTIFACT_NAMES:
+                groups[str(official_timeline)][OFFICIAL_ARTIFACT_NAMES[lower_name]] = (Path(entry.path), mtime)
+                continue
             for suffix, kind in ARTIFACT_SUFFIXES:
                 if lower_name.endswith(suffix):
                     base = str(root / entry.name[: -len(suffix)])
