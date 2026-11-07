@@ -27,7 +27,7 @@ instance. Replacing its label globally would change Species and reaction identit
   hydrogens only when the original SMILES valence rules resolve their counts;
   otherwise report incomplete input. Ignore original bond orders and stereochemical
   annotations for this inference, but retain the original label and its provenance.
-- Use the independent `neutral-main-group-milp/v3` core with the existing SciPy and
+- Use the independent `neutral-main-group-milp/v4` core with the existing SciPy and
   RDKit dependencies. The RNG prototype mentioned in the issue was unavailable in
   the inspected local checkout; this implementation does not import an unpublished
   RNG interface or claim numerical equivalence with that prototype.
@@ -43,11 +43,22 @@ instance. Replacing its label globally would change Species and reaction identit
   restrictions after RDKit sanitization. These are deliberately narrow model-domain
   assumptions, not universal chemistry; they exclude valid ionic representations.
 - Replace weighted penalties with lexicographic integer minimization, in this order:
-  charged-atom shell deficit, non-carbon shell deficit, model unpaired electrons,
-  total shell deficit, number of charged atoms, expanded-shell excess. Shell targets
+  charged-atom shell deficit, non-carbon shell deficit, small-ring unsaturation,
+  model unpaired electrons, total shell deficit, number of charged atoms,
+  expanded-shell excess, charge-location electronegativity. Shell targets
   are a duet for H, a sextet for neutral B, otherwise an octet; allowed P/S expanded
   states remain versioned in the core. Lock each optimum before solving the next
   objective, sharing the remaining wall-time/node budget across all stages.
+- For 3/4-member cycles, count each triple bond and each adjacent pair of double
+  bonds once, including cycles omitted by a ring basis. Minimize this count before
+  unpaired electrons; isolated ring double bonds, exocyclic double bonds and acyclic
+  multiple bonds are not penalized. This is a naming preference, not strain energy
+  or a blanket prohibition: higher-priority shell objectives can still prevail.
+- As the final tie-break, minimize the sum of formal charge times integer-scaled
+  Pauling electronegativity. At fixed earlier objectives this favors negative
+  charge on more electronegative atoms and positive charge on less electronegative
+  atoms. Publish the table and scale in method metadata. It cannot trade shell
+  satisfaction or introduce additional charges to improve this last objective.
 - Preserve the selected atom-level charge, unpaired electrons, lone pairs, isotope
   and integer bond orders in `model_graph`. Indices are local zero-based diagram
   indices, never RNG Atom IDs. Draw from this graph without reinferring radicals
@@ -116,3 +127,25 @@ Result schema v2 introduces the model graph and named objectives. Method v3 and
 schema v2 invalidate older prepared annotations; users explicitly rebuild them.
 Original Species and reaction identities are never migrated. Real-trajectory and
 spin-resolved validation remain deferred.
+
+## Charge-location and small-ring review (v4)
+
+The [remaining review examples](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6703813400)
+reproduced two omissions: no tie-break for equal-charge-count representations, and
+no small-ring multiple-bond penalty. The three charge-location and four ring
+regressions pass with the two added priorities. CO and earlier acyclic carbon
+examples retain their intended representations. These preferences do not identify
+an electronic ground state.
+
+A charge-only ablation and the full v4 model were replayed on the same 7775 entries.
+Strict agreement is 7449 for both v3 and charge-only, and 7439 for v4. The cited
+42-entry drop from v2 to v3 in CHOF/CHOCl is a net difference: 200 losses and 158
+gains. None of the 200 losses is an equal-charge-count location error; 188 v3
+candidates are uncharged, and 12 introduce charges absent from the reference.
+Ring penalties also change tied bond/radical assignments, including some that
+already had zero small-ring penalty. Keep these regressions visible in the
+[validation report](../research/lewis-reference-validation.md), rather than treating
+the two fixes as a general reference-accuracy improvement.
+
+Method v4 invalidates v1/v2/v3 annotations. The result schema stays v2; its named
+objectives and method metadata expose the new rules. No source identity changes.

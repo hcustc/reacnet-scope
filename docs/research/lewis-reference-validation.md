@@ -1,4 +1,141 @@
-# Lewis v3：碳片段修复与同分母参考回放
+# Lewis 候选结构：公开参考回放与模型取舍
+
+## 当前 v4：电荷位置与小环偏好
+
+日期：2026-11-07。回应[第三轮反馈](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6703813400)。
+v4 修复 3 个电荷位置和 4 个小环样例；同分母严格结构一致数从 v3 的 **7449/7775**
+降至 **7439/7775**。这是明确规则下的命名候选，不宣称整体准确率提高。此前 v3 的
+方法、来源、指标定义和同分母历史比较保留在后文。
+
+### 两项新增规则
+
+1. 在未配对电子目标之前，最小化三/四元环内的三键数与相邻双键对数之和。
+   每个键/键对只计一次，直接检查短环连接，覆盖可能不在最小环基中的短环。
+   环内孤立双键、环外双键和链上多键不受惩罚。这是排序偏好，不是物理张力能，
+   更高优先级的带电原子/非 C 壳层目标仍可胜出。
+2. 在原有目标之后，最小化 `Σ(形式电荷 × Pauling 电负性 × 100)`，使其余目标相同
+   的候选优先把负电放在电负性高的原子、正电放在电负性低的原子。乘 100 是为了使用
+   精确整数目标锁定，不是能量换算。CO 的八隅体目标优先，因此仍保留 `[C-]#[O+]`。
+
+电负性表来自 [RSC 元素周期表](https://periodic-table.rsc.org/)，例如
+[C=2.55](https://periodic-table.rsc.org/element/6/carbon)、
+[N=3.04](https://periodic-table.rsc.org/element/7/nitrogen)、
+[O=3.44](https://periodic-table.rsc.org/element/8/oxygen)。完整表与八级顺序在方法元数据中公开。
+电负性偏好本身不确定共振贡献、电子态或能量。
+
+| 原始连接图 | v3 | v4 |
+| --- | --- | --- |
+| `[H][C]([H])[O][O]` | `[H][C-]([H])[O+]=O` | `[H]C([H])=[O+][O-]` |
+| `[H][C]([H])[N]([H])[O]` | `[H][C-]([H])[N+]([H])=O` | `[H]C([H])=[N+]([H])[O-]` |
+| `[N][N][O]` | `[N-]=[N+]=O` | `N#[N+][O-]` |
+| `[H][C]1([H])[C][C]1` | `[H]C1([H])C#C1` | `[H]C1([H])[C][C]1` |
+| `[C]1[C][O]1` | `C1#CO1` | `[C]1[C]O1` |
+| `[C]1[C][C][C]1` | `C1#CC#C1` | `[C]1[C][C][C]1` |
+| `[C]1[C][C]1` | `C1=C=C=1` | `[C]1[C][C]1` |
+
+小环样例选中了带中性碳孤对的模型分配；SMILES 仍可能丢失这种分配，不据此指定自旋。
+小环项的最优值为零也不证明结构稳定。先只添加电荷位置项，3 个电荷测试由失败转为通过、
+4 个小环仍失败；再加入小环项，7 个样例全部通过。模型图与 SMILES 的结构比较确认这些
+错误产生在优化阶段，而不是序列化阶段。
+
+### 同一参考集上的单项对照
+
+仍使用下文列出的十四个库、固定提交和哈希；7781 条声明中排除相同的 6 条域外元素，
+比较全部 7775 条。v3、仅加电荷位置的实验、v4 均无超时、节点截断或比较器错误，全部
+模型图与 SMILES 在规范化后的结构指标上一致。原始数据和逐条结果保留在仓库外。
+
+| 库 | 分母 | v3 结构一致 | 仅加电荷位置 | v4 结构一致 |
+| --- | ---: | ---: | ---: | ---: |
+| primaryThermoLibrary | 45 | 37 | 38 | 38 |
+| halogens | 26 | 26 | 26 | 26 |
+| CHOF_G4 | 3364 | 3222 | 3222 | 3216 |
+| CHOCl_G4 | 3250 | 3127 | 3127 | 3123 |
+| CH | 112 | 112 | 112 | 112 |
+| CHO | 354 | 354 | 354 | 354 |
+| CN | 1 | 1 | 1 | 1 |
+| CHN | 141 | 141 | 141 | 141 |
+| CHON | 94 | 94 | 94 | 94 |
+| primaryNS | 72 | 51 | 51 | 51 |
+| BurcatNS | 109 | 98 | 98 | 98 |
+| NOx2018 | 146 | 130 | 130 | 130 |
+| GRI-Mech3.0 | 52 | 48 | 47 | 47 |
+| NISTThermoLibrary | 9 | 8 | 8 | 8 |
+| **合计** | **7775** | **7449** | **7449** | **7439** |
+
+| 方法 | 严格结构 | SMILES 往返局部电子 | 模型图局部电子 |
+| --- | ---: | ---: | ---: |
+| v3 | 7449 | 7383 | 7432 |
+| charge-only | 7449 | 7383 | 7432 |
+| v4 | 7439 | 7372 | 7422 |
+
+上表分母均为 7775；局部电子指标不判断自旋。电荷单项实验中，NOx2018 与 GRI-Mech3.0
+的 N2O 参考都采用 `[N-]=[N+]=O`，因此改为本轮要求的 `N#[N+][O-]` 后，严格结构
+比较会从一致变为不一致。另有 ONHN、HNCN 两条变为一致；HNCN 不带形式电荷，
+其变化属于同分最优解选择，不能归因为负电位置更合理。
+固定的小 C/N/O 分层继续保留：
+
+| 分层 | 分母 | v3 结构/SMILES 局部/模型局部 | 仅加电荷位置 | v4 |
+| --- | ---: | ---: | ---: | ---: |
+| 小 C/N/O | 383 | 340/326/328 | 340/326/328 | 340/325/328 |
+| 含未配对电子或中性碳孤对 | 172 | 132/120/122 | 134/122/124 | 134/121/124 |
+| 含中性碳孤对 | 14 | 12/0/8 | 12/0/8 | 13/0/9 |
+
+### “少了 42 条”的逐条核算
+
+CHOF_G4/CHOCl_G4 从 v2 到 v3 的 42 条是**净差额**，不是固定的 42 条失败集合：
+
+| 库 | v2 一致→v3 不一致 | v2 不一致→v3 一致 | 净减少 | 失配中 v3 无电荷 | 失配中 v3 引入电荷对 | 同电荷数的位置错误 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CHOF_G4 | 108 | 77 | 31 | 102 | 6 | 0 |
+| CHOCl_G4 | 92 | 81 | 11 | 86 | 6 | 0 |
+| 合计 | **200** | **158** | **42** | **188** | **12** | **0** |
+
+按 `(library, index, label)` 对齐条目，对全部 200 条失配检查候选与参考的逐原子形式电荷：
+188 条 v3 候选完全无电荷；另 12 条的参考完全无电荷，v3 引入 O⁺/O⁻ 对。
+后者属于是否引入电荷的选择，不是相同电荷数下的位置排序问题。因此，按本轮第 1 类
+问题定义，归属数是 **0**。作为独立验证，仅加电荷位置项后这两个库所有候选都未改变，
+200 条失配没有一条恢复。不能把这 42 条净损失归因于缺少电负性排序。
+
+12 条带电候选的参考索引为 CHOF_G4：482、713、997、1693、1773、2003；
+CHOCl_G4：54、87、1131、1297、2109、2187。它们的参考是中性过氧自由基表示，而
+v3/v4 偏好局部电荷分离；本轮没有改变决定这些表示的较高优先级目标。
+
+加入小环项后，CHOF/CHOCl 相对 v3 分别有 5/5 条变为一致、11/9 条变为不一致，
+净减少 6/4。原 200 条失配恢复 4 条，不能用此忽略同时发生的退步。
+原 v3 两库各有 3 条小环惩罚非零，v4 全部降为零；但新约束也改变了一些原本惩罚为零的
+同分最优解，涉及键级/自由基位置。它们未被证明全部属于同一共振类，严格比较照常记为
+差异。此处报告的是版本输出的变化，不能把所有变化都解释成新增化学规则的直接效果。
+
+### v4 与单项实验复现
+
+沿用后文十四库的下载、哈希、预算及回放命令。当前源码默认运行 v4；历史 v3 与电荷
+单项实验可在外部临时目录中生成：
+
+```bash
+WORK=$(mktemp -d)
+REPO=$(pwd)
+git show 029dd82194d21d016e1ff76f8fa01b8881a504dd:reacnet_scope/lewis.py > "$WORK/lewis.py"
+cp "$WORK/lewis.py" "$WORK/lewis-v3.py"
+git -C "$WORK" apply --unidiff-zero "$REPO/docs/research/lewis-charge-location-experiment.patch"
+```
+
+同一回放命令将实现选项设置为 `--implementation-file "$WORK/lewis-v3.py"` 或
+`--implementation-file "$WORK/lewis.py"`，分别使用独立输出目录即可重现历史 v3 和
+仅加电荷位置的实验。复现 v4 时移除 `--implementation-file`，并使用独立输出目录。
+该补丁只用于外部实验，不是生产选项。实际运行的实现 SHA-256：
+
+| 方法 | SHA-256 |
+| --- | --- |
+| v3 | `951421505492df44c634af5a14a93c08570d79c585acbe660d079f1fcf6457cd` |
+| charge-only | `bd0e35130a195fded49d8e435fdd9aa77225551653c2b71b9e590331c3e8632b` |
+| v4 | `97db644549e1b4d5d47aa5d92cae1f57c56cd9662d86917266bb3192e6503daf` |
+
+生产方法升级到 `neutral-main-group-milp/v4`，schema 保持 v2，旧方法注释须显式重新准备。
+八级目标共享原有时间/节点预算。真实轨迹验收、唯一电子态识别与自动过滤不属于此次结论。
+
+---
+
+## v3 历史回放
 
 日期：2026-11-07。回应 [PR #73 的碳片段与验证反馈](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6703323546)，
 保留此前 [v2 含卤修复](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6702833099) 的比较。
@@ -163,6 +300,7 @@ REPO=$(pwd)
 git show 193edc85515e9fbd6d1869cb8cea6625a4b9e9c8:reacnet_scope/lewis.py > "$WORK/lewis.py"
 cp "$WORK/lewis.py" "$WORK/lewis-v1.py"
 git show a13a23ffad5856f7cb7e6680ea385f25e9fac98b:reacnet_scope/lewis.py > "$WORK/lewis-v2.py"
+git show 029dd82194d21d016e1ff76f8fa01b8881a504dd:reacnet_scope/lewis.py > "$WORK/lewis-v3.py"
 git -C "$WORK" apply --unidiff-zero "$REPO/docs/research/lewis-combined-experiment.patch"
 INPUTS=/path/to/reference
 uv run --locked python scripts/benchmark_lewis_rmg.py \
@@ -172,16 +310,17 @@ uv run --locked python scripts/benchmark_lewis_rmg.py \
   "$INPUTS/BurcatNS.py" "$INPUTS/NOx2018.py" "$INPUTS/GRI-Mech3.0.py" \
   "$INPUTS/NISTThermoLibrary.py" \
   --revision 6391cc4f75341803605d9ad17417e14cf2db1f59 \
+  --implementation-file "$WORK/lewis-v3.py" \
   --output-dir "$WORK/v3"
 ```
 
-相同命令分别添加 `--implementation-file "$WORK/lewis-v1.py"`、
+相同命令分别将实现选项替换为 `--implementation-file "$WORK/lewis-v1.py"`、
 `--implementation-file "$WORK/lewis-v2.py"` 或 `--implementation-file "$WORK/lewis.py"`，
 并换用独立输出目录，即得到 v1/v2/组合实验。该选项只用于可信的 Scope 历史代码，
 不能指向下载的 RMG 文件。补丁应用后的文件哈希应与上表 combined 完全一致。
 `summary.json` 保存方法、来源哈希、分母及分层，`entries.json` 保留逐条状态和比较结果。
 完整参考输入/输出不随仓库分发，脚本拒绝将完整结果写入源码仓库。
 
-生产方法为 `neutral-main-group-milp/v3`，结果 schema 升至
+该轮方法为 `neutral-main-group-milp/v3`，结果 schema 升至
 `reacnet-scope/lewis-annotation/v2`：新增 `model_graph` 和命名 `model_objectives`，
 移除加权 `model_score`。旧注释须显式重新准备；同分候选和别名可改变，原始身份不变。

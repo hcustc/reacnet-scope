@@ -59,9 +59,11 @@ prepare_lewis_annotations(
   不说明其整个分组均已处理；元数据未知时不会猜测模式。
 - 支持 H、B、C、N、O、F、Si、P、S、Cl、Br、I；所有片段必须中性。
   已知 NH₄⁺、PF₆⁻ 不会被偷偷中和；Na、Se 等不支持元素保留原名称。
-- 当前 `neutral-main-group-milp/v3` 禁止卤素正电，负电限制在 N/O/卤素或只有一个
+- 当前 `neutral-main-group-milp/v4` 禁止卤素正电，负电限制在 N/O/卤素或只有一个
   重原子邻居的 C，并要求带电原子沿连接边一对一匹配异号电荷。中性 C 允许孤电子对。
-  六级优化顺序在方法元数据中公开，各级共享时间和节点预算；没有物理能量评分。
+  八级优化顺序在方法元数据中公开，各级共享时间和节点预算；没有物理能量评分。
+  模型优先减少三/四元环内的三键和相邻双键；其余目标相同时，负电偏向电负性高的
+  原子、正电偏向电负性低的原子。CO 等由更高优先级决定的表示保留。
   这是命名模型的保守边界；被排除或求解失败不能解释为物种不可能存在。
 - 图示从 `model_graph` 保留的模型电子分配生成；碳旁的 LP 是孤电子对数，电子点是
   模型未配对电子。它们不判定实际自旋，`model_unpaired_electrons` 也不是自旋测量。
@@ -85,7 +87,7 @@ prepare_lewis_annotations(
 公开参考集比较记录见[参考验证](research/lewis-reference-validation.md)。键级/形式电荷
 表示一致，不等于未配对电子、孤电子对或自旋状态一致，不能据此声称已验证化学有效性。
 
-升级到方法 v3 后，旧方法生成的注释会显示过期，需要重新运行
+升级到方法 v4 后，旧方法生成的注释会显示过期，需要重新运行
 `reacnet-scope prepare rebuild lewis /path/to/rng --assume-neutral`。
 结果 schema 升为 `reacnet-scope/lewis-annotation/v2`，增加模型图与命名目标值
 `model_objectives`，移除旧加权 `model_score`；原始 RNG 身份、原始文件和计数不变。

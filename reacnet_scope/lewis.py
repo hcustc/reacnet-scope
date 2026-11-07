@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+from itertools import combinations
 import json
 import math
 import time
@@ -19,8 +20,14 @@ from rdkit import Chem, rdBase
 
 
 LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v2"
-LEWIS_METHOD = "neutral-main-group-milp/v3"
-_OBJECTIVES = ("charged_shell_deficit", "hetero_shell_deficit", "unpaired_electrons", "shell_deficit", "formal_charge_count", "expanded_shell_excess")
+LEWIS_METHOD = "neutral-main-group-milp/v4"
+_OBJECTIVES = ("charged_shell_deficit", "hetero_shell_deficit", "small_ring_unsaturation",
+               "unpaired_electrons", "shell_deficit", "formal_charge_count",
+               "expanded_shell_excess", "charge_electronegativity")
+# Pauling electronegativities x100, integer-scaled for exact lexicographic locks.
+# Source: https://periodic-table.rsc.org/ (element atomic data).
+_ELECTRONEGATIVITY = {"H": 220, "B": 204, "C": 255, "N": 304, "O": 344, "F": 398,
+                      "Si": 190, "P": 219, "S": 258, "Cl": 316, "Br": 296, "I": 266}
 _HALOGENS = frozenset({"F", "Cl", "Br", "I"})
 # Valence electrons and closed-shell bond-order sums by formal charge.
 # Lower sums retain unpaired electrons; P/S additionally permit expanded shells.
@@ -72,6 +79,12 @@ def method_metadata() -> dict:
             "charge_policy": {"positive_halogen": "forbidden",
                               "negative_sites": "N_O_halogen_or_C_with_one_heavy_neighbor",
                               "pairing": "one_to_one_opposite_charges_on_existing_edges"},
+            "small_ring_policy": {"sizes": [3, 4],
+                                  "objective": "triple_bonds_plus_adjacent_double_bond_pairs",
+                                  "counting": "unique_bonds_and_pairs_in_any_small_cycle",
+                                  "claim": "naming_preference_not_strain_energy"},
+            "charge_location_policy": {"objective": "min_sum_formal_charge_times_electronegativity",
+                                       "scale": "Pauling_x100", "values": dict(_ELECTRONEGATIVITY)},
             "radical_electrons_basis": "RDKit_representation_not_electronic_state",
             "neutral_carbon_pairing": "all_allowed_unpaired_lone_pair_partitions",
             "electron_assignment_claim": "one_model_assignment_not_spin_identification",
@@ -242,6 +255,25 @@ def _charge_policy_holds(molecule):
     return len(positives) == len(negatives) and all(pair(i, set()) for i in positives)
 
 
+def _small_ring_bond_pairs(graph):
+    """Find every adjacent edge pair in a triangle or quadrilateral.
+
+    Detect local 3/4-cycles directly: a ring basis can omit a chorded or fused
+    small cycle. Deduplicate pairs so shared rings do not multiply a penalty.
+    This never enumerates longer cycles or uses the input bond orders.
+    """
+    neighbors = [{n.GetIdx() for n in a.GetNeighbors()} for a in graph.GetAtoms()]
+    pairs = set()
+    for center, adjacent in enumerate(neighbors):
+        for left, right in combinations(sorted(adjacent), 2):
+            triangle = right in neighbors[left]
+            quadrilateral = bool((neighbors[left] & neighbors[right]) - {center})
+            if triangle or quadrilateral:
+                pairs.add(tuple(sorted((graph.GetBondBetweenAtoms(center, left).GetIdx(),
+                                        graph.GetBondBetweenAtoms(center, right).GetIdx()))))
+    return sorted(pairs)
+
+
 def _solve(graph, options: LewisOptions, seconds: float) -> dict:
     started = time.monotonic()
     atoms = list(graph.GetAtoms())
@@ -255,9 +287,16 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
         width += len(items)
     pairing_offset = width
     width += 2 * len(bonds)
+    ring_pairs = _small_ring_bond_pairs(graph)
+    ring_bonds = sorted({j for pair in ring_pairs for j in pair})
+    ring_offsets = {j: width + 3 * k for k, j in enumerate(ring_bonds)}
+    width += 3 * len(ring_bonds)
+    cumulene_offset = width
+    width += 2 * len(ring_pairs)
     fragments = Chem.GetMolFrags(graph)
     pairing_row = 2 * len(atoms) + len(fragments)
-    matrix = np.zeros((pairing_row + 2 * len(atoms), width))
+    ring_row = pairing_row + 2 * len(atoms)
+    matrix = np.zeros((ring_row + 2 * len(ring_bonds) + len(ring_pairs), width))
     rhs = np.zeros(len(matrix))
     objectives = np.zeros((len(_OBJECTIVES), width))
     lower, upper = np.zeros(width), np.ones(width)
@@ -284,7 +323,27 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
             matrix[2 * len(atoms) + fragment_for[i], j] = charge
             if charge:
                 matrix[pairing_row + (0 if charge > 0 else len(atoms)) + i, j] = -1
-            objectives[:, j] = deficit if charge else 0, deficit if atoms[i].GetSymbol() != "C" else 0, radicals, deficit, abs(charge), expanded
+            objectives[:, j] = (deficit if charge else 0,
+                                 deficit if atoms[i].GetSymbol() != "C" else 0,
+                                 0, radicals, deficit, abs(charge), expanded,
+                                 charge * _ELECTRONEGATIVITY[atoms[i].GetSymbol()])
+    ring_objective = _OBJECTIVES.index("small_ring_unsaturation")
+    for k, j in enumerate(ring_bonds):
+        row, column = ring_row + 2 * k, ring_offsets[j]
+        # Exactly one single/double/triple indicator, tied to the bond order.
+        matrix[row, column:column + 3] = 1
+        rhs[row] = 1
+        matrix[row + 1, j] = 1
+        matrix[row + 1, column:column + 3] = (-1, -2, -3)
+        objectives[ring_objective, column + 2] = 1
+    for k, (left, right) in enumerate(ring_pairs):
+        row = ring_row + 2 * len(ring_bonds) + k
+        column = cumulene_offset + 2 * k
+        matrix[row, ring_offsets[left] + 1] = 1
+        matrix[row, ring_offsets[right] + 1] = 1
+        # d_left + d_right = 2 * both + exactly_one (all binary).
+        matrix[row, column:column + 2] = (-2, -1)
+        objectives[ring_objective, column] = 1
     values, fields = _optimize(objectives, matrix, rhs, lower, upper, options,
                                seconds - (time.monotonic() - started))
     if values is None:

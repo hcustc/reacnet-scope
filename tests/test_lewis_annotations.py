@@ -31,6 +31,46 @@ def neutral(**kwargs):
 
 
 @pytest.mark.parametrize("smiles,expected", [
+    ("[H][C]([H])[O][O]", "C=[O+][O-]"),
+    ("[H][C]([H])[N]([H])[O]", "C=[NH+][O-]"),
+    ("[N][N][O]", "N#[N+][O-]"),
+])
+def test_charge_location_prefers_electronegative_negative_site(smiles, expected):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    assert Chem.MolToSmiles(Chem.MolFromSmiles(result["candidate_smiles"])) == expected
+    assert result["original_species"] == smiles
+
+
+@pytest.mark.parametrize("smiles", [
+    "[H][C]1([H])[C][C]1", "[C]1[C][O]1", "[C]1[C][C][C]1", "[C]1[C][C]1",
+])
+def test_small_ring_candidates_avoid_triples_and_cumulated_doubles(smiles):
+    from reacnet_scope.lewis import lewis_model_molecule
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    model = lewis_model_molecule(result)
+    Chem.GetSymmSSSR(model)
+    rings = [r for r in model.GetRingInfo().BondRings() if len(r) in (3, 4)]
+    assert rings
+    for ring in rings:
+        bonds = [model.GetBondWithIdx(i) for i in ring]
+        assert all(b.GetBondTypeAsDouble() <= 2 for b in bonds)
+        for atom in model.GetAtoms():
+            assert sum(b.GetBondTypeAsDouble() == 2 for b in bonds
+                       if atom.GetIdx() in (b.GetBeginAtomIdx(), b.GetEndAtomIdx())) <= 1
+    assert result["original_species"] == smiles
+
+
+@pytest.mark.parametrize("smiles", ["C1CC1", "C1=CC1", "C1=CC=C1", "C=C1CC1", "C=C=C", "C#C"])
+def test_ring_preference_preserves_isolated_double_bonds_and_acyclic_unsaturation(smiles):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    assert Chem.MolToSmiles(Chem.MolFromSmiles(result["candidate_smiles"])) == smiles
+    assert result["model_objectives"]["small_ring_unsaturation"] == 0
+
+
+@pytest.mark.parametrize("smiles,expected", [
     ("[C][C]", "[C]=[C]"), ("[C][C][C]", "[C]=C=[C]"),
     ("[C][C][O]", "[C]=C=O"), ("[C][C][C][O]", "[C]=C=C=O"),
 ])
@@ -65,7 +105,7 @@ def test_halogen_restriction_preserves_co_charge_pair_and_exposes_model_rules():
     assert result["model_objectives"]["charged_shell_deficit"] == 0
     assert result["method"]["charge_policy"]["positive_halogen"] == "forbidden"
     assert result["method"]["radical_electrons_basis"] == "RDKit_representation_not_electronic_state"
-    assert result["method"]["method"] == "neutral-main-group-milp/v3"
+    assert result["method"]["method"] == "neutral-main-group-milp/v4"
 
 
 def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
@@ -220,8 +260,8 @@ def test_revision_and_assumption_changes_invalidate_results(sources):
     assert get_lewis_annotation(sources, "[C][O]")["coverage"] == "selected_representative_only"
 
 
-@pytest.mark.parametrize("old_method", ["v1", "v2"])
-def test_old_publication_is_rejected_and_rebuilt_with_v3_rules(sources, old_method):
+@pytest.mark.parametrize("old_method", ["v1", "v2", "v3"])
+def test_old_publication_is_rejected_and_rebuilt_with_v4_rules(sources, old_method):
     import sqlite3
     prepare_lewis_annotations(sources, options=neutral())
     with sqlite3.connect(annotation_path(sources)) as db:
@@ -232,7 +272,7 @@ def test_old_publication_is_rejected_and_rebuilt_with_v3_rules(sources, old_meth
     with pytest.raises(IndexStaleError):
         get_lewis_annotation(sources, "[C][O]")
     prepare_lewis_annotations(sources, options=neutral())
-    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v3"
+    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v4"
 
 
 def test_carbene_model_graph_retains_pairing_lost_by_smiles_roundtrip():
