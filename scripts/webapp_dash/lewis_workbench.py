@@ -29,6 +29,7 @@ _REASONS = {"neutral_assumption_required": "需明确选择中性片段假设",
             "solver_budget": "达到求解时间或节点预算",
             "atom_budget": "超过单结构原子数预算",
             "candidate_rdkit_check_failed": "返回的候选未通过 RDKit 表示检查，未穷举其他候选",
+            "candidate_charge_policy_failed": "候选表示不满足模型的电荷约束，已保留原始名称",
             "no_allowed_atom_state": "连接关系超出当前原子状态规则",
             "species_not_in_prepared_catalogue": "该物种不在已准备的代表结构目录中"}
 
@@ -56,6 +57,7 @@ def annotation_panel(annotation):
                  "representative_connectivity": "当前代表结构的元素与连接图"}
         children.append(html.P(scope.get(value["coverage"], value["coverage"]), className="small mb-1"))
         children.append(html.P("模型：中性片段；自旋未确定。候选不替换 RNG 原始身份。", className="small mb-1"))
+        children.append(html.P("自由基点与计数仅是结构表示属性，不能据此判定真实电子态或卡宾自旋。", className="small mb-1"))
         children.append(html.Details([html.Summary("方法、假设与来源"),
                                      html.Pre(json.dumps(value, ensure_ascii=False, indent=2),
                                               style={"maxHeight": "280px", "overflow": "auto"})]))

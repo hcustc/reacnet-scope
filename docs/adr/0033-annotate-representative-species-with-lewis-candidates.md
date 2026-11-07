@@ -27,7 +27,7 @@ instance. Replacing its label globally would change Species and reaction identit
   hydrogens only when the original SMILES valence rules resolve their counts;
   otherwise report incomplete input. Ignore original bond orders and stereochemical
   annotations for this inference, but retain the original label and its provenance.
-- Use the independent `neutral-main-group-milp/v1` core with the existing SciPy and
+- Use the independent `neutral-main-group-milp/v2` core with the existing SciPy and
   RDKit dependencies. The RNG prototype mentioned in the issue was unavailable in
   the inspected local checkout; this implementation does not import an unpublished
   RNG interface or claim numerical equivalence with that prototype.
@@ -36,6 +36,10 @@ instance. Replacing its label globally would change Species and reaction identit
   fragment or requested net charge is unsupported. Any specified spin multiplicity
   is unsupported. Formal charges are restricted to -1, 0, +1; atom-state rules,
   expanded P/S shells and heuristic weights are versioned in the core.
+- Positive F/Cl/Br/I formal charges are excluded from the v2 candidate domain,
+  including a check after RDKit sanitization. This is a conservative model
+  restriction, not a universal statement about halogen chemistry. Retain the
+  weighted objective and expose its weights in method metadata.
 - Solve for one minimum-penalty assignment of single/double/triple bond orders,
   formal charges and radical electrons. Check the serialized candidate with RDKit
   and verify composition/connectivity/fragment charge are preserved. This is a
@@ -69,3 +73,23 @@ Group expansion for `miso=2`, supplied raw molecular-graph input, richer ion/spi
 models, automatic species filtering and scientific validation against a curated
 real-trajectory set remain separate work. This annotation feature does not
 constitute a validated filter or change candidate-route eligibility.
+
+## PR review validation and v2 selection
+
+The [PR #73 feedback](https://github.com/hcustc/reacnet-scope/pull/73#issuecomment-6702833099)
+reproduced positive-halogen candidates for small halocarbon fragments in v1.
+Increasing the charge penalty alone also changed the intended CO representation.
+We therefore tested the positive-halogen restriction independently, as well as a
+larger exploratory combination of negative-charge-site restrictions, adjacent
+charge pairing and lexicographic objectives. The latter did not establish better
+strict reference agreement and is not enabled by this revision.
+
+The selected minimal change removes the observed positive-halogen candidates and
+improves strict bond/formal-charge agreement on the pinned reference collection;
+it still disagrees with some reference representations and cannot identify spin
+or carbene electronic states. Local unpaired-electron/lone-pair agreement is a
+separate, weaker result than establishing the electronic state. See the
+[reference validation](../research/lewis-reference-validation.md) for denominators,
+exclusions, sources and reproduction. The result schema remains v1; the method
+changes to v2, invalidating v1 prepared annotations through the existing version
+check. No original Species or reaction identity is migrated.

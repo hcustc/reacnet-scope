@@ -30,6 +30,38 @@ def neutral(**kwargs):
     return LewisOptions(assume_neutral=True, **kwargs)
 
 
+@pytest.mark.parametrize("smiles,expected", [
+    ("[C][F]", "[C]F"), ("[C][Cl]", "[C]Cl"),
+    ("[H][C][Cl]", "[CH]Cl"), ("[F][C][F]", "F[C]F"),
+    ("[C][Br]", "[C]Br"), ("[C][I]", "[C]I"),
+])
+def test_halocarbon_candidates_do_not_charge_separate_to_quench_radicals(smiles, expected):
+    result = annotate_lewis(smiles, options=neutral())
+    assert result["status"] == "generated"
+    candidate = Chem.MolFromSmiles(result["candidate_smiles"])
+    assert Chem.MolToSmiles(candidate) == Chem.MolToSmiles(Chem.MolFromSmiles(expected))
+    assert all(atom.GetFormalCharge() == 0 for atom in candidate.GetAtoms())
+    assert all(bond.GetBondType() == Chem.BondType.SINGLE for bond in candidate.GetBonds())
+    assert result["unique_electronic_state"] == "not_established"
+
+
+def test_halogen_restriction_preserves_co_charge_pair_and_exposes_model_rules():
+    result = annotate_lewis("[C][O]", options=neutral())
+    assert result["candidate_smiles"] == "[C-]#[O+]"
+    assert result["model_score"] == 20
+    assert result["method"]["charge_policy"] == {"positive_halogen": "forbidden"}
+    assert result["method"]["radical_electrons_basis"] == "RDKit_representation_not_electronic_state"
+    assert result["method"]["method"] == "neutral-main-group-milp/v2"
+
+
+def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
+    result = annotate_lewis("C[N+](=O)[O-]", options=neutral())
+    mol = Chem.MolFromSmiles(result["candidate_smiles"])
+    charged = [a for a in mol.GetAtoms() if a.GetFormalCharge()]
+    assert sorted((a.GetSymbol(), a.GetFormalCharge()) for a in charged) == [("N", 1), ("O", -1)]
+    assert mol.GetBondBetweenAtoms(charged[0].GetIdx(), charged[1].GetIdx()) is not None
+
+
 @pytest.mark.parametrize("miso", [0, 1, 2, None])
 def test_candidate_keeps_identity_and_marks_representative_scope(miso):
     result = annotate_lewis("[C][O]", options=neutral(), miso=miso)
@@ -147,6 +179,20 @@ def test_revision_and_assumption_changes_invalidate_results(sources):
         get_lewis_annotation(sources, "[C][O]")
     prepare_lewis_annotations(sources, options=neutral())
     assert get_lewis_annotation(sources, "[C][O]")["coverage"] == "selected_representative_only"
+
+
+def test_v1_publication_is_rejected_and_rebuilt_with_v2_rules(sources):
+    import sqlite3
+    prepare_lewis_annotations(sources, options=neutral())
+    with sqlite3.connect(annotation_path(sources)) as db:
+        method = json.loads(db.execute("SELECT value FROM meta WHERE key='method'").fetchone()[0])
+        method["method"] = "neutral-main-group-milp/v1"
+        db.execute("UPDATE meta SET value=? WHERE key='method'", (json.dumps(method),))
+    assert annotation_status(sources)["state"] == "stale"
+    with pytest.raises(IndexStaleError):
+        get_lewis_annotation(sources, "[C][O]")
+    prepare_lewis_annotations(sources, options=neutral())
+    assert get_lewis_annotation(sources, "[C][O]")["method"]["method"] == "neutral-main-group-milp/v2"
 
 
 def test_queued_request_rejects_changed_source_before_reusing_publication(sources):

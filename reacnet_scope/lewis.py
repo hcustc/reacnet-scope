@@ -19,22 +19,26 @@ from rdkit import Chem, rdBase
 
 
 LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v1"
-LEWIS_METHOD = "neutral-main-group-milp/v1"
+LEWIS_METHOD = "neutral-main-group-milp/v2"
+_SCORE_WEIGHTS = {"unpaired_electrons": 100, "absolute_formal_charge": 10,
+                  "shell_deficit": 10, "expanded_shell_excess": 1}
 # Valence electrons and closed-shell bond-order sums by formal charge.
 # Lower sums retain unpaired electrons; P/S additionally permit expanded shells.
+# Positive halogen states are outside this naming model. This restriction is
+# a conservative domain choice, not a universal statement about halogen chemistry.
 _STATES = {
     "H": (1, {-1: (0,), 0: (1,), 1: (0,)}),
     "B": (3, {-1: (4,), 0: (3,), 1: (2,)}),
     "C": (4, {-1: (3,), 0: (4,), 1: (3,)}),
     "N": (5, {-1: (2,), 0: (3,), 1: (4,)}),
     "O": (6, {-1: (1,), 0: (2,), 1: (3,)}),
-    "F": (7, {-1: (0,), 0: (1,), 1: (2,)}),
+    "F": (7, {-1: (0,), 0: (1,)}),
     "Si": (4, {-1: (3,), 0: (4,), 1: (3,)}),
     "P": (5, {-1: (2, 4, 6), 0: (3, 5), 1: (4, 6)}),
     "S": (6, {-1: (1, 3, 5), 0: (2, 4, 6), 1: (3, 5)}),
-    "Cl": (7, {-1: (0,), 0: (1,), 1: (2,)}),
-    "Br": (7, {-1: (0,), 0: (1,), 1: (2,)}),
-    "I": (7, {-1: (0,), 0: (1,), 1: (2,)}),
+    "Cl": (7, {-1: (0,), 0: (1,)}),
+    "Br": (7, {-1: (0,), 0: (1,)}),
+    "I": (7, {-1: (0,), 0: (1,)}),
 }
 
 
@@ -66,6 +70,10 @@ def method_metadata() -> dict:
     return {"method": LEWIS_METHOD, "rdkit_version": rdBase.rdkitVersion,
             "scipy_version": scipy.__version__, "elements": sorted(_STATES),
             "fragment_charge": 0, "spin_model": "unspecified",
+            "charge_policy": {"positive_halogen": "forbidden"},
+            "objective_policy": "weighted_heuristic",
+            "score_weights": dict(_SCORE_WEIGHTS),
+            "radical_electrons_basis": "RDKit_representation_not_electronic_state",
             "candidate_policy": "one_model_optimum_not_exhaustive_enumeration"}
 
 
@@ -145,7 +153,10 @@ def _atom_states(atom):
                     shell = max(8, 2 * math.ceil(occupancy / 2))
                 if occupancy > shell or shell > 12:
                     continue
-                penalty = 100 * radicals + 10 * abs(charge) + 10 * (shell - occupancy) + max(0, shell - 8)
+                penalty = (_SCORE_WEIGHTS["unpaired_electrons"] * radicals
+                           + _SCORE_WEIGHTS["absolute_formal_charge"] * abs(charge)
+                           + _SCORE_WEIGHTS["shell_deficit"] * (shell - occupancy)
+                           + _SCORE_WEIGHTS["expanded_shell_excess"] * max(0, shell - 8))
                 states.add((bond_sum, charge, radicals, penalty))
     return sorted(states)
 
@@ -212,6 +223,9 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
             if flag != Chem.SanitizeFlags.SANITIZE_NONE:
                 return {**fields, "status": "candidate_rejected", "reason": "candidate_rdkit_check_failed"}
             candidate = Chem.MolToSmiles(checked, canonical=True)
+            if any(atom.GetSymbol() in {"F", "Cl", "Br", "I"} and atom.GetFormalCharge() > 0
+                   for atom in checked.GetAtoms()):
+                return {**fields, "status": "candidate_rejected", "reason": "candidate_charge_policy_failed"}
     except (ValueError, RuntimeError):
         return {**fields, "status": "solver_failed", "reason": "candidate_serialization_failed"}
     # Sanitization is performed on a copy and may standardize charges/bonds.

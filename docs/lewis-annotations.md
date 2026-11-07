@@ -59,6 +59,11 @@ prepare_lewis_annotations(
   不说明其整个分组均已处理；元数据未知时不会猜测模式。
 - 支持 H、B、C、N、O、F、Si、P、S、Cl、Br、I；所有片段必须中性。
   已知 NH₄⁺、PF₆⁻ 不会被偷偷中和；Na、Se 等不支持元素保留原名称。
+- 当前 `neutral-main-group-milp/v2` 禁止候选中的卤素正形式电荷，避免以卤素带正电的
+  写法减少未配对电子。其余评分权重保持 v1 的启发式规则并在方法元数据中公开。
+  这是命名模型的保守边界；被排除或求解失败不能解释为物种不可能存在。
+- 自由基点和 `radical_electrons` 是 RDKit 对候选表示的属性，不是测得或验证的电子态。
+  例如 `F[C]F` 不能区分 CF₂ 的单重态/三重态；本功能不据此给卡宾指定自旋。
 - 原始 SMILES 定义的显式/隐式氢被保留；无法可靠解析氢数时拒判，不能任意补氢。
 - `optimization_complete` 表示有界模型优化是否完成；`candidate_search_complete=false`
   表示没有穷举替代候选。成功返回一个结构不证明唯一性、真实电子态、稳定性或机理。
@@ -71,5 +76,12 @@ prepare_lewis_annotations(
 有界优化使用 [SciPy milp](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.milp.html)。
 规则评分只用于这个模型内选择候选，不是物种可信度或物理能量。
 小型样例验收不替代真实轨迹上的科学有效性评估。
+
+公开参考集比较记录见[参考验证](research/lewis-reference-validation.md)。键级/形式电荷
+表示一致，不等于未配对电子、孤电子对或自旋状态一致，不能据此声称已验证化学有效性。
+
+升级到 v2 后，旧方法生成的注释会显示过期，需要重新运行
+`reacnet-scope prepare rebuild lewis /path/to/rng --assume-neutral`。
+结果 schema 仍为 `reacnet-scope/lewis-annotation/v1`；原始 RNG 身份、原始文件和计数不变。
 
 身份、版本和发布决定见 [ADR-0033](adr/0033-annotate-representative-species-with-lewis-candidates.md)。
