@@ -1234,6 +1234,7 @@ def _render_preparation_tasks(tasks: list[dict[str, Any]]) -> Any:
         "event": "事件检索",
         "trajectory": "轨迹证据",
         "composition": "元素分布",
+        "lewis": "Lewis 注释",
     }
     state_labels = {
         "running": "running · 运行中",
@@ -1816,6 +1817,7 @@ def _species_detail_children(detail: dict[str, Any], smiles: str) -> list[Any]:
     """Render the one exact Species detail used by search and cross-entry drilldown."""
     formula = detail.get("formula") or "?"
     smiles_value = detail.get("smiles") or smiles
+    from .lewis_workbench import annotation_panel
     info_panel = html.Div(
         [
             html.Div(
@@ -1833,6 +1835,7 @@ def _species_detail_children(detail: dict[str, Any], smiles: str) -> list[Any]:
                 html.Dt("生成反应数"), html.Dd(_fmt_num(detail.get("n_produce_rxns"))),
             ]),
             _species_identity_context_panel(detail),
+            annotation_panel(detail.get("lewis_annotation")),
         ], className="rs-detail-stats",
     )
     svg_result = svc.render_species_svg(smiles)
@@ -3265,6 +3268,7 @@ def register_callbacks(app: Any) -> None:
                     "event": "事件检索",
                     "trajectory": "轨迹证据",
                     "composition": "元素分布",
+                    "lewis": "Lewis 注释",
                 }.get(str(completed.get("capability") or ""), "分析功能")
                 notice = dbc.Alert(
                     f"{completed.get('dataset_label') or '其他RNG 数据'} 的"
@@ -4858,7 +4862,7 @@ def register_callbacks(app: Any) -> None:
         back_visible = stage != "results"
         return (
             {} if stage == "results" else {"display": "none"},
-            {} if not is_mass_search or stage == "results" else {"display": "none"},
+            {} if stage == "results" or (not is_mass_search and result_count > 0) else {"display": "none"},
             {} if is_mass_search and stage == "structures" else {"display": "none"},
             {} if stage == "detail" else {"display": "none"},
             stage == "results",
@@ -4975,6 +4979,7 @@ def register_callbacks(app: Any) -> None:
         smiles_value = detail.get("smiles") or smiles
         evolution_target = f"smiles:{smiles}"
 
+        from .lewis_workbench import annotation_panel
         info_panel = html.Div(
             [
                 html.Div(
@@ -5003,6 +5008,7 @@ def register_callbacks(app: Any) -> None:
                     ]
                 ),
                 _species_identity_context_panel(detail),
+                annotation_panel(detail.get("lewis_annotation")),
             ],
             className="rs-detail-stats",
         )

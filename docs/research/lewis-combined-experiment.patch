@@ -1,0 +1,175 @@
+--- a/lewis.py
++++ b/lewis.py
+@@ -21,2 +21,4 @@
+-LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v1"
+-LEWIS_METHOD = "neutral-main-group-milp/v1"
++LEWIS_SCHEMA = "reacnet-scope/lewis-annotation/v2"
++LEWIS_METHOD = "neutral-main-group-milp/combined-experiment-1"
++_OBJECTIVES = ("shell_deficit", "unpaired_electrons", "formal_charge_count", "expanded_shell_excess")
++_HALOGENS = frozenset({"F", "Cl", "Br", "I"})
+@@ -31 +33 @@
+-    "F": (7, {-1: (0,), 0: (1,), 1: (2,)}),
++    "F": (7, {-1: (0,), 0: (1,)}),
+@@ -35,3 +37,3 @@
+-    "Cl": (7, {-1: (0,), 0: (1,), 1: (2,)}),
+-    "Br": (7, {-1: (0,), 0: (1,), 1: (2,)}),
+-    "I": (7, {-1: (0,), 0: (1,), 1: (2,)}),
++    "Cl": (7, {-1: (0,), 0: (1,)}),
++    "Br": (7, {-1: (0,), 0: (1,)}),
++    "I": (7, {-1: (0,), 0: (1,)}),
+@@ -68,0 +71,5 @@
++            "objective_order": list(_OBJECTIVES),
++            "charge_policy": {"positive_halogen": "forbidden",
++                              "negative_sites": "N_O_halogen_or_C_with_one_heavy_neighbor",
++                              "pairing": "one_to_one_opposite_charges_on_existing_edges"},
++            "radical_electrons_basis": "RDKit_representation_not_electronic_state",
+@@ -134,0 +142 @@
++    heavy_degree = sum(neighbor.GetAtomicNum() != 1 for neighbor in atom.GetNeighbors())
+@@ -135,0 +144,5 @@
++        # Conservative model domain, not universal chemistry: e.g. borate,
++        # phosphide and chloronium representations require a different model.
++        if charge < 0 and not (element in {"N", "O"} | _HALOGENS
++                               or element == "C" and heavy_degree == 1):
++            continue
+@@ -148,2 +161 @@
+-                penalty = 100 * radicals + 10 * abs(charge) + 10 * (shell - occupancy) + max(0, shell - 8)
+-                states.add((bond_sum, charge, radicals, penalty))
++                states.add((bond_sum, charge, radicals, shell - occupancy, max(0, shell - 8)))
+@@ -152,0 +165,77 @@
++def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
++    """Prove each integer objective optimal before considering the next one.
++
++    All passes share the same time/node budget. An incumbent, or even a proven
++    optimum for only a prefix of objectives, is never a finished annotation.
++    """
++    deadline = time.monotonic() + seconds
++    used_nodes, scores, values = 0, {}, None
++    fields = {"optimization_complete": False, "model_objectives": scores,
++              "optimization_stages_completed": 0, "solver_nodes_used": 0}
++    for name, objective in zip(_OBJECTIVES, objectives, strict=True):
++        if values is not None and not np.any(objective):
++            scores[name] = 0
++            fields["optimization_stages_completed"] += 1
++            continue
++        remaining = deadline - time.monotonic()
++        if remaining <= 0 or used_nodes >= options.max_nodes:
++            return None, {**fields, "status": "timeout" if remaining <= 0 else "truncated",
++                          "reason": "solver_budget", "truncated": True}
++        result = milp(objective, integrality=np.ones(len(objective)), bounds=Bounds(lower, upper),
++                      constraints=LinearConstraint(matrix, rhs, rhs),
++                      options={"time_limit": remaining, "node_limit": options.max_nodes - used_nodes,
++                               "mip_rel_gap": 0.0})
++        used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
++        fields.update(solver_status=int(result.status), solver_message=str(result.message),
++                      solver_nodes_used=used_nodes)
++        if result.status == 1:
++            return None, {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
++                          "reason": "solver_budget", "truncated": True}
++        if result.status != 0 or result.x is None:
++            infeasible = result.status == 2 and not scores
++            return None, {**fields, "optimization_complete": infeasible,
++                          "status": "no_candidate" if infeasible else "solver_failed",
++                          "reason": "model_infeasible" if infeasible else "solver_failed"}
++        values = np.rint(result.x)
++        if (not np.allclose(values, result.x, atol=1e-5)
++                or not np.allclose(matrix @ values, rhs)
++                or np.any(values < lower) or np.any(values > upper)):
++            return None, {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}
++        optimum = int(round(float(objective @ values)))
++        scores[name] = optimum
++        fields["optimization_stages_completed"] += 1
++        # Exact integer equality prevents lower-priority improvements from
++        # buying even one unit of a higher-priority objective.
++        matrix = np.vstack((matrix, objective))
++        rhs = np.append(rhs, optimum)
++    return values, {**fields, "optimization_complete": True}
++
++
++def _charge_policy_holds(molecule):
++    """Recheck the emitted representation, since sanitization may change it."""
++    positives, negatives = [], set()
++    for atom in molecule.GetAtoms():
++        charge, element = atom.GetFormalCharge(), atom.GetSymbol()
++        if charge not in (-1, 0, 1) or (charge > 0 and element in _HALOGENS):
++            return False
++        if charge < 0:
++            heavy_degree = sum(n.GetAtomicNum() != 1 for n in atom.GetNeighbors())
++            if not (element in {"N", "O"} | _HALOGENS or element == "C" and heavy_degree == 1):
++                return False
++            negatives.add(atom.GetIdx())
++        if charge > 0:
++            positives.append(atom.GetIdx())
++    matched = {}
++    def pair(positive, seen):
++        for neighbor in molecule.GetAtomWithIdx(positive).GetNeighbors():
++            negative = neighbor.GetIdx()
++            if negative not in negatives or negative in seen:
++                continue
++            seen.add(negative)
++            if negative not in matched or pair(matched[negative], seen):
++                matched[negative] = positive
++                return True
++        return False
++    return len(positives) == len(negatives) and all(pair(i, set()) for i in positives)
++
++
+@@ -153,0 +243 @@
++    started = time.monotonic()
+@@ -162,0 +253,2 @@
++    pairing_offset = width
++    width += 2 * len(bonds)
+@@ -164 +256,2 @@
+-    matrix = np.zeros((2 * len(atoms) + len(fragments), width))
++    pairing_row = 2 * len(atoms) + len(fragments)
++    matrix = np.zeros((pairing_row + 2 * len(atoms), width))
+@@ -166 +259 @@
+-    objective = np.zeros(width)
++    objectives = np.zeros((len(_OBJECTIVES), width))
+@@ -170,2 +263,9 @@
+-        matrix[bond.GetBeginAtomIdx(), j] = 1
+-        matrix[bond.GetEndAtomIdx(), j] = 1
++        left, right = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
++        matrix[left, j] = 1
++        matrix[right, j] = 1
++        # Each directed pairing binary contributes once to a positive atom's
++        # row and once to an adjacent negative atom's row.
++        for direction, (positive, negative) in enumerate(((left, right), (right, left))):
++            column = pairing_offset + 2 * j + direction
++            matrix[pairing_row + positive, column] = 1
++            matrix[pairing_row + len(atoms) + negative, column] = 1
+@@ -177 +277 @@
+-        for k, (bond_sum, charge, _radicals, penalty) in enumerate(items):
++        for k, (bond_sum, charge, radicals, deficit, expanded) in enumerate(items):
+@@ -182,17 +282,7 @@
+-            objective[j] = penalty
+-    result = milp(objective, integrality=np.ones(width), bounds=Bounds(lower, upper),
+-                  constraints=LinearConstraint(matrix, rhs, rhs),
+-                  options={"time_limit": seconds, "node_limit": options.max_nodes, "mip_rel_gap": 0.0})
+-    fields = {"optimization_complete": result.status in (0, 2),
+-              "solver_status": int(result.status), "solver_message": str(result.message)}
+-    if result.status == 1:
+-        # Keep no incumbent: a bounded search cannot silently replace the name
+-        # with a candidate dependent on when the solver happened to stop.
+-        return {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
+-                "reason": "solver_budget", "truncated": True}
+-    if result.status != 0 or result.x is None:
+-        return {**fields, "status": "no_candidate" if result.status == 2 else "solver_failed",
+-                "reason": "model_infeasible" if result.status == 2 else "solver_failed"}
+-    values = np.rint(result.x)
+-    if not np.allclose(values, result.x, atol=1e-5) or not np.allclose(matrix @ values, rhs):
+-        return {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}
++            if charge:
++                matrix[pairing_row + (0 if charge > 0 else len(atoms)) + i, j] = -1
++            objectives[:, j] = deficit, radicals, abs(charge), expanded
++    values, fields = _optimize(objectives, matrix, rhs, lower, upper, options,
++                               seconds - (time.monotonic() - started))
++    if values is None:
++        return fields
+@@ -203 +293 @@
+-        _b, charge, radicals, _p = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
++        _b, charge, radicals, _deficit, _expanded = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
+@@ -214,0 +305,2 @@
++            if not _charge_policy_holds(checked):
++                return {**fields, "status": "candidate_rejected", "reason": "candidate_charge_policy_failed"}
+@@ -225 +316,0 @@
+-            "model_score": float(result.fun),

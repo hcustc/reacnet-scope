@@ -108,16 +108,54 @@ def write_csv(path: str, fieldnames: Sequence[str], rows: Iterable[dict]) -> Non
             w.writerow(row)
 
 
+def cmd_lewis(args: argparse.Namespace) -> int:
+    """Read or export the prepared annotation catalogue; never solve online."""
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.lewis_store import (get_lewis_annotation, search_lewis_annotations,
+                                          export_lewis_annotations)
+    from reacnet_scope.indexes import IndexNotReadyError
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        if args.species:
+            if args.format != "json":
+                raise ValueError("单物种详情使用 JSON；CSV 导出使用 --alias 或全部目录")
+            text = json.dumps(get_lewis_annotation(dataset, args.species), ensure_ascii=False, indent=2)
+        elif args.out or args.format == "csv":
+            text = export_lewis_annotations(dataset, format=args.format, alias=args.alias or "")
+        else:
+            text = json.dumps(search_lewis_annotations(dataset, args.alias or "", limit=args.limit,
+                                                       offset=args.offset), ensure_ascii=False, indent=2)
+        if args.out:
+            Path(args.out).write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return 0
+    except (IndexNotReadyError, ValueError, OSError, RuntimeError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
+
 def cmd_prepare(args: argparse.Namespace) -> int:
     """Run offline preparation through the supported unified CLI surface."""
     from reacnet_scope.prepare import run_preparation
+    from reacnet_scope.lewis import LewisOptions
 
-    return run_preparation(
-        action=str(args.prepare_action),
-        capability=str(getattr(args, "capability", "all")),
-        case=str(args.case),
-        base=str(args.base or ""),
-    )
+    arguments = {"action": str(args.prepare_action),
+                 "capability": str(getattr(args, "capability", "all")),
+                 "case": str(args.case), "base": str(args.base or "")}
+    if arguments["capability"] != "lewis":
+        return run_preparation(**arguments)
+    try:
+        return run_preparation(**arguments, lewis_options=LewisOptions(
+            assume_neutral=bool(getattr(args, "assume_neutral", False)),
+            net_charge=getattr(args, "net_charge", None),
+            multiplicity=getattr(args, "multiplicity", None),
+            max_seconds=getattr(args, "max_solve_seconds", 5)),
+            max_task_seconds=getattr(args, "max_task_seconds", 300),
+            max_species=getattr(args, "max_species", 10000))
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -1462,6 +1500,18 @@ def build_parser() -> argparse.ArgumentParser:
     from reacnet_scope.prepare import configure_parser as configure_prepare
 
     configure_prepare(sp_prepare, handler=cmd_prepare)
+
+    sp_lewis = sub.add_parser("lewis", help="查询或导出已准备的 Lewis 候选结构注释")
+    sp_lewis.add_argument("case", help="RNG 文件夹或文件前缀")
+    sp_lewis.add_argument("--base", default="")
+    lewis_query = sp_lewis.add_mutually_exclusive_group()
+    lewis_query.add_argument("--species", default="", help="原始精确 Species 身份")
+    lewis_query.add_argument("--alias", default="", help="Lewis 候选 SMILES，返回全部关联原物种（分页）")
+    sp_lewis.add_argument("--limit", type=int, default=50)
+    sp_lewis.add_argument("--offset", type=int, default=0)
+    sp_lewis.add_argument("--format", choices=("json", "csv"), default="json")
+    sp_lewis.add_argument("--out", default="", help="导出全部匹配注释，保留来源和假设")
+    sp_lewis.set_defaults(func=cmd_lewis)
 
     sp_distribution = sub.add_parser(
         "element-distribution",
