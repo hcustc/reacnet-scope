@@ -93,10 +93,6 @@ from reacnet_scope.trajectory import (  # noqa: E402
     save_timestep_ps,
     select_local_environment,
 )
-from reacnet_scope.kinetics import (  # noqa: E402
-    KineticsInputError,
-    estimate_mass_action_rate_aligned,
-)
 from reacnet_scope.queries import (  # noqa: E402
     STORE,
     build_dataset_status_payload,
@@ -1793,6 +1789,19 @@ def _enrich_channel_kinetics(
     """Attach physical event frequency and auditable apparent k estimates."""
     if not rows:
         return {"status": "not_applicable", "message": ""}
+    try:
+        from reacnet_scope.research.kinetics import (
+            KineticsInputError,
+            estimate_mass_action_rate_aligned,
+        )
+    except ImportError as exc:
+        from reacnet_scope.research import RESEARCH_EXTRA_HINT
+
+        return _unavailable_kinetics(
+            rows,
+            reason="optional_dependency_missing",
+            message=f"表观速率不可用：{exc}。{RESEARCH_EXTRA_HINT}",
+        )
     species_file = str(artifacts.get("species") or "").strip()
     if not species_file or not Path(species_file).is_file():
         return _unavailable_kinetics(

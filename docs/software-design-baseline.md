@@ -80,9 +80,11 @@ Verification 及 QC 交接扩展。冻结表示不在普通导航、任务卡或
 PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)）：
 
 - Path Verification 与 QC Handoff Readiness 留在核心包，共享证据契约变化时须保持可用。
-- Species Fate Analysis 与 Apparent Rate Constant Estimate 移入通过包 extra 安装的可选子包；
-  核心模块和普通 Dash 主线不得导入它们；CLI 只在调用其命令时按需导入，未安装 extra 时明确
-  报告缺少的可选依赖。迁移期保留弃用的旧导入路径。
+- Species Fate Analysis 与 Apparent Rate Constant Estimate 位于可选子包
+  `reacnet_scope.research`，第三方依赖（`scipy`）由 `research` extra 提供，不属于核心依赖。
+  核心模块和普通 Dash 主线不得在加载时导入它们；服务与 CLI 只在调用时按需导入，缺少 extra
+  时以 `optional_dependency_missing` 明确报告。旧导入路径 `reacnet_scope.species_fate`、
+  `reacnet_scope.kinetics` 为弃用别名，0.2.0 移除。
 
 ## 5. 当前非目标
 
@@ -595,8 +597,6 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知�
 - Dash 回调集中在单个大文件（`scripts/webapp_dash/callbacks.py` 约 1.2 万行），数据集切换、
   跨入口交接与异步刷新的状态职责尚未收敛。
 - `candidate-paths` v3 评分命令仍在，已按 ADR-0034 弃用，待 0.2.0 移除。
-- Species Fate Analysis 与 Apparent Rate Constant Estimate 仍在核心包内，尚未按 ADR-0034
-  拆入可选子包。
 - Path Verification 的 `_load_event_nodes` 仍不加条件读取整张 events 表，违反在线有界读取，
   只适用于小规模数据。
 - CLI 与核心查询仍保留指向本机研究数据（`datas/1ER_2500K/...`）的默认输入路径。
