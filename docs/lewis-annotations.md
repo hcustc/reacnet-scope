@@ -14,6 +14,12 @@
 JSON / CSV 导出使用已提交的查询，包含全部匹配成员，不限于当前展示页。
 CSV 的 `annotation_json` 列保留完整的机器可读契约。
 
+## 依赖
+
+候选推断使用 SciPy 的 MILP 求解器。SciPy 不在核心依赖中：安装 `reacnet-scope[web]`
+（Dash）或 `reacnet-scope[research]` 时已包含，仅装核心包时需另行安装 `scipy>=1.11`。
+未安装时准备任务在写入前明确报错；读取已发布注释、状态与导出不需要 SciPy。
+
 ## CLI
 
 ```bash

@@ -17,7 +17,8 @@ import uuid
 
 from .indexes import (IndexInvalidError, IndexNotReadyError, IndexStaleError,
                       _exclusive_build_lock, _readonly_connection, resolve_dataset_paths)
-from .lewis import LewisOptions, annotate_lewis, lewis_alias_key, method_metadata, LEWIS_SCHEMA
+from .lewis import (LewisOptions, annotate_lewis, lewis_alias_key, method_metadata, require_solver,
+                    LEWIS_SCHEMA)
 
 
 _ROLES = ("reaction", "species", "timeline", "reactionevent", "molecules")
@@ -145,6 +146,7 @@ def prepare_lewis_annotations(artifacts: dict, *, options: LewisOptions,
     """
     if not options.assume_neutral and options.net_charge is None:
         raise ValueError("请明确选择中性片段假设，或提供已知净电荷")
+    require_solver()  # fail before staging when the optional solver is absent
     if not math.isfinite(max_task_seconds) or not 0 < max_task_seconds <= 86_400:
         raise ValueError("任务时间预算须在 (0, 86400] 秒范围内")
     if isinstance(max_species, bool) or not isinstance(max_species, int) or not 1 <= max_species <= 1_000_000:

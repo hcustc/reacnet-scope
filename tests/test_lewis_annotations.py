@@ -176,7 +176,7 @@ def test_nitro_candidate_retains_one_adjacent_opposite_charge_pair():
 @pytest.mark.parametrize("limit", ["time", "nodes"])
 def test_lexicographic_passes_share_budget_and_do_not_publish_partial_optima(monkeypatch, limit):
     from reacnet_scope import lewis
-    solve = lewis.milp
+    bounds, constraint, solve = lewis.require_solver()
     calls = []
     def budgeted(*args, **kwargs):
         calls.append(kwargs["options"])
@@ -186,7 +186,7 @@ def test_lexicographic_passes_share_budget_and_do_not_publish_partial_optima(mon
                 result.mip_node_count = 10
             return result
         return SimpleNamespace(status=1, message="Time limit reached", x=None)
-    monkeypatch.setattr(lewis, "milp", budgeted)
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, budgeted))
     result = annotate_lewis("[C][O]", options=neutral(max_nodes=10))
     assert result["status"] == ("timeout" if limit == "time" else "truncated")
     assert result["candidate_smiles"] is None
@@ -262,7 +262,9 @@ def test_rejections_keep_original_name(smiles, options, status, reason):
 @pytest.mark.parametrize("message,status", [("Time limit reached", "timeout"), ("Iteration limit reached", "truncated")])
 def test_solver_timeout_never_publishes_incumbent_as_a_complete_candidate(monkeypatch, message, status):
     from reacnet_scope import lewis
-    monkeypatch.setattr(lewis, "milp", lambda *a, **k: SimpleNamespace(status=1, message=message, x=[1]))
+    bounds, constraint, _ = lewis.require_solver()
+    monkeypatch.setattr(lewis, "require_solver", lambda: (
+        bounds, constraint, lambda *a, **k: SimpleNamespace(status=1, message=message, x=[1])))
     result = annotate_lewis("[C][O]", options=neutral())
     assert result["status"] == status
     assert result["truncated"] and not result["optimization_complete"]
@@ -490,3 +492,30 @@ def test_late_dash_results_are_not_shown_for_another_dataset():
     result = {"context": context_key(first), "request_id": 1, "rows": []}
     assert callback(result, second, {"request_id": 1}) == ("", True, True)
     assert callback(result, first, {"request_id": 2}) == ("", True, True)
+
+
+def test_missing_solver_is_reported_explicitly(monkeypatch):
+    import builtins
+
+    from reacnet_scope import lewis
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "scipy" or name.startswith("scipy."):
+            raise ImportError("blocked for test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(RuntimeError, match="SciPy"):
+        lewis.require_solver()
+    with pytest.raises(RuntimeError, match="SciPy"):
+        annotate_lewis("[C][O]", options=LewisOptions(assume_neutral=True))
+
+
+def test_method_metadata_records_solver_version_without_importing_it():
+    import scipy
+
+    from reacnet_scope.lewis import method_metadata
+
+    assert method_metadata()["scipy_version"] == scipy.__version__

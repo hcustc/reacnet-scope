@@ -13,9 +13,9 @@ import json
 import math
 import time
 
+from importlib import metadata
+
 import numpy as np
-import scipy
-from scipy.optimize import Bounds, LinearConstraint, milp
 from rdkit import Chem, rdBase
 
 
@@ -72,9 +72,31 @@ class LewisOptions:
             raise ValueError("multiplicity must be positive")
 
 
+_MISSING_SOLVER = ("Lewis 候选推断需要 SciPy>=1.11（MILP 求解器），当前环境未安装；"
+                   "请安装 reacnet-scope[web] 或单独安装 scipy 后重试")
+
+
+def _scipy_version() -> str | None:
+    # Read package metadata instead of importing SciPy, so status checks and
+    # core/CLI/Dash imports stay free of the solver (see ADR-0034 boundary).
+    try:
+        return metadata.version("scipy")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def require_solver():
+    """Import the MILP solver on first use; fail explicitly when it is absent."""
+    try:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+    except ImportError as exc:
+        raise RuntimeError(_MISSING_SOLVER) from exc
+    return Bounds, LinearConstraint, milp
+
+
 def method_metadata() -> dict:
     return {"method": LEWIS_METHOD, "rdkit_version": rdBase.rdkitVersion,
-            "scipy_version": scipy.__version__, "elements": sorted(_STATES),
+            "scipy_version": _scipy_version(), "elements": sorted(_STATES),
             "fragment_charge": 0, "spin_model": "unspecified",
             "objective_order": list(_OBJECTIVES),
             "charge_policy": {"positive_halogen": "forbidden",
@@ -190,6 +212,7 @@ def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
     All passes share the same time/node budget. An incumbent, or even a proven
     optimum for only a prefix of objectives, is never a finished annotation.
     """
+    Bounds, LinearConstraint, milp = require_solver()
     deadline = time.monotonic() + seconds
     used_nodes, scores, values = 0, {}, None
     fields = {"optimization_complete": False, "model_objectives": scores,
