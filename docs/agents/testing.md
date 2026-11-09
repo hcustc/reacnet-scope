@@ -43,7 +43,7 @@ uv run --locked --group browser playwright install chromium
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser
 ```
 
-Linux CI 安装浏览器系统库时使用 `playwright install --with-deps chromium`。可设置 `REACNET_SCOPE_SCREENSHOTS=/tmp/reacnet-ui-screenshots` 保存截图。测试服务器绑定本机临时端口，数据源和 Dataset Workspace 均位于 pytest 临时目录；页面请求必须保持本机来源。
+Linux CI 安装浏览器系统库时使用 `playwright install --with-deps chromium`；Chromium 按锁定的 Playwright 版本缓存，命中缓存时只运行 `playwright install-deps chromium` 安装系统库。可设置 `REACNET_SCOPE_SCREENSHOTS=/tmp/reacnet-ui-screenshots` 保存截图。测试服务器绑定本机临时端口，数据源和 Dataset Workspace 均位于 pytest 临时目录；页面请求必须保持本机来源。
 
 CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 PR/分支的旧运行。
 规则由 `scripts/ci_test_plan.py` 维护，选测结果显示在 CI 的 plan job 中：
