@@ -15,7 +15,7 @@ from reacnet_scope.batch_compare import BatchComparator, ConditionGroup, Simulat
 from reacnet_scope.network import Reaction, ReactionNetwork
 from reacnet_scope import services as svc
 from scripts.webapp_dash.app import create_app
-from scripts.webapp_dash.callbacks import _build_batch_group_requests
+from scripts.webapp_dash.callbacks.batch import _build_batch_group_requests
 
 
 def _network(*reactions: Reaction) -> ReactionNetwork:

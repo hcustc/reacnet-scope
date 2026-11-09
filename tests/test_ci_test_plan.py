@@ -30,7 +30,7 @@ from scripts.ci_test_plan import changed_paths, main, test_plan as plan_for_chan
     (["tests/browser/test_workbench.py"], "full", True),
     (["scripts/webapp_dash/new_page.py"], "full", True),
     (["scripts/webapp_dash/assets/workbench.css"], "full", True),
-    (["scripts/webapp_dash/callbacks.py"], "full", True),
+    (["scripts/webapp_dash/callbacks/events.py"], "full", True),
     (["tests/browser/new_workflow.py"], "full", True),
     (["tests/browser/conftest.py"], "full", True),
     (["reacnet_scope/services.py"], "full", True),

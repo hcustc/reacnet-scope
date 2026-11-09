@@ -64,7 +64,7 @@ def test_grid_numeric_columns_and_unconfirmed_rates():
 @pytest.mark.parametrize("clicks", [0, 1])
 def test_task_navigation_matches_clicked_button_not_another_buttons_old_count(monkeypatch, encoded, clicks):
     from dash.exceptions import PreventUpdate
-    from scripts.webapp_dash import callbacks
+    from scripts.webapp_dash.callbacks import page_navigation
     from scripts.webapp_dash.app import create_app
 
     app = create_app()
@@ -72,7 +72,7 @@ def test_task_navigation_matches_clicked_button_not_another_buttons_old_count(mo
                     if item.get("callback") and item["callback"].__name__ == "_navigate")
     target = {"type": "workspace-open-page", "page": "events"}
     other = {"type": "workspace-open-page", "page": "reactions"}
-    monkeypatch.setattr(callbacks, "ctx", SimpleNamespace(
+    monkeypatch.setattr(page_navigation, "ctx", SimpleNamespace(
         triggered_id=target,
         triggered=[{"prop_id": json.dumps(target) + ".n_clicks", "value": None}],
         inputs_list=[[{"id": json.dumps(other) if encoded else other, "value": 1},

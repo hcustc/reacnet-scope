@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 from dash.exceptions import PreventUpdate
 
-from scripts.webapp_dash import candidate_workbench, callbacks
+from scripts.webapp_dash import candidate_workbench
+from scripts.webapp_dash.callbacks import evolution, page_navigation, reaction_channels
 from scripts.webapp_dash.app import create_app
 
 
@@ -41,15 +42,15 @@ def test_channel_focus_stays_bound_to_displayed_channel():
     dataset = {"dataset_id": "run-1", "source_revision": "v1", "artifacts": {},
                "selected_smiles": "B"}
     focus = {"species": "A", "context": candidate_workbench.context_key(dataset)}
-    assert callbacks._channel_focus_species(focus, dataset) == "A"
-    assert callbacks._channel_focus_species(focus, {**dataset, "source_revision": "v2"}) == "B"
+    assert reaction_channels._channel_focus_species(focus, dataset) == "A"
+    assert reaction_channels._channel_focus_species(focus, {**dataset, "source_revision": "v2"}) == "B"
 
 
 def test_abundance_shortcut_prefills_the_standard_species_browser(monkeypatch):
     app = create_app()
     shortcut = _callback(app, "_open_species_abundance")
     dataset = {"dataset_id": "run-1", "source_revision": "v1", "selected_smiles": "Oc1ccccc1Cl"}
-    monkeypatch.setattr(callbacks, "ctx", SimpleNamespace(triggered_id="species-to-evolution-btn"))
+    monkeypatch.setattr(evolution, "ctx", SimpleNamespace(triggered_id="species-to-evolution-btn"))
     context = candidate_workbench.context_key(dataset)
     row = {"smiles": "Oc1ccccc1Cl", "formula": "C6H5ClO", "total_count": 100}
     mode, focus, target, picker, curve_filter, single, multiple, selected, ranking_open = shortcut(
@@ -78,7 +79,7 @@ def test_abundance_shortcut_prefills_the_standard_species_browser(monkeypatch):
 @pytest.mark.parametrize("trigger", ["evolution-open-compare-btn", "evolution-close-compare-btn"])
 def test_species_abundance_comparison_keeps_the_return_to_species(monkeypatch, trigger):
     navigate = _callback(create_app(), "_navigate")
-    monkeypatch.setattr(callbacks, "ctx", SimpleNamespace(
+    monkeypatch.setattr(page_navigation, "ctx", SimpleNamespace(
         triggered_id=trigger, triggered=[{"prop_id": f"{trigger}.n_clicks", "value": 1}],
     ))
     result = navigate(None, {"page": "evolution", "version": 2, "entry": "species"})
