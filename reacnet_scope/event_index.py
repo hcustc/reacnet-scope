@@ -44,6 +44,7 @@ from .datasets import is_native_timeline_path
 from .timed_evidence import (
     NativeHdf5EvidenceAdapter,
     TimedEvidenceDataError,
+    _available_memory_bytes,
     select_timed_evidence,
 )
 
@@ -54,24 +55,6 @@ EVENT_CONTINUITY_SCHEMA_VERSION = 1
 EVENT_CONTINUITY_ALGORITHM_VERSION = 2
 _MEMBERSHIP_MATERIALIZATION_RESERVE_BYTES = 4 * 1024**3
 _EVENT_BUILD_CHECKPOINT_INTERVALS = 100
-
-
-def _available_memory_bytes() -> int:
-    """Best-effort physical memory availability without a new dependency."""
-
-    try:
-        with open("/proc/meminfo", encoding="ascii") as handle:
-            for line in handle:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, UnicodeError, ValueError):
-        pass
-    try:
-        return int(os.sysconf("SC_AVPHYS_PAGES")) * int(
-            os.sysconf("SC_PAGE_SIZE")
-        )
-    except (AttributeError, OSError, TypeError, ValueError):
-        return 0
 
 
 def _can_materialize_membership(membership_bytes: int) -> bool:
