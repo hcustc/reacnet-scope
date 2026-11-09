@@ -22,6 +22,7 @@ from scripts.ci_test_plan import changed_paths, main, test_plan as plan_for_chan
     (["reacnet_scope/hypergraph_svg.py"], "smoke,candidate", True),
     (["tests/browser/test_abundance_workbench.py"], "smoke,abundance", True),
     (["tests/browser/test_species_workbench.py"], "smoke,species", True),
+    (["scripts/webapp_dash/lewis_workbench.py"], "smoke,species", True),
     (["tests/browser/test_reaction_workbench.py"], "smoke,reactions", True),
     (["tests/browser/test_event_workbench.py"], "smoke,events", True),
     (["tests/browser/test_dataset_workbench.py"], "smoke,dataset", True),

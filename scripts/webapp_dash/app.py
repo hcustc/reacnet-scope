@@ -39,6 +39,7 @@ from scripts.webapp_dash import ui_components as ui
 from scripts.webapp_dash import ui_state
 from scripts.webapp_dash import dataset_library
 from scripts.webapp_dash import evolution_workbench
+from scripts.webapp_dash import lewis_workbench
 from reacnet_scope import services as svc  # noqa: E402
 from scripts.webapp_dash.navigation import (  # noqa: E402
     NAV_GROUPS,
@@ -604,7 +605,7 @@ def _species_page() -> html.Div:
         style={"display": "none"},
     )
 
-    return html.Div([query_card,
+    return html.Div([query_card, lewis_workbench.layout(),
                      html.Div(id="species-query-feedback", role="status", **{"aria-live": "polite"}),
                      grid_card], className="rs-page", id="page-species")
 
@@ -3389,6 +3390,7 @@ def create_app() -> dash.Dash:
     file_import.register_callbacks(app)
     dataset_library.register_callbacks(app)
     evolution_workbench.register_callbacks(app)
+    lewis_workbench.register_callbacks(app)
 
     @app.server.get("/api/structure.svg")
     def _structure_svg():
