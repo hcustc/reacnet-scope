@@ -79,14 +79,6 @@ from reacnet_scope.molecule_lineage import (  # noqa: E402
     continue_molecule_lineage,
     molecule_lineage_to_csv,
 )
-from reacnet_scope.species_fate import (  # noqa: E402
-    SpeciesFateError,
-    SpeciesFateQueryError,
-    analyze_species_fate,
-    species_fate_catalog,
-    species_fate_tables_zip,
-    species_fate_to_json,
-)
 from reacnet_scope.rng_events import (  # noqa: E402
     canonical_reaction_key,
     reaction_key,
@@ -1311,6 +1303,33 @@ def continue_molecule_lineage_analysis(
     return continued
 
 
+def _species_fate_module():
+    """Import optional Species Fate Analysis on demand (ADR-0034)."""
+
+    try:
+        from reacnet_scope.research import species_fate
+    except ImportError as exc:  # pragma: no cover - depends on installed extras
+        from reacnet_scope.research import RESEARCH_EXTRA_HINT
+
+        raise ServiceError(
+            f"物种命运分析不可用：{exc}。{RESEARCH_EXTRA_HINT}",
+            reason="optional_dependency_missing",
+        ) from exc
+    return species_fate
+
+
+def species_fate_to_json(result: Mapping[str, Any]) -> str:
+    """Serialize a Fate Result with the optional Species Fate module."""
+
+    return _species_fate_module().species_fate_to_json(result)
+
+
+def species_fate_tables_zip(result: Mapping[str, Any]) -> bytes:
+    """Export Fate Result tables with the optional Species Fate module."""
+
+    return _species_fate_module().species_fate_tables_zip(result)
+
+
 def species_fate_catalog_for_dataset(
     artifacts: dict[str, str],
     *,
@@ -1325,15 +1344,16 @@ def species_fate_catalog_for_dataset(
             "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
             reason="missing_reactionevent",
         )
+    fate = _species_fate_module()
     try:
-        return species_fate_catalog(
+        return fate.species_fate_catalog(
             reactionevent_file,
             molecules_file,
             query=query,
             limit=limit,
         )
     except (
-        SpeciesFateError,
+        fate.SpeciesFateError,
         IndexInvalidError,
         IndexNotReadyError,
         IndexStaleError,
@@ -1369,8 +1389,9 @@ def build_species_fate_analysis(
             "缺少 .timeline.h5 或 .reactionevent.csv 事件源",
             reason="missing_reactionevent",
         )
+    fate = _species_fate_module()
     try:
-        return analyze_species_fate(
+        return fate.analyze_species_fate(
             reactionevent_file,
             molecules_file,
             target_species=target_species,
@@ -1388,10 +1409,10 @@ def build_species_fate_analysis(
             detail_retention_limit=detail_retention_limit,
             global_episode_limit=global_episode_limit,
         )
-    except SpeciesFateQueryError as exc:
+    except fate.SpeciesFateQueryError as exc:
         raise ServiceError(str(exc), reason="species_fate_query") from exc
     except (
-        SpeciesFateError,
+        fate.SpeciesFateError,
         IndexInvalidError,
         IndexNotReadyError,
         IndexStaleError,

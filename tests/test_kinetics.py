@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from reacnet_scope import kinetics
+from reacnet_scope.research import kinetics
 from reacnet_scope import analysis_services as analysis_svc
 from reacnet_scope import queries as query_svc
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
-from reacnet_scope.kinetics import (
+from reacnet_scope.research.kinetics import (
     AVOGADRO_ANGSTROM3_TO_LITRE,
     KineticsInputError,
     estimate_mass_action_rate,
