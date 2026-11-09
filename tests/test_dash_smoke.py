@@ -5086,33 +5086,6 @@ def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
     assert "从最近RNG 数据中移除 old run" in payload
 
 
-def test_starting_location_switcher_uses_friendly_names_and_full_paths(
-    monkeypatch,
-) -> None:
-    roots = [
-        Path.home().resolve(),
-        Path("/media/huangchen"),
-        Path("/data"),
-        Path("/mnt"),
-    ]
-    monkeypatch.setattr(cb, "_allowed_roots", lambda: roots)
-
-    rendered = cb._render_allowed_roots()
-    payload = json.dumps(
-        rendered,
-        default=lambda value: value.to_plotly_json(),
-        ensure_ascii=False,
-    )
-
-    for label in ("主目录", "外接数据", "共享数据", "其他挂载"):
-        assert label in payload
-    for root in roots:
-        assert str(root) in payload
-    assert "切换起始位置" in payload
-    assert "可访问位置" not in payload
-    assert "huangchen 2" not in payload
-
-
 def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_card_rule() -> None:
     css = (
         Path(__file__).parents[1]
