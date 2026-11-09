@@ -415,6 +415,10 @@ SVG 内嵌分子结构，可离线打开；JSON 保留完整反应物、产物�
 - 基础依赖：`pandas`、`openpyxl`、`rdkit`
 - 可选绘图增强：`matplotlib`、`scipy`（CLI `species-evolution --out-png` 时需要）
 - 可选轨迹适配：`ase`（安装 extra：`trajectory`）
+- 可选研究扩展：`scipy`（安装 extra：`research`）。物种命运分析与表观速率估计位于
+  `reacnet_scope.research`，不属于主线；未安装该 extra 时表观速率报告
+  `optional_dependency_missing`，命运分析不需要额外依赖。旧导入路径
+  `reacnet_scope.species_fate`、`reacnet_scope.kinetics` 已弃用，0.2.0 移除。
 
 ### 使用 uv 安装
 

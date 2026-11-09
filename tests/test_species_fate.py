@@ -11,10 +11,10 @@ import pytest
 
 from reacnet_scope import dir_browser, services as svc
 from reacnet_scope import event_index as event_index_module
-from reacnet_scope import species_fate as species_fate_module
+from reacnet_scope.research import species_fate as species_fate_module
 from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import IndexInvalidError
-from reacnet_scope.species_fate import (
+from reacnet_scope.research.species_fate import (
     SpeciesFateQueryError,
     analyze_species_fate,
     species_fate_to_json,

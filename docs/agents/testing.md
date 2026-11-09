@@ -15,6 +15,7 @@
 | 数据集发现、权限、身份与能力 | `tests/test_dataset_discovery.py`、`tests/test_directory_browser.py`、`tests/test_dataset_context.py`、`tests/test_analysis_capabilities.py` |
 | 反应/物种索引、组成、质量 | `tests/test_network_indexes.py`、`tests/test_composition_index.py`、`tests/test_isotopic_mass_search.py` |
 | 物理时间与表观动力学 | `tests/test_time_axis_contract.py`、`tests/test_kinetics.py` |
+| 可选研究扩展的导入边界（`reacnet_scope.research`） | `tests/test_research_boundary.py`、`tests/test_dependency_contract.py` |
 | 候选发现与明确序列验证 | `tests/test_candidate_paths.py`、`tests/test_event_paths.py`、`tests/test_pathway_cli.py` |
 | 分子谱系与物种命运 | `tests/test_molecule_lineage.py`、`tests/test_species_fate.py` |
 | 事件包、DFT 与 QC 交接 | `tests/test_event_package.py`、`tests/test_event_export_cli.py`、`tests/test_dft_geometry.py`、`tests/test_reaction_readiness.py` |

@@ -4,12 +4,13 @@
 Common use cases:
 1) Query all SMILES for a molecular formula
 2) Query next-step reactions for a given SMILES (consumption/production)
-3) Query reaction channels by formula equation (e.g. C6H4O2+C6H4->C12H8O2)
-4) Compute TOP-N share from a CSV metric column
-5) Export one indexed RNG event as a reproducible evidence ZIP
-6) Verify an explicit time-ordered, exact-molecule, atom-continuous event path
-7) Export one matched occurrence as auditable DFT initial geometries
-8) Discover bounded, Step-Evidence-backed candidate routes from start Species
+3) Export one indexed RNG event as a reproducible evidence ZIP
+4) Verify an explicit time-ordered, exact-molecule, atom-continuous event path
+5) Export one matched occurrence as auditable DFT initial geometries
+6) Discover bounded, Step-Evidence-backed candidate routes from start Species
+
+Analysis logic lives in the ``reacnet_scope`` package; this module only parses
+arguments, routes commands and formats terminal/CSV output.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
@@ -34,10 +34,8 @@ if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
 from reacnet_scope.network import (  # noqa: E402
-    Reaction,
     ReactionNetwork,
     parse_reactionabcd,
-    smiles_to_formula_fast,
 )
 from reacnet_scope.datasets import is_native_timeline_path  # noqa: E402
 
@@ -62,24 +60,6 @@ def detect_default_reaction_file() -> Path:
 
 DEFAULT_REACTION_FILE = detect_default_reaction_file()
 
-@dataclass
-class MatchedReaction:
-    role: str
-    reaction: Reaction
-    forward_tp: int
-    reverse_tp: int
-    net_tp: int
-    ratio_pct: float
-
-
-def reaction_formula_str(rxn: Reaction) -> str:
-    return " + ".join(rxn.reactant_formulas) + " -> " + " + ".join(rxn.product_formulas)
-
-
-def reaction_smiles_str(rxn: Reaction) -> str:
-    return " + ".join(rxn.reactant_smiles) + " -> " + " + ".join(rxn.product_smiles)
-
-
 def build_network(reac_file: str, min_tp: int) -> ReactionNetwork:
     if not os.path.exists(reac_file):
         raise FileNotFoundError(f"reactionabcd not found: {reac_file}")
@@ -87,16 +67,6 @@ def build_network(reac_file: str, min_tp: int) -> ReactionNetwork:
     if not reactions:
         raise RuntimeError(f"No reactions loaded from: {reac_file}")
     return ReactionNetwork(reactions)
-
-
-def reverse_key(rxn: Reaction) -> str:
-    return "+".join(sorted(rxn.product_smiles)) + "->" + "+".join(sorted(rxn.reactant_smiles))
-
-
-def net_flux(rxn: Reaction, tp_map: dict[str, int]) -> tuple[int, int, int]:
-    fwd = rxn.tp
-    rev = tp_map.get(reverse_key(rxn), 0)
-    return fwd, rev, fwd - rev
 
 
 def write_csv(path: str, fieldnames: Sequence[str], rows: Iterable[dict]) -> None:
@@ -452,11 +422,6 @@ def cmd_batch_compare(args: argparse.Namespace) -> int:
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
-
-
-def _reaction_base(reaction_path: str) -> str:
-    suffix = ".reactionabcd"
-    return reaction_path[: -len(suffix)] if reaction_path.endswith(suffix) else reaction_path
 
 
 def _write_json_atomic(path: str, document: dict) -> None:
@@ -1056,29 +1021,13 @@ def cmd_species(args: argparse.Namespace) -> int:
     return 0
 
 
-def collect_next_reactions(net: ReactionNetwork, smi: str, role: str) -> List[MatchedReaction]:
-    tp_map = {r.key: r.tp for r in net.reactions}
-    rows: List[MatchedReaction] = []
-
-    if role in {"consume", "both"}:
-        total = net.total_consume_tp(smi)
-        for rxn in net.consumption_of(smi):
-            fwd, rev, net_tp = net_flux(rxn, tp_map)
-            ratio = (rxn.tp / total * 100.0) if total else 0.0
-            rows.append(MatchedReaction("consume", rxn, fwd, rev, net_tp, ratio))
-
-    if role in {"produce", "both"}:
-        total = net.total_produce_tp(smi)
-        for rxn in net.production_of(smi):
-            fwd, rev, net_tp = net_flux(rxn, tp_map)
-            ratio = (rxn.tp / total * 100.0) if total else 0.0
-            rows.append(MatchedReaction("produce", rxn, fwd, rev, net_tp, ratio))
-
-    rows.sort(key=lambda x: (abs(x.net_tp), x.forward_tp), reverse=True)
-    return rows
-
-
 def cmd_next(args: argparse.Namespace) -> int:
+    from reacnet_scope.queries import (
+        collect_next_reactions,
+        reaction_formula_str,
+        reaction_smiles_str,
+    )
+
     net = build_network(args.reac, args.min_tp)
     smi = args.smiles
     if smi not in net.species:
@@ -1138,163 +1087,6 @@ def cmd_next(args: argparse.Namespace) -> int:
     return 0
 
 
-def match_formula_reaction(
-    rxn: Reaction,
-    need_r: Counter,
-    need_p: Counter,
-    mode: str,
-) -> bool:
-    have_r = Counter(rxn.reactant_formulas)
-    have_p = Counter(rxn.product_formulas)
-    if mode == "exact":
-        if need_r and have_r != need_r:
-            return False
-        if need_p and have_p != need_p:
-            return False
-        return True
-    if need_r and not multiset_contains(have_r, need_r):
-        return False
-    if need_p and not multiset_contains(have_p, need_p):
-        return False
-    return True
-
-
-def cmd_rxn_formula(args: argparse.Namespace) -> int:
-    reactants = split_terms(args.reactants)
-    products = split_terms(args.products)
-    if not reactants and not products:
-        print("[ERROR] provide reactants and/or products.")
-        return 2
-
-    net = build_network(args.reac, args.min_tp)
-    tp_map = {r.key: r.tp for r in net.reactions}
-    need_r = Counter(reactants)
-    need_p = Counter(products)
-
-    matched = []
-    for rxn in net.reactions:
-        if not match_formula_reaction(rxn, need_r, need_p, args.mode):
-            continue
-        fwd, rev, net_tp = net_flux(rxn, tp_map)
-        matched.append(
-            {
-                "tp": fwd,
-                "reverse_tp": rev,
-                "net_tp": net_tp,
-                "reactant_formulas": " + ".join(rxn.reactant_formulas),
-                "product_formulas": " + ".join(rxn.product_formulas),
-                "reaction_formulas": reaction_formula_str(rxn),
-                "reaction_smiles": reaction_smiles_str(rxn),
-            }
-        )
-
-    matched.sort(key=lambda x: (x["tp"], abs(x["net_tp"])), reverse=True)
-    top = matched[: args.top] if args.top > 0 else matched
-
-    lhs = " + ".join(reactants) if reactants else "*"
-    rhs = " + ".join(products) if products else "*"
-    q = f"{lhs} -> {rhs}"
-    print(f"# query={q}, mode={args.mode}, matches={len(matched)} (show={len(top)})")
-    print("rank,tp,reverse_tp,net_tp,reaction_formulas,reaction_smiles")
-    for i, row in enumerate(top, 1):
-        print(
-            f"{i},{row['tp']},{row['reverse_tp']},{row['net_tp']},"
-            f"{row['reaction_formulas']},{row['reaction_smiles']}"
-        )
-
-    if args.out:
-        out_rows = []
-        for i, row in enumerate(top, 1):
-            d = dict(row)
-            d["rank"] = i
-            out_rows.append(d)
-        write_csv(
-            args.out,
-            [
-                "rank",
-                "tp",
-                "reverse_tp",
-                "net_tp",
-                "reactant_formulas",
-                "product_formulas",
-                "reaction_formulas",
-                "reaction_smiles",
-            ],
-            out_rows,
-        )
-        print(f"[OK] wrote: {args.out}")
-    return 0
-
-
-def parse_metric(value: str) -> float | None:
-    s = value.strip()
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def cmd_topshare(args: argparse.Namespace) -> int:
-    if not os.path.exists(args.csv):
-        print(f"[ERROR] file not found: {args.csv}")
-        return 2
-
-    with open(args.csv, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames or args.metric not in reader.fieldnames:
-            print(f"[ERROR] metric column not found: {args.metric}")
-            print(f"       available: {', '.join(reader.fieldnames or [])}")
-            return 2
-        rows = []
-        for row in reader:
-            v = parse_metric(str(row.get(args.metric, "")))
-            if v is None:
-                continue
-            if args.abs_metric:
-                v = abs(v)
-            if args.positive_only and v <= 0:
-                continue
-            rows.append((v, row))
-
-    if not rows:
-        print("[INFO] no valid rows after filtering.")
-        return 0
-
-    rows.sort(key=lambda x: x[0], reverse=True)
-    top = rows[: args.top] if args.top > 0 else rows
-
-    total = sum(v for v, _ in rows)
-    top_sum = sum(v for v, _ in top)
-    share = top_sum / total * 100.0 if total else 0.0
-
-    print(
-        f"# metric={args.metric}, rows={len(rows)}, top={len(top)}, "
-        f"top_sum={top_sum:.6g}, total={total:.6g}, share={share:.3f}%"
-    )
-    print(f"rank,metric_value,share_pct,cumulative_pct")
-    cum = 0.0
-    out_rows = []
-    for i, (v, row) in enumerate(top, 1):
-        pct = v / total * 100.0 if total else 0.0
-        cum += pct
-        data = {
-            "rank": i,
-            "metric_value": v,
-            "share_pct": round(pct, 3),
-            "cumulative_pct": round(cum, 3),
-        }
-        out_rows.append(data)
-        print(f"{i},{v:.6g},{data['share_pct']},{data['cumulative_pct']}")
-
-    if args.out:
-        write_csv(args.out, ["rank", "metric_value", "share_pct", "cumulative_pct"], out_rows)
-        print(f"[OK] wrote: {args.out}")
-    return 0
-
-
-
 def split_target_args(raw_items: Sequence[str]) -> List[str]:
     out: List[str] = []
     for raw in raw_items:
@@ -1304,16 +1096,10 @@ def split_target_args(raw_items: Sequence[str]) -> List[str]:
 
 
 
-def derive_species_path(reac_path: str) -> str:
-    if reac_path.endswith(".reactionabcd"):
-        return reac_path[: -len(".reactionabcd")] + ".species"
-    return reac_path + ".species"
-
-
-
 def cmd_species_evolution(args: argparse.Namespace) -> int:
     """Run the formal indexed Species Evolution workflow."""
     from reacnet_scope import services as svc
+    from reacnet_scope.queries import derive_species_path
 
     species_file = args.species_file or derive_species_path(args.reac)
     if not os.path.exists(species_file):
