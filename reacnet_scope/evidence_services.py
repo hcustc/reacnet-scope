@@ -1309,10 +1309,10 @@ def _species_fate_module():
     try:
         from reacnet_scope.research import species_fate
     except ImportError as exc:  # pragma: no cover - depends on installed extras
-        from reacnet_scope.research import RESEARCH_EXTRA_HINT
+        from reacnet_scope.research import RESEARCH_DEPENDENCY_HINT
 
         raise ServiceError(
-            f"物种命运分析不可用：{exc}。{RESEARCH_EXTRA_HINT}",
+            f"物种命运分析不可用：{exc}。{RESEARCH_DEPENDENCY_HINT}",
             reason="optional_dependency_missing",
         ) from exc
     return species_fate

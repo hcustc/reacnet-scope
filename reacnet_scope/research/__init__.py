@@ -4,14 +4,13 @@ Species Fate Analysis (:mod:`reacnet_scope.research.species_fate`) and the
 Apparent Rate Constant Estimate (:mod:`reacnet_scope.research.kinetics`) are
 frozen for expansion and live here so that core modules, the ordinary Dash
 mainline and the default CLI never import them at load time (ADR-0034).
-Install the ``research`` extra for their third-party dependencies::
-
-    pip install "reacnet-scope[research]"
+Their third-party dependency (SciPy) is a core dependency, so no extra is
+needed; the import boundary keeps load time and the core import graph small.
 
 Submodules are imported explicitly; this package does not import them.
 """
 
-RESEARCH_EXTRA_HINT = (
-    "该功能属于可选研究扩展；请安装 `reacnet-scope[research]`"
-    "（源码环境：uv sync --extra research）。"
+RESEARCH_DEPENDENCY_HINT = (
+    "该功能依赖 SciPy（核心依赖）；请检查 scipy 是否完整安装"
+    "（源码环境：uv sync --locked）。"
 )

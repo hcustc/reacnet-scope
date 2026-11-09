@@ -1751,17 +1751,13 @@ dependencies = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "rdkit" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.optional-dependencies]
 plot = [
     { name = "matplotlib" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-research = [
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 trajectory = [
     { name = "ase" },
@@ -1771,9 +1767,6 @@ web = [
     { name = "dash-ag-grid" },
     { name = "dash-bootstrap-components" },
     { name = "dash-cytoscape" },
-    { name = "matplotlib" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -1788,8 +1781,6 @@ dev = [
     { name = "dash-cytoscape" },
     { name = "matplotlib" },
     { name = "pytest" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 test = [
     { name = "ase" },
@@ -1799,8 +1790,6 @@ test = [
     { name = "dash-cytoscape" },
     { name = "matplotlib" },
     { name = "pytest" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.metadata]
@@ -1812,15 +1801,12 @@ requires-dist = [
     { name = "dash-cytoscape", marker = "extra == 'web'", specifier = ">=1,<2" },
     { name = "h5py", specifier = ">=3.10" },
     { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.8" },
-    { name = "matplotlib", marker = "extra == 'web'", specifier = ">=3.8" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "rdkit", specifier = ">=2023.9" },
-    { name = "scipy", marker = "extra == 'plot'", specifier = ">=1.11" },
-    { name = "scipy", marker = "extra == 'research'", specifier = ">=1.11" },
-    { name = "scipy", marker = "extra == 'web'", specifier = ">=1.11" },
+    { name = "scipy", specifier = ">=1.11" },
 ]
-provides-extras = ["plot", "web", "trajectory", "research"]
+provides-extras = ["web", "trajectory", "plot"]
 
 [package.metadata.requires-dev]
 browser = [{ name = "playwright", specifier = ">=1.55,<2" }]
@@ -1832,7 +1818,6 @@ dev = [
     { name = "dash-cytoscape", specifier = ">=1,<2" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "pytest", specifier = ">=8,<9" },
-    { name = "scipy", specifier = ">=1.11" },
 ]
 test = [
     { name = "ase", specifier = ">=3.23,<4" },
@@ -1842,7 +1827,6 @@ test = [
     { name = "dash-cytoscape", specifier = ">=1,<2" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "pytest", specifier = ">=8,<9" },
-    { name = "scipy", specifier = ">=1.11" },
 ]
 
 [[package]]

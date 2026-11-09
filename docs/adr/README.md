@@ -49,6 +49,6 @@ ADR 只追加、不删除：决定改变时新写一份 ADR，并在旧 ADR 顶�
 | [0031](0031-show-net-reaction-directions-in-candidate-workbench.md) | 候选工作台默认按净反应方向展示 | 有效 | |
 | [0032](0032-constrain-candidate-carriers-by-waypoints-and-exclusions.md) | 候选路线支持途经与排除物种 | 有效 | |
 | [0033](0033-make-direct-channels-the-mainline-and-candidates-optional.md) | 直接通道为主线，候选路径为可选工具 | 有效 | |
-| [0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md) | 弃用 v3 候选评分，冻结能力按用途处置 | 有效 | |
+| [0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md) | 弃用 v3 候选评分，冻结能力按用途处置 | 有效 | 2026-11-09 修订：取消 `research` extra，scipy 并入核心依赖 |
 
 新增 ADR 时同步更新本表，并在被替代的 ADR 顶部写明替代范围。
