@@ -87,6 +87,11 @@ def test_ranked_paths_are_sampled_multi_metric_and_deterministic() -> None:
     assert reacnet_scope.discover_event_paths is not None
 
 
+def test_v3_ranking_api_is_deprecated_in_favor_of_candidate_search() -> None:
+    with pytest.warns(DeprecationWarning, match="search_candidate_paths"):
+        rank_candidate_paths(_network(), _event_report(), ["CCO"])
+
+
 def test_energy_evidence_is_explicit_and_reports_partial_coverage() -> None:
     result = rank_candidate_paths(
         _network(),

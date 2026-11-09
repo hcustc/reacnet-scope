@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import fmean
 from typing import Any, Iterable, Mapping
+import warnings
 
 from .network import Reaction, ReactionNetwork, count_atoms_fast
 from .rng_events import canonical_reaction_key, reaction_key
@@ -22,6 +23,10 @@ from .rng_events import canonical_reaction_key, reaction_key
 
 CANDIDATE_PATH_SCHEMA_VERSION = "reacnet-scope/candidate-paths/v3"
 SCORE_VERSION = "candidate-path/network-v1"
+CANDIDATE_PATHS_DEPRECATION = (
+    "candidate-paths（v3 评分与能量 CSV 排名）已弃用，将在 0.2.0 移除；"
+    "请改用 candidate-search / search_candidate_paths（见 ADR-0034）。"
+)
 LEGACY_EVENT_PATH_SCORE_VERSION = "sampled-candidate-path/v2"
 DEFAULT_SCORE_WEIGHTS = {
     "frequency": 0.35,
@@ -390,8 +395,13 @@ def rank_candidate_paths(
     energy_evidence: Mapping[str, EnergyEvidence | Mapping[str, Any]] | None = None,
     score_weights: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Rank sampled Event Path signatures using transparent normalized metrics."""
+    """Rank sampled Event Path signatures using transparent normalized metrics.
 
+    Deprecated: this v3 scoring and energy-CSV ranking path is scheduled for
+    removal in 0.2.0. Use ``search_candidate_paths`` instead (ADR-0034).
+    """
+
+    warnings.warn(CANDIDATE_PATHS_DEPRECATION, DeprecationWarning, stacklevel=2)
     if not isinstance(max_paths, int) or isinstance(max_paths, bool) or not 1 <= max_paths <= 500:
         raise ValueError("max_paths must be an integer in [1, 500]")
     if (

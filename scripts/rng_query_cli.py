@@ -688,9 +688,11 @@ def cmd_candidate_search(args: argparse.Namespace) -> int:
 
 
 def cmd_candidate_paths(args: argparse.Namespace) -> int:
-    """Discover bounded network Candidates with indexed Step Evidence."""
+    """Deprecated v3 Candidate ranking; use ``candidate-search`` instead."""
     from reacnet_scope import services as svc
+    from reacnet_scope.candidate_paths import CANDIDATE_PATHS_DEPRECATION
 
+    print(f"[DEPRECATED] {CANDIDATE_PATHS_DEPRECATION}", file=sys.stderr)
     try:
         sources = [_event_path_source_from_spec(value) for value in args.source]
         current = sources[0]
@@ -1812,7 +1814,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_candidate_paths = sub.add_parser(
         "candidate-paths",
-        help="从观测有向反应网络发现有界候选路径，并附加逐步事件证据",
+        help="[已弃用，0.2.0 移除；请改用 candidate-search] 旧版 v3 候选路径评分",
     )
     sp_candidate_paths.add_argument(
         "--source",

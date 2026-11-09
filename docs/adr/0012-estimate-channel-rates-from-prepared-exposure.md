@@ -1,4 +1,14 @@
+---
+status: accepted
+date: 2026-08-28
+---
+
 # Estimate Channel Rates from Prepared Exposure
+
+Ordinary Direct Reaction Channel queries no longer calculate this estimate
+([ADR-0014](0014-converge-dash-around-five-workspaces.md)), and its code moves to
+an optional extra ([ADR-0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)).
+The estimation model and evidence requirements below remain accepted.
 
 Direct Reaction Channel tables may report physical event frequency and an Apparent Rate Constant Estimate only when the current dataset supplies exact Reaction Occurrences, confirmed physical time, and aligned Species Abundance Evidence. Second-order estimates additionally require confirmed Å coordinates and simulation-box volumes prepared in the Trajectory index. Forward and reverse directions are estimated independently from occurrence counts; TP and net TP remain descriptive network statistics and never substitute for the numerator.
 
