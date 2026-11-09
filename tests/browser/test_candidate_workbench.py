@@ -588,7 +588,10 @@ def test_candidate_history_rebuild_requires_new_search(page, workbench):
     expect(page.locator('#cp-continue')).to_be_enabled()
     page.locator('#cp-continue').click()
     expect(page.locator('#cp-trail-view')).to_contain_text('已选浏览路径')
-    expect(page.locator('#cp-continue')).to_be_enabled(timeout=30000)
+    # The trail updates on request; wait for the continued result and its
+    # route selection to commit before changing the source revision.
+    expect(page.locator('#cp-graph-summary')).to_contain_text('已保留 1 个浏览步骤', timeout=30000)
+    expect(page.locator('#cp-focus')).to_contain_text('路线 1', timeout=30000)
     page.locator('#cp-export-menu button.dropdown-toggle').click()
     with page.expect_download() as downloaded:
         page.locator('#cp-json').click()
