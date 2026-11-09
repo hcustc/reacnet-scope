@@ -1,7 +1,8 @@
 # 有界候选路径发现
 
-“反应与事件 → 候选路径”、`candidate-search` CLI 与
-`reacnet_scope.search_candidate_paths` 共用事件索引的已发布局部邻接。
+候选路径是可选的路线假设工具，不是主线必经步骤（[ADR-0033](adr/0033-make-direct-channels-the-mainline-and-candidates-optional.md)）。
+Dash 物种详情的“探索路线”、物种检索栏的“直接探索路线”、反应入口下的候选路线任务、
+`candidate-search` CLI 与 `reacnet_scope.search_candidate_paths` 共用事件索引的已发布局部邻接。
 仅起点沿观测方向逐步查后续，仅终点在观测方向上逐步查候选前驱；
 双端查询默认不要求最大步数，用首步分支轮流展示已检查路线。
 单端结果可翻到上一页或下一页，选择一条后可继续展开一步；
@@ -83,7 +84,9 @@ CLI 使用 `--out-hypergraph-json` / `--out-svg`。完整参与物、重复计�
 
 A → B → C → A 是物种网络循环，不证明同一分子实际返回。净转化不保证网络无环，也不额外隐藏这类多步循环；普通候选枚举仍使用简单路径，单步浏览可回到先前物种。继续、翻页及返回沿用已提交查询口径，修改搜索条件后重新搜索才生效。
 
-以下内容描述保留兼容的 `candidate-paths` 命令及其 `v3` 结果，不是新 Web 的执行边界。
+以下内容描述已弃用的 `candidate-paths` 命令及其 `v3` 结果，不是新 Web 的执行边界。该命令与
+`rank_candidate_paths` 运行时给出弃用提示，将在 0.2.0 移除，请改用 `candidate-search`；见
+[ADR-0034](adr/0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)。
 
 “候选路径发现”接收一个或多个精确 RNG SMILES。系统在当前数据集观测到的有向 Reaction Type 网络上执行确定性的有界局部展开：
 

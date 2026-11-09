@@ -337,24 +337,15 @@ uv run reacnet-scope species --reac /path/to/xxx.reactionabcd --formula C6H4
 
 ## 有界候选路径发现
 
-`reacnet-scope candidate-paths` 从一个或多个精确起始 Species 出发，在当前数据集观测到的
-有向 Reaction Type 网络上执行有界局部展开，以具有单步局部原子继承证据的精确 Carried Species 连接步骤，再对候选涉及的
-Reaction Types 查询逐步事件证据。原子连续 Event Path 留给独立的路径验证。
-
-```bash
-uv run reacnet-scope candidate-paths \
-  --source rep1=/data/case/rep1/run.lammpstrj \
-  --reac /data/case/rep1/run.lammpstrj.reactionabcd \
-  --start 'CCO' \
-  --start '[OH]' \
-  --min-steps 2 \
-  --max-steps 4 \
-  --out-json candidate-paths.json
-```
-
-可选 `--energy-csv` 输入需要 `reaction_key,score` 两列，其中 `score` 是用户按同一口径
-归一化到 `[0,1]` 的能量评分。详细契约见
+候选路径发现在当前数据集观测到的有向 Reaction Type 网络上执行有界局部展开，以具有单步局部
+原子继承证据的精确 Carried Species 连接步骤，再对候选涉及的 Reaction Types 查询逐步事件证据。
+原子连续 Event Path 留给独立的路径验证。命令用法见下文“候选路径工具（可选）”中的
+`reacnet-scope candidate-search`，详细契约见
 [有界候选路径发现](docs/candidate-path-discovery.md)。
+
+旧的 `reacnet-scope candidate-paths` 命令（v3 结果、综合评分与 `--energy-csv` 能量排名）已弃用，
+运行时会提示改用 `candidate-search`，将在 0.2.0 移除；见
+[ADR-0034](docs/adr/0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)。
 
 ## 时间有序、原子连续的路径验证
 
@@ -416,7 +407,7 @@ CSV 事件源可加 `--molecules`，须与准备索引时的来源一致。
 Web 导出菜单提供“当前图超图 JSON”和“当前图 SVG”，可导出本页或当前与勾选路线。
 SVG 内嵌分子结构，可离线打开；JSON 保留完整反应物、产物、计量数与查询来源，
 适合后续网络分析。范围和 Python 接口见 [超图与网络图导出](docs/candidate-hypergraph.md)。
-旧 `candidate-paths` 命令保留兼容，和本版 `candidate-search` 的 schema/排序口径不同。
+旧 `candidate-paths` 命令已弃用（0.2.0 移除），和 `candidate-search` 的 schema/排序口径不同。
 
 ## 依赖
 
