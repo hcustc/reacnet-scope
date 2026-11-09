@@ -160,7 +160,10 @@ def test_candidate_paths_cli_uses_bounded_discovery_service(
     assert args.func(args) == 0
     assert captured["starts"] == ["A"]
     assert captured["kwargs"]["max_expansions"] == 5_000
-    assert "# candidate_paths=1" in capsys.readouterr().out
+    output = capsys.readouterr()
+    assert "# candidate_paths=1" in output.out
+    assert "[DEPRECATED]" in output.err
+    assert "candidate-search" in output.err
 
 
 def test_candidate_path_module_and_public_service_are_available() -> None:

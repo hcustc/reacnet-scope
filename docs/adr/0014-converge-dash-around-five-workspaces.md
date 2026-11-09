@@ -5,6 +5,11 @@ date: 2026-09-19
 
 # Converge the ordinary Dash surface around five workspaces
 
+Compatibility retention of the v3 `candidate-paths` command and Candidate
+scoring, and the packaging of frozen Fate and rate capabilities, are refined by
+[ADR-0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md).
+The surface decisions below otherwise remain accepted.
+
 The ordinary Dash product surface is organized around five workspaces:
 Dataset, Species & Trends, Reactions & Events, Trajectory & Lineage, and
 Compare. Tool pages may retain their existing internal page identifiers, but

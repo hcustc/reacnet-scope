@@ -1,3 +1,8 @@
+---
+status: accepted
+date: 2026-08-16
+---
+
 # Derive DFT initial geometries from matched occurrences
 
 ReacNet Scope may derive a DFT Initial Geometry only from a `matched` Reaction

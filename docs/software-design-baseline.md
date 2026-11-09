@@ -2,11 +2,11 @@
 
 状态：已接受
 日期：2026-08-03
-最近产品范围修订：2026-11-09（直接通道主线，候选路径为可选工具）
+最近产品范围修订：2026-11-09（直接通道主线，候选路径为可选工具；v3 候选评分弃用与冻结能力处置）
 
 本文档定义 ReacNet Scope 当前版本的产品范围、领域语义、功能契约和发布验收基准。它不是对现有实现状态的声明；代码是否符合本文档，需要另行审查。
 
-术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准，难以逆转的设计决策以 [`docs/adr/`](adr/) 中已接受 ADR 为准。早于本文档的日期化设计稿和实施计划保留为历史资料；与本文档冲突时，不构成当前功能承诺。
+术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准，难以逆转的设计决策以 [`docs/adr/`](adr/) 中已接受 ADR 为准。ADR 的有效状态见 [ADR 索引](adr/README.md)。旧的设计稿与实施计划已从仓库删除，仅存于 git 历史，不构成当前功能承诺。
 
 ## 1. 产品定位
 
@@ -74,10 +74,15 @@ DFT 评估所选事件这一步作为基元反应的化学合理性，Continuous
 
 每项能力必须定义输入、输出、失败行为、来源限制和验收测试。页面能够打开不等于功能已实现。
 
-以下已有能力冻结扩展并保留兼容核心：Species Fate Analysis、Apparent Rate
-Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
-不在普通导航、任务卡或跨工具主线中推广，也不作为主线前置条件；不改变其已有身份、证据、
-结果或导出语义，不删除共用的事件、分子连续性、时间、体积、PBC 与几何检查基础。
+以下已有能力冻结扩展：Species Fate Analysis、Apparent Rate Constant Estimate、Path
+Verification 及 QC 交接扩展。冻结表示不在普通导航、任务卡或跨工具主线中推广，也不作为主线
+前置条件；不改变其已有身份、证据、结果或导出语义，不删除共用的事件、分子连续性、时间、体积、
+PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)）：
+
+- Path Verification 与 QC Handoff Readiness 留在核心包，共享证据契约变化时须保持可用。
+- Species Fate Analysis 与 Apparent Rate Constant Estimate 移入通过包 extra 安装的可选子包；
+  核心模块和普通 Dash 主线不得导入它们；CLI 只在调用其命令时按需导入，未安装 extra 时明确
+  报告缺少的可选依赖。迁移期保留弃用的旧导入路径。
 
 ## 5. 当前非目标
 
@@ -515,13 +520,14 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 - `events`
 - `species-evolution`
 - `verify-path`
-- `candidate-paths`
-- `species-fate`
+- `candidate-search`
+- `species-fate`（可选扩展，见 [ADR-0034](adr/0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)）
 - `export-event`
+- `export-dft-geometry`
 - `element-distribution`
 - `batch-compare`
 
-`prepare` 包含 status、rebuild、cancel 和 clear。删除 `topshare`、`next`、`rxn-formula`、`plot`、旧 Web/Route 构建入口及重复启动命令。
+`candidate-paths`（v3 评分与能量 CSV 排名）已弃用，运行时提示改用 `candidate-search`，在 0.2.0 移除。`prepare` 包含 status、rebuild、cancel 和 clear。删除 `topshare`、`next`、`rxn-formula`、`plot`、旧 Web/Route 构建入口及重复启动命令。
 
 `reacnet_scope` 中显式导出的接口构成公共 API；其他模块默认内部使用。核心包拥有领域对象、索引、查询和导出。Dash 和 CLI 仅负责适配，不互相导入业务逻辑。
 
@@ -584,18 +590,18 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知�
 
 ## 17. 已知的当前实现偏差
 
-本文档接受时，至少存在以下已知偏差，后续实现审查必须逐项核实：
+以下偏差于 2026-11-09 按代码复核，后续实现审查必须逐项核实：
 
-- 旧静态 Web 仍存在，Dash 仍导入其业务逻辑。
-- `.route` 索引和事件回退仍存在。
-- `rng_tools` 与 `reacnet_scope` 分裂，Dash 服务和回调文件过大。
-- 时间演化仍可能在请求中完整扫描 `.species`。
-- 组成索引、UI 和 CLI 仍写死 C/O/Cl 或 Carbon。
-- 质量检索仍存在仅针对 Cl 的同位素组合特例。
-- 时间相关页面仍可能静默使用 `0.0001 ps`。
-- CLI 仍暴露历史命令和独立入口，缺少部分正式批处理能力。
-- 输入发现仍包含 `.route`、`.moname` 等非正式能力来源。
-- 跨平台路径、后台进程和 OVITO 启动尚未按 macOS/Windows/Linux 完整验收。
+- Dash 回调集中在单个大文件（`scripts/webapp_dash/callbacks.py` 约 1.2 万行），数据集切换、
+  跨入口交接与异步刷新的状态职责尚未收敛。
+- `candidate-paths` v3 评分命令仍在，已按 ADR-0034 弃用，待 0.2.0 移除。
+- Species Fate Analysis 与 Apparent Rate Constant Estimate 仍在核心包内，尚未按 ADR-0034
+  拆入可选子包。
+- Path Verification 的 `_load_event_nodes` 仍不加条件读取整张 events 表，违反在线有界读取，
+  只适用于小规模数据。
+- CLI 与核心查询仍保留指向本机研究数据（`datas/1ER_2500K/...`）的默认输入路径。
+- 跨平台路径、后台进程和 OVITO 启动尚未按 macOS/Windows/Linux 完整验收；CI 只覆盖
+  Linux / Python 3.11。
 - 真实数据和结构性能验收有计划文档，但尚未形成完整发布门槛。
 - Species Fate Analysis 已有 continuity substrate、查询核心、正式导出和 CLI 纵向切片；
   独立 Dash 页面已退役。兼容核心仍缺少从 Species/Molecule Lineage 的稳定身份跳转、
@@ -604,5 +610,9 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知�
 - Candidate step 到实例详情的自动回调测试已覆盖稳定事件交接、跨页导航、缺坐标降级和返回上下文；大型真实数据上的交互耗时及窄屏视觉验收仍需在发布环境记录。
 - Candidate CLI、专题文档和兼容测试仍有旧响应字段；独立 Dash 页面已退役。任何语义迁移
   必须按迁移计划版本化切换，不能在旧字段上静默改变含义。
+
+2026-11-09 复核确认已消除：旧静态 Web、`.route` 索引与事件回退、`rng_tools` 分包、请求中
+扫描 `.species`、写死 C/O/Cl 的组成分析、Cl 专用同位素特例、静默 `0.0001 ps`、CLI 历史命令，
+以及输入发现中的 `.route`/`.moname` 能力来源。
 
 这些偏差是后续 `/code-review` 的审查对象，不应通过修改本基准去迁就现状。
