@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from dash.exceptions import PreventUpdate
 from dash._callback_context import context_value
 from dash._utils import AttributeDict
 from plotly.utils import PlotlyJSONEncoder
@@ -97,5 +98,8 @@ def test_single_anchor_does_not_apply_hidden_waypoints_and_summary_uses_report(a
     text = json.dumps(route_summary(report), cls=PlotlyJSONEncoder, ensure_ascii=False)
     assert 'COC → CC=O' in text and '排除主线物种：O' in text
     assert '本次途经与排除条件内' in text
-    reset, _, nav = invoke(callback(app, 'cp-request.data'), 'cp-context.data', *args)
+    reset, _, nav = invoke(callback(app, 'cp-request.data'), 'cp-context.data', *args, result, '')
     assert reset is None and nav is None
+    # A context change with nothing to clear leaves the request untouched.
+    with pytest.raises(PreventUpdate):
+        invoke(callback(app, 'cp-request.data'), 'cp-context.data', *args, None, '')

@@ -134,6 +134,7 @@ def register_callbacks(app):
     @app.callback(
         Output("import-add-folder", "disabled"),
         Input("import-location", "data"), Input("import-collect-cancel", "disabled"),
+        prevent_initial_call=True,
     )
     def selection_actions(location, idle):
         return not idle or not bool((location or {}).get("path"))
@@ -202,6 +203,7 @@ def register_callbacks(app):
         Input("import-list-prev", "n_clicks"), Input("import-list-next", "n_clicks"),
         Input("import-location", "data"), Input("import-filter", "value"),
         State("import-list-page", "data"),
+        prevent_initial_call=True,
     )
     def list_page(_prev, _next, location, query, page):
         if ctx.triggered_id == "import-list-prev":
@@ -542,21 +544,25 @@ def register_callbacks(app):
 
     @app.callback(
         Output("import-auto-message", "children"), Output("import-auto-cancel", "disabled"),
-        Output("import-auto-panel", "style"),
+        Output("import-auto-panel", "style"), Output("import-auto-tick", "disabled"),
         Input("import-auto-request", "data"), Input("import-auto-result", "data"),
         Input("app-store", "data"), Input("import-auto-cancel-result", "data"),
     )
     def preparation_message(request, result, current, cancel):
+        # ``request_preparation`` only acts for imported file collections, so
+        # the retry tick polls only while such a dataset is current.
+        idle_tick = not ((current or {}).get("dataset_id")
+                         and svc.is_collection_path((current or {}).get("base", "")))
         if not request or not svc.is_same_dataset_revision(current, request.get("current")):
-            return "", True, {"display": "none"}
+            return "", True, {"display": "none"}, idle_tick
         if (result or {}).get("token") == request["token"]:
             if result.get("ok"):
-                return "", True, {"display": "none"}
-            return result["message"] + " 可打开“RNG 数据”查看详情或重试。", True, {}
+                return "", True, {"display": "none"}, idle_tick
+            return result["message"] + " 可打开“RNG 数据”查看详情或重试。", True, {}, idle_tick
         if (cancel or {}).get("token") == request["token"]:
-            return cancel["message"], bool(cancel.get("requested")), {}
+            return cancel["message"], bool(cancel.get("requested")), {}, idle_tick
         label = "丰度与元素组成" if request["kind"] == "composition" else "观测事件"
-        return f"正在后台准备{label}，已就绪的分析仍可使用。可在“RNG 数据”查看进度。", False, {}
+        return f"正在后台准备{label}，已就绪的分析仍可使用。可在“RNG 数据”查看进度。", False, {}, idle_tick
 
     @app.callback(
         Output("import-auto-cancel-result", "data"), Input("import-auto-cancel", "n_clicks"),
@@ -578,7 +584,7 @@ def preparation_layout():
         dcc.Store(id="import-auto-request"), dcc.Store(id="import-auto-result"),
         dcc.Store(id="import-pending-evolution"), dcc.Store(id="import-pending-elements"), dcc.Store(id="import-pending-events"),
         dcc.Store(id="import-auto-attempts", data=[]), dcc.Store(id="import-auto-cancel-result"),
-        dcc.Interval(id="import-auto-tick", interval=2000, n_intervals=0),
+        dcc.Interval(id="import-auto-tick", interval=2000, n_intervals=0, disabled=True),
         html.Div([html.Span(id="import-auto-message"),
                   dbc.Button("取消准备", id="import-auto-cancel", size="sm", outline=True, color="secondary")],
                  id="import-auto-panel", className="rs-import-auto", style={"display": "none"}, role="status"),

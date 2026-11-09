@@ -2387,7 +2387,7 @@ def register_callbacks(app: Any) -> None:
         State("page-store", "data"),
         State("event-bookmark-store", "data"),
         State("app-store", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def _migrate_restored_page(_tick, page_store, bookmark, dataset):
         migrated = migrate_page_state(page_store)
@@ -2763,6 +2763,7 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("rxn-channel-timestep-ps", "value"),
         Input("app-store", "data"),
+        prevent_initial_call=True,
     )
     def _load_channel_timestep_ps(store):
         artifacts = (store or {}).get("artifacts", {}) or {}
@@ -3823,7 +3824,10 @@ def register_callbacks(app: Any) -> None:
             }
             if (origin.library || current.state === 'succeeded') return none;
             if (current.state === 'validating') return supersede('candidate_changed');
-            return candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+            const next = candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+            // Rewriting an identical preview state would only re-run every
+            // transaction listener (feedback, focus, commit, import lists).
+            return JSON.stringify(next) === JSON.stringify(current) ? none : next;
         }"""
     app.clientside_callback(
         preview_switch_transaction,
@@ -4123,7 +4127,7 @@ def register_callbacks(app: Any) -> None:
         *_dataset_bound_reset_outputs(),
         Input("dataset-session-restore", "n_intervals"),
         State("dataset-session-store", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def _restore_current_dataset(_tick, session_store):
         current = session_store if isinstance(session_store, dict) else {}
@@ -5786,6 +5790,7 @@ def register_callbacks(app: Any) -> None:
         Output("rxn-consumption-csv-btn", "disabled"),
         Input("rxn-production-grid", "rowData"),
         Input("rxn-consumption-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _toggle_species_channel_exports(production_rows, consumption_rows):
         return not bool(production_rows), not bool(consumption_rows)
@@ -6688,6 +6693,7 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-group-member-open-btn", "disabled"),
         Input("evolution-group-members-grid", "selectedRows"),
         State("evolution-group-members-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _group_member_open_disabled(selected_rows, rows):
         return _selected_table_row(selected_rows, rows) is None
@@ -6696,6 +6702,7 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-csv-btn", "disabled"),
         Input("evolution-payload-store", "data"),
         Input("evolution-csv-busy", "data"),
+        prevent_initial_call=True,
     )
     def _evolution_export_available(payload, busy=False):
         if busy or not payload or not payload.get("curves"):
@@ -7830,6 +7837,7 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("event-type-map-editor", "children"),
         Input("event-viewer-store", "data"),
+        prevent_initial_call=True,
     )
     def _render_event_type_map_editor(viewer):
         if not viewer:
@@ -8437,6 +8445,7 @@ def register_callbacks(app: Any) -> None:
     @app.callback(
         Output("event-dft-review-confirmation", "options"),
         Input("event-dft-store", "data"),
+        prevent_initial_call=True,
     )
     def _bind_dft_review_to_report(payload):
         report = (payload or {}).get("readiness_report") or {}
@@ -8614,6 +8623,7 @@ def register_callbacks(app: Any) -> None:
         Output("molecule-lineage-anchor-value", "disabled"),
         Output("molecule-lineage-anchor-value", "placeholder"),
         Input("molecule-lineage-anchor-mode", "value"),
+        prevent_initial_call=True,
     )
     def _configure_lineage_anchor(mode):
         if mode == "elements":
@@ -9270,6 +9280,7 @@ def register_callbacks(app: Any) -> None:
         Output("evolution-rank-open-btn", "disabled"),
         Input("evolution-rank-grid", "selectedRows"),
         State("evolution-rank-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _rank_open_disabled(selected_rows, rows):
         return _selected_table_row(selected_rows, rows) is None
@@ -10293,6 +10304,7 @@ def register_callbacks(app: Any) -> None:
         Output("species-compare-switch-btn", "disabled"),
         Input("species-compare-summary", "selectedRows"),
         State("species-compare-summary", "rowData"),
+        prevent_initial_call=True,
     )
     def _compare_switch_disabled(selected, rows):
         row = _selected_table_row(selected, rows)

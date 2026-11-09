@@ -83,6 +83,9 @@ def result_grid(
         "paginationPageSize": page_size or 50,
         "paginationPageSizeSelector": False,
         "suppressCellFocus": False,
+        # Matches what the preview-sync callback derives from an empty grid,
+        # so that callback has nothing to do on page load.
+        "context": {"previews": {}},
         "localeText": {"noRowsToShow": "暂无结果", "loadingOoo": "正在读取…",
                        "page": "页", "of": "/", "to": "–", "more": "更多",
                        "firstPage": "第一页", "lastPage": "最后一页",
@@ -191,4 +194,7 @@ def register_grid_callbacks(app: Any) -> None:
             Output(grid_id, "dashGridOptions"),
             Input(f"{grid_id}-previews", "data"), Input(f"{grid_id}-page-size", "data"),
             Input(grid_id, "rowData"), State(grid_id, "dashGridOptions"),
+            # result_grid() already starts with this callback's empty-grid
+            # options; later row, preview or page-size changes trigger it.
+            prevent_initial_call=True,
         )
