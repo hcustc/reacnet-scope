@@ -1292,9 +1292,11 @@ def species_detail(artifacts: dict[str, str], smiles: str) -> dict[str, Any]:
             # Detail panel is best-effort; the network may already be loaded
             # elsewhere and the search page will have surfaced any real error.
             pass
+    from .lewis_services import lewis_detail
     return {
         "ok": True,
         "smiles": smi,
+        "lewis_annotation": lewis_detail(artifacts, smi),
         "formula": formula,
         "exact_mass": mass_fields.get("exact_mass"),
         "nominal_mass": mass_fields.get("nominal_mass"),

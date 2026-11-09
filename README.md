@@ -434,6 +434,19 @@ uv sync
 uv sync --extra plot
 ```
 
+## Lewis 候选结构注释
+
+物种页可显式准备 Lewis 候选注释、按候选 SMILES 查找原始物种，并导出含假设与来源的
+JSON/CSV。原始物种身份、反应和计数不变；候选生成不等于化学有效性验证。
+
+```bash
+reacnet-scope prepare build lewis /path/to/rng --assume-neutral
+reacnet-scope lewis /path/to/rng --alias '[C-]#[O+]'
+```
+
+当前支持中性主族片段的代表结构，不支持指定自旋或已知非零片段电荷，也不自动过滤物种。
+详见 [使用说明与判断范围](docs/lewis-annotations.md)。
+
 ## Element Distribution Evolution
 
 Dash 的“元素分布演化”从数据集发现可用元素。用户选择分组元素和最大原子数，
