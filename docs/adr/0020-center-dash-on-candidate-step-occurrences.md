@@ -5,7 +5,7 @@ date: 2026-09-21
 
 # Center the Dash workflow on candidate steps and concrete occurrences
 
-The separate evidence-inspection navigation placement is superseded by [ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md). Candidate-step evidence, concrete occurrence selection, stable handoff, return, and export decisions remain accepted.
+The separate evidence-inspection navigation placement is superseded by [ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md). Candidate Path as a co-equal entry of the ordinary mainline is superseded by [ADR-0033](0033-make-direct-channels-the-mainline-and-candidates-optional.md); Candidate Path is an optional tool. Candidate-step evidence, concrete occurrence selection, stable handoff, return, and export decisions remain accepted.
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 状态：已接受
 日期：2026-08-03
-最近产品范围修订：2026-09-25（物种中心研究工作流）
+最近产品范围修订：2026-11-09（直接通道主线，候选路径为可选工具）
 
 本文档定义 ReacNet Scope 当前版本的产品范围、领域语义、功能契约和发布验收基准。它不是对现有实现状态的声明；代码是否符合本文档，需要另行审查。
 
@@ -10,7 +10,7 @@
 
 ## 1. 产品定位
 
-ReacNet Scope 是面向反应分子动力学（MD）的证据分析工作台。它围绕研究者关注的精确 Species，将 ReacNetGenerator（RNG）记录组织为可探索的候选反应路线，并将路线中的每一步关联到可核查的具体事件，帮助研究者形成、筛选机理假设，并评估其在现有 MD 数据中的证据支持。它不自动确认机理成立。
+ReacNet Scope 是面向反应分子动力学（MD）的证据分析工作台。它围绕研究者关注的精确 Species，将 ReacNetGenerator（RNG）记录组织为可逐级下钻、可核查的证据：一步生成/消耗通道、具体 Reaction Occurrence、局部轨迹与分子变化追踪。它另提供候选反应路线作为形成多步机理假设的可选工具，路线每一步都关联到可核查的具体事件，可继续导出 DFT 初始几何或检查连续 MD 支持。它不自动确认机理成立。
 
 ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权威生产者。ReacNet Scope 负责索引、查询、关联、统计、证据验证、可视化和导出，不从原始轨迹运行第二套反应检测或通用成键判定。
 
@@ -38,9 +38,9 @@ ReacNetGenerator 是 Species、Reaction Type、反应计数和逐时事件的权
 
 发布必过的核心链路是：
 
-> 选择 RNG 数据 → 打开精确 Species 详情 → 探索 Candidate Path → 选择反应步骤及具体 Reaction Occurrence → 核查结构/局部轨迹或导出 → 返回原分析位置
+> 选择 RNG 数据 → 打开精确 Species 详情 → 查看 Direct Reaction Channel 并选择 Reaction Type → 选择具体 Reaction Occurrence → 核查结构/局部轨迹、分子变化追踪或导出 → 返回原分析位置
 
-每份物种详情及其分析请求绑定当前 RNG 数据、源修订与该详情的精确 Species；浏览另一物种不重新解释已有结果。跨入口返回恢复原来源、查询与选择位置，不重新执行分析。Direct Reaction Channel 保留生成/消耗的一步查询，包含未满足候选主线载体条件的反应；丰度趋势沿用自身的时间与单位条件，不暗中筛选候选路线。
+每份物种详情及其分析请求绑定当前 RNG 数据、源修订与该详情的精确 Species；浏览另一物种不重新解释已有结果。跨入口返回恢复原来源、查询与选择位置，不重新执行分析。Direct Reaction Channel 列出全部一步生成/消耗 Reaction Type，不受候选路线载体条件筛选；丰度趋势沿用自身的时间与单位条件，不暗中筛选候选路线。Candidate Path Discovery 不是核心链路的必经步骤，主线发布验收不依赖它，见 [ADR-0033](adr/0033-make-direct-channels-the-mainline-and-candidates-optional.md)。
 在物种发现结果中选中精确结构即打开该物种详情；随后可打开任一适用分析工具。独立反应式与事件检索无需先打开物种详情。
 
 Path Verification 接收用户明确给出的 Reaction Type 序列，并按 Event Path 的时间、分子实例和原子谱系连续性核查具体 Reaction Occurrence。它不发现、补全、评分或排名路径。Event Path 只证明相应事件在现有证据中以规定的连续性发生过，不证明因果、唯一性或完整反应机制。
@@ -49,17 +49,23 @@ Candidate Path Discovery 是与 Path Verification 分离的网络级辅助工作
 
 围绕焦点 Species 的 Direct Reaction Channel 是单步生成/消耗 Reaction Type 查询；它本身不递归扩展路径。
 
-普通 Dash 的物种起点发布主线为“精确 Species 详情 → 候选路线 → 反应步骤 → 具体事件 → 详情／核查或导出 → 返回路线”，同时允许从反应、演化和事件独立开始。Candidate Path
-Discovery 位于物种详情的路线分析；Molecular Lineage 以界面名称“分子变化追踪”作为所选
-实例的可选下钻，不是候选成立或几何导出的前置条件。Path Verification 与 Species Fate
-Analysis 的科学契约继续有效，但不挂载独立 Dash 页面；公共 CLI/API 默认兼容保留。旧页面
-ID 恢复时只归一到所属工作区，不运行退役分析。产品优先级与 ADR-0018 的替代范围见
-[ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)。
+普通 Dash 的物种起点发布主线为“精确 Species 详情 → 直接通道 → 反应类型 → 具体事件 → 详情／核查、分子变化追踪或导出 → 返回原位置”，同时允许从反应、演化和事件独立开始。Candidate Path
+Discovery 是物种详情中的可选路线工具，也可用独立填写的精确起终点打开；它形成以逐步事件
+为依据的路线假设，候选步骤的事件打开同一事件详情，可继续导出 DFT 初始几何供量化核查。
+DFT 评估所选事件这一步作为基元反应的化学合理性，Continuous MD Support 评估具体分子是否按
+顺序走完路线；两者互不替代，也都不使候选成为已确认机理。Molecular Lineage 以界面名称
+“分子变化追踪”作为所选实例的可选下钻，不是候选成立或几何导出的前置条件。Path Verification
+与 Species Fate Analysis 的科学契约继续有效，但不挂载独立 Dash 页面；公共 CLI/API 默认兼容
+保留。旧页面 ID 恢复时只归一到所属工作区，不运行退役分析。候选步骤与事件交接规则见
+[ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)，主线与候选定位见
+[ADR-0033](adr/0033-make-direct-channels-the-mainline-and-candidates-optional.md)。
 
 ## 4. 正式辅助能力
 
 以下能力继续作为普通工作区内的正式辅助功能，但不是核心链路的必经步骤：
 
+- Candidate Path Discovery：从物种详情或独立起终点形成多步路线假设，逐步打开支持事件，
+  并可导出所选事件的 DFT 初始几何。它持续维护，不属于冻结能力。
 - 对已发现候选路线执行的独立 Continuous MD Support 检查。
 - 从所选 Reaction Occurrence 进入的分子变化追踪。
 - Species 时间演化。
@@ -202,7 +208,7 @@ Constant Estimate、Path Verification 及 QC 交接扩展。冻结表示
 普通导航为五个平级入口：“RNG 数据／物种／反应／演化／事件”；展示决定见 [ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)。内部可保留原页面 ID 和单份控件，但不显示旧工作区任务排或空白核查入口。
 
 - RNG 数据管理导入列表、Current Dataset、各项能力和 Preparation Task。
-- 物种提供分子式、质量和精确结构检索；选择精确结构后显示一份身份、结构与统计详情，并可探索候选路线、一步直接通道或丰度趋势。路线工具带入当前精确物种，在工具内选择后续、前驱或两物种连接模式；检索空态可独立填写候选路线起终点。
+- 物种提供分子式、质量和精确结构检索；选择精确结构后显示一份身份、结构与统计详情，主操作为一步直接通道（相关反应），另可打开丰度趋势或可选的候选路线；路线入口不得排在直接通道之前。路线工具带入当前精确物种，在工具内选择后续、前驱或两物种连接模式；检索空态可独立填写候选路线起终点。
 - 反应独立检索 Reaction Type，展示反应结构、事件与时间分布，并提供多来源反应对比；不要求先打开物种详情。
 - 演化默认展示当前目标、可编辑条件及丰度曲线。物种可按分子式、精确 RNG SMILES、中性单同位素质量与元素包含／排除／计数范围筛选，组合条件取交集；返回按精确 Species 分页，不能以同分子式代表结构替代其他异构体。累计采样丰度排行是按需展开的辅助入口，打开前不执行排行查询；选行仍可在当前页绘制曲线。输入元素原子数条件即可在同一曲线区显示全部匹配物种的逐帧总量，可查看精确成员或按成员拆分，无需切换模式。多组元素分布与指定时间点下钻保留独立高级入口。列表选择和组内下钻不自动跳到物种页；继续研究路线或反应须显式进入物种详情。排行必须标注已分析帧范围、显示上限和精确结构身份；多来源物种比较仍由演化入口进入。
 - 事件独立查询 Reaction Occurrence。同一事件从候选步骤、反应或事件结果打开时共用详情，再按需展开全宽核查、轨迹、事件包、DFT 初始几何或分子变化追踪。
