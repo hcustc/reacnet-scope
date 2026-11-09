@@ -45,11 +45,11 @@
 
 代码依据：[候选准备与搜索](../../reacnet_scope/path_search.py)、[步骤事件与连续检查服务](../../reacnet_scope/path_search_services.py)、[具体谱系](../../reacnet_scope/lineage_explorer.py)、[原子来源](../../reacnet_scope/lineage_provenance.py)、[几何构建](../../reacnet_scope/dft_geometry.py)、[readiness](../../reacnet_scope/reaction_readiness.py)。候选连续检查当前对缺少间隔内状态证明的情况仍报告 inconclusive；Explorer 的 segment 能力不能被当成该接口已经全面升级的证据。[候选检查实现](../../reacnet_scope/candidate_evidence.py)；[ADR-0017](../adr/0017-qualify-candidate-events-and-check-selected-history.md)。
 
-现有[目标物种流程提案](../target-species-workflow-proposal.md)和[开发计划](../target-species-workflow-development-plan.md)已经提出“目标物种 → 候选步骤 → 多个实例 → 前后结构 → DFT 几何”。它们明确标为尚未实施；本研究支持其方向，但不能将其列为已完成功能。设计基准中的早期偏差清单也不能取代今天的源码核对。
+现有[目标物种流程提案](../archive/target-species-workflow-proposal.md)和[开发计划](../archive/target-species-workflow-development-plan.md)已经提出“目标物种 → 候选步骤 → 多个实例 → 前后结构 → DFT 几何”。它们明确标为尚未实施；本研究支持其方向，但不能将其列为已完成功能。设计基准中的早期偏差清单也不能取代今天的源码核对。
 
 ### 值得借鉴并优先落地的内容
 
-**1. 让每条路线直接进入逐步量化研究。** 研究者选择一个步骤后，应能比较多个独立 occurrence、选定几何、导出、再把外部计算结果挂回同一次发生及其 Reaction Type。最先解决现有跨页交接丢失所选 occurrence、需要重复选择的问题；保留路线、步骤、实例和返回位置。[现有交互缺口与实施顺序](../target-species-workflow-development-plan.md)。
+**1. 让每条路线直接进入逐步量化研究。** 研究者选择一个步骤后，应能比较多个独立 occurrence、选定几何、导出、再把外部计算结果挂回同一次发生及其 Reaction Type。最先解决现有跨页交接丢失所选 occurrence、需要重复选择的问题；保留路线、步骤、实例和返回位置。[现有交互缺口与实施顺序](../archive/target-species-workflow-development-plan.md)。
 
 候选各步可以来自不同实例。没有完整连续链不阻止分别验证这些步骤；有完整连续链也不证明它们是正确的基元机理。界面宜分别呈现“步骤观测证据”“具体连续历史”“量化结果”，不把三者压成一个通过标记。[ADR-0013](../adr/0013-separate-candidate-discovery-from-continuous-md-support.md)。
 
@@ -88,7 +88,7 @@
 | 随后 | 多构象/多帧初猜、一个外部程序适配器 | 固定原子映射、PBC、时间与计算参数；复合步骤和缺帧明确报告 |
 | 后续按需求 | 参考机理对应、目标端回溯、跨模型偏差比较 | 机理版本与匹配限制可审计；计算选择有明确覆盖范围 |
 
-当前候选服务的目标模式仍要求起点；“只选目标就向上游搜索至指定前体集合”是未来模式，不能写成已有能力。用户从目标生成事件进入某个具体实例的向后谱系则是另一问题。[搜索 API](../../reacnet_scope/path_search.py)；[目标物种提案](../target-species-workflow-proposal.md)。
+当前候选服务的目标模式仍要求起点；“只选目标就向上游搜索至指定前体集合”是未来模式，不能写成已有能力。用户从目标生成事件进入某个具体实例的向后谱系则是另一问题。[搜索 API](../../reacnet_scope/path_search.py)；[目标物种提案](../archive/target-species-workflow-proposal.md)。
 
 建议先用小型 benchmark 比较：同式异构体、真实小分子共同反应物、短寿命真实中间体、一个观测区间内多个变化、错误/未覆盖自旋态、优化端点改变、重复发生的多个构象、缺失物理时间或坐标。记录身份误配数、可交接覆盖率、成功/失败类别、人工干预次数、计算成本和每项结论的适用范围，再评估自动化程度。大数据查询性能和跨平台验收另行开展。
 

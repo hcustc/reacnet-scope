@@ -233,18 +233,18 @@ reacnet-evidence-indexing。科学规则在核心实现并由 Dash 调用，不�
 
 | 文件 | 当前职责与本次关注点 |
 | --- | --- |
-| [app.py](../scripts/webapp_dash/app.py) | `_topbar`、`_sidebar`、`_workspace_task_navigation`、`_detail_panel`；各 `_..._page` 和 `build_layout`；五入口、对象内容区和单份详情挂载 |
-| [navigation.py](../scripts/webapp_dash/navigation.py) | `NAV_GROUPS`、`WORKSPACE_TOOL_PAGES`、`WORKSPACE_TASK_PAGES`、页面名称、归属、能力和旧页面重定向 |
-| [compact_navbar.py](../scripts/webapp_dash/compact_navbar.py) | `REACNET_SCOPE_COMPACT_NAV` 模式的顶栏，必须与默认布局同步 |
+| [app.py](../../scripts/webapp_dash/app.py) | `_topbar`、`_sidebar`、`_workspace_task_navigation`、`_detail_panel`；各 `_..._page` 和 `build_layout`；五入口、对象内容区和单份详情挂载 |
+| [navigation.py](../../scripts/webapp_dash/navigation.py) | `NAV_GROUPS`、`WORKSPACE_TOOL_PAGES`、`WORKSPACE_TASK_PAGES`、页面名称、归属、能力和旧页面重定向 |
+| [compact_navbar.py](../../scripts/webapp_dash/compact_navbar.py) | `REACNET_SCOPE_COMPACT_NAV` 模式的顶栏，必须与默认布局同步 |
 | [species_research.py](../scripts/webapp_dash/species_research.py) | 研究身份、快捷入口、依赖失效、概览和重复横幅；保留身份规则，调整展示归属 |
-| [candidate_workbench.py](../scripts/webapp_dash/candidate_workbench.py) | 精确起终点选择、三类模式、路线图、步骤事件分页、事件交接、`cp-nav-anchor` |
-| [callbacks.py](../scripts/webapp_dash/callbacks.py) | `_navigate`、物种阶段、直接通道／发生时间、事件选择与书签恢复、轨迹和导出、趋势与对比 |
-| [ui_state.py](../scripts/webapp_dash/ui_state.py) | 阶段返回、表单反馈、任务高亮和 Enter 提交；删除旧导航依赖时连同回调一起调整 |
-| [dataset_library.py](../scripts/webapp_dash/dataset_library.py)、[file_import.py](../scripts/webapp_dash/file_import.py) | 数据页工具入口与准备完成后的交接；保留导入、切换和准备语义 |
-| [navigation.js](../scripts/webapp_dash/assets/navigation.js)、[workbench.js](../scripts/webapp_dash/assets/workbench.js) | 即时导航、阶段切换、焦点、Escape；含旧页面／工作区映射，不能只改 Python |
-| [workbench.css](../scripts/webapp_dash/assets/workbench.css)、[app.css](../scripts/webapp_dash/assets/app.css) | 内容区域、响应式事件详情、全宽核查及现有图／表布局 |
-| [analysis_services.py](../reacnet_scope/analysis_services.py)、[composition.py](../reacnet_scope/composition.py) | 物种丰度目录与索引摘要；演化页排行复用入口，先检查有界读取方式 |
-| [evidence_services.py](../reacnet_scope/evidence_services.py)、[event_index.py](../reacnet_scope/event_index.py)、[reaction_timing.py](../reacnet_scope/reaction_timing.py) | 精确反应事件、事件详情与时间窗现有能力；UI 使用 services 门面，不自行扫描证据 |
+| [candidate_workbench.py](../../scripts/webapp_dash/candidate_workbench.py) | 精确起终点选择、三类模式、路线图、步骤事件分页、事件交接、`cp-nav-anchor` |
+| [callbacks.py](../../scripts/webapp_dash/callbacks.py) | `_navigate`、物种阶段、直接通道／发生时间、事件选择与书签恢复、轨迹和导出、趋势与对比 |
+| [ui_state.py](../../scripts/webapp_dash/ui_state.py) | 阶段返回、表单反馈、任务高亮和 Enter 提交；删除旧导航依赖时连同回调一起调整 |
+| [dataset_library.py](../../scripts/webapp_dash/dataset_library.py)、[file_import.py](../../scripts/webapp_dash/file_import.py) | 数据页工具入口与准备完成后的交接；保留导入、切换和准备语义 |
+| [navigation.js](../../scripts/webapp_dash/assets/navigation.js)、[workbench.js](../../scripts/webapp_dash/assets/workbench.js) | 即时导航、阶段切换、焦点、Escape；含旧页面／工作区映射，不能只改 Python |
+| [workbench.css](../../scripts/webapp_dash/assets/workbench.css)、[app.css](../../scripts/webapp_dash/assets/app.css) | 内容区域、响应式事件详情、全宽核查及现有图／表布局 |
+| [analysis_services.py](../../reacnet_scope/analysis_services.py)、[composition.py](../../reacnet_scope/composition.py) | 物种丰度目录与索引摘要；演化页排行复用入口，先检查有界读取方式 |
+| [evidence_services.py](../../reacnet_scope/evidence_services.py)、[event_index.py](../../reacnet_scope/event_index.py)、[reaction_timing.py](../../reacnet_scope/reaction_timing.py) | 精确反应事件、事件详情与时间窗现有能力；UI 使用 services 门面，不自行扫描证据 |
 
 现有 `page-store`、`species-workspace-stage`、`research-species`、`rxn-channel-focus-store`、
 `event-selected-store`、`event-bookmark-store`、候选结果与事件页 store 是优先复用对象。
@@ -344,21 +344,21 @@ Dash 布局注意：同一分析或事件详情只挂载一份带 ID 的控件�
 本次仅修订本交接文档。实现任务需要把已确认的界面方向写入正式文档，而不是让未来实现
 长期与基准冲突。
 
-- [设计基准](software-design-baseline.md)：更新 §3 主流程的界面表达、§10 导航和会话、
+- [设计基准](../software-design-baseline.md)：更新 §3 主流程的界面表达、§10 导航和会话、
   §11.7 事件入口与核查展示方式，以及 §11.2／11.9／11.10 的展示入口；必要时修正 §8。
   保留科学和来源规则，标明排行复用的实际指标，不把待定扩展写成已实现能力。
 - 新 ADR：说明五个对象／观察入口、多入口交接、对象内发起分析、共用事件详情，以及允许
   保留内部页面 ID。当前最高编号为 0028，实际写入时重新检查，避免与其他工作撞号。
-- [ADR-0027](adr/0027-center-dash-on-persistent-research-species.md)：仅替代独立物种研究
+- [ADR-0027](../adr/0027-center-dash-on-persistent-research-species.md)：仅替代独立物种研究
   工作区／研究概览的入口和展示归属；研究身份、精确选择建立身份、局部焦点、来源修订、
   依赖失效及事件交接规则继续有效。
-- [ADR-0028](adr/0028-integrate-comparison-into-analysis-tasks.md)：仅替代三个分析工作区
+- [ADR-0028](../adr/0028-integrate-comparison-into-analysis-tasks.md)：仅替代三个分析工作区
   和任务摆放；趋势内对比、独立来源和不切换 Current Dataset 的决策继续有效。
-- [ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)：候选步骤、实例证据、
+- [ADR-0020](../adr/0020-center-dash-on-candidate-step-occurrences.md)：候选步骤、实例证据、
   返回与导出要求仍有效；必要时标注独立核查工作区的展示替代关系。
-- [ADR-0025](adr/0025-imported-dataset-library.md)：Dataset Library 决策保持；核对已有
+- [ADR-0025](../adr/0025-imported-dataset-library.md)：Dataset Library 决策保持；核对已有
   导航替代说明，避免历史分组仍被误读为当前要求。
-- [ui-workbench.md](ui-workbench.md)：同步显示阶段、详情展开、键盘、响应式和验收。
+- [ui-workbench.md](../ui-workbench.md)：同步显示阶段、详情展开、键盘、响应式和验收。
 - 旧 [物种研究交接](species-centered-workflow-handoff-2026-09-25.md)、
   [目标物种方案](target-species-workflow-proposal.md) 和
   [开发计划](target-species-workflow-development-plan.md) 只需增加准确的导航替代说明，
@@ -393,7 +393,7 @@ Dash 布局注意：同一分析或事件详情只挂载一份带 ID 的控件�
 | 窄屏与键盘 | 条件、结果、详情不挤在长页；没有横向页面溢出；Escape／关闭返回正确且焦点可用 |
 | 两种导航外壳 | 默认布局和 compact 顶栏行为一致，查询运行时导航仍可用且无混合可见帧 |
 
-测试入口以 [验证指南](agents/testing.md) 为准，优先扩展已有行为测试。仅更新旧导航文字
+测试入口以 [验证指南](../agents/testing.md) 为准，优先扩展已有行为测试。仅更新旧导航文字
 断言不足以验证上述操作；与新导航冲突的旧断言需改成新行为验收，保留身份和失效反例。
 
 定向测试示例：
@@ -421,7 +421,7 @@ uv run --locked --group browser playwright install chromium
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser
 ```
 
-重点扩展 [tests/browser/test_workbench.py](../tests/browser/test_workbench.py) 的精确选择、
+重点扩展 [tests/browser/test_workbench.py](../../tests/browser/test_workbench.py) 的精确选择、
 研究物种与局部焦点、候选事件返回、迟到响应、非物种起点、多入口交接、趋势比较和导航
 用例。使用临时小型 RNG 数据与本机服务；不修改真实数据工作区。浏览器依赖不可用时明确记录未验收，
 不能把普通 pytest 中被跳过的浏览器测试当作通过。

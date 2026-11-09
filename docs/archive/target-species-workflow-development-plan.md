@@ -1,13 +1,13 @@
 # 目标物种、路径步骤与反应实例开发计划
 
-> 导航更新：普通入口现按[ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)分为 RNG 数据、物种、反应、演化和事件；本计划的历史页面分组不再作为验收标准。
+> 导航更新：普通入口现按[ADR-0029](../adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)分为 RNG 数据、物种、反应、演化和事件；本计划的历史页面分组不再作为验收标准。
 
 日期：2026-09-21。
 状态：已实施；自动化验收完成，浏览器视觉与真实数据人工走查待发布环境补充。
-后续信息架构与研究对象状态由[物种中心研究工作流交接](species-centered-workflow-handoff-2026-09-25.md)及[ADR-0027](adr/0027-center-dash-on-persistent-research-species.md)替代；本计划保留当时步骤、事件和导出的历史交付记录。
+后续信息架构与研究对象状态由[物种中心研究工作流交接](species-centered-workflow-handoff-2026-09-25.md)及[ADR-0027](../adr/0027-center-dash-on-persistent-research-species.md)替代；本计划保留当时步骤、事件和导出的历史交付记录。
 交互依据：[目标物种使用流程方案](target-species-workflow-proposal.md)及本次讨论。
 历史：[五工作区收敛计划](development-convergence-plan.md)已完成，保留其原阶段和验收记录。
-科学身份、步骤证据、连续性与几何导出继续遵守[设计基准](software-design-baseline.md)
+科学身份、步骤证据、连续性与几何导出继续遵守[设计基准](../software-design-baseline.md)
 和有效 ADR；本计划不重新定义候选路径或 Reaction Occurrence。
 
 ## 1. 本轮完成目标
@@ -40,12 +40,12 @@
 
 | 已有基础 | 主要位置 | 本轮需要完成 |
 | --- | --- | --- |
-| 路径合并图、稳定步骤身份、点击连线定位步骤 | [candidate_graph.py](../scripts/webapp_dash/candidate_graph.py)、[candidate_workbench.py](../scripts/webapp_dash/candidate_workbench.py) | 把分散的步骤、实例和结构详情整理为连贯的图旁交互 |
-| 每步支持事件分页、真实键图及实例选择 | [candidate_workbench.py](../scripts/webapp_dash/candidate_workbench.py)、[path_search_services.py](../reacnet_scope/path_search_services.py) | 用一套实例选择控制详情、结构查看和后续操作 |
+| 路径合并图、稳定步骤身份、点击连线定位步骤 | [candidate_graph.py](../../scripts/webapp_dash/candidate_graph.py)、[candidate_workbench.py](../../scripts/webapp_dash/candidate_workbench.py) | 把分散的步骤、实例和结构详情整理为连贯的图旁交互 |
+| 每步支持事件分页、真实键图及实例选择 | [candidate_workbench.py](../../scripts/webapp_dash/candidate_workbench.py)、[path_search_services.py](../../reacnet_scope/path_search_services.py) | 用一套实例选择控制详情、结构查看和后续操作 |
 | 候选步骤向事件页交接一页记录 | `candidate_workbench.open_events` | 交接当前选中事件；保留原路线、步骤、分页与返回位置 |
-| 事件选择、书签、局部轨迹及 DFT 卡片 | [callbacks.py](../scripts/webapp_dash/callbacks.py)、[app.py](../scripts/webapp_dash/app.py) | 复用现有查看及导出服务，防止实例切换后使用旧预览 |
-| 具体分子图及原子来源查询 | [lineage_explorer.py](../scripts/webapp_dash/lineage_explorer.py) | 从实例参与者直接进入；回到图时保留原选择 |
-| 五工作区导航与数据集切换 | [navigation.py](../scripts/webapp_dash/navigation.py)、`callbacks.py` | 调整任务入口和文案，保持会话、来源修订与任务归属一致 |
+| 事件选择、书签、局部轨迹及 DFT 卡片 | [callbacks.py](../../scripts/webapp_dash/callbacks.py)、[app.py](../../scripts/webapp_dash/app.py) | 复用现有查看及导出服务，防止实例切换后使用旧预览 |
+| 具体分子图及原子来源查询 | [lineage_explorer.py](../../scripts/webapp_dash/lineage_explorer.py) | 从实例参与者直接进入；回到图时保留原选择 |
+| 五工作区导航与数据集切换 | [navigation.py](../../scripts/webapp_dash/navigation.py)、`callbacks.py` | 调整任务入口和文案，保持会话、来源修订与任务归属一致 |
 
 本轮首先接通已有能力，不预设要增加索引版本、修改候选搜索算法或重写全部状态管理。
 某项总体计数或过滤若没有有界查询支持，先明确显示已有范围和限制，再单独评估服务缺口。
@@ -149,7 +149,7 @@ PBC、完整分子、元素和 Å 条件继续通过已有回归。检查真实�
 5. 保留五工作区归属，按任务理顺入口。候选任务继续位于“反应与事件”；原“轨迹与谱系”
    展示名改为“结构与轨迹”，不新增第六个工作区。趋势和对比保持辅助流程。
    后续 ADR-0025 曾将导航归并为数据入口与三个分析工作区；现行
-   [设计基准第 10 节](software-design-baseline.md) 定义独立 RNG 数据入口与四个分析工作区。
+   [设计基准第 10 节](../software-design-baseline.md) 定义独立 RNG 数据入口与四个分析工作区。
    本条中的五工作区数量、旧展示名称和独立对比入口均不再适用。
 6. 同步使用说明及相应产品范围描述：候选分析是本轮研究主线，连续实例是可选证据。
    处理设计基准第 3–4、10 节与 ADR-0018 中原有入口优先级表述；如替代已接受的产品决策，
@@ -186,7 +186,7 @@ Preparation Task 始终属于原数据集及修订，不随页面选择或分析
 
 ## 5. 验证与发布门槛
 
-实施期间按[验证指南](agents/testing.md)选择现有入口并补充必要的用户动作回归：
+实施期间按[验证指南](../agents/testing.md)选择现有入口并补充必要的用户动作回归：
 
 | 范围 | 现有测试入口 | 重点场景 |
 | --- | --- | --- |
@@ -218,7 +218,7 @@ Preparation Task 始终属于原数据集及修订，不随页面选择或分析
   轨迹”，页面入口只要求事件能力，坐标和 segment 能力由各操作独立检查。
 - 既有事件包和 DFT Initial Geometry 服务未改变科学契约。DFT 卡仍只在 viewer 与所选
   `event_id` 一致时出现，并继续要求 matched occurrence、精确前后帧、完整分子、元素和 Å。
-- [ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)记录新的产品主线，只替代
+- [ADR-0020](../adr/0020-center-dash-on-candidate-step-occurrences.md)记录新的产品主线，只替代
   ADR-0018 的入口优先级；lineage、锚点、来源和连续性规则保持不变。
 
 实际验证：
@@ -231,7 +231,7 @@ Preparation Task 始终属于原数据集及修订，不随页面选择或分析
   `git diff --check`、`uv run --locked reacnet-scope --help` 和
   `./start-reacnet-scope.sh --check` 通过。
 - 固定 2500 K 真实案例沿用
-  [目标搜索验收](research/candidate-target-search-fix-2026-09-21.md)的同源同参数查询；本次
+  [目标搜索验收](../research/candidate-target-search-fix-2026-09-21.md)的同源同参数查询；本次
   只读复跑得到 20 条候选路线，0.191 秒，因 20 条返回上限标记未完成。首条路线第一步有
   62 个 matched 实例；offset 0 与 25 均各读 25 条，第二页首个实例含 14 个关联原子。
   原始 RNG 工件未修改，也未重建索引。

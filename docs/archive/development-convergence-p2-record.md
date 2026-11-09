@@ -6,7 +6,7 @@
 [收敛开发计划](development-convergence-plan.md)。
 
 依据：[收敛开发计划](development-convergence-plan.md)、
-[软件设计基准](software-design-baseline.md)、
+[软件设计基准](../software-design-baseline.md)、
 [P0–P1 实施记录](development-convergence-p0-p1-record.md)。
 
 ## 1. 交付行为

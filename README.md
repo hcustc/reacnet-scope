@@ -115,8 +115,8 @@ Path Verification 和 Species Fate Analysis 不挂载独立 Dash 页面；公共
 工具提供（见下文“候选路径工具”），CLI/API 共用同一核心。完整输入和证据边界见
 [`docs/candidate-path-discovery.md`](docs/candidate-path-discovery.md)。
 
-完整的信息架构、功能归属与后续去重计划见
-[`docs/usage-logic-redesign.md`](docs/usage-logic-redesign.md)。
+完整的信息架构与功能归属见[设计基准第 10 节](docs/software-design-baseline.md#10-dash-信息架构与会话)；
+设计决策的有效状态见 [ADR 索引](docs/adr/README.md)。
 
 ReacNetGenerator 官方 schema `1.1` 和既有 fork schema `1`/`2` 的
 `.timeline.h5` 会被自动识别；这两套版本编号属于各自的格式契约。其中

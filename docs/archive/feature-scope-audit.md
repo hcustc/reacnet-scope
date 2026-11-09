@@ -10,7 +10,7 @@
 
 事实来源：
 
-- [产品设计基准](software-design-baseline.md)与[领域词汇](../CONTEXT.md)。
+- [产品设计基准](../software-design-baseline.md)与[领域词汇](../../CONTEXT.md)。
 - 本地 `analysis_outputs/target_generation_20260918/report.md`：目标 Species 的真实生成分析。
 - 本地 `analysis_outputs/chlorocyclopentadienone_20260918/iteration_comparison/report.md`：iter25/iter32 比较。
 - 本地 `analysis_outputs/chlorocyclopentadienone_20260918/miso_assessment.md`：miso 身份审计。
@@ -48,7 +48,7 @@
 
 ### 1. 候选路径的综合“好坏”评分与能量 CSV 排名
 
-[实现](../reacnet_scope/candidate_paths.py)包含固定权重和频次、结构相似性等归一化分量。当前网络模式已排除时间/连续性分量，不能指责它仍默认把这两者当作候选成立条件；但剩余综合分数也没有给出“本课题主生成路线”的验证依据。
+[实现](../../reacnet_scope/candidate_paths.py)包含固定权重和频次、结构相似性等归一化分量。当前网络模式已排除时间/连续性分量，不能指责它仍默认把这两者当作候选成立条件；但剩余综合分数也没有给出“本课题主生成路线”的验证依据。
 
 更关键的是，实际迭代比较报告已经展示：三步网络连接和一个具体目标实例的长分支谱系不是同一件事。频繁的开闭环也不能自动解释成独立生成次数。
 
@@ -56,7 +56,7 @@
 
 ### 2. 默认展示并继续扩张表观 k
 
-[速率模块](../reacnet_scope/kinetics.py)不是空壳：它确实实现了指定一/二阶质量作用模型下的事件数/反应物暴露估计，并有统计区间。问题是产品优先级与解释条件，而不是“公式尚未写好”。
+[速率模块](../../reacnet_scope/kinetics.py)不是空壳：它确实实现了指定一/二阶质量作用模型下的事件数/反应物暴露估计，并有统计区间。问题是产品优先级与解释条件，而不是“公式尚未写好”。
 
 目标生成报告中的 269 条生成记录、269 条消耗记录以及反复开闭环，说明日常任务首先需要区分事件、原子集合、往返和积累。为看通道就要求处理时间/盒体积/单位，会把工具重心带离这个问题。
 
@@ -64,7 +64,7 @@
 
 ### 3. 通用命运分析产品化
 
-[Species Fate](../reacnet_scope/species_fate.py)已经有完整命运、部分命运、吸收终点、分支及删失处理，不应称作毫无实现。但 `_build_result_document` 仍返回 `left_censored_detection_complete=False`。UI 还要求用户输入终点、锚点及元素映射等，当前回调没有补齐从普通物种/谱系交接到全部证据下钻的流程。
+[Species Fate](../../reacnet_scope/species_fate.py)已经有完整命运、部分命运、吸收终点、分支及删失处理，不应称作毫无实现。但 `_build_result_document` 仍返回 `left_censored_detection_complete=False`。UI 还要求用户输入终点、锚点及元素映射等，当前回调没有补齐从普通物种/谱系交接到全部证据下钻的流程。
 
 “这个产物怎么来的”更适合事件与分子谱系；“所有形成 episode 的锚点后代最终落入哪些预定义终点”才是 Fate 的问题。二者不能互相替代。
 
@@ -72,15 +72,15 @@
 
 ### 4. 独立手写路径验证和提前摆出的连续支持设置
 
-[事件路径实现](../reacnet_scope/event_paths.py)的 `_load_event_nodes` 无 WHERE 限制遍历 events；`_analyze_event_paths` 随后建边，再处理指定序列。这是规模边界问题，不能由小 fixture 测试通过推出生产适用。
+[事件路径实现](../../reacnet_scope/event_paths.py)的 `_load_event_nodes` 无 WHERE 限制遍历 events；`_analyze_event_paths` 随后建边，再处理指定序列。这是规模边界问题，不能由小 fixture 测试通过推出生产适用。
 
-[候选服务](../reacnet_scope/analysis_services.py)现在走网络展开与索引摘要，和上述实现必须分开看。其时间约束会被记录为 `continuous_support_filters_deferred`；[候选页面](../scripts/webapp_dash/app.py)对应控件禁用。正式 Carrier Chain 支持验证不能仅靠换名宣布完成。
+[候选服务](../../reacnet_scope/analysis_services.py)现在走网络展开与索引摘要，和上述实现必须分开看。其时间约束会被记录为 `continuous_support_filters_deferred`；[候选页面](../../scripts/webapp_dash/app.py)对应控件禁用。正式 Carrier Chain 支持验证不能仅靠换名宣布完成。
 
 建议：收起未完成控件；保留高级核查能力，优先支持从现有选择生成输入、受限索引查询。不要投入大型手写序列工作台，也不要为了实现所有 ADR 目标一次性补完整候选平台。
 
 ### 5. 完整 QC/动力学平台
 
-[QC 预检](../reacnet_scope/reaction_readiness.py)给出实际交接检查；`kinetics_applicability` 当前固定为 `insufficient_evidence`，persistence 也明确未评估。这些限制是诚实报告，不是删除所有检查的理由。
+[QC 预检](../../reacnet_scope/reaction_readiness.py)给出实际交接检查；`kinetics_applicability` 当前固定为 `insufficient_evidence`，persistence 也明确未评估。这些限制是诚实报告，不是删除所有检查的理由。
 
 应保留初始几何导出所需的事件身份、原子映射、单位、PBC 与几何检查。停止线是导出可复核的初始几何和元数据。没有具体课题驱动时，不开发调度器、量化结果解释平台、TS/IRC 自动化和理论速率求解。
 

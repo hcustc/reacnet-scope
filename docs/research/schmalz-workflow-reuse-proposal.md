@@ -8,7 +8,7 @@ Current issue handoff: the user requested short English issues before PR develop
 
 ## 当前起点
 
-最新 [ADR-0020](../adr/0020-center-dash-on-candidate-step-occurrences.md) 与[开发记录](../target-species-workflow-development-plan.md)已把主线接通为：目标 Species → 候选步骤 → 多个独立 Reaction Occurrences → 所选实例结构/轨迹 → 证据与 DFT 初始几何导出。当前代码包含实例分页、稳定事件交接和返回上下文。开发记录仍保留浏览器视觉与真实数据人工验收缺口；本次只做源码和文档检查，没有重新运行其中记录的测试。
+最新 [ADR-0020](../adr/0020-center-dash-on-candidate-step-occurrences.md) 与[开发记录](../archive/target-species-workflow-development-plan.md)已把主线接通为：目标 Species → 候选步骤 → 多个独立 Reaction Occurrences → 所选实例结构/轨迹 → 证据与 DFT 初始几何导出。当前代码包含实例分页、稳定事件交接和返回上下文。开发记录仍保留浏览器视觉与真实数据人工验收缺口；本次只做源码和文档检查，没有重新运行其中记录的测试。
 
 因此，“提供多个实例浏览”“添加 DFT 初始结构导出”“实现跨重复模拟检出率”都不应再列成全新功能。当前可复用的基础包括：
 

@@ -1,6 +1,6 @@
 # 物种中心研究工作流：开发交接
 
-> 历史交接：独立“物种研究”工作区与研究概览的导航决定已由[对象中心五入口方案](species-analysis-ui-development-plan-2026-09-25.md)及[ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)替代。精确研究身份、局部焦点及科学证据要求继续有效。
+> 历史交接：独立“物种研究”工作区与研究概览的导航决定已由[对象中心五入口方案](species-analysis-ui-development-plan-2026-09-25.md)及[ADR-0029](../adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)替代。精确研究身份、局部焦点及科学证据要求继续有效。
 
 日期：2026-09-25。状态：已实施；下文保留交接时的目标与验收清单，实际验证范围见第 9 节和本次交付报告。
 这份交接承接用户对产品定位与研究起点的确认，供新对话实施；现有实现、历史验收和本轮目标须分别核对。
@@ -26,7 +26,7 @@
 1. `navigation.py` 仍以物种发现、反应路径、证据核查、物种趋势组织四个分析工作区；反应任务中的默认检索仍显示为“反应路径”。用户需要自行把这些工具串起来。
 2. `callbacks.py` 的 `_show_species_detail` 和 `_focus_reaction_structure_species` 都修改 `app-store.selected_smiles`。物种列表选择、局部反应浏览焦点和后续分析入口复用这一字段，不能直接将它认定为稳定的研究物种。
 3. `candidate_workbench.py` 已有起点、终点、研究物种交接、逐步探索、事件分页和返回状态，应逐项复用。
-4. 旧[使用流程提案](target-species-workflow-proposal.md)仍包含“寻找生成路线必须另选起点”的历史文字；有效 [ADR-0026](adr/0026-search-candidates-by-anchor-mode.md)已允许仅终点的逐步前驱探索。实施不能恢复这个旧限制。
+4. 旧[使用流程提案](target-species-workflow-proposal.md)仍包含“寻找生成路线必须另选起点”的历史文字；有效 [ADR-0026](../adr/0026-search-candidates-by-anchor-mode.md)已允许仅终点的逐步前驱探索。实施不能恢复这个旧限制。
 
 工作区已有多处未提交修改，涉及导航、候选图、数据管理、样式、测试和文档。新对话先重新检查 `git status` 和相关差异，保留这些修改；不要把历史测试数字当成本轮验证。
 
@@ -116,16 +116,16 @@
 8. 直接检索反应/事件仍可独立使用；比较来源选择不改变普通分析使用的 Current Dataset。
 9. 浏览器验证长反应式、多事件、侧边/展开详情、窄屏、返回及旧会话迁移；没有浏览器验证就明确保留缺口。
 
-按[测试指南](agents/testing.md)选择现有回归，重点为 Dash smoke、workbench、dataset switch、候选图与事件工作台、证据导出和浏览器测试。
+按[测试指南](../agents/testing.md)选择现有回归，重点为 Dash smoke、workbench、dataset switch、候选图与事件工作台、证据导出和浏览器测试。
 先做阶段定向验证，跨模块修改完成后运行 `uv run --locked pytest -q`，浏览器另按指南运行。
 真实案例记录输入来源、修订、查询和事件身份；历史报告和小 fixture 不能替代本轮真实规模、视觉或跨平台验收。
 
 ## 8. 文档衔接
 
-实施前读根和 Dash 局部 AGENTS、[CONTEXT](../CONTEXT.md)、[设计基准](software-design-baseline.md)及有效 ADR。
+实施前读根和 Dash 局部 AGENTS、[CONTEXT](../../CONTEXT.md)、[设计基准](../software-design-baseline.md)及有效 ADR。
 使用 `reacnet-dash-workflows` 技能追踪状态；如确实改变科学分析契约，再按对应技能同步。
 
-落实本方案的信息架构时，同步设计基准第 1、3、10 节及[UI 约定](ui-workbench.md)。
+落实本方案的信息架构时，同步设计基准第 1、3、10 节及[UI 约定](../ui-workbench.md)。
 按仓库 ADR 规则记录对旧导航、入口和研究对象归属决策的具体替代范围；保留 ADR-0020 的步骤/事件主线、ADR-0025 的数据列表与来源管理、ADR-0026 的候选模式等仍有效决定。
 旧目标物种提案和计划保留历史交付记录，补充后续替代指引，避免仍把旧导航或“仅目标不可搜索”当作现行要求。
 

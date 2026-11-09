@@ -1,8 +1,8 @@
 # 围绕目标物种整理使用流程
 
-> 导航更新：普通入口现按[ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)分为 RNG 数据、物种、反应、演化和事件；本提案的历史工具摆放不再作为验收标准。
+> 导航更新：普通入口现按[ADR-0029](../adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)分为 RNG 数据、物种、反应、演化和事件；本提案的历史工具摆放不再作为验收标准。
 
-> 历史提案：当前研究入口与导航见[物种中心研究工作流交接](species-centered-workflow-handoff-2026-09-25.md)及[ADR-0027](adr/0027-center-dash-on-persistent-research-species.md)。本文件“仅目标需另选起点”的说明已由[ADR-0026](adr/0026-search-candidates-by-anchor-mode.md)替代，不作为现行要求。
+> 历史提案：当前研究入口与导航见[物种中心研究工作流交接](species-centered-workflow-handoff-2026-09-25.md)及[ADR-0027](../adr/0027-center-dash-on-persistent-research-species.md)。本文件“仅目标需另选起点”的说明已由[ADR-0026](../adr/0026-search-candidates-by-anchor-mode.md)替代，不作为现行要求。
 
 状态：已实施；科学契约同步至设计基准和 ADR-0020。
 日期：2026-09-21。
@@ -252,7 +252,7 @@ signature、Occurrence Identity、参与侧与实例引用，并携带 Dataset I
 不作为该版本前置条件。下面保留本方案的研究场景清单，具体代码范围和测试安排不在此重复维护。
 
 各阶段复用现有分析服务。跨模块交互实施后按
-[验证指南](agents/testing.md) 跑受影响测试及要求的全量检查，并做浏览器操作验收。
+[验证指南](../agents/testing.md) 跑受影响测试及要求的全量检查，并做浏览器操作验收。
 至少覆盖以下研究场景：
 
 1. 分子式匹配多个结构 → 显式选择一个 → 候选路线或直接生成通道 → 支持实例 → 结构核查。
@@ -274,13 +274,13 @@ signature、Occurrence Identity、参与侧与实例引用，并携带 Dataset I
 ## 6. 依据
 
 - [当前使用说明](usage-logic-redesign.md)
-- [设计基准：核心链路、工作区及分析契约](software-design-baseline.md)
-- [ADR-0014：五工作区](adr/0014-converge-dash-around-five-workspaces.md)
-- [ADR-0015：候选路径任务](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)
-- [ADR-0017：往返证据与连续历史检查](adr/0017-qualify-candidate-events-and-check-selected-history.md)
-- [ADR-0018：具体分子谱系](adr/0018-explore-segment-occurrence-lineage.md)
-- [ADR-0019：锚点连续性与原子来源](adr/0019-separate-anchor-continuity-and-atom-provenance.md)
-- [ADR-0020：以候选步骤和具体实例组织 Dash 主线](adr/0020-center-dash-on-candidate-step-occurrences.md)
+- [设计基准：核心链路、工作区及分析契约](../software-design-baseline.md)
+- [ADR-0014：五工作区](../adr/0014-converge-dash-around-five-workspaces.md)
+- [ADR-0015：候选路径任务](../adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)
+- [ADR-0017：往返证据与连续历史检查](../adr/0017-qualify-candidate-events-and-check-selected-history.md)
+- [ADR-0018：具体分子谱系](../adr/0018-explore-segment-occurrence-lineage.md)
+- [ADR-0019：锚点连续性与原子来源](../adr/0019-separate-anchor-continuity-and-atom-provenance.md)
+- [ADR-0020：以候选步骤和具体实例组织 Dash 主线](../adr/0020-center-dash-on-candidate-step-occurrences.md)
 
 ADR-0020 只替代 ADR-0018 的产品入口优先级；segment、锚点连续性、原子来源和导出语义
 仍按 ADR-0018/0019 执行。

@@ -5,8 +5,8 @@
 状态：P0 基线已固定；P1 五工作区实现已完成，验证结果见本文末尾。
 
 依据：[收敛开发计划](development-convergence-plan.md)、
-[软件设计基准](software-design-baseline.md)、
-[ADR 0014](adr/0014-converge-dash-around-five-workspaces.md)。
+[软件设计基准](../software-design-baseline.md)、
+[ADR 0014](../adr/0014-converge-dash-around-five-workspaces.md)。
 
 ## 1. P0 可回退基线
 

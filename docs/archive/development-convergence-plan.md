@@ -11,7 +11,7 @@
 [P3 分支追踪实施记录](development-convergence-p3-record.md)和
 [P4 可比性收敛实施记录](development-convergence-p4-record.md)、
 [P5 清理与最终验收记录](development-convergence-p5-record.md)。
-依据：[功能范围审查](feature-scope-audit.md)、[设计基准](software-design-baseline.md)、[领域词汇](../CONTEXT.md)。
+依据：[功能范围审查](feature-scope-audit.md)、[设计基准](../software-design-baseline.md)、[领域词汇](../../CONTEXT.md)。
 
 ## 1. 完成目标
 
@@ -161,7 +161,7 @@
 
 ## 6. 验证安排
 
-遵循[验证指南](agents/testing.md)：
+遵循[验证指南](../agents/testing.md)：
 
 - P1：Dash smoke、dataset selection/switch、capability；浏览器验证新旧会话与大/窄屏。
 - P2：上述测试，加事件索引、time axis、事件包/导出及受影响的身份反例。

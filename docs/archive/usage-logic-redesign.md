@@ -27,12 +27,12 @@ Reaction Type，不递归扩展路线，也不在普通查询中计算表观速�
 步骤事件、实例前后切换、所选路线连续历史检查和 JSON/CSV 导出。点击图中的反应菱形或连线
 会打开同一步骤；选中的实例可直接进入“结构与轨迹”，无需在事件页再次选择。步骤支持与整条连续历史分别表达；
 “寻找生成路线”仍需精确起点，不能只凭目标物种反向补全未观测反应。
-范围与证据规则见 [ADR-0015](adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)
-和 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
+范围与证据规则见 [ADR-0015](../adr/0015-add-indexed-candidate-task-to-reaction-workspace.md)
+和 [ADR-0017](../adr/0017-qualify-candidate-events-and-check-selected-history.md)。
 
 “分子变化追踪”从所选事件中的具体分子实例开始，底层使用 Molecular Lineage Explorer
 展开 segment/occurrence 图，并从已展开图中提取已观测路径。它与候选 Species 路线是不同视图；基本查询不以
-轨迹坐标为前提。具体入口和限制见 [Explorer 使用说明](molecular-lineage-explorer.md)。
+轨迹坐标为前提。具体入口和限制见 [Explorer 使用说明](../molecular-lineage-explorer.md)。
 
 跨工具交接只传递精确 SMILES、完整 Reaction Type、稳定 `event_id` 及经核验的 Dataset
 Identity／源修订。数据集选择、能力状态和派生索引准备集中在“数据集”；切换 Current
