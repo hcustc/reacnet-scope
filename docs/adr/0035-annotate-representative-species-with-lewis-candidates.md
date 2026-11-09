@@ -126,14 +126,14 @@ charge-separated CO representation. This is a naming convention under declared
 assumptions, not evidence that the selected carbene arrangement is a ground state.
 The reference collection includes triplet C2/C2O assignments that v3 does not match.
 
-The [reference validation](../research/lewis-reference-validation.md) now publishes
+The [reference validation](../lewis-annotations.md#参考验证) now publishes
 v1, v2, the previously unreported combined experiment, and v3 on the same denominators,
 plus predeclared small-C/N/O and reactive-fragment strata. v3 has lower aggregate
 strict agreement than v2 (7449 versus 7487 of 7775), although it removes the observed
 carbon-charge pathologies and preserves some previously lost lone-pair assignments.
 This tradeoff prevents claiming a general accuracy improvement or validated filter.
-The historical combined experiment is reproducible from a checked-in patch and
-remains a comparison, not another selectable production method.
+The historical combined experiment (its patch is kept in the git history of PR #73,
+commit `53ba837`) remains a comparison, not another selectable production method.
 
 Result schema v2 introduces the model graph and named objectives. Method v3 and
 schema v2 invalidate older prepared annotations; users explicitly rebuild them.
@@ -156,7 +156,7 @@ gains. None of the 200 losses is an equal-charge-count location error; 188 v3
 candidates are uncharged, and 12 introduce charges absent from the reference.
 Ring penalties also change tied bond/radical assignments, including some that
 already had zero small-ring penalty. Keep these regressions visible in the
-[validation report](../research/lewis-reference-validation.md), rather than treating
+[validation report](../lewis-annotations.md#参考验证), rather than treating
 the two fixes as a general reference-accuracy improvement.
 
 Method v4 invalidates v1/v2/v3 annotations. The result schema stays v2; its named
@@ -182,7 +182,7 @@ radical shift with unchanged atom-level charge and lone-pair counts. Two more co
 electron assignments remain unclassified. These are reported without erasing strict
 mismatches or claiming identical energies/electronic states. The benchmark separately
 labels the two explicitly accepted N2O resonance forms; other mismatches are not
-called chemical errors. See the [report](../research/lewis-reference-validation.md)
+called chemical errors. See the [report](../lewis-annotations.md#参考验证)
 for denominators, every peroxy entry, remaining differences and reproducible ablations.
 A separately reported pinned SABIC aromatic library improves from 263/365 to 281/365,
 including its phenoxyl and phenylperoxy references. It is not pooled with the original

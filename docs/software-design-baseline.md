@@ -269,7 +269,7 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 
 #### 11.1.3 Lewis 候选结构注释
 
-- [ADR-0033](adr/0033-annotate-representative-species-with-lewis-candidates.md) 定义可选的
+- [ADR-0035](adr/0035-annotate-representative-species-with-lewis-candidates.md) 定义可选的
   Lewis Candidate Annotation。原始 Species 身份、方向、计量、计数和事件保持不变；
   候选名称用于对照与别名检索，返回全部关联原物种并按原身份进入分析。
 - 基础版本处理 `.reactionabcd` / `.species` 的完整代表 SMILES，不枚举逐帧分子图。
@@ -296,7 +296,7 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
 - 参考集的键级/形式电荷、SMILES 往返局部电子、模型图局部电子一致率分开报告，
   并保留同分母比较及小 C/N/O 分层。严格表示差异不直接判为化学错误；N₂O 的两种
   已声明共振表示另行标注，不混入严格一致数。v5 整体严格一致率低于 v4，不能声称全面改善，
-  见[验证记录](research/lewis-reference-validation.md)。
+  见[参考验证](lewis-annotations.md#参考验证)。
 - 批量任务显式启动，受整体及单结构预算限制，在 Dataset Workspace 原子发布。
   失败/取消不污染已发布结果；源修订、方法版本和假设变化使旧结果失效。
   在线详情、别名分页及 JSON/CSV 导出只读已准备结果，保留原结构、候选、假设、方法和来源。

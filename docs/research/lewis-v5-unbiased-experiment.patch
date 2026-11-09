@@ -1,9 +1,0 @@
---- a/lewis.py
-+++ b/lewis.py
-@@ -23,2 +23,2 @@
--LEWIS_METHOD = "neutral-main-group-milp/v4"
--_OBJECTIVES = ("charged_shell_deficit", "hetero_shell_deficit", "small_ring_unsaturation",
-+LEWIS_METHOD = "neutral-main-group-milp/v5-unbiased-experiment"
-+_OBJECTIVES = ("charged_shell_deficit", "small_ring_unsaturation",
-@@ -327 +326,0 @@
--                                 deficit if atoms[i].GetSymbol() != "C" else 0,

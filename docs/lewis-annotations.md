@@ -87,7 +87,7 @@ prepare_lewis_annotations(
 规则评分只用于这个模型内选择候选，不是物种可信度或物理能量。
 小型样例验收不替代真实轨迹上的科学有效性评估。
 
-公开参考集比较记录见[参考验证](research/lewis-reference-validation.md)。键级/形式电荷
+公开参考集比较结果见下文[参考验证](#参考验证)。键级/形式电荷
 表示一致，不等于未配对电子、孤电子对或自旋状态一致，不能据此声称已验证化学有效性。
 不同共振写法也可能合理；例如 N₂O 的 `N#[N+][O-]` 与 `[N-]=[N+]=O`，不能仅按
 是否与参考 SMILES 相同判断对错。报告把这组已声明的共振差异与严格一致分开计数。
@@ -97,4 +97,49 @@ prepare_lewis_annotations(
 当前结果 schema 为 `reacnet-scope/lewis-annotation/v2`，保存模型图和命名目标值
 `model_objectives`；原始 RNG 身份、原始文件和计数不变。
 
-身份、版本和发布决定见 [ADR-0033](adr/0033-annotate-representative-species-with-lewis-candidates.md)。
+身份、版本和发布决定见 [ADR-0035](adr/0035-annotate-representative-species-with-lewis-candidates.md)。
+
+## 参考验证
+
+以下是 `neutral-main-group-milp/v5` 在公开参考集上的开发回放结果，用于说明候选命名的
+取舍，**不是独立留出验证、化学有效率或电子态判定**。逐条结果和各版本消融实验过程见
+[PR #73](https://github.com/hcustc/reacnet-scope/pull/73) 的讨论与提交历史。
+
+**输入。** 固定 RMG-database 提交 `6391cc4f75341803605d9ad17417e14cf2db1f59` 的
+`input/thermo/libraries/` 下十四个库：primaryThermoLibrary、halogens、CHOF_G4、
+CHOCl_G4、CH、CHO、CN、CHN、CHON、primaryNS、BurcatNS、NOx2018、GRI-Mech3.0、
+NISTThermoLibrary。共 7781 条声明，排除 6 条超出元素域的稀有气体（Ar/He/Ne），
+7775 条参与比较；不同库可能共享连接图，不是 7775 个独立样本。芳香补充集为同一提交的
+`SABIC_aromatics.py` 全部 365 条，单独报告，不并入原分母。
+
+**结果。**
+
+| 集合 | 分母 | v4 严格一致 | v5 严格一致 |
+| --- | ---: | ---: | ---: |
+| 原十四库 | 7775 | 7439 | 7371 |
+| SABIC 芳香补充 | 365 | 263 | 281 |
+
+- v5 去掉了中性原子按 C/非 C 区别的壳层优先级，并加入有条件的芳香六元环偏好。
+  审查指出的 12 条过氧自由基参考全部恢复，苯氧（SABIC index 10）和苯基过氧
+  （index 32）参考恢复。
+- 原集合比 v4 少的部分中，93 条新增差异有 91 条是单个自由基沿两根键移动、原子级
+  电荷与孤对数不变的表示差异；其余 2 条为更复杂的电子分配，未归类。
+- 严格表示差异不直接等于化学错误。N₂O 的两种已声明共振写法单独标注，不计入严格一致。
+  SABIC 中 2 条稠环自由基（index 197、329）在“去除未配对电子后比较”下不一致，
+  保留未配对电子后一致，属于比较器限制。
+- 全部条目都生成了候选，无超时、节点截断或比较器错误。没有真实 MD 轨迹验收，也没有
+  自旋分辨的量化计算；不能把比例解释为 RNG 数据的化学有效率，或据此删除物种。
+
+**复现。** RMG 库文件只按 AST 读取结构字面量，不导入或执行。下载上述固定提交的库文件后，
+在仓库外的目录运行（完整输出不提交到仓库）：
+
+```bash
+uv run --locked python scripts/benchmark_lewis_rmg.py \
+  --revision 6391cc4f75341803605d9ad17417e14cf2db1f59 \
+  --output-dir /path/to/out \
+  /path/to/RMG-database/input/thermo/libraries/{primaryThermoLibrary,halogens,CHOF_G4,CHOCl_G4,CH,CHO,CN,CHN,CHON,primaryNS,BurcatNS,NOx2018,GRI-Mech3.0,NISTThermoLibrary}.py
+```
+
+默认参数为中性假设、单结构 5 秒、批次 600 秒。比较历史版本时，用
+`--implementation-file` 指向从 git 历史取出的旧 `reacnet_scope/lewis.py`（例如 v4 为提交
+`7fbf40e` 中的版本）。
