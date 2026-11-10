@@ -26,7 +26,7 @@ from reacnet_scope.indexes import IndexBuildInProgressError
 from reacnet_scope import services as svc
 from scripts.webapp_dash import dataset_library
 from scripts.webapp_dash.chart_presentation import empty_chart_figure
-from scripts.webapp_dash.candidate_workbench import context_key
+from scripts.webapp_dash.dataset_scope import context_key, current_species_focus
 
 from .common import (
     _evolution_comparison_active,
@@ -196,13 +196,14 @@ def register(app: Any) -> None:
         State({"type": "species-compare-replicate", "path": ALL}, "value"),
         State({"type": "species-compare-replicate", "path": ALL}, "id"),
         State("app-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
     def _edit_species_compare_sources(
         managed_ids, _add_path, _handoff, _remove, managed, path_text,
         new_label, sources, targets, target_ids, labels, label_ids,
         model_iterations, model_iteration_ids, conditions, condition_ids,
-        replicates, replicate_ids, app_store,
+        replicates, replicate_ids, app_store, species_focus,
     ):
         sources = [dict(item) for item in (sources or [])]
         current = {item["species_file"]: item for item in sources}
@@ -241,7 +242,7 @@ def register(app: Any) -> None:
             if not species_file:
                 return sources, "选择已导入的 RNG 数据，或添加 Species 文件。"
             path = str(Path(species_file).expanduser().resolve())
-            selected_smiles = str(store.get("selected_smiles") or "").strip()
+            selected_smiles = current_species_focus(species_focus, store)["selected_smiles"].strip()
             existing = next(
                 (item for item in sources if item.get("species_file") == path),
                 None,

@@ -20,7 +20,11 @@ from dash import (
 from dash.exceptions import PreventUpdate
 from reacnet_scope.indexes import dataset_id_for_source
 from reacnet_scope import services as svc
-from scripts.webapp_dash.candidate_workbench import context_key
+from scripts.webapp_dash.dataset_scope import (
+    context_key,
+    current_species_focus,
+    species_focus_for,
+)
 from scripts.webapp_dash.navigation import (
     PAGE_CLASS_NAMES,
     PAGE_DESCRIPTIONS,
@@ -37,11 +41,11 @@ from .common import (
 )
 
 
-def _channel_focus_species(channel_focus, store):
+def _channel_focus_species(channel_focus, store, species_focus=None):
     focus = channel_focus if isinstance(channel_focus, dict) else {}
     if focus.get("context") == context_key(store):
         return str(focus.get("species") or "").strip()
-    return str((store or {}).get("selected_smiles") or "").strip()
+    return current_species_focus(species_focus, store)["selected_smiles"].strip()
 
 
 def _current_dataset_id(store: dict[str, Any] | None) -> str:
@@ -551,17 +555,19 @@ def register(app: Any) -> None:
         Input("species-to-channels-btn", "n_clicks"),
         State("rxn-top", "value"),
         State("app-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
     def _load_selected_species_channels(
         _channel_clicks,
         top,
         store,
+        species_focus,
     ):
         if ctx.triggered_id != "species-to-channels-btn":
             raise PreventUpdate
         store = store or {}
-        selected_smiles = str(store.get("selected_smiles") or "").strip()
+        selected_smiles = current_species_focus(species_focus, store)["selected_smiles"].strip()
         if not selected_smiles:
             raise PreventUpdate
         columns = _direct_channel_columns()
@@ -625,6 +631,7 @@ def register(app: Any) -> None:
         State("rxn-top", "value"),
         State("app-store", "data"),
         State("rxn-channel-focus-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
         running=[
             (
@@ -649,7 +656,7 @@ def register(app: Any) -> None:
             ),
         ],
     )
-    def _save_channel_timestep_ps(n_clicks, timestep_ps, top, store, channel_focus):
+    def _save_channel_timestep_ps(n_clicks, timestep_ps, top, store, channel_focus, species_focus):
         if not n_clicks:
             raise PreventUpdate
         store = store or {}
@@ -667,7 +674,7 @@ def register(app: Any) -> None:
             )
 
         try:
-            selected_smiles = _channel_focus_species(channel_focus, store)
+            selected_smiles = _channel_focus_species(channel_focus, store, species_focus)
             result = svc.collect_species_channels(
                 artifacts,
                 selected_smiles,
@@ -765,6 +772,7 @@ def register(app: Any) -> None:
         State("rxn-top", "value"),
         State("app-store", "data"),
         State("rxn-channel-focus-store", "data"),
+        State("species-focus", "data"),
         background=True,
         prevent_initial_call=True,
         running=[
@@ -802,6 +810,7 @@ def register(app: Any) -> None:
         top,
         store,
         channel_focus,
+        species_focus,
     ):
         if not n_clicks:
             raise PreventUpdate
@@ -851,7 +860,7 @@ def register(app: Any) -> None:
                     str(evidence.get("message") or "模拟盒体积证据仍未就绪"),
                     reason=str(evidence.get("reason") or "volume_unavailable"),
                 )
-            selected_smiles = _channel_focus_species(channel_focus, current)
+            selected_smiles = _channel_focus_species(channel_focus, current, species_focus)
             result = svc.collect_species_channels(
                 artifacts,
                 selected_smiles,
@@ -911,6 +920,7 @@ def register(app: Any) -> None:
         State("rxn-consumption-grid", "rowData"),
         State("app-store", "data"),
         State("rxn-channel-focus-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
     def _download_species_channels(
@@ -920,6 +930,7 @@ def register(app: Any) -> None:
         consumption_rows,
         store,
         channel_focus,
+        species_focus,
     ):
         triggered_id = ctx.triggered_id
         if triggered_id == "rxn-production-csv-btn":
@@ -936,7 +947,7 @@ def register(app: Any) -> None:
             raise PreventUpdate
 
         store = store if isinstance(store, dict) else {}
-        focus_smiles = _channel_focus_species(channel_focus, store)
+        focus_smiles = _channel_focus_species(channel_focus, store, species_focus)
         focus_formula = str(svc.candidate_formula(focus_smiles) or "").strip()
         export_rows = [
             {
@@ -1017,7 +1028,7 @@ def register(app: Any) -> None:
         Output("rxn-consumption-grid", "cellClicked", allow_duplicate=True),
         Output("rxn-channel-selection-store", "data", allow_duplicate=True),
         Output("rxn-channel-history-store", "data", allow_duplicate=True),
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Output("rxn-query-card", "style", allow_duplicate=True),
         Output("rxn-results-card", "style", allow_duplicate=True),
         Output("rxn-channel-view", "style", allow_duplicate=True),
@@ -1045,6 +1056,7 @@ def register(app: Any) -> None:
         State("rxn-channel-selection-store", "data"),
         State("rxn-channel-alert", "children"),
         State("rxn-channel-focus-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
     def _focus_reaction_structure_species(
@@ -1061,6 +1073,7 @@ def register(app: Any) -> None:
         channel_selection,
         channel_alert,
         channel_focus,
+        species_focus,
     ):
         click_values = _clicks if isinstance(_clicks, (list, tuple)) else [_clicks]
         if not any(
@@ -1079,15 +1092,13 @@ def register(app: Any) -> None:
             selected_formula = ""
         store = store if isinstance(store, dict) else {}
         focus = {
-            "selected_smiles": store.get("selected_smiles") or "",
-            "selected_formula": store.get("selected_formula") or "",
-            "selected_species_source": (
-                store.get("selected_species_source") or ""
-            ),
+            key: value
+            for key, value in current_species_focus(species_focus, store).items()
+            if key != "context"
         }
         history = list(history) if isinstance(history, list) else []
         if triggered.get("scope") == "channel":
-            previous_species = _channel_focus_species(channel_focus, store)
+            previous_species = _channel_focus_species(channel_focus, store, species_focus)
             previous_target = (
                 str(svc.candidate_formula(previous_species) or "")
                 or focus["selected_formula"] or previous_species
@@ -1120,12 +1131,9 @@ def register(app: Any) -> None:
                     "focus": focus,
                 }
             )
-        updated_store = {
-            **store,
-            "selected_smiles": selected_smiles,
-            "selected_formula": selected_formula,
-            "selected_species_source": "reaction_structure",
-        }
+        updated_focus = species_focus_for(
+            store, selected_smiles, selected_formula, "reaction_structure"
+        )
         columns = _direct_channel_columns()
         try:
             result = svc.collect_species_channels(
@@ -1153,7 +1161,7 @@ def register(app: Any) -> None:
             None,
             None,
             history,
-            updated_store,
+            updated_focus,
             {"display": "none"},
             {"display": "none"},
             {"display": "block"},

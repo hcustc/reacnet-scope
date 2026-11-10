@@ -16,7 +16,7 @@ from dash.exceptions import PreventUpdate
 from scripts.webapp_dash.file_import import defer_query
 from reacnet_scope import services as svc
 from scripts.webapp_dash.chart_presentation import empty_chart_figure
-from scripts.webapp_dash.candidate_workbench import context_key
+from scripts.webapp_dash.dataset_scope import context_key, current_species_focus
 from scripts.webapp_dash.navigation import (
     migrate_page_state,
 )
@@ -130,6 +130,7 @@ def register(app: Any) -> None:
         State("evolution-start-timestep", "value"),
         State("evolution-end-timestep", "value"),
         *[State(f"evolution-group-filter-{field}", "value") for field in ("required", "excluded", "element", "min", "max")],
+        State("species-focus", "data"),
         State("app-store", "data"),
         State("import-pending-evolution", "data"),
         prevent_initial_call=True,
@@ -187,6 +188,7 @@ def register(app: Any) -> None:
         start_timestep,
         end_timestep,
         group_required, group_excluded, filter_element, filter_min, filter_max,
+        species_focus,
         store,
         submitted_trigger=None,
     ):
@@ -287,8 +289,9 @@ def register(app: Any) -> None:
         targets = list(dict.fromkeys([*picked_targets, *manual_targets]))
         species = ""
         selected_from_rank = selected_rank is not None and trigger == "evolution-rank-request"
+        detail_focus = current_species_focus(species_focus, store)
         if from_detail:
-            species = str(store.get("selected_smiles") or "").strip()
+            species = detail_focus["selected_smiles"].strip()
             if not species:
                 raise PreventUpdate
             targets = [species]
@@ -299,7 +302,7 @@ def register(app: Any) -> None:
             targets = list(focus.get("targets") or [])
             species = str(focus.get("species") or "")
         if not targets:
-            targets_text_default = store.get("selected_formula") or store.get("selected_smiles") or ""
+            targets_text_default = detail_focus["selected_formula"] or detail_focus["selected_smiles"]
             targets = [targets_text_default] if targets_text_default else []
         if not targets:
             message = "请先选择或输入目标物种。" if trigger == "evolution-search-btn" else None
@@ -567,10 +570,11 @@ def register(app: Any) -> None:
         State("app-store", "data"),
         State("evolution-rank-store", "data"),
         State("evolution-rank-grid", "rowData"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
-    def _open_species_abundance(_clicks, dataset, ranking, rows):
-        species = str((dataset or {}).get("selected_smiles") or "").strip()
+    def _open_species_abundance(_clicks, dataset, ranking, rows, species_focus):
+        species = current_species_focus(species_focus, dataset)["selected_smiles"].strip()
         if not _clicks or not species:
             raise PreventUpdate
         context = context_key(dataset or {})

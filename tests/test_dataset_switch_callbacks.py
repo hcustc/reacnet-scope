@@ -571,7 +571,10 @@ def test_successful_switch_commits_context_resets_results_and_opens_overview(
     assert response.status_code == 200
     result = response.get_json()["response"]
     assert result["app-store"]["data"]["dataset_id"] == "dataset-new"
-    assert result["app-store"]["data"]["selected_smiles"] == ""
+    assert "selected_smiles" not in result["app-store"]["data"]
+    assert result["species-focus"]["data"] == {
+        "context": "", "selected_smiles": "", "selected_formula": "", "selected_species_source": "",
+    }
     assert result["app-store"]["data"]["inputs_pending"] is True
     assert result["recent-datasets"]["data"][0]["base"] == "/data/new"
     assert result["dataset-switch-navigation"]["data"]["page"] == "data-management"

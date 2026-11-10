@@ -24,6 +24,7 @@ from scripts.webapp_dash.callbacks import (
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import ui_components as ui
 from scripts.webapp_dash.candidate_workbench import context_key, observation_rows
+from scripts.webapp_dash.dataset_scope import empty_species_focus, species_focus_for
 from scripts.webapp_dash.navigation import (
     LEGACY_PAGE_REDIRECTS,
     NAV_GROUPS,
@@ -71,28 +72,35 @@ def test_old_trajectory_session_requires_valid_event_bookmark(monkeypatch) -> No
     }
 
 
+def _detail_state(store: dict[str, Any], smiles: str, formula: str = "",
+                  source: str = "species_grid") -> dict[str, Any]:
+    """Browser state with ``smiles`` shown by the Species detail of ``store``."""
+    return {"app-store": store,
+            "species-focus": species_focus_for(store, smiles, formula, source)}
+
+
 def test_cross_entry_species_detail_restores_origin_and_previous_focus(monkeypatch) -> None:
     app = create_app()
     monkeypatch.setattr(svc, "species_detail", lambda _artifacts, smiles:
                         {"smiles": smiles, "formula": "B"})
     monkeypatch.setattr(svc, "render_species_svg", lambda _smiles: {"ok": False})
     dataset = {"dataset_id": "run-1", "source_revision": {"fingerprint": "v1"},
-               "artifacts": {"reaction": "/tmp/run.reaction"},
-               "selected_smiles": "A", "selected_formula": "A"}
+               "artifacts": {"reaction": "/tmp/run.reaction"}}
+    previous_focus = species_focus_for(dataset, "A", "A", "species_grid")
     origin = {"page": "evolution", "version": 2, "compare_sources": True}
     handoff = {"species": "B", "context": context_key(dataset)}
     opened = _wrapped_callback(app, "_open_species_from_another_entry")(
-        handoff, dataset, origin)
-    updated_store, page_state = opened[0], opened[9]
-    assert updated_store["selected_smiles"] == "B"
+        handoff, dataset, origin, previous_focus)
+    updated_focus, page_state = opened[0], opened[9]
+    assert updated_focus["selected_smiles"] == "B"
+    assert updated_focus["context"] == context_key(dataset)
     assert page_state["page"] == "species"
     assert page_state["return_stack"][-1]["page"] == "evolution"
     assert page_state["return_stack"][-1]["compare_sources"] is True
     returned = _wrapped_callback(app, "_return_from_species_detail")(
-        1, page_state, updated_store)
+        1, page_state, dataset)
     assert returned[0] == origin
-    assert returned[1]["selected_smiles"] == "A"
-    assert returned[1]["selected_formula"] == "A"
+    assert returned[1] == previous_focus
 
 
 def test_reaction_event_list_is_invalidated_when_selected_reaction_changes(monkeypatch) -> None:
@@ -110,9 +118,9 @@ def test_reaction_event_list_is_invalidated_when_selected_reaction_changes(monke
 
 def test_cross_entry_detail_keeps_species_result_card_without_search_rows() -> None:
     update = _wrapped_callback(create_app(), "_update_species_state")
-    store = {"dataset_id": "run-1", "artifacts": {"reaction": "/tmp/run.reaction"},
-             "selected_smiles": "B", "selected_species_source": "cross_entry_detail"}
-    result = update(store, {"rows": []}, False)
+    store = {"dataset_id": "run-1", "artifacts": {"reaction": "/tmp/run.reaction"}}
+    focus = species_focus_for(store, "B", "", "cross_entry_detail")
+    result = update(store, {"rows": []}, False, focus)
     assert result[2] == {"display": "block"}
     assert result[6] == {"display": "none"}
     assert result[7] == {"display": "block"}
@@ -331,7 +339,7 @@ def test_dash_layout_and_callback_dependencies_are_loadable(monkeypatch, compact
         dependency
         for dependency in dependencies
         if "running" in dependency
-        and "app-store.data" in str(dependency.get("output") or "")
+        and "species-focus.data" in str(dependency.get("output") or "")
         and any(
             item.get("id") == "species-structure-grid"
             for item in dependency.get("inputs") or []
@@ -903,7 +911,7 @@ def test_candidate_shortcut_carries_exact_species_without_candidate_index(
     monkeypatch.setattr(svc, "search_candidate_species", unavailable)
     client = create_app().server.test_client()
     side = "start"
-    store = {"selected_smiles": "CCO", "artifacts": {}}
+    store = {"artifacts": {}}
     input_ids = [
         f"cp-{side}-find", f"cp-{side}-current", "cp-context",
         "cp-species-handoff", "cp-nav-anchor", "cp-mode",
@@ -938,7 +946,7 @@ def test_candidate_mode_keeps_manual_formula_choices_after_species_handoff(monke
         "rows": [{"species": "CCO"}, {"species": "COC"}], "has_more": False,
     })
     client = create_app().server.test_client()
-    store = {"selected_smiles": "CC=O", "artifacts": {}}
+    store = {"artifacts": {}}
     handoff = {"species": "CC=O", "context": context_key(store), "side": "start"}
     input_ids = ["cp-start-find", "cp-start-current", "cp-context",
                  "cp-species-handoff", "cp-nav-anchor", "cp-mode"]
@@ -1594,9 +1602,8 @@ def test_species_detail_abundance_shortcut_plots_exact_species(monkeypatch) -> N
         changed="species-to-evolution-btn.n_clicks",
         input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "group"},
         state_values={"evolution-targets": "CCO", "evolution-species-file": "/old.species",
-                      "evolution-species-files": "old::/old.species", "app-store": {
-            "selected_smiles": "COC", "artifacts": {},
-        }},
+                      "evolution-species-files": "old::/old.species",
+                      **_detail_state({"artifacts": {}}, "COC")},
         output_id="evolution-payload-store",
     ))
     assert response.status_code == 200
@@ -1627,9 +1634,7 @@ def test_species_detail_abundance_shortcut_wins_batched_control_changes(monkeypa
                    "evolution-xaxis", "evolution-group-members-grid"],
         changed=first_trigger,
         input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
-        state_values={"evolution-targets": "CCO", "app-store": {
-            "selected_smiles": "COC", "artifacts": {},
-        }},
+        state_values={"evolution-targets": "CCO", **_detail_state({"artifacts": {}}, "COC")},
         output_id="evolution-payload-store",
     )
     payload["changedPropIds"] = [first_trigger, "species-to-evolution-btn.n_clicks"]
@@ -1649,9 +1654,9 @@ def test_batched_species_shortcut_keeps_its_trigger_while_preparing(monkeypatch)
                    "evolution-xaxis", "evolution-group-members-grid"],
         changed="evolution-group-element.value",
         input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
-        state_values={"app-store": {"base": "/collection", "selected_smiles": "COC",
-                      "artifacts": {"species": "/run.species"},
-                      "analysis_capabilities": {"species_abundance": {"state": "needs_preparation"}}}},
+        state_values=_detail_state({"base": "/collection", "artifacts": {"species": "/run.species"},
+                                    "analysis_capabilities": {"species_abundance": {"state": "needs_preparation"}}},
+                                   "COC"),
         output_id="evolution-payload-store",
     )
     payload["changedPropIds"] = ["evolution-group-element.value", "species-to-evolution-btn.n_clicks"]
@@ -1677,8 +1682,7 @@ def test_abundance_preselection_allows_new_queries_and_settings_follow_current_o
                 "meta": {"warnings": []}}
 
     monkeypatch.setattr(svc, "build_species_evolution", fake_evolution)
-    dataset = {"dataset_id": "run-1", "source_revision": "v1", "artifacts": {},
-               "selected_smiles": "Oc1ccc(Cl)cc1"}
+    dataset = {"dataset_id": "run-1", "source_revision": "v1", "artifacts": {}}
     context = context_key(dataset)
     previous_row = {"smiles": "[O]=[O]", "formula": "O2", "total_count": 1000}
     client = create_app().server.test_client()
@@ -1690,7 +1694,7 @@ def test_abundance_preselection_allows_new_queries_and_settings_follow_current_o
         changed=trigger,
         input_values={"evolution-search-btn": 1, "evolution-browse-mode": "species",
                       "evolution-xaxis": "step", "evolution-rank-request": {"selection": [previous_row], "context": context}},
-        state_values={"app-store": dataset,
+        state_values={**_detail_state(dataset, "Oc1ccc(Cl)cc1"),
                       "evolution-focus-store": {"species": species, "targets": [species], "context": context},
                       "evolution-rank-store": {"context": context}, "evolution-rank-grid": [previous_row],
                       "evolution-targets": "Oc1ccc(Cl)cc1", "evolution-species-picker": [],
@@ -1719,7 +1723,7 @@ def test_species_detail_abundance_does_not_aggregate_a_formula_shaped_identity(t
                    "evolution-xaxis", "evolution-group-members-grid"],
         changed="species-to-evolution-btn.n_clicks",
         input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "species"},
-        state_values={"app-store": {"selected_smiles": "O", "artifacts": {"species": str(source)}}},
+        state_values=_detail_state({"artifacts": {"species": str(source)}}, "O"),
         output_id="evolution-payload-store",
     ))
     assert response.status_code == 200
@@ -1745,9 +1749,8 @@ def test_species_detail_abundance_shortcut_retains_target_after_preparation(monk
                  "evolution-browse-mode", "evolution-group-element", "evolution-group-count",
                  "evolution-xaxis", "evolution-group-members-grid"]
     dataset = {"base": "/collection", "artifacts": {"species": "/run.species"},
-               "selected_smiles": "COC",
                "analysis_capabilities": {"species_abundance": {"state": "needs_preparation"}}}
-    state = {"evolution-targets": "COC", "app-store": dataset}
+    state = {"evolution-targets": "COC", **_detail_state(dataset, "COC")}
     initial = client.post("/_dash-update-component", json=_callback_payload(
         client, input_ids=input_ids, changed="species-to-evolution-btn.n_clicks",
         input_values={"species-to-evolution-btn": 1, "evolution-browse-mode": "group"},
@@ -2481,7 +2484,10 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
     detail = detail_response.get_json()["response"]
     assert detail["species-to-evolution-btn"]["disabled"] is False
     assert detail["evolution-targets"]["value"] == f"smiles:{smiles}"
-    assert detail["app-store"]["data"]["selected_smiles"] == smiles
+    assert detail["species-focus"]["data"] == species_focus_for(
+        dataset, smiles, detail["species-focus"]["data"]["selected_formula"], "species_grid")
+    # Selecting a Species must not rewrite the Current Dataset context.
+    assert "app-store" not in detail
     assert "research-species" not in detail
     rendered_detail = json.dumps(
         detail["detail-body"]["children"],
@@ -2501,7 +2507,8 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
             state_values={
                 "species-grid.rowData": [row],
                 "species-structure-grid.rowData": [],
-                "app-store.data": detail["app-store"]["data"],
+                "app-store.data": dataset,
+                "species-focus.data": detail["species-focus"]["data"],
                 "species-grid-store.data": {"query_kind": "smiles", "rows": [row],
                                             "context": context_key(dataset)},
             },
@@ -2509,6 +2516,7 @@ def test_selected_species_opens_prefilled_time_evolution(monkeypatch) -> None:
         ),
     )
     assert cleared.status_code == 200
+    assert cleared.get_json()["response"]["species-focus"]["data"] == empty_species_focus()
 
     dependency = next(
         item
@@ -2678,12 +2686,9 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
         input_values={pattern_id: [1]},
         state_values={
             "rxn-top": 7,
-            "app-store": {
-                "artifacts": {"reaction": "/tmp/example.reaction"},
-                "selected_smiles": "[C][O]",
-                "selected_formula": "CO",
-                "selected_species_source": "species_grid",
-            },
+            **_detail_state(
+                {"artifacts": {"reaction": "/tmp/example.reaction"}}, "[C][O]", "CO", "species_grid",
+            ),
             "rxn-channel-history-store": [
                 {"kind": "species", "label": "返回物种检索"}
             ],
@@ -2742,8 +2747,9 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
             "alert": "CO 的通道",
         },
     ]
-    assert result["app-store"]["data"]["selected_smiles"] == "[C]"
-    assert result["app-store"]["data"]["selected_formula"] == "C"
+    assert result["species-focus"]["data"] == species_focus_for(
+        {"artifacts": {"reaction": "/tmp/example.reaction"}}, "[C]", "C", "reaction_structure")
+    assert "app-store" not in result
     assert result["rxn-query-card"]["style"] == {"display": "none"}
     assert result["rxn-results-card"]["style"] == {"display": "none"}
     assert result["rxn-channel-view"]["style"] == {"display": "block"}
@@ -2759,12 +2765,9 @@ def test_clicking_reaction_structure_species_loads_its_direct_channels(
         input_values={pattern_id: [1]},
         state_values={
             "rxn-top": 7,
-            "app-store": {
-                "artifacts": {"reaction": "/tmp/example.reaction"},
-                "selected_smiles": "[O]",
-                "selected_formula": "O",
-                "selected_species_source": "reaction_search",
-            },
+            **_detail_state(
+                {"artifacts": {"reaction": "/tmp/example.reaction"}}, "[O]", "O", "reaction_search",
+            ),
             "rxn-channel-history-store": [],
         },
         output_id="rxn-production-grid",
@@ -2825,12 +2828,9 @@ def test_mounting_channel_species_cards_does_not_change_focus(monkeypatch) -> No
         input_values={pattern_id: [0]},
         state_values={
             "rxn-top": 50,
-            "app-store": {
-                "artifacts": {"reaction": "/tmp/example.reaction"},
-                "selected_smiles": "C6H5ClO",
-                "selected_formula": "C6H5ClO",
-                "selected_species_source": "reaction_structure",
-            },
+            **_detail_state(
+                {"artifacts": {"reaction": "/tmp/example.reaction"}}, "C6H5ClO", "C6H5ClO", "reaction_structure",
+            ),
             "rxn-channel-history-store": [],
             "rxn-production-grid.rowData": [],
             "rxn-production-grid.columnDefs": [],
@@ -2929,11 +2929,9 @@ def test_selected_species_loads_exact_production_and_consumption_channels(
             },
             state_values={
                 "rxn-top": 12,
-                "app-store": {
-                    "selected_smiles": "[C][O]",
-                    "selected_formula": "CO",
-                    "artifacts": {"reaction": "run.reactionabcd"},
-                },
+                **_detail_state(
+                    {"artifacts": {"reaction": "run.reactionabcd"}}, "[C][O]", "CO",
+                ),
             },
             output_id="rxn-production-grid",
         ),
@@ -3197,10 +3195,7 @@ def test_channel_time_conversion_saves_and_refreshes_tables(monkeypatch) -> None
             state_values={
                 "rxn-channel-timestep-ps": 0.00025,
                 "rxn-top": 12,
-                "app-store": {
-                    "artifacts": artifacts,
-                    "selected_smiles": "O",
-                },
+                **_detail_state({"artifacts": artifacts}, "O"),
             },
             output_id="rxn-channel-timestep-status",
         ),
@@ -3257,10 +3252,7 @@ def test_species_channel_tables_export_loaded_rows_as_csv() -> None:
     state_values = {
         "rxn-production-grid": [production],
         "rxn-consumption-grid": [consumption],
-        "app-store": {
-            "selected_formula": "CO",
-            "selected_smiles": "[C][O]",
-        },
+        **_detail_state({}, "[C][O]", "CO"),
     }
 
     production_response = client.post(
@@ -3660,18 +3652,14 @@ def test_loading_another_dataset_drops_cross_dataset_species_selection(
                 "base": "/new/new.lammpstrj",
                 "label": "new",
             },
-            store={
-                "dataset_id": "old",
-                "selected_smiles": "[OLD]",
-                "selected_formula": "OLD",
-            },
+            store={"dataset_id": "old"},
             recent_records=[],
         ),
     )
     assert response.status_code == 200
-    store = response.get_json()["response"]["app-store"]["data"]
-    assert store["selected_smiles"] == ""
-    assert store["selected_formula"] == ""
+    body = response.get_json()["response"]
+    assert body["species-focus"]["data"] == empty_species_focus()
+    assert not {"selected_smiles", "selected_formula"} & set(body["app-store"]["data"])
 
 
 def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
@@ -3736,7 +3724,7 @@ def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
         )
         loaded_stores.append(store)
         ids.append(store["dataset_id"])
-        assert store["selected_smiles"] == ""
+        assert "selected_smiles" not in store
         assert store["dataset_id"] == dataset_id_for_source(
             str((folder / "run.lammpstrj").resolve(strict=False))
         )

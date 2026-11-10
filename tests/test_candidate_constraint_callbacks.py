@@ -76,15 +76,15 @@ def test_constraint_picker_preserves_selection_and_resets_on_dataset_change(app,
     monkeypatch.setattr(svc, 'search_candidate_species',
                         lambda *_: dict(rows=[{'species': 'CC=O'}], has_more=False))
     options, selected, _, _ = invoke(find, f'cp-{side}-find.n_clicks',
-        1, None, None, store, 'CC=O', [{'value': 'COC', 'label': 'COC'}], ['COC'])
+        1, None, None, store, 'CC=O', [{'value': 'COC', 'label': 'COC'}], ['COC'], None)
     assert selected == ['COC', 'CC=O']
     assert {item['value'] for item in options} == {'COC', 'CC=O'}
     monkeypatch.setattr(svc, 'search_candidate_species', lambda *_: dict(rows=[], has_more=False))
     _, kept, message, _ = invoke(find, f'cp-{side}-find.n_clicks',
-        2, None, None, store, 'unknown', options, selected)
+        2, None, None, store, 'unknown', options, selected, None)
     assert kept == selected and '已选约束保留' in message
     assert invoke(find, 'cp-context.data', 2, None, None,
-                  dict(store, dataset_id='new'), 'unknown', options, selected) == ([], [], '', '')
+                  dict(store, dataset_id='new'), 'unknown', options, selected, None) == ([], [], '', '')
 
 
 def test_single_anchor_does_not_apply_hidden_waypoints_and_summary_uses_report(app):
