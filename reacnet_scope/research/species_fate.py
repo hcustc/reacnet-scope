@@ -6,7 +6,6 @@ import csv
 import heapq
 import io
 import json
-import os
 import re
 import sqlite3
 import statistics
@@ -26,6 +25,7 @@ from ..event_index import (
 )
 from ..indexes import IndexInvalidError, _readonly_connection
 from ..formula import ELEMENT_SYMBOLS as _ELEMENT_SYMBOLS
+from ..molecule_lineage import _source_signature
 
 
 SPECIES_FATE_SCHEMA_VERSION = "species-fate/v1"
@@ -205,16 +205,6 @@ def _canonical_json(value: Any) -> str:
 
 def _stable_id(prefix: str, value: Any, *, length: int = 20) -> str:
     return f"{prefix}_{sha1(_canonical_json(value).encode('utf-8')).hexdigest()[:length]}"
-
-
-def _source_signature(path: str) -> dict[str, Any]:
-    resolved = os.path.abspath(path)
-    stat = os.stat(resolved)
-    return {
-        "path": resolved,
-        "size": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-    }
 
 
 def _normalize_endpoints(
