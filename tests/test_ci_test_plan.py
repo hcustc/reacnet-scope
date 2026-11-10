@@ -51,7 +51,47 @@ def test_changed_files_choose_coverage(paths, scope, run_pytest):
     plan = plan_for_changes(paths)
     assert plan["browser_scope"] == scope
     assert plan["pytest"] is run_pytest
-    assert len(plan["shards"]) == (4 if scope == "full" else 2 if "," in scope else 1)
+    assert len(plan["shards"]) == (8 if scope == "full" else 2 if "," in scope else 1)
+
+
+@pytest.mark.parametrize("paths, scope", [
+    (["README.md"], "none"),
+    (["scripts/webapp_dash/evolution_workbench.py"], "smoke,abundance"),
+    (["scripts/webapp_dash/callbacks/dataset_switch.py"], "all"),
+    (["reacnet_scope/services.py"], "all"),
+    (["uv.lock"], "all"),
+    ([".github/workflows/test.yml"], "all"),
+])
+def test_pull_requests_run_the_complete_suite_on_compact_navigation_only(paths, scope):
+    plan = plan_for_changes(paths, pull_request=True)
+    assert plan["browser_scope"] == scope
+    assert plan["shards"] == (list(range(1, 9)) if scope == "all" else [1, 2] if "," in scope else [1])
+    # Push, scheduled and manual runs keep classic navigation for shared changes.
+    if scope == "all":
+        assert plan_for_changes(paths)["browser_scope"] == "full"
+
+
+def test_pull_request_event_is_the_only_one_that_drops_classic_navigation(tmp_path, monkeypatch):
+    import scripts.ci_test_plan as ci_test_plan
+
+    event = tmp_path / "event.json"
+    event.write_text("{}")
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(ci_test_plan, "changed_paths", lambda *_: ["reacnet_scope/services.py"])
+    for event_name, scope in (("pull_request", "all"), ("push", "full")):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", event_name)
+        output.write_text("")
+        main()
+        assert f"browser_scope={scope}" in output.read_text().splitlines()
+    # Without a reliable diff a pull request still falls back to the complete suite.
+    monkeypatch.setattr(ci_test_plan, "changed_paths", lambda *_: None)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    output.write_text("")
+    main()
+    assert "browser_scope=full" in output.read_text().splitlines()
 
 
 def test_manual_and_scheduled_runs_always_use_full_coverage(tmp_path, monkeypatch):
@@ -67,7 +107,7 @@ def test_manual_and_scheduled_runs_always_use_full_coverage(tmp_path, monkeypatc
         output.write_text("")
         main()
         assert output.read_text().splitlines() == [
-            "pytest=true", "browser_scope=full", "shards=[1, 2, 3, 4]",
+            "pytest=true", "browser_scope=full", "shards=[1, 2, 3, 4, 5, 6, 7, 8]",
         ]
 
 
@@ -142,6 +182,11 @@ def test_scoped_collection_and_sharding_cover_each_selected_case_once(collected_
     assert smoke == {"tests/browser/test_cases.py::test_critical[compact]"}
     related = collect("--browser-scope=smoke,abundance")
     assert related == smoke | {"tests/browser/test_cases.py::test_abundance[compact]"}
+    every_case_once = collect("--browser-scope=all")
+    assert every_case_once == {
+        f"tests/browser/test_cases.py::{name}[compact]"
+        for name in ("test_critical", "test_abundance", "test_events", "test_full_only")
+    }
     first = collect("--browser-scope=smoke,abundance", "--browser-shard=1/2")
     second = collect("--browser-scope=smoke,abundance", "--browser-shard=2/2")
     assert not first & second
