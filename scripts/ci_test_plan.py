@@ -45,6 +45,25 @@ AREA_PATHS = {
                 "tests/browser/test_species_"),
     "reactions": ("tests/browser/test_reaction_",),
 }
+# Callback modules whose owned components are only exercised by area-marked
+# browser cases. Modules that write cross-workspace state (dataset_switch,
+# page_navigation, preparation, species, ...) or whose components appear in
+# unmarked navigation acceptance (tests/browser/test_workbench.py) stay
+# unmapped, so they keep falling back to the complete suite.
+CALLBACK_AREAS = {
+    "batch.py": ("dataset", "reactions"),
+    "dataset_overview.py": ("dataset",),
+    "dft.py": ("events",),
+    "element_distribution.py": ("abundance",),
+    "event_exports.py": ("events",),
+    "events.py": ("candidate", "events"),
+    "evolution.py": ("abundance", "species"),
+    "molecule_lineage.py": ("events",),
+    "reaction_timing.py": ("events", "reactions"),
+}
+for _module, _areas in CALLBACK_AREAS.items():
+    for _area in _areas:
+        AREA_PATHS[_area] += (f"scripts/webapp_dash/callbacks/{_module}",)
 SHARED_PATHS = (
     ".github/workflows/", "scripts/ci_test_plan.py", "pyproject.toml", "uv.lock",
     "tests/browser/conftest.py", "tests/browser/workbench.py", "tests/browser/test_workbench.py",
