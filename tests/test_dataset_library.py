@@ -6,8 +6,9 @@ import pytest
 from reacnet_scope import services as svc, dir_browser
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash.app import _data_management_page
-from scripts.webapp_dash import callbacks as cb, dataset_library
-from scripts.webapp_dash.callbacks import _batch_managed_dataset_catalog
+from scripts.webapp_dash import dataset_library
+from scripts.webapp_dash.callbacks import dataset_switch
+from scripts.webapp_dash.callbacks.batch import _batch_managed_dataset_catalog
 from scripts.webapp_dash.dataset_library import (
     _build_library_index, _control_snapshot, _library_index_control,
 )
@@ -135,7 +136,7 @@ def test_library_row_click_starts_switch_without_hidden_selector(folders, monkey
         (trigger, [click]),
         ('page-store', [{'prop_id': 'page-store.data', 'value': {'page': 'data-management'}}, click]),
     ):
-        monkeypatch.setattr(cb, 'ctx', SimpleNamespace(
+        monkeypatch.setattr(dataset_switch, 'ctx', SimpleNamespace(
             triggered_id=triggered_id, triggered=changed,
         ))
         transaction, request = reducer(

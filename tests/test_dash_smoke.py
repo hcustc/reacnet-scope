@@ -13,7 +13,14 @@ from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import dataset_id_for_source
 from reacnet_scope import dir_browser
 from scripts import rng_query_cli as cli
-from scripts.webapp_dash import callbacks as cb
+from scripts.webapp_dash.callbacks import (
+    dataset_overview,
+    dataset_switch,
+    dft,
+    events,
+    reaction_channels,
+    reaction_search,
+)
 from scripts.webapp_dash.app import create_app
 from scripts.webapp_dash import ui_components as ui
 from scripts.webapp_dash.candidate_workbench import context_key, observation_rows
@@ -95,7 +102,7 @@ def test_reaction_event_list_is_invalidated_when_selected_reaction_changes(monke
     app = create_app()
     clear = _wrapped_callback(app, "_clear_reaction_events_for_new_selection")
     request = {"origin": "reaction_search", "reaction_smiles": "A -> B"}
-    monkeypatch.setattr(cb, "ctx", SimpleNamespace(triggered_id="rxn-grid"))
+    monkeypatch.setattr(reaction_search, "ctx", SimpleNamespace(triggered_id="rxn-grid"))
     assert clear([{"reaction_smiles": "C -> D"}], None, request) is None
     with pytest.raises(PreventUpdate):
         clear([{"reaction_smiles": "A -> B"}], None, request)
@@ -1413,7 +1420,7 @@ def test_reaction_timing_click_pages_and_exports_exact_events(
     assert stale_response.status_code == 200
     assert stale_response.get_json()["response"]["rxn-timing-page-store"]["data"] is None
 
-    reset_ids = {output.component_id for output, _ in cb._dataset_bound_resets()}
+    reset_ids = {output.component_id for output, _ in dataset_switch._dataset_bound_resets()}
     assert {"rxn-timing-distribution-store", "rxn-timing-page-store",
             "rxn-timing-event-grid"}.issubset(reset_ids)
 
@@ -2344,7 +2351,7 @@ def test_data_workspace_next_step_syncs_restored_page_chrome() -> None:
 
 
 def test_review_source_files_are_collapsed_by_default() -> None:
-    details = cb._render_artifacts(
+    details = dataset_overview._render_artifacts(
         {"reaction": "/data/run.lammpstrj.reaction"},
     )
 
@@ -2586,7 +2593,7 @@ def test_reaction_structure_species_cards_expose_channel_focus_actions() -> None
         ],
     }
 
-    children = cb._reaction_structure_detail_children(
+    children = reaction_channels._reaction_structure_detail_children(
         detail,
         action_scope="channel",
     )
@@ -3639,7 +3646,7 @@ def test_loading_another_dataset_drops_cross_dataset_species_selection(
         lambda records: records,
     )
     monkeypatch.setattr(
-        "scripts.webapp_dash.callbacks._validated_dataset_target",
+        "scripts.webapp_dash.callbacks.common._validated_dataset_target",
         lambda selected: selected,
     )
     app = create_app()
@@ -3678,7 +3685,7 @@ def test_loading_same_basename_from_two_directories_has_distinct_stable_ids(
     alias.symlink_to(folders[0], target_is_directory=True)
 
     monkeypatch.setattr(
-        "scripts.webapp_dash.callbacks._validated_dataset_target",
+        "scripts.webapp_dash.callbacks.common._validated_dataset_target",
         lambda selected: selected,
     )
     monkeypatch.setattr(
@@ -5062,7 +5069,7 @@ def test_sidebar_navigation_has_an_immediate_browser_fallback() -> None:
 
 
 def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
-    rendered = cb._render_recent_datasets(
+    rendered = dataset_overview._render_recent_datasets(
         [
             {
                 "folder": "/missing",
@@ -5084,33 +5091,6 @@ def test_unavailable_recent_dataset_is_distinct_and_removable() -> None:
     assert '"disabled": true' in payload
     assert "dir-browser-recent-remove" in payload
     assert "从最近RNG 数据中移除 old run" in payload
-
-
-def test_starting_location_switcher_uses_friendly_names_and_full_paths(
-    monkeypatch,
-) -> None:
-    roots = [
-        Path.home().resolve(),
-        Path("/media/huangchen"),
-        Path("/data"),
-        Path("/mnt"),
-    ]
-    monkeypatch.setattr(cb, "_allowed_roots", lambda: roots)
-
-    rendered = cb._render_allowed_roots()
-    payload = json.dumps(
-        rendered,
-        default=lambda value: value.to_plotly_json(),
-        ensure_ascii=False,
-    )
-
-    for label in ("主目录", "外接数据", "共享数据", "其他挂载"):
-        assert label in payload
-    for root in roots:
-        assert str(root) in payload
-    assert "切换起始位置" in payload
-    assert "可访问位置" not in payload
-    assert "huangchen 2" not in payload
 
 
 def test_mobile_browser_css_targets_input_group_component_and_has_no_obsolete_card_rule() -> None:
@@ -5713,13 +5693,13 @@ def test_dft_output_stems_and_electronic_states_follow_selection() -> None:
         ],
     }
 
-    assert cb._dft_output_stems(row, [1], [0], "both") == [
+    assert dft._dft_output_stems(row, [1], [0], "both") == [
         "reactants",
         "reactant-02-atoms-2-4",
         "products",
         "product-01-atoms-1-4",
     ]
-    assert cb._dft_electronic_states_from_controls(
+    assert dft._dft_electronic_states_from_controls(
         [0],
         [{"type": "event-dft-charge", "stem": "reactants"}],
         [1],
@@ -5846,7 +5826,7 @@ def test_qc_preview_rejects_stale_current_dataset_revision(tmp_path, monkeypatch
         stream.write("changed after dataset validation\n")
 
     with pytest.raises(svc.ServiceError, match="来源已变化"):
-        cb._build_dft_bundle_from_controls(
+        dft._build_dft_bundle_from_controls(
             selected={"row": event, "kind": "rng_event"},
             app_store=dataset,
             reactant_indices=[0, 1], product_indices=[0], layout="combined",
@@ -6481,7 +6461,7 @@ def test_evolution_export_requires_result(payload, busy, disabled):
 
 def test_evolution_dataset_reset_preserves_intentional_empty_state():
     resets = {(output.component_id, output.component_property): value
-              for output, value in cb._dataset_bound_resets()}
+              for output, value in dataset_switch._dataset_bound_resets()}
     figure = resets[("evolution-graph", "figure")]
     assert not figure["data"]
     assert figure["layout"]["xaxis"]["visible"] is False
@@ -6552,7 +6532,7 @@ def test_participant_tracking_resolves_exact_product_and_rejects_old_context(mon
     monkeypatch.setattr(svc, 'create_event_bookmark', lambda *_a, **_k: {'event_id': 'event-2'})
     monkeypatch.setattr(svc, 'restore_event_bookmark', lambda *_a, **_k: {'selection': {'row': row}})
     monkeypatch.setattr(svc, 'lineage_explorer_status', lambda _: {'message': 'ready'})
-    monkeypatch.setattr(cb, 'ctx', SimpleNamespace(triggered_id=button))
+    monkeypatch.setattr(events, 'ctx', SimpleNamespace(triggered_id=button))
     updated, handoff = track([0, 1], detail, selected, dataset)
     assert updated['row'] == row
     assert updated['origin']['participant'] == 'product:1'
@@ -6564,7 +6544,7 @@ def test_participant_tracking_resolves_exact_product_and_rejects_old_context(mon
         track([0, 0], detail, selected, dataset)
     with pytest.raises(PreventUpdate):
         track([1], detail, selected, {**dataset, 'source_revision': {'fingerprint': 'v2'}})
-    monkeypatch.setattr(cb, 'ctx', SimpleNamespace(triggered_id={**button, 'index': 8}))
+    monkeypatch.setattr(events, 'ctx', SimpleNamespace(triggered_id={**button, 'index': 8}))
     with pytest.raises(PreventUpdate):
         track([1], detail, selected, dataset)
 

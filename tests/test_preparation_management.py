@@ -24,7 +24,7 @@ from reacnet_scope.indexes import (
     resolve_dataset_paths,
 )
 from reacnet_scope import prepare
-from scripts.webapp_dash import callbacks as cb
+from scripts.webapp_dash.callbacks import dataset_overview, preparation
 from scripts.webapp_dash.app import create_app
 from reacnet_scope import services as svc
 
@@ -530,7 +530,7 @@ def test_index_management_keeps_primary_actions_separate_from_maintenance() -> N
 
 
 def test_artifact_details_show_only_the_active_timed_evidence_source() -> None:
-    rendered = cb._render_artifacts(
+    rendered = dataset_overview._render_artifacts(
         {
             "reaction": "/data/run.reactionabcd",
             "species": "/data/run.species",
@@ -551,7 +551,7 @@ def test_artifact_details_show_only_the_active_timed_evidence_source() -> None:
 
 
 def test_artifact_details_keep_legacy_fallback_when_it_is_the_active_source() -> None:
-    rendered = cb._render_artifacts(
+    rendered = dataset_overview._render_artifacts(
         {
             "reactionevent": "/data/run.reactionevent.csv",
             "molecules": "/data/run.molecules.csv",
@@ -570,7 +570,7 @@ def test_artifact_details_keep_legacy_fallback_when_it_is_the_active_source() ->
 
 
 def test_completed_preparation_tasks_are_collapsed_as_history() -> None:
-    rendered = cb._render_preparation_tasks(
+    rendered = preparation._render_preparation_tasks(
         [
             {
                 "dataset_id": "dataset-a",
@@ -601,7 +601,7 @@ def test_completed_preparation_tasks_are_collapsed_as_history() -> None:
 
 
 def test_failed_preparation_tasks_are_collapsed_and_removable() -> None:
-    rendered = cb._render_preparation_tasks(
+    rendered = preparation._render_preparation_tasks(
         [
             {
                 "dataset_id": "dataset-a",

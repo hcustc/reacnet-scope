@@ -9,7 +9,7 @@ if os.environ.get("REACNET_SCOPE_BROWSER_TESTS") != "1":
     pytest.skip("Browser acceptance is opt-in; see docs/agents/testing.md", allow_module_level=True)
 
 from playwright.sync_api import expect
-from scripts.webapp_dash.callbacks import _event_columns, _event_table_rows
+from scripts.webapp_dash.callbacks.common import _event_columns, _event_table_rows
 
 
 @pytest.mark.browser_area('events')
