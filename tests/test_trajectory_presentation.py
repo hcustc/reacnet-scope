@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.webapp_dash.callbacks import _event_frame_figure
+from scripts.webapp_dash.callbacks.events import _event_frame_figure
 
 
 @pytest.mark.parametrize("scope", ["core", "participants"])

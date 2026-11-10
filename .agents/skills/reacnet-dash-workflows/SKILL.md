@@ -11,7 +11,7 @@ description: 修改 ReacNet Scope Dash 的数据集选择/切换、回调状态�
 
 ## 追踪一次用户操作
 
-从 `app.py` 的组件与 store，追到 `navigation.py`、`callbacks.py`、相关 assets，
+从 `app.py` 的组件与 store，追到 `navigation.py`、`callbacks/` 中对应页面模块、相关 assets，
 最后到 `reacnet_scope.services`。记录触发输入、读取状态、写入输出和状态所属范围：
 
 | 状态 | 所属范围与提交条件 |

@@ -2,7 +2,9 @@
 
 本文件补充根目录 AGENTS.md，适用于 `scripts/webapp_dash/` 及其 assets。
 
-- `app.py` 定义布局，`navigation.py` 定义导航，`callbacks.py` 注册回调。
+- `app.py` 定义布局，`navigation.py` 定义导航，`callbacks/` 包按页面注册回调：每个模块提供
+  `register(app)`，由 `callbacks/__init__.py` 汇总；只被一个页面使用的辅助函数留在该页面模块，
+  跨页面共享的放在 `callbacks/common.py`。新回调放进所属页面模块，不再堆进 `common.py`。
   数据操作通过 `reacnet_scope.services` 门面；新增化学分析进入核心包。
 - 调整控件 ID 时检查布局、导航、Python 回调、clientside JS 和 smoke tests 的引用。
   新控件沿用现有 Dash / Bootstrap 组件与本地 CSS；本仓库没有 Node 构建步骤。
