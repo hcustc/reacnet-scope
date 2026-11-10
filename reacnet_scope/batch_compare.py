@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from reacnet_scope.network import Reaction, ReactionNetwork
+from reacnet_scope.network import Reaction, ReactionNetwork, _split_reaction_terms
 
 
 # ---------------------------------------------------------------------------
@@ -154,36 +154,13 @@ def _fallback_group_name(condition_name: str) -> str:
     return f"{parent}/{grouped_leaf}" if parent else grouped_leaf
 
 
-def _split_top_level_terms(side: str) -> Tuple[str, ...]:
-    """Split a reaction side without treating charge signs as separators."""
-    terms: List[str] = []
-    current: List[str] = []
-    bracket_depth = 0
-    for character in str(side or ""):
-        if character == "[":
-            bracket_depth += 1
-        elif character == "]" and bracket_depth:
-            bracket_depth -= 1
-        if character == "+" and bracket_depth == 0:
-            term = "".join(current).strip()
-            if term:
-                terms.append(term)
-            current = []
-            continue
-        current.append(character)
-    term = "".join(current).strip()
-    if term:
-        terms.append(term)
-    return tuple(terms)
-
-
 def _canonical_reaction_key(reaction_text: str) -> str:
     text = str(reaction_text or "").strip()
     if "->" not in text:
         return text
     left, right = text.split("->", 1)
-    reactants = _split_top_level_terms(left)
-    products = _split_top_level_terms(right)
+    reactants = _split_reaction_terms(left)
+    products = _split_reaction_terms(right)
     return f"{'+'.join(sorted(reactants))}->{'+'.join(sorted(products))}"
 
 

@@ -412,27 +412,34 @@ SVG 内嵌分子结构，可离线打开；JSON 保留完整反应物、产物�
 ## 依赖
 
 - Python 3.10+
-- 基础依赖：`pandas`、`openpyxl`、`rdkit`
-- 可选绘图增强：`matplotlib`、`scipy`（CLI `species-evolution --out-png` 时需要）
-- 可选轨迹适配：`ase`（安装 extra：`trajectory`）
-- 可选研究扩展：`scipy`（安装 extra：`research`）。物种命运分析与表观速率估计位于
-  `reacnet_scope.research`，不属于主线；未安装该 extra 时表观速率报告
-  `optional_dependency_missing`，命运分析不需要额外依赖。旧导入路径
-  `reacnet_scope.species_fate`、`reacnet_scope.kinetics` 已弃用，0.2.0 移除。
+- 基础依赖：`h5py`、`pandas`、`openpyxl`、`rdkit`、`scipy`
+- 可选 extras，每组对应一种用途：
 
-### 使用 uv 安装
+| extra | 依赖 | 用途 |
+| --- | --- | --- |
+| `web` | `dash[diskcache]`、`dash-bootstrap-components`、`dash-cytoscape`、`dash-ag-grid` | Dash Web 运行 |
+| `trajectory` | `ase` | 轨迹检查、几何与事件包导出 |
+| `plot` | `matplotlib` | CLI `species-evolution --out-png` |
 
-仅安装基础依赖：
+物种命运分析与表观速率估计位于可选研究子包 `reacnet_scope.research`，不属于主线，
+核心、CLI 和 Dash 加载时不导入它；其依赖 `scipy` 已在基础依赖中，无需额外安装。
+旧导入路径 `reacnet_scope.species_fate`、`reacnet_scope.kinetics` 已弃用，0.2.0 移除。
+
+### 安装方式
+
+源码开发与本地启动（dev 组包含测试栈及全部 extras 的依赖）：
 
 ```bash
-uv sync
+uv sync --locked
 ```
 
-安装基础依赖 + 绘图增强依赖：
+部署精简运行环境（Dash + 轨迹，不含开发组）：
 
 ```bash
-uv sync --extra plot
+uv sync --locked --no-dev --extra web --extra trajectory
 ```
+
+以包形式安装时按需选择 extras，例如 `pip install "reacnet-scope[web,trajectory]"`。
 
 ## Lewis 候选结构注释
 
