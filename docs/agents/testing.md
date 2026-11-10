@@ -53,7 +53,7 @@ CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 P
 | 纯文档 | 跳过 | 跳过 |
 | 普通代码 | 全量 | 4 条关键流程：导航、数据切换、检索、CSV 下载 |
 | 已划分的页面模块 | 全量 | 关键流程 + 对应领域流程 |
-| 共享布局、回调、服务、依赖、CI 规则，或未归类的 Dash/浏览器测试文件 | 全量 | 完整套件 |
+| 共享布局、回调、服务、依赖、CI 规则，或未归类的 Dash/浏览器测试文件 | 全量 | PR：完整套件的 compact 导航（`--browser-scope=all`）；`main` 推送：完整套件 |
 
 局部模块覆盖 abundance、species、candidate、dataset、events、reactions；一个文件可以触发多个领域。
 浏览器用例按领域放在 `tests/browser/test_<领域>_workbench.py`，共享样例与就绪操作在
@@ -64,7 +64,9 @@ CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 P
 普通顺序切换数据集时，顶部名称变化后仍须等待关联回调结束，再提交下一次切换；
 忙态拒绝和迟到响应专项测试继续按其原定时序验证。
 新增局部模块时同步路径映射，并用 `browser_area` 标记相关用例；未归类的 UI 文件默认全量。
-关键/局部流程使用 compact 导航，分别使用 1/2 个 job；全量覆盖 classic/compact 并分为 4 个 job。
+关键/局部流程使用 compact 导航，分别使用 1/2 个 job。完整套件分为 4 个 job：PR 上只跑
+compact 导航（每个用例一次），以缩短合并前的等待；`main` 推送、定时和手动运行覆盖
+classic/compact。因此只在 classic 导航下出现的回归，会在合并后的 `main` 运行中才被发现。
 分片在选测之后进行，每个入选用例只运行一次。
 
 每周一北京时间 03:17 定时跑全量，发布前通过 Actions 的 **Run workflow** 手动跑全量。
@@ -77,6 +79,7 @@ CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 P
 ```bash
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke,abundance
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=all  # PR 完整套件（仅 compact）
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -x -vv --tb=short tests/browser --browser-shard=1/4
 ```
 
