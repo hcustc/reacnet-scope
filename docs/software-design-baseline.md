@@ -629,8 +629,12 @@ RP3 验收至少固定验证反应类型数、事件数、事件关联、已知�
 
 以下偏差于 2026-11-09 按代码复核，后续实现审查必须逐项核实：
 
-- Dash 回调已按页面拆分为 `scripts/webapp_dash/callbacks/` 包（纯搬移，未改逻辑），但数据集切换、
-  跨入口交接与异步刷新的状态职责尚未收敛，跨页面共享的辅助函数仍集中在 `callbacks/common.py`。
+- Dash 回调已按页面拆分为 `scripts/webapp_dash/callbacks/` 包，跨页面共享的辅助函数集中在
+  `callbacks/common.py`。`app-store` 仍同时承载 Current Dataset 上下文与物种选择，由 12 个回调写入，
+  其中物种跨入口打开/返回、反应通道聚焦、查询按钮标记和能力轮询以“读出整份再写回”方式更新且不受
+  dataset-bound 运行保护。2026-11-10 浏览器复核：迟到的跨入口物种详情不能撤销已完成的数据集切换
+  （`tests/browser/test_dataset_switch_races.py` 覆盖）；但这类迟到响应会覆盖同期写入 `app-store`
+  的其他字段，例如能力状态，需等下次轮询恢复。
 - `candidate-paths` v3 评分命令仍在，已按 ADR-0034 弃用，待 0.2.0 移除。
 - Path Verification 的 `_load_event_nodes` 仍不加条件读取整张 events 表，违反在线有界读取，
   只适用于小规模数据。

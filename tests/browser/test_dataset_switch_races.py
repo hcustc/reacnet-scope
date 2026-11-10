@@ -163,3 +163,68 @@ def test_cancelled_preview_transaction_rejects_late_validation(page, workbench):
         assert page.evaluate('readSwitchTransaction().state') == 'superseded'
         expect(page.locator('#topbar-rungroup')).to_have_text(current['label'])
         assert page.evaluate('JSON.parse(sessionStorage.getItem("dataset-session-store")).dataset_id') == current['dataset_id']
+
+
+_APP_STORE = """() => {
+    const state = window.store.getState();
+    return state.paths.strs['app-store']
+        .reduce((node, key) => node[key], state.layout).props.data || {};
+}"""
+
+
+@pytest.mark.browser_area('dataset')
+def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, workbench):
+    """A species handoff started on dataset A must not write A back after a switch to B."""
+    from scripts.webapp_dash.candidate_workbench import context_key
+
+    _, current = workbench
+    base = Path(current['folder']) / 'race-handoff'
+    base.with_suffix('.reactionabcd').write_text('1 CCO->COC\n')
+    base.with_suffix('.species').write_text('Timestep 0: CCO 1\n')
+    other = svc.validate_dataset_candidate(str(base.parent), str(base))
+    records = [{key: item[key] for key in ('folder', 'base', 'label', 'dataset_id')}
+               for item in (current, other)]
+    page.evaluate("records => window.dash_clientside.set_props('dataset-library', {data: records})", records)
+    page.evaluate('window.readAppStore = ' + _APP_STORE)
+    wait_for_initial_callbacks(page)
+    before = page.evaluate('readAppStore()')
+    assert before['dataset_id'] == current['dataset_id']
+    held = {}
+
+    def intercept(route):
+        payload = route.request.post_data_json or {}
+        if payload.get('changedPropIds') == ['species-detail-handoff.data']:
+            held['handoff'] = (route, route.fetch())
+            page.evaluate('window.handoffHeld = true')
+        else:
+            route.continue_()
+
+    page.route('**/_dash-update-component', intercept)
+    try:
+        page.evaluate(
+            "value => window.dash_clientside.set_props('species-detail-handoff', {data: value})",
+            {'context': context_key(before), 'species': 'CCO', 'formula': 'C2H6O',
+             'request_id': 'late-handoff'},
+        )
+        page.wait_for_function('window.handoffHeld === true')
+        page.locator('#current-dataset-menu > summary').click()
+        page.locator('#library-select').click()
+        page.get_by_text(f"{other['label']} · {other['folder']}", exact=True).click()
+        expect(page.locator('#library-use')).to_be_enabled()
+        page.locator('#library-use').click()
+        expect(page.locator('#topbar-rungroup')).to_have_text(other['label'], timeout=15000)
+        page.wait_for_function('id => readAppStore().dataset_id === id', arg=other['dataset_id'])
+        route, response = held.pop('handoff')
+        stale = response.json()['response']['app-store']['data']
+        assert stale['dataset_id'] == current['dataset_id']
+        route.fulfill(response=response)
+        # Preparation polling keeps the callback queue busy after the switch,
+        # so give the renderer time to apply (or drop) the held response.
+        page.wait_for_timeout(1500)
+        assert page.evaluate('readAppStore().dataset_id') == other['dataset_id']
+        assert page.evaluate('JSON.parse(sessionStorage.getItem("dataset-session-store")).dataset_id') == other['dataset_id']
+        expect(page.locator('#topbar-rungroup')).to_have_text(other['label'])
+    finally:
+        for route, response in held.values():
+            route.fulfill(response=response)
+        page.unroute('**/_dash-update-component', intercept)
