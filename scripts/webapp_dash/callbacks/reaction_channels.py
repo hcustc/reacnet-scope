@@ -375,6 +375,7 @@ def register(app: Any) -> None:
     @app.callback(
         Output("rxn-channel-timestep-ps", "value"),
         Input("app-store", "data"),
+        prevent_initial_call=True,
     )
     def _load_channel_timestep_ps(store):
         artifacts = (store or {}).get("artifacts", {}) or {}
@@ -896,6 +897,7 @@ def register(app: Any) -> None:
         Output("rxn-consumption-csv-btn", "disabled"),
         Input("rxn-production-grid", "rowData"),
         Input("rxn-consumption-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _toggle_species_channel_exports(production_rows, consumption_rows):
         return not bool(production_rows), not bool(consumption_rows)

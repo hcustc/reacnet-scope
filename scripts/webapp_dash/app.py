@@ -3285,11 +3285,15 @@ def build_layout() -> html.Div:
                 ],
                 hidden=True,
             ),
+            # Session restoration runs in the initial callback wave (see
+            # ``_restore_current_dataset``). The interval never ticks: callbacks
+            # that read ``app-store`` wait for the restored context instead of
+            # running once with the placeholder and again after a later tick.
             dcc.Interval(
                 id="dataset-session-restore",
                 interval=100,
                 n_intervals=0,
-                max_intervals=1,
+                disabled=True,
             ),
             dataset_library.stores(),
             dcc.Store(id="species-detail-focus"),

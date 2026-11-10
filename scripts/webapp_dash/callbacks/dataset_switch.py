@@ -344,7 +344,10 @@ def register(app: Any) -> None:
             }
             if (origin.library || current.state === 'succeeded') return none;
             if (current.state === 'validating') return supersede('candidate_changed');
-            return candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+            const next = candidate ? {state: 'candidate-selected', candidate} : {state: 'idle'};
+            // Rewriting an identical preview state would only re-run every
+            // transaction listener (feedback, focus, commit, import lists).
+            return JSON.stringify(next) === JSON.stringify(current) ? none : next;
         }"""
     app.clientside_callback(
         preview_switch_transaction,
@@ -644,7 +647,7 @@ def register(app: Any) -> None:
         *_dataset_bound_reset_outputs(),
         Input("dataset-session-restore", "n_intervals"),
         State("dataset-session-store", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def _restore_current_dataset(_tick, session_store):
         current = session_store if isinstance(session_store, dict) else {}

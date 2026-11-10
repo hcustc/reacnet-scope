@@ -253,7 +253,7 @@ def register_callbacks(app):
         return (disabled is not False,) * 2
 
     @app.callback(Output("evolution-target-add", "children"), Output("evolution-target-cancel", "style"),
-                  Input("evolution-editor-state", "data"))
+                  Input("evolution-editor-state", "data"), prevent_initial_call=True)
     def editing_state(editor):
         editing = bool((editor or {}).get("editing"))
         return ("保存" if editing else "添加"), ({} if editing else {"display": "none"})
@@ -319,6 +319,7 @@ def register_callbacks(app):
         *[Output(f"{prefix}-{field}", "options") for prefix in ("evolution-filter", "evolution-group-filter")
           for field in ("required", "excluded", "element")],
         Input("app-store", "data"),
+        prevent_initial_call=True,
     )
     def options(dataset):
         status = svc.composition_index_status((dataset or {}).get("artifacts") or {})
@@ -369,14 +370,14 @@ def register_callbacks(app):
             message += "；可翻到下一页或收窄条件。"
         return {**result, "rows": rows, "context": context, "submitted": query}, rows, [], message, ({} if rows else {"display": "none"}), offset == 0, not result["has_more"]
 
-    @app.callback(Output("evolution-filter-grid-previews", "data"), Input("evolution-filter-result", "data"))
+    @app.callback(Output("evolution-filter-grid-previews", "data"), Input("evolution-filter-result", "data"), prevent_initial_call=True)
     def previews(result):
         return [{field: {"type": "markdown", "value": f"![结构](/api/structure.svg?smiles={quote(row['smiles'], safe='')}&width=280&height=190)"}
                  for field in ("formula_mass", "smiles")}
                 for row in (result or {}).get("rows") or []]
 
     @app.callback(Output("evolution-filter-replace", "disabled"), Output("evolution-filter-add", "disabled"),
-                  Input("evolution-filter-grid", "selectedRows"), Input("evolution-filter-result", "data"))
+                  Input("evolution-filter-grid", "selectedRows"), Input("evolution-filter-result", "data"), prevent_initial_call=True)
     def selection_enabled(selected, result):
         disabled = not _selected_species(selected, result)
         return disabled, disabled
