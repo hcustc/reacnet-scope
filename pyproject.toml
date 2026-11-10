@@ -14,6 +14,7 @@ dependencies = [
   "pandas>=2.0",
   "openpyxl>=3.1",
   "rdkit>=2023.9",
+  "scipy>=1.11",
 ]
 keywords = ["reacnetgenerator", "reaction-network", "md", "chemistry", "smiles"]
 classifiers = [
@@ -25,25 +26,21 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-plot = [
-  "matplotlib>=3.8",
-  "scipy>=1.11",
-]
+# Each extra serves one install purpose; see README "依赖".
+# Dash Web runtime (deployment: --extra web --extra trajectory).
 web = [
   "dash[diskcache]>=4,<5",
   "dash-bootstrap-components>=2,<3",
   "dash-cytoscape>=1,<2",
-  "matplotlib>=3.8",
-  "scipy>=1.11",
   "dash-ag-grid>=35.2,<36",
 ]
+# Trajectory, geometry and event-package export (ASE).
 trajectory = [
   "ase>=3.23,<4",
 ]
-# Optional research capabilities (ADR-0034): Species Fate Analysis and the
-# Apparent Rate Constant Estimate in reacnet_scope.research.
-research = [
-  "scipy>=1.11",
+# CLI PNG export: species-evolution --out-png.
+plot = [
+  "matplotlib>=3.8",
 ]
 
 [project.scripts]
@@ -82,8 +79,7 @@ test = [
   "dash[diskcache]>=4,<5",
   "dash-bootstrap-components>=2,<3",
   "dash-cytoscape>=1,<2",
-  "matplotlib>=3.8",
-  "scipy>=1.11",
-  "ase>=3.23,<4",
   "dash-ag-grid>=35.2,<36",
+  "ase>=3.23,<4",
+  "matplotlib>=3.8",
 ]

@@ -58,7 +58,7 @@ def test_old_import_paths_are_deprecated_aliases(old_name, module) -> None:
     )
 
 
-def test_missing_research_extra_reports_unavailable_rate(monkeypatch) -> None:
+def test_missing_research_dependency_reports_unavailable_rate(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "reacnet_scope.research.kinetics", None)
     rows = [{"reaction_smiles": "A>>B"}]
 
@@ -66,6 +66,6 @@ def test_missing_research_extra_reports_unavailable_rate(monkeypatch) -> None:
 
     assert summary["status"] == "unavailable"
     assert summary["reason"] == "optional_dependency_missing"
-    assert "reacnet-scope[research]" in summary["message"]
+    assert "SciPy" in summary["message"]
     assert rows[0]["k_app"] is None
     assert rows[0]["kinetics_reason"] == "optional_dependency_missing"

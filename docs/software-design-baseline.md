@@ -81,9 +81,9 @@ PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecat
 
 - Path Verification 与 QC Handoff Readiness 留在核心包，共享证据契约变化时须保持可用。
 - Species Fate Analysis 与 Apparent Rate Constant Estimate 位于可选子包
-  `reacnet_scope.research`，第三方依赖（`scipy`）由 `research` extra 提供，不属于核心依赖。
-  核心模块和普通 Dash 主线不得在加载时导入它们；服务与 CLI 只在调用时按需导入，缺少 extra
-  时以 `optional_dependency_missing` 明确报告。旧导入路径 `reacnet_scope.species_fate`、
+  `reacnet_scope.research`，其第三方依赖 `scipy` 属于核心依赖，不设单独 extra。
+  核心模块和普通 Dash 主线不得在加载时导入它们；服务与 CLI 只在调用时按需导入，依赖
+  无法导入时以 `optional_dependency_missing` 明确报告。旧导入路径 `reacnet_scope.species_fate`、
   `reacnet_scope.kinetics` 为弃用别名，0.2.0 移除。
 
 ## 5. 当前非目标

@@ -1797,12 +1797,12 @@ def _enrich_channel_kinetics(
             estimate_mass_action_rate_aligned,
         )
     except ImportError as exc:
-        from reacnet_scope.research import RESEARCH_EXTRA_HINT
+        from reacnet_scope.research import RESEARCH_DEPENDENCY_HINT
 
         return _unavailable_kinetics(
             rows,
             reason="optional_dependency_missing",
-            message=f"表观速率不可用：{exc}。{RESEARCH_EXTRA_HINT}",
+            message=f"表观速率不可用：{exc}。{RESEARCH_DEPENDENCY_HINT}",
         )
     species_file = str(artifacts.get("species") or "").strip()
     if not species_file or not Path(species_file).is_file():

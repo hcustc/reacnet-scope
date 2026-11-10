@@ -16,9 +16,9 @@ CSV 的 `annotation_json` 列保留完整的机器可读契约。
 
 ## 依赖
 
-候选推断使用 SciPy 的 MILP 求解器。SciPy 不在核心依赖中：安装 `reacnet-scope[web]`
-（Dash）或 `reacnet-scope[research]` 时已包含，仅装核心包时需另行安装 `scipy>=1.11`。
-未安装时准备任务在写入前明确报错；读取已发布注释、状态与导出不需要 SciPy。
+候选推断使用 SciPy 的 MILP 求解器。SciPy 是核心依赖，任何安装方式都已包含，无需额外
+extra；它只在准备任务运行时按需导入。环境中无法导入 SciPy 时准备任务在写入前明确报错；
+读取已发布注释、状态与导出不需要 SciPy。
 
 ## CLI
 

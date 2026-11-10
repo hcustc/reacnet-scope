@@ -72,8 +72,8 @@ class LewisOptions:
             raise ValueError("multiplicity must be positive")
 
 
-_MISSING_SOLVER = ("Lewis 候选推断需要 SciPy>=1.11（MILP 求解器），当前环境未安装；"
-                   "请安装 reacnet-scope[web] 或单独安装 scipy 后重试")
+_MISSING_SOLVER = ("Lewis 候选推断需要 SciPy>=1.11（MILP 求解器），当前环境无法导入；"
+                   "SciPy 是核心依赖，请检查安装（源码环境：uv sync --locked）后重试")
 
 
 def _scipy_version() -> str | None:
