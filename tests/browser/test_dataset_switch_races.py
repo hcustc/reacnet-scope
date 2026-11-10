@@ -165,17 +165,18 @@ def test_cancelled_preview_transaction_rejects_late_validation(page, workbench):
         assert page.evaluate('JSON.parse(sessionStorage.getItem("dataset-session-store")).dataset_id') == current['dataset_id']
 
 
-_APP_STORE = """() => {
+_STORE_DATA = """(id) => {
     const state = window.store.getState();
-    return state.paths.strs['app-store']
+    return state.paths.strs[id]
         .reduce((node, key) => node[key], state.layout).props.data || {};
 }"""
+_APP_STORE = """() => readStore('app-store')"""
 
 
 @pytest.mark.browser_area('dataset')
 def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, workbench):
     """A species handoff started on dataset A must not write A back after a switch to B."""
-    from scripts.webapp_dash.candidate_workbench import context_key
+    from scripts.webapp_dash.dataset_scope import context_key, current_species_focus, empty_species_focus
 
     _, current = workbench
     base = Path(current['folder']) / 'race-handoff'
@@ -185,6 +186,8 @@ def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, work
     records = [{key: item[key] for key in ('folder', 'base', 'label', 'dataset_id')}
                for item in (current, other)]
     page.evaluate("records => window.dash_clientside.set_props('dataset-library', {data: records})", records)
+    # ``void`` keeps Playwright from calling the assigned function without an id.
+    page.evaluate('void (window.readStore = ' + _STORE_DATA + ')')
     page.evaluate('window.readAppStore = ' + _APP_STORE)
     wait_for_initial_callbacks(page)
     before = page.evaluate('readAppStore()')
@@ -215,13 +218,19 @@ def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, work
         expect(page.locator('#topbar-rungroup')).to_have_text(other['label'], timeout=15000)
         page.wait_for_function('id => readAppStore().dataset_id === id', arg=other['dataset_id'])
         route, response = held.pop('handoff')
-        stale = response.json()['response']['app-store']['data']
-        assert stale['dataset_id'] == current['dataset_id']
+        late = response.json()['response']
+        # The late detail writes only the Species focus, bound to dataset A.
+        assert 'app-store' not in late
+        assert late['species-focus']['data']['context'] == context_key(before)
         route.fulfill(response=response)
         # Preparation polling keeps the callback queue busy after the switch,
         # so give the renderer time to apply (or drop) the held response.
         page.wait_for_timeout(1500)
-        assert page.evaluate('readAppStore().dataset_id') == other['dataset_id']
+        after = page.evaluate('readAppStore()')
+        assert after['dataset_id'] == other['dataset_id']
+        # Whether or not the renderer applied it, the A focus is not current for B.
+        assert current_species_focus(page.evaluate("readStore('species-focus')"), after) \
+            == empty_species_focus()
         assert page.evaluate('JSON.parse(sessionStorage.getItem("dataset-session-store")).dataset_id') == other['dataset_id']
         expect(page.locator('#topbar-rungroup')).to_have_text(other['label'])
     finally:
