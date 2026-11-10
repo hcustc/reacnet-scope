@@ -440,6 +440,7 @@ def register(app: Any) -> None:
         Output("evolution-group-member-open-btn", "disabled"),
         Input("evolution-group-members-grid", "selectedRows"),
         State("evolution-group-members-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _group_member_open_disabled(selected_rows, rows):
         return _selected_table_row(selected_rows, rows) is None
@@ -448,6 +449,7 @@ def register(app: Any) -> None:
         Output("evolution-csv-btn", "disabled"),
         Input("evolution-payload-store", "data"),
         Input("evolution-csv-busy", "data"),
+        prevent_initial_call=True,
     )
     def _evolution_export_available(payload, busy=False):
         if busy or not payload or not payload.get("curves"):
@@ -665,6 +667,7 @@ def register(app: Any) -> None:
         Output("evolution-rank-open-btn", "disabled"),
         Input("evolution-rank-grid", "selectedRows"),
         State("evolution-rank-grid", "rowData"),
+        prevent_initial_call=True,
     )
     def _rank_open_disabled(selected_rows, rows):
         return _selected_table_row(selected_rows, rows) is None

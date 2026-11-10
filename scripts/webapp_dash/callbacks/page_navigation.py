@@ -547,7 +547,7 @@ def register(app: Any) -> None:
         State("page-store", "data"),
         State("event-bookmark-store", "data"),
         State("app-store", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call="initial_duplicate",
     )
     def _migrate_restored_page(_tick, page_store, bookmark, dataset):
         migrated = migrate_page_state(page_store)

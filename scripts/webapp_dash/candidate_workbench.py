@@ -533,7 +533,7 @@ def register_callbacks(app):
                                 for species in values or []])
         register_constraint_picker(side)
 
-    @app.callback(Output('cp-return-controls', 'style'), Input('cp-direction-view', 'value'))
+    @app.callback(Output('cp-return-controls', 'style'), Input('cp-direction-view', 'value'), prevent_initial_call=True)
     def return_controls(direction):
         return {'display': 'none'} if direction == 'net' else {}
 
@@ -551,7 +551,7 @@ def register_callbacks(app):
 
     @app.callback(Output('cp-results', 'style'), Output('cp-search-settings', 'open'),
                   Output('cp-search-heading', 'children'),
-                  Input('cp-report', 'data'), Input('app-store', 'data'))
+                  Input('cp-report', 'data'), Input('app-store', 'data'), prevent_initial_call=True)
     def presentation(report, store):
         if not report or report.get('context') != context_key(store) or report.get('error'):
             return {'display': 'none'}, True, '搜索条件'
@@ -620,7 +620,7 @@ def register_callbacks(app):
                                 f'{step_count} 个反应步骤{history_note}。{note}')
 
     @app.callback(Output('cp-graph-base-style', 'data'), Input('cp-graph', 'elements'),
-                  Input('cp-focus', 'value'), Input('cp-routes', 'selectedRows'), Input('cp-step', 'value'))
+                  Input('cp-focus', 'value'), Input('cp-routes', 'selectedRows'), Input('cp-step', 'value'), prevent_initial_call=True)
     def graph_highlight(graph_elements, focus, selected, step_index):
         return candidate_graph.stylesheet(graph_elements or [], focus, ui.selected_ids(selected), step_index)
 
@@ -629,7 +629,7 @@ def register_callbacks(app):
                   Input('cp-graph', 'elements'), Input('cp-graph-size', 'data'),
                   Input('cp-graph-scope', 'value'), Input('cp-step', 'value'),
                   State('cp-focus', 'value'), State('cp-graph', 'extent'),
-                  State('cp-graph-layout-state', 'data'))
+                  State('cp-graph-layout-state', 'data'), prevent_initial_call=True)
     def graph_layout(reset, locate, graph, size, scope, step_index, focus, extent, previous):
         if not graph or not size or not size.get('width'):
             return no_update, no_update
@@ -706,7 +706,7 @@ def register_callbacks(app):
 
     @app.callback(Output('cp-graph-pick', 'data'), Input('cp-graph', 'tapNodeData'),
                   Input('cp-graph', 'tapEdgeData'), Input('cp-report', 'data'), Input('app-store', 'data'),
-                  State('cp-graph-pick', 'data'))
+                  State('cp-graph-pick', 'data'), prevent_initial_call=True)
     def graph_pick(node, edge, report, store, previous):
         if not report or report.get('context') != context_key(store):
             return None
@@ -788,7 +788,7 @@ def register_callbacks(app):
             return {}, {'display': 'none'}
         return {'display': 'none'}, {'display': 'none'}
 
-    @app.callback(Output('cp-from-species', 'disabled'), Input('app-store', 'data'))
+    @app.callback(Output('cp-from-species', 'disabled'), Input('app-store', 'data'), prevent_initial_call=True)
     def shortcuts(store):
         disabled = not bool((store or {}).get('selected_smiles'))
         return disabled
@@ -897,13 +897,13 @@ def register_callbacks(app):
                 {'display': 'none'} if mode == 'target' else {})
 
     @app.callback(Output('cp-back', 'disabled'), Input('cp-nav-anchor', 'data'),
-                  Input('cp-mode', 'value'), Input('app-store', 'data'))
+                  Input('cp-mode', 'value'), Input('app-store', 'data'), prevent_initial_call=True)
     def back_control(nav, mode, store):
         return not bool(nav and nav.get('context') == context_key(store)
                         and nav.get('mode') == mode and nav.get('segments'))
 
     @app.callback(Output('cp-page-prev', 'disabled'), Output('cp-page-next', 'disabled'),
-                  Input('cp-report', 'data'), Input('app-store', 'data'))
+                  Input('cp-report', 'data'), Input('app-store', 'data'), prevent_initial_call=True)
     def page_controls(report, store):
         if not report or report.get('context') != context_key(store):
             return True, True
@@ -930,13 +930,20 @@ def register_callbacks(app):
                   State('cp-prefixes', 'value'), State('cp-examined', 'value'), State('cp-seconds', 'value'),
                   State('cp-report', 'data'), State('cp-focus', 'value'),
                   State('cp-nav-anchor', 'data'), State('cp-via', 'value'),
-                  State('cp-excluded', 'value'), prevent_initial_call=True)
+                  State('cp-excluded', 'value'), State('cp-request', 'data'),
+                  State('cp-message', 'children'), prevent_initial_call=True)
     def request(_run, _continue, _back, _page_prev, _page_next, _cancel, _context,
                 store, start, target, mode, depth, limit,
                 direction_view, quality_view, window, basis, expansions, frontier, prefixes, examined, seconds,
-                report, focus, previous_nav, via_species=None, excluded_species=None):
+                report, focus, previous_nav, via_species=None, excluded_species=None,
+                current_request=None, current_message=None):
         trigger = ctx.triggered_id
         if trigger not in {'cp-search', 'cp-continue', 'cp-back', 'cp-page-prev', 'cp-page-next'}:
+            if (trigger == 'cp-context' and current_request is None
+                    and not current_message and previous_nav is None):
+                # Already cleared: rewriting None would only rerun the
+                # background search worker and every report listener.
+                raise PreventUpdate
             return None, '已取消搜索。' if trigger == 'cp-cancel' else '', None
         valid_nav = (previous_nav or {}) if (
             (previous_nav or {}).get('context') == context_key(store)
@@ -1042,7 +1049,7 @@ def register_callbacks(app):
         return result
 
     @app.callback(Output('cp-report', 'data'), Input('cp-raw', 'data'), Input('cp-request', 'data'),
-                  Input('app-store', 'data'))
+                  Input('app-store', 'data'), prevent_initial_call=True)
     def commit(raw, request, store):
         if accept_result(raw, request, store):
             return dict(raw['report'], context=raw['context'], query_request_id=raw['request_id'])

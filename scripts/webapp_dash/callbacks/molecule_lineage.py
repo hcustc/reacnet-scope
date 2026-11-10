@@ -248,6 +248,7 @@ def register(app: Any) -> None:
         Output("molecule-lineage-anchor-value", "disabled"),
         Output("molecule-lineage-anchor-value", "placeholder"),
         Input("molecule-lineage-anchor-mode", "value"),
+        prevent_initial_call=True,
     )
     def _configure_lineage_anchor(mode):
         if mode == "elements":

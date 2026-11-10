@@ -19,10 +19,14 @@ from scripts.webapp_dash.app import create_app
 
 def wait_for_initial_callbacks(page):
     # Session restoration can finish after the first visible frame.
+    # Before hydration the renderer store exists with empty callback queues,
+    # so idle queues alone do not prove that the initial wave has finished.
     page.wait_for_function("""() => {
-        const callbacks = window.store?.getState().callbacks;
-        return callbacks && ['requested', 'prioritized', 'executing', 'watched', 'blocked']
-            .every(key => callbacks[key].length === 0);
+        const state = window.store?.getState();
+        const callbacks = state?.callbacks;
+        return state?.appLifecycle === 'HYDRATED' && callbacks
+            && ['requested', 'prioritized', 'executing', 'watched', 'blocked']
+                .every(key => callbacks[key].length === 0);
     }""", timeout=60000)
 
 

@@ -178,10 +178,15 @@ def register_callbacks(app):
                   *[Input('lx-'+key,'n_clicks') for key in ['start','prev','next','all','continue','paths','frame-show','event','cancel']],
                   Input('app-store','data'), State('event-selected-store','data'), State('lx-instance','value'),
                   State('lx-state','data'), State('lx-focus','data'), State('lx-target','value'), State('lx-frame','value'),
-                  State('lx-anchor-mode','value'), State('lx-anchor-ids','value'), State('lx-atom-elements','value'))
+                  State('lx-anchor-mode','value'), State('lx-anchor-ids','value'), State('lx-atom-elements','value'),
+                  State('lx-request','data'))
     def request(*args):
-        store, selected, instance, state, focus, target, frame, anchor_mode, anchor_ids, atom_elements = args[9:]
+        store, selected, instance, state, focus, target, frame, anchor_mode, anchor_ids, atom_elements, current = args[9:]
         if ctx.triggered_id in {'app-store', 'lx-cancel'} or not ctx.triggered_id:
+            if current is None and ctx.triggered_id == 'app-store':
+                # Nothing to clear; rewriting None would only rerun the
+                # background worker (app-store already cancels a running one).
+                raise PreventUpdate
             return None
         action = ctx.triggered_id.removeprefix('lx-')
         report = (state or {}).get('report')
@@ -246,7 +251,7 @@ def register_callbacks(app):
         return payload
 
     @app.callback(Output('lx-state','data'), Input('lx-raw','data'), Input('lx-request','data'),
-                  Input('app-store','data'), State('lx-state','data'))
+                  Input('app-store','data'), State('lx-state','data'), prevent_initial_call=True)
     def commit(raw, request, store, current):
         if not request:
             return no_update if current and current.get('context')==context_key(store) else None
@@ -262,7 +267,7 @@ def register_callbacks(app):
         return result
 
     @app.callback(Output('lx-focus','data'), Input('lx-graph','tapNodeData'), Input('lx-state','data'),
-                  Input('lx-home','n_clicks'), State('lx-focus','data'))
+                  Input('lx-home','n_clicks'), State('lx-focus','data'), prevent_initial_call=True)
     def focus(tap, state, _home, current):
         report = (state or {}).get('report')
         if not report:

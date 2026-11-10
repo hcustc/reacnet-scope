@@ -918,6 +918,7 @@ def register(app: Any) -> None:
         Output("species-compare-switch-btn", "disabled"),
         Input("species-compare-summary", "selectedRows"),
         State("species-compare-summary", "rowData"),
+        prevent_initial_call=True,
     )
     def _compare_switch_disabled(selected, rows):
         row = _selected_table_row(selected, rows)

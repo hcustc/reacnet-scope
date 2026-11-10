@@ -525,6 +525,7 @@ def register(app: Any) -> None:
     @app.callback(
         Output("event-dft-review-confirmation", "options"),
         Input("event-dft-store", "data"),
+        prevent_initial_call=True,
     )
     def _bind_dft_review_to_report(payload):
         report = (payload or {}).get("readiness_report") or {}

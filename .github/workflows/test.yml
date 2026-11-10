@@ -69,10 +69,27 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       - name: Sync optional browser tools
         run: uv sync --locked --group browser
+      - name: Resolve Playwright version
+        id: playwright
+        run: echo "version=$(uv run --locked --group browser python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+      # The browser build is pinned by the locked Playwright version; system
+      # libraries are not cached and are installed on every runner.
+      - name: Cache Chromium
+        id: chromium-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - name: Install Chromium
+        if: steps.chromium-cache.outputs.cache-hit != 'true'
         run: uv run --locked --group browser playwright install --with-deps chromium
+      - name: Install Chromium system libraries
+        if: steps.chromium-cache.outputs.cache-hit == 'true'
+        run: uv run --locked --group browser playwright install-deps chromium
       - name: Exercise the offline workbench
         timeout-minutes: 30
         env:

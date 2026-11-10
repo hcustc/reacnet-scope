@@ -919,6 +919,7 @@ def register(app: Any) -> None:
     @app.callback(
         Output("event-type-map-editor", "children"),
         Input("event-viewer-store", "data"),
+        prevent_initial_call=True,
     )
     def _render_event_type_map_editor(viewer):
         if not viewer:
