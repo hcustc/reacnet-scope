@@ -51,7 +51,7 @@ def test_changed_files_choose_coverage(paths, scope, run_pytest):
     plan = plan_for_changes(paths)
     assert plan["browser_scope"] == scope
     assert plan["pytest"] is run_pytest
-    assert len(plan["shards"]) == (4 if scope == "full" else 2 if "," in scope else 1)
+    assert len(plan["shards"]) == (8 if scope == "full" else 2 if "," in scope else 1)
 
 
 @pytest.mark.parametrize("paths, scope", [
@@ -65,7 +65,7 @@ def test_changed_files_choose_coverage(paths, scope, run_pytest):
 def test_pull_requests_run_the_complete_suite_on_compact_navigation_only(paths, scope):
     plan = plan_for_changes(paths, pull_request=True)
     assert plan["browser_scope"] == scope
-    assert plan["shards"] == ([1, 2, 3, 4] if scope == "all" else [1, 2] if "," in scope else [1])
+    assert plan["shards"] == (list(range(1, 9)) if scope == "all" else [1, 2] if "," in scope else [1])
     # Push, scheduled and manual runs keep classic navigation for shared changes.
     if scope == "all":
         assert plan_for_changes(paths)["browser_scope"] == "full"
@@ -107,7 +107,7 @@ def test_manual_and_scheduled_runs_always_use_full_coverage(tmp_path, monkeypatc
         output.write_text("")
         main()
         assert output.read_text().splitlines() == [
-            "pytest=true", "browser_scope=full", "shards=[1, 2, 3, 4]",
+            "pytest=true", "browser_scope=full", "shards=[1, 2, 3, 4, 5, 6, 7, 8]",
         ]
 
 

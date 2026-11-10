@@ -64,6 +64,10 @@ CALLBACK_AREAS = {
 for _module, _areas in CALLBACK_AREAS.items():
     for _area in _areas:
         AREA_PATHS[_area] += (f"scripts/webapp_dash/callbacks/{_module}",)
+# Browser cases cost about 35 s each (page load plus the workflow), so wall time is
+# roughly cases / shards. Public-repository runners are free; keep two full plans
+# (a pull request and a push) below the 20 concurrent-job limit.
+FULL_BROWSER_SHARDS = list(range(1, 9))
 SHARED_PATHS = (
     ".github/workflows/", "scripts/ci_test_plan.py", "pyproject.toml", "uv.lock",
     "tests/browser/conftest.py", "tests/browser/workbench.py", "tests/browser/test_workbench.py",
@@ -104,7 +108,7 @@ def test_plan(paths: list[str], *, force_full: bool = False, pull_request: bool 
     return {
         "pytest": bool(code) or force_full,
         "browser_scope": ",".join(scopes) or "none",
-        "shards": [1, 2, 3, 4] if scopes in (["full"], ["all"]) else (
+        "shards": FULL_BROWSER_SHARDS if scopes in (["full"], ["all"]) else (
             [1, 2] if len(scopes) > 1 else [1]
         ),
     }

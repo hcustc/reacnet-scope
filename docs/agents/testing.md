@@ -67,7 +67,7 @@ CI 在 PR 和 `main` 推送时按完整差异选测；新提交会取消同一 P
 `scripts/webapp_dash/callbacks/` 只映射其组件仅由领域标记用例覆盖的模块（`CALLBACK_AREAS`）；
 写跨工作区状态的模块（数据集切换、导航、准备、物种等）、共享 helper、注册入口和新增模块
 仍触发完整套件。模块职责或其组件被未标记的导航验收引用时，同步调整映射。
-关键/局部流程使用 compact 导航，分别使用 1/2 个 job。完整套件分为 4 个 job：PR 上只跑
+关键/局部流程使用 compact 导航，分别使用 1/2 个 job。完整套件分为 8 个 job（用例约 35 秒一个，墙钟约等于用例数除以 job 数）：PR 上只跑
 compact 导航（每个用例一次），以缩短合并前的等待；`main` 推送、定时和手动运行覆盖
 classic/compact。因此只在 classic 导航下出现的回归，会在合并后的 `main` 运行中才被发现。
 分片在选测之后进行，每个入选用例只运行一次。
@@ -83,7 +83,7 @@ classic/compact。因此只在 classic 导航下出现的回归，会在合并�
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=smoke,abundance
 REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -q tests/browser --browser-scope=all  # PR 完整套件（仅 compact）
-REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -x -vv --tb=short tests/browser --browser-shard=1/4
+REACNET_SCOPE_BROWSER_TESTS=1 uv run --locked --group browser pytest -x -vv --tb=short tests/browser --browser-shard=1/8
 ```
 
 省略 `--browser-shard` 运行所有入选用例；省略 `--browser-scope` 选中完整套件。
