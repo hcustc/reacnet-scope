@@ -402,8 +402,11 @@ def trace_skeleton_lineage(
     timestep_ps: float | None = None,
     max_segments: int = 20000,
     max_seconds: float = 10.0,
+    lammps_units: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Trace an atom-anchored skeleton timeline from a published event index."""
+    from .trajectory import resolve_trajectory_units
+
     anchors = sorted({int(a) for a in anchor_atom_ids})
     if not anchors:
         raise ServiceError("至少需要指定一个锚定原子 ID。", reason="invalid_anchor")
@@ -490,12 +493,15 @@ def trace_skeleton_lineage(
     finally:
         con.close()
 
+    units = resolve_trajectory_units(
+        artifacts, lammps_units=lammps_units, timestep_ps=timestep_ps,
+    )
     report = build_skeleton_timeline(
         segments,
         anchor_atom_ids=anchors,
         mode=mode,
         oscillation_max_frames=oscillation_max_frames,
-        timestep_ps=timestep_ps,
+        timestep_ps=units["timestep_ps"],
     )
     report["truncated"] = truncated
     report["provenance"] = collect_runtime_provenance(
@@ -504,6 +510,8 @@ def trace_skeleton_lineage(
             "index_path": str(index_path.resolve()),
         }
     )
+    if "physical_unit_sources" in units:
+        report["provenance"]["physical_unit_sources"] = units["physical_unit_sources"]
     return report
 
 

@@ -165,9 +165,10 @@
     addDetail("Type", atomType || "—");
     addDetail("角色", atomRole(atom));
     addDetail("Frame", frame && frame.frame !== undefined ? frame.frame : "—");
+    const coordinateLabel = coordinateUnit === "angstrom" ? "Å" : (coordinateUnit || "单位未确认");
     addDetail(
       "显示坐标",
-      `(${numeric(atom.x, 0).toFixed(3)}, ${numeric(atom.y, 0).toFixed(3)}, ${numeric(atom.z, 0).toFixed(3)}) ${coordinateUnit === "angstrom" ? "Å" : "单位未确认"}`
+      `(${numeric(atom.x, 0).toFixed(3)}, ${numeric(atom.y, 0).toFixed(3)}, ${numeric(atom.z, 0).toFixed(3)}) ${coordinateLabel}`
     );
     const formed = changedBonds(Number(atom.serial), evidence.formed);
     const broken = changedBonds(Number(atom.serial), evidence.broken);

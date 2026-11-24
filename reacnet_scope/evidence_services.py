@@ -92,7 +92,6 @@ from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
     TrajectoryFrameError,
     dataset_settings_path,
-    load_coordinate_length_unit,
     load_type_element_map,
     load_timestep_ps,
     normalize_type_element_map,
@@ -1540,8 +1539,12 @@ def build_rng_event_visualization(
     atom_type_map: Mapping[Any, Any] | None = None,
     persist_type_map: bool = True,
     plateau_window: Mapping[str, Any] | None = None,
+    lammps_units: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an ASE/PBC-aware local view from indexed trajectory frames."""
+    from .provenance import angstroms_per_length_unit
+    from .trajectory import resolve_trajectory_units
+
     trajectory_file = (artifacts.get("trajectory") or "").strip()
     if not trajectory_file or not Path(trajectory_file).is_file():
         raise ServiceError("缺少原始轨迹文件", reason="missing_trajectory")
@@ -1636,8 +1639,8 @@ def build_rng_event_visualization(
             type_map_path = dataset_settings_path(trajectory_file)
             if not type_map_path.is_file():
                 type_map_path = None
-        timestep_ps = load_timestep_ps(trajectory_file)
-        coordinate_length_unit = load_coordinate_length_unit(trajectory_file)
+        units = resolve_trajectory_units(artifacts, lammps_units=lammps_units)
+        scale = angstroms_per_length_unit(units["coordinate_length_unit"]) or 1.0
 
         parsed_frames: dict[int, dict[str, Any]] = {}
         with open(trajectory_file, "rb") as source:
@@ -1667,10 +1670,11 @@ def build_rng_event_visualization(
         environment = select_local_environment(
             parsed_frames[anchor_frame],
             atom_ids,
-            radius=float(environment_radius),
+            radius=float(environment_radius) / scale,
             max_environment_atoms=int(max_environment_atoms),
         )
         environment["max_environment_atoms"] = int(max_environment_atoms)
+        environment["radius"] = float(environment_radius)
     except TrajectoryDependencyError as exc:
         raise ServiceError(str(exc), reason="missing_ase") from exc
     except (TrajectoryFrameError, OSError, UnicodeError, ValueError) as exc:
@@ -1856,8 +1860,7 @@ def build_rng_event_visualization(
             },
             "environment": environment,
             "type_element_map": resolved_type_map,
-            "timestep_ps": timestep_ps,
-            "coordinate_length_unit": coordinate_length_unit,
+            **units,
             "native_element_column": "element"
             in {
                 str(value).strip().lower()

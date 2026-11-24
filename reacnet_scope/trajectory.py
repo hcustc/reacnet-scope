@@ -8,6 +8,7 @@ provides cell/PBC handling; this module never scans a complete trajectory.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import threading
@@ -158,7 +159,7 @@ def load_timestep_ps(source_file: str) -> float | None:
         parsed = float(value)
     except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
 
 
 def load_coordinate_length_unit(source_file: str) -> str | None:
@@ -187,6 +188,44 @@ def load_coordinate_length_unit(source_file: str) -> str | None:
     if confirmed and normalized in {"angstrom", "å"}:
         return "angstrom"
     raise TrajectoryFrameError(f"数据集坐标单位确认无效: {path}")
+
+
+def resolve_trajectory_units(
+    artifacts: Mapping[str, Any],
+    *,
+    lammps_units: Mapping[str, Any] | None = None,
+    timestep_ps: float | None = None,
+) -> dict[str, Any]:
+    """Resolve units from explicit values, workspace settings, RNG, and the input script."""
+    from reacnet_scope.timed_evidence import read_timeline_physical_units
+
+    path = str(artifacts.get("trajectory") or "")
+    timeline = str(artifacts.get("timeline") or "")
+    native = read_timeline_physical_units(timeline)
+    fallback = lammps_units or {}
+    result: dict[str, Any] = {"timestep_ps": None, "coordinate_length_unit": None}
+    sources = {}
+    for key, candidates in {
+        "timestep_ps": (
+            ("explicit", timestep_ps),
+            ("dataset_settings", load_timestep_ps(path) if path else None),
+            ("timeline_configuration", native.timestep_ps if native else None),
+            ("lammps_input", fallback.get("timestep_ps")),
+        ),
+        "coordinate_length_unit": (
+            ("dataset_settings", load_coordinate_length_unit(path) if path else None),
+            ("timeline_configuration", native.length_unit if native else None),
+            ("lammps_input", fallback.get("coordinate_length_unit")),
+        ),
+    }.items():
+        for source, value in candidates:
+            if value is not None:
+                result[key] = value
+                sources[key] = source
+                break
+    if sources:
+        result["physical_unit_sources"] = sources
+    return result
 
 
 def load_linked_trajectory(source_file: str) -> str | None:
