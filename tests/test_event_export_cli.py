@@ -34,6 +34,7 @@ def _prepared_dataset(
     monkeypatch,
     *,
     configured_workspace: bool = True,
+    extended_product: bool = False,
 ) -> tuple[Path, str]:
     if configured_workspace:
         monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
@@ -43,16 +44,19 @@ def _prepared_dataset(
     reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
     molecules = tmp_path / "run.lammpstrj.molecules.csv"
     reaction = tmp_path / "run.lammpstrj.reactionabcd"
-    trajectory.write_text(_frame(0) + _frame(10), encoding="utf-8")
+    timesteps = range(0, 70, 10) if extended_product else (0, 10)
+    trajectory.write_text("".join(_frame(step) for step in timesteps), encoding="utf-8")
     reactionevent.write_text(
-        "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+        "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n"
+        + ("1,[C][O],[C]=[O]\n" if extended_product else ""),
         encoding="utf-8",
     )
     molecules.write_text(
         "Timestep,Species,AtomIDs,BondIDs\n"
         "0,[C],0,\n"
         "0,[O],1,\n"
-        "10,[C][O],0;1,0-1-1\n",
+        "10,[C][O],0;1,0-1-1\n"
+        + ("".join(f"{step},[C]=[O],0;1,0-1-2\n" for step in range(20, 70, 10)) if extended_product else ""),
         encoding="utf-8",
     )
     reaction.write_text("1 [C]+[O]->[C][O]\n", encoding="utf-8")
@@ -65,6 +69,29 @@ def _prepared_dataset(
         limit=1,
     )["rows"][0]["event_id"]
     return trajectory, event_id
+
+
+def test_export_event_plateau_preserves_endpoints_and_extends_bond_order_variants(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, event_id = _prepared_dataset(tmp_path, monkeypatch, extended_product=True)
+    target = tmp_path / "plateau.zip"
+    assert cli.main([
+        "export-event", "--case", str(tmp_path), "--event-id", event_id,
+        "--window-mode", "plateau", "--qc-manifest", "--type-map", "1=C,2=O",
+        "--out", str(target),
+    ]) == 0
+    with ZipFile(target) as archive:
+        event = json.loads(archive.read("event.json"))
+        manifest = json.loads(archive.read("qc_manifest.json"))
+    assert [frame["source_timestep"] for frame in event["frames"]] == list(range(0, 70, 10))
+    assert [frame["bond_state"] for frame in event["frames"]] == ["before", "after", *["unassigned"] * 5]
+    selection = event["selection"]["extraction_parameters"]
+    assert selection["window_mode"] == "plateau"
+    assert selection["plateau_window"]["reactant_carrier_atom_ids"] == [[1], [2]]
+    assert selection["padding_truncated"] is False
+    assert manifest["participant_coverage"]["status"] == "complete"
+    assert manifest["total_electrons"] == 14
 
 
 def test_export_event_cli_writes_package_without_persisting_type_override(

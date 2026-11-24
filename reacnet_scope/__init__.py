@@ -68,6 +68,7 @@ from .skeleton_lineage import (
     SKELETON_LINEAGE_SCHEMA,
     build_skeleton_timeline,
     connectivity_signature,
+    find_event_plateau_window,
     trace_skeleton_lineage,
 )
 from .geometry_audit import (
@@ -87,8 +88,10 @@ from .event_package import (
     QC_MANIFEST_SCHEMA_VERSION,
     build_qc_manifest,
 )
+from .static_report import render_report
 
 __all__ = [
+    "find_event_plateau_window", "render_report",
     "LewisOptions", "annotate_lewis", "prepare_lewis_annotations",
     "get_lewis_annotation", "search_lewis_annotations", "export_lewis_annotations",
     "CANDIDATE_HYPERGRAPH_SCHEMA_VERSION", "build_candidate_hypergraph",

@@ -499,6 +499,11 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 不完整时仍导出 ZIP 和 LAMMPS 轨迹，只省略 ExtXYZ 并说明原因。CLI 默认不覆盖
 目标，覆盖必须显式指定。
 
+CLI 平台窗以已匹配事件的两侧确切帧和索引中的连续骨架为边界。选择共享原子数最多的
+两侧参与分子作为载体，并列时取共同窗；只合并连续的同骨架键级变化，保留拓扑回穿及
+来源边界。每侧额外读取至多 100 个轨迹帧，记录裁剪。额外帧的参与者键态留空。
+可选 QC manifest 在两侧确切帧分别核对所有记录的参与分子及原子覆盖，并报告缺失伙伴。
+
 #### 11.8.1 DFT Initial Geometry
 
 - 只接受具有精确 Molecular Evidence 的 `matched` Reaction Occurrence；其他事件失败关闭，不按空间距离或 SMILES 顺序猜参与分子。
