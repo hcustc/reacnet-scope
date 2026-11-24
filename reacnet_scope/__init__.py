@@ -60,6 +60,33 @@ from .lineage_explorer import (
     lineage_explorer_status, start_lineage_explorer, expand_lineage_explorer,
     observed_lineage_paths, lineage_frame_reference, lineage_frame_data, lineage_occurrence_record, export_lineage_explorer,
 )
+from .provenance import (
+    collect_runtime_provenance,
+    parse_lammps_input_units,
+)
+from .skeleton_lineage import (
+    SKELETON_LINEAGE_SCHEMA,
+    build_skeleton_timeline,
+    connectivity_signature,
+    trace_skeleton_lineage,
+)
+from .geometry_audit import (
+    BOND_OSCILLATION_ARTIFACT,
+    GEOMETRY_AUDIT_SCHEMA,
+    INCONCLUSIVE_WINDOW,
+    TRANSIENT_RECROSSING_COLLISION,
+    VERIFIED_NET_TRANSFORMATION,
+    audit_event_geometry,
+)
+from .topology_classifier import (
+    TOPOLOGY_CLASSIFIER_SCHEMA,
+    classify_species_collection,
+    classify_species_topology,
+)
+from .event_package import (
+    QC_MANIFEST_SCHEMA_VERSION,
+    build_qc_manifest,
+)
 
 __all__ = [
     "LewisOptions", "annotate_lewis", "prepare_lewis_annotations",
@@ -69,6 +96,23 @@ __all__ = [
     "lineage_explorer_status", "start_lineage_explorer", "expand_lineage_explorer",
     "observed_lineage_paths", "lineage_frame_reference", "lineage_frame_data",
     "lineage_occurrence_record", "export_lineage_explorer",
+    "SKELETON_LINEAGE_SCHEMA",
+    "build_skeleton_timeline",
+    "connectivity_signature",
+    "trace_skeleton_lineage",
+    "collect_runtime_provenance",
+    "parse_lammps_input_units",
+    "GEOMETRY_AUDIT_SCHEMA",
+    "VERIFIED_NET_TRANSFORMATION",
+    "BOND_OSCILLATION_ARTIFACT",
+    "TRANSIENT_RECROSSING_COLLISION",
+    "INCONCLUSIVE_WINDOW",
+    "audit_event_geometry",
+    "TOPOLOGY_CLASSIFIER_SCHEMA",
+    "classify_species_topology",
+    "classify_species_collection",
+    "QC_MANIFEST_SCHEMA_VERSION",
+    "build_qc_manifest",
     "check_candidate_continuity",
     "search_candidate_paths",
     "search_candidate_species",
