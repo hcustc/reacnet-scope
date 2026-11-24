@@ -905,6 +905,21 @@ def cmd_classify_isomers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_render_report(args: argparse.Namespace) -> int:
+    """Render saved evidence JSON as a standalone HTML review page."""
+    from reacnet_scope.static_report import render_report
+
+    try:
+        documents = [json.loads(Path(path).expanduser().read_text(encoding="utf-8")) for path in args.inputs]
+        html = render_report(documents, title=args.title)
+        target = _write_bytes_atomic(args.out, html.encode("utf-8"), force=args.force)
+    except (OSError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(f"[OK] wrote evidence review: {target}")
+    return 0
+
+
 def cmd_export_event(args: argparse.Namespace) -> int:
     """Export one prepared RNG event as a reproducible evidence ZIP."""
     from reacnet_scope.event_index import (
@@ -921,6 +936,7 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         IndexStaleError,
     )
     from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.skeleton_lineage import find_event_plateau_window
     from reacnet_scope.timed_evidence import select_timed_evidence
     from reacnet_scope.trajectory import (
         TrajectoryDependencyError,
@@ -950,15 +966,22 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         if str(args.type_map or "").strip():
             atom_type_map = load_type_element_map(dataset["trajectory"])
             atom_type_map.update(explicit_mapping)
+        window_mode = getattr(args, "window_mode", "fixed")
+        plateau_args = {}
+        if window_mode == "plateau":
+            if args.before_frames is not None or args.after_frames is not None:
+                raise ValueError("Use --before-frames and --after-frames with --window-mode fixed.")
+            plateau_args["plateau_window"] = find_event_plateau_window(dataset, event)
         viewer = svc.build_rng_event_visualization(
             dataset,
             event,
-            before_frames=args.before_frames,
-            after_frames=args.after_frames,
+            before_frames=3 if args.before_frames is None else args.before_frames,
+            after_frames=3 if args.after_frames is None else args.after_frames,
             environment_radius=args.environment_radius,
             max_environment_atoms=args.max_environment_atoms,
             atom_type_map=atom_type_map,
             persist_type_map=False,
+            **plateau_args,
         )
         lammps_units = None
         if str(getattr(args, "lammps_input", "") or "").strip():
@@ -1917,16 +1940,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="导出的原子范围",
     )
     sp_export_event.add_argument(
+        "--window-mode",
+        choices=("fixed", "plateau"),
+        default="fixed",
+        help="fixed: frame padding; plateau: indexed carrier skeleton bounds (up to 100 frames of padding per side)",
+    )
+    sp_export_event.add_argument(
         "--before-frames",
         type=_bounded_int("before_frames", 0, 100),
-        default=3,
-        help="反应前附加帧数",
+        help="反应前附加帧数（fixed 模式默认 3）",
     )
     sp_export_event.add_argument(
         "--after-frames",
         type=_bounded_int("after_frames", 0, 100),
-        default=3,
-        help="反应后附加帧数",
+        help="反应后附加帧数（fixed 模式默认 3）",
     )
     sp_export_event.add_argument(
         "--environment-radius",
@@ -1968,6 +1995,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="原子替换已有输出文件",
     )
     sp_export_event.set_defaults(func=cmd_export_event)
+
+    sp_render = sub.add_parser("render-report", help="将保存的分析 JSON 生成离线 HTML 审阅页")
+    sp_render.add_argument("inputs", nargs="+", help="trace-skeleton、audit-event 或 classify-isomers JSON")
+    sp_render.add_argument("--out", required=True, help="输出 HTML 路径")
+    sp_render.add_argument("--title", default="ReacNet Scope evidence review", help="审阅页标题")
+    sp_render.add_argument("--force", action="store_true", help="原子替换已有输出文件")
+    sp_render.set_defaults(func=cmd_render_report)
 
     sp_export_dft = sub.add_parser(
         "export-dft-geometry",

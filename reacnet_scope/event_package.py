@@ -552,6 +552,57 @@ def _hill_formula_from_counts(counts: Mapping[str, int]) -> str:
     return "".join(parts)
 
 
+def _participant_coverage(
+    view: Mapping[str, Any], frames: list[dict[str, Any]], selected_ids: set[int]
+) -> dict[str, Any]:
+    """Check each indexed molecule against the atoms at its exact source frame."""
+    event = view.get("event") or {}
+    if event.get("association_status") != "matched" or not (
+        event.get("reactant_participants") and event.get("product_participants")
+    ):
+        return {"status": "unavailable", "reason": "Missing matched participant records."}
+
+    expected_ids = set(_scope_atom_ids(view, "participants"))
+    frame_ids = {
+        int(frame.get("source_timestep", frame["frame"])): {int(atom["id"]) for atom in frame["atoms"]}
+        for frame in frames
+    }
+    sides = {}
+    for side, field in (("reactant", "before_timestep"), ("product", "after_timestep")):
+        timestep = event.get(field)
+        present = frame_ids.get(timestep, set())
+        covered: set[int] = set()
+        duplicate: set[int] = set()
+        participants = []
+        for participant in event[f"{side}_participants"]:
+            ids = {int(atom) for atom in participant["atom_ids"]}
+            duplicate.update(ids & covered)
+            covered.update(ids)
+            missing = sorted(ids - present)
+            participants.append({
+                "species": participant["species"],
+                "atom_ids": sorted(ids),
+                "missing_atom_ids": missing,
+                "complete": bool(ids) and not missing,
+            })
+        sides[side] = {
+            "source_timestep": timestep,
+            "frame_present": timestep in frame_ids,
+            "participants": participants,
+            "unassigned_atom_ids": sorted(expected_ids - covered),
+            "duplicate_atom_ids": sorted(duplicate),
+            "unexpected_atom_ids": sorted(covered - expected_ids),
+            "complete": covered == expected_ids and not duplicate and all(
+                participant["complete"] for participant in participants
+            ),
+        }
+    return {
+        "status": "complete" if all(side["complete"] for side in sides.values()) else "incomplete",
+        "outside_scope_atom_ids": sorted(expected_ids - selected_ids),
+        **sides,
+    }
+
+
 def build_qc_manifest(
     view: Mapping[str, Any],
     *,
@@ -570,8 +621,25 @@ def build_qc_manifest(
     atom_ids = _scope_atom_ids(view, normalized_scope)
     frames = _selected_frames(view, atom_ids=atom_ids, type_element_map=mapping)
     first_atoms = frames[0]["atoms"]
-    elements = [str(atom.get("element") or "").strip().capitalize() for atom in first_atoms]
-    complete_elements = all(bool(e) for e in elements)
+    selected_ids = set(atom_ids)
+    first_elements = {
+        int(atom["id"]): str(atom.get("element") or "").strip().capitalize()
+        for atom in first_atoms
+    }
+    elements = list(first_elements.values())
+    complete_timesteps = {
+        int(frame.get("source_timestep", frame["frame"])) for frame in frames
+        if len(frame["atoms"]) == len(atom_ids)
+        and {int(atom["id"]) for atom in frame["atoms"]} == selected_ids
+    }
+    incomplete_timesteps = sorted({
+        int(frame.get("source_timestep", frame["frame"])) for frame in view.get("frames", ())
+    } - complete_timesteps)
+    complete_elements = not incomplete_timesteps and all(
+        first_elements.get(int(atom["id"])) == str(atom.get("element") or "").strip().capitalize()
+        for frame in frames for atom in frame["atoms"]
+    ) and all(_atomic_number(element) is not None for element in elements)
+    coverage = _participant_coverage(view, frames, selected_ids)
 
     element_counts = dict(sorted(Counter(e for e in elements if e).items()))
     formula = _hill_formula_from_counts(element_counts) if complete_elements else ""
@@ -580,7 +648,9 @@ def build_qc_manifest(
     electron_parity: str | None = None
     recommended_multiplicities: list[int] = []
     spin_guidance = "Element mapping is incomplete; confirm all atom elements before QC submission."
-    if complete_elements:
+    if coverage["status"] == "incomplete":
+        spin_guidance = "Restore the complete event participants before assessing cluster spin."
+    elif complete_elements:
         z_values = [_atomic_number(e) for e in elements]
         if all(z is not None for z in z_values):
             total_electrons = sum(int(z) for z in z_values if z is not None) - int(charge)
@@ -601,7 +671,7 @@ def build_qc_manifest(
                     )
 
     groups = view.get("atom_groups") or {}
-    core_ids = sorted({int(a) for a in (groups.get("core") or []) if int(a) in set(atom_ids)})
+    core_ids = sorted({int(a) for a in (groups.get("core") or []) if int(a) in selected_ids})
     selected_view = {**dict(view), "frames": frames}
     audit = audit_event_geometry(selected_view)
 
@@ -613,6 +683,8 @@ def build_qc_manifest(
         "atom_ids": atom_ids,
         "core_atom_ids": core_ids,
         "complete_elements": complete_elements,
+        "participant_coverage": coverage,
+        "incomplete_coordinate_timesteps": incomplete_timesteps,
         "element_counts": element_counts,
         "formula": formula,
         "assumed_charge": int(charge),

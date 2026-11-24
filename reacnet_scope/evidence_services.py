@@ -1539,6 +1539,7 @@ def build_rng_event_visualization(
     max_environment_atoms: int = 500,
     atom_type_map: Mapping[Any, Any] | None = None,
     persist_type_map: bool = True,
+    plateau_window: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an ASE/PBC-aware local view from indexed trajectory frames."""
     trajectory_file = (artifacts.get("trajectory") or "").strip()
@@ -1576,6 +1577,32 @@ def build_rng_event_visualization(
         left, right = right, left
     start = max(0, left - max(0, int(before_frames)))
     stop = min(len(available), right + max(0, int(after_frames)) + 1)
+    plateau_extraction = {}
+    if plateau_window is not None:
+        from .skeleton_lineage import EVENT_PLATEAU_MAX_PADDING
+
+        lower = int(plateau_window["start_timestep"])
+        upper = int(plateau_window["end_timestep"])
+        if not lower <= before_timestep < after_timestep <= upper or (
+            available[left] != before_timestep or available[right] != after_timestep
+        ):
+            raise ServiceError(
+                "Plateau export requires both exact trajectory endpoint frames.",
+                reason="missing_plateau_endpoints",
+            )
+        plateau_start = bisect_left(available, lower)
+        plateau_stop = bisect_right(available, upper)
+        start = max(plateau_start, left - EVENT_PLATEAU_MAX_PADDING)
+        stop = min(plateau_stop, right + EVENT_PLATEAU_MAX_PADDING + 1)
+        if stop - start > 2 * EVENT_PLATEAU_MAX_PADDING + 2:
+            raise ServiceError("Plateau window exceeds 202 trajectory frames.", reason="plateau_too_large")
+        before_frames = left - start
+        after_frames = stop - right - 1
+        plateau_extraction = {
+            "window_mode": "plateau",
+            "plateau_window": dict(plateau_window),
+            "padding_truncated": start != plateau_start or stop != plateau_stop,
+        }
     selected_frames = available[start:stop]
     offsets = index.offsets_for(selected_frames)
     if not offsets:
@@ -1699,7 +1726,10 @@ def build_rng_event_visualization(
                 )
             if not atoms:
                 continue
-            if int(frame) <= before_timestep:
+            if plateau_window is not None and int(frame) not in (before_timestep, after_timestep):
+                # The carrier's connectivity does not identify every participant's bond state.
+                frame_bonds, bond_state = [], "unassigned"
+            elif int(frame) <= before_timestep:
                 frame_bonds, bond_state = reactant_bonds, "before"
             elif int(frame) >= after_timestep:
                 frame_bonds, bond_state = product_bonds, "after"
@@ -1818,6 +1848,7 @@ def build_rng_event_visualization(
             "coordinate_treatment": "ASE minimum-image, reaction-core centered",
             "anchor_frame": anchor_frame,
             "extraction": {
+                **plateau_extraction,
                 "before_frames": int(before_frames),
                 "after_frames": int(after_frames),
                 "environment_radius": float(environment_radius),

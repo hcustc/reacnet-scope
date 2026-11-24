@@ -9,6 +9,7 @@ import pytest
 from reacnet_scope.event_package import (
     EVENT_PACKAGE_SCHEMA_VERSION,
     build_event_package,
+    build_qc_manifest,
     event_changed_bond_distances_csv,
 )
 
@@ -239,3 +240,21 @@ def test_environment_scope_includes_context_atoms() -> None:
         document = json.loads(archive.read("event.json"))
         assert document["selection"]["atom_ids"] == [1, 2, 3]
         assert document["frames"][0]["atom_count"] == 3
+
+
+def test_qc_manifest_flags_missing_partner_at_exact_endpoint() -> None:
+    viewer = _viewer()
+    viewer["event"]["reactant_participants"] = [
+        {"species": "[C]", "atom_ids": [1]}, {"species": "[O]", "atom_ids": [2]},
+    ]
+    viewer["event"]["product_participants"] = [{"species": "[C][O]", "atom_ids": [1, 2]}]
+    viewer["frames"][0]["atoms"] = [atom for atom in viewer["frames"][0]["atoms"] if atom["id"] != 2]
+    manifest = build_qc_manifest(viewer)
+
+    coverage = manifest["participant_coverage"]
+    assert coverage["status"] == "incomplete"
+    assert coverage["reactant"]["participants"][1]["missing_atom_ids"] == [2]
+    assert coverage["product"]["complete"]
+    assert manifest["incomplete_coordinate_timesteps"] == [0]
+    assert manifest["total_electrons"] is None
+    assert manifest["recommended_multiplicities"] == []

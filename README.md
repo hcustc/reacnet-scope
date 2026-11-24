@@ -220,6 +220,21 @@ uv run reacnet-scope export-event \
   --out EVENT_evidence.zip
 ```
 
+CLI 默认在事件两侧各取 3 帧。指定 `--window-mode plateau` 可根据已索引谱系，
+把窗口延展到事件两侧载体的连续骨架平台。载体按两侧分子共享的原子数选取；
+并列时取共同支持的范围。窗口每侧最多延展 100 个轨迹帧，裁剪和来源记录在
+`event.json`。平台窗内仅两个事件端点标注参与者键状态。
+
+指定 `--qc-manifest` 可核对两个确切端点的各参与分子原子覆盖，包括共同反应物
+和离去碎片。`--lammps-input input.lammps` 可提供输入脚本中明确的单位信息。
+
+`trace-skeleton`、`audit-event` 和 `classify-isomers` 的 JSON 结果可合并成单文件
+离线审阅页。页面保留原始 JSON，支持在浏览器中展开查看。
+
+```bash
+uv run reacnet-scope render-report lineage.json audit.json isomers.json --out review.html
+```
+
 ### DFT 初始几何导出
 
 对具有精确 Molecular Evidence 的 `matched` Reaction Occurrence，轨迹页面会显示

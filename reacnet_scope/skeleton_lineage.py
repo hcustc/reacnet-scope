@@ -32,6 +32,7 @@ from .workspace_services import _event_artifact_paths
 
 SKELETON_LINEAGE_SCHEMA = "reacnet-scope/skeleton-lineage/v1"
 VALID_MODES = ("strict", "skeleton")
+EVENT_PLATEAU_MAX_PADDING = 100
 
 
 def strip_bond_orders(bonds: Iterable[str]) -> tuple[tuple[int, int], ...]:
@@ -105,6 +106,7 @@ def _normalize_segment(raw: Mapping[str, Any], anchors: set[int]) -> dict[str, A
         "end_frame": end_frame,
         "start_timestep": raw.get("start_timestep"),
         "end_timestep": raw.get("end_timestep"),
+        "source_id": raw.get("source_id"),
         "frame_count": frame_count,
         "atom_ids": list(canon_atoms),
         "connectivity_edges": [list(pair) for pair in edges],
@@ -213,6 +215,7 @@ def _finalize_platform(
         "end_frame": platform["end_frame"],
         "start_timestep": platform["start_timestep"],
         "end_timestep": platform["end_timestep"],
+        "source_id": platform["source_id"],
         "frame_count": platform["frame_count"],
         "duration_ps": duration_ps,
         "representative_species": representative,
@@ -294,6 +297,7 @@ def build_skeleton_timeline(
             if (
                 merged
                 and merged[-1]["end_frame"] + 1 == item["start_frame"]
+                and merged[-1]["source_id"] == item["source_id"]
                 and merged[-1]["connectivity_signature"] == item["connectivity_signature"]
             ):
                 is_flip = (
@@ -316,6 +320,7 @@ def build_skeleton_timeline(
                         idx + 2 < len(merged)
                         and merged[idx]["end_frame"] + 1 == merged[idx + 1]["start_frame"]
                         and merged[idx + 1]["end_frame"] + 1 == merged[idx + 2]["start_frame"]
+                        and merged[idx]["source_id"] == merged[idx + 1]["source_id"] == merged[idx + 2]["source_id"]
                         and merged[idx]["connectivity_signature"]
                         == merged[idx + 2]["connectivity_signature"]
                         and merged[idx + 1]["frame_count"] <= oscillation_max_frames
@@ -350,7 +355,7 @@ def build_skeleton_timeline(
                 "from_timestep": prev["end_timestep"],
                 "to_timestep": curr["start_timestep"],
                 "frame_gap": frame_gap,
-                "contiguous": frame_gap == 0,
+                "contiguous": frame_gap == 0 and prev["source_id"] == curr["source_id"],
                 "from_species": prev["representative_species"],
                 "to_species": curr["representative_species"],
                 "from_connectivity": prev["connectivity_signature"],
@@ -449,7 +454,7 @@ def trace_skeleton_lineage(
         sql = f"""
             SELECT s.segment_id, s.start_frame, s.end_frame,
                    q.species, q.atoms, q.bonds,
-                   fa.timestep AS start_timestep, fb.timestep AS end_timestep,
+                   fa.timestep AS start_timestep, fb.timestep AS end_timestep, fa.source_id,
                    COUNT(DISTINCT a.atom_id) AS anchor_overlap
             FROM lineage_segment_atoms a
             JOIN lineage_segments s ON s.segment_id = a.segment_id
@@ -476,6 +481,7 @@ def trace_skeleton_lineage(
                 "end_frame": row["end_frame"],
                 "start_timestep": row["start_timestep"],
                 "end_timestep": row["end_timestep"],
+                "source_id": row["source_id"],
             }
             for row in rows
         ]
@@ -501,12 +507,92 @@ def trace_skeleton_lineage(
     return report
 
 
+def find_event_plateau_window(
+    artifacts: Mapping[str, str], event: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Find contiguous skeleton bounds at a matched event's exact endpoints.
+
+    The carrier is the participant pair with the most shared atoms. Tied pairs
+    contribute their common window. Other participants remain in the export.
+    """
+    if event.get("association_status") != "matched":
+        raise ServiceError("Plateau mode requires a matched occurrence.", reason="unmatched_event")
+    sides = [
+        [set(participant["atom_ids"]) for participant in event.get(f"{side}_participants", ())]
+        for side in ("reactant", "product")
+    ]
+    overlaps = [(len(left & right), left, right) for left in sides[0] for right in sides[1]]
+    maximum = max((overlap for overlap, _, _ in overlaps), default=0)
+    if not maximum:
+        raise ServiceError("Plateau mode requires shared participant atoms.", reason="missing_carrier")
+    carriers = [
+        sorted({tuple(sorted(pair[side])) for pair in overlaps if pair[0] == maximum})
+        for side in (1, 2)
+    ]
+    transition = int(event["timestep_index"])
+    before, after = int(event["before_timestep"]), int(event["after_timestep"])
+    if before >= after:
+        raise ServiceError("Plateau mode requires increasing endpoint timesteps.", reason="invalid_event_time")
+
+    endpoints = []
+    for side, frame, timestep, atom_sets in zip(
+        ("reactant", "product"), (transition, transition + 1), (before, after), carriers
+    ):
+        bonds = event.get(f"{side}_bonds") or ()
+        if isinstance(bonds, str):
+            bonds = bonds.split(";")
+        edges = strip_bond_orders(bonds)
+        platforms = []
+        for atoms in atom_sets:
+            # Topology returns are retained in this window, including short excursions.
+            lineage = trace_skeleton_lineage(
+                artifacts,
+                anchor_atom_ids=atoms,
+                oscillation_max_frames=0,
+                start_frame=max(0, frame - EVENT_PLATEAU_MAX_PADDING),
+                end_frame=frame + EVENT_PLATEAU_MAX_PADDING,
+                min_anchor_overlap=len(atoms),
+            )
+            expected_signature, _, _ = connectivity_signature(
+                atoms, (f"{a}-{b}" for a, b in edges if a in atoms and b in atoms)
+            )
+            matches = [
+                plateau for plateau in lineage["timeline"]
+                if plateau["atom_ids"] == list(atoms)
+                and plateau["connectivity_signature"] == expected_signature
+                and plateau["start_frame"] <= frame <= plateau["end_frame"]
+                and plateau["start_timestep"] is not None
+                and plateau["end_timestep"] is not None
+                and plateau["start_timestep"] <= timestep <= plateau["end_timestep"]
+            ]
+            if lineage["truncated"] or len(matches) != 1:
+                raise ServiceError(
+                    f"Could not establish a unique {side} skeleton plateau for atoms {list(atoms)}.",
+                    reason="incomplete_event_plateau",
+                )
+            platforms.append(matches[0])
+        endpoints.append(platforms)
+
+    source_ids = {item["source_id"] for platforms in endpoints for item in platforms}
+    if len(source_ids) != 1 or None in source_ids:
+        raise ServiceError("Plateau export requires one trajectory source.", reason="ambiguous_plateau_source")
+    return {
+        "start_timestep": max(item["start_timestep"] for item in endpoints[0]),
+        "end_timestep": min(item["end_timestep"] for item in endpoints[1]),
+        "reactant_carrier_atom_ids": carriers[0],
+        "product_carrier_atom_ids": carriers[1],
+        "shared_carrier_atom_count": maximum,
+        "source_id": source_ids.pop(),
+    }
+
+
 __all__ = [
     "SKELETON_LINEAGE_SCHEMA",
     "VALID_MODES",
     "build_skeleton_timeline",
     "connectivity_signature",
     "cyclomatic_ring_count",
+    "find_event_plateau_window",
     "strip_bond_orders",
     "trace_skeleton_lineage",
 ]
