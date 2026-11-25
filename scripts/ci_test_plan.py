@@ -64,6 +64,10 @@ CALLBACK_AREAS = {
 for _module, _areas in CALLBACK_AREAS.items():
     for _area in _areas:
         AREA_PATHS[_area] += (f"scripts/webapp_dash/callbacks/{_module}",)
+# Browser cases cost about 35 s each (page load plus the workflow), so wall time is
+# roughly cases / shards. Public-repository runners are free; keep two full plans
+# (a pull request and a push) below the 20 concurrent-job limit.
+FULL_BROWSER_SHARDS = list(range(1, 9))
 SHARED_PATHS = (
     ".github/workflows/", "scripts/ci_test_plan.py", "pyproject.toml", "uv.lock",
     "tests/browser/conftest.py", "tests/browser/workbench.py", "tests/browser/test_workbench.py",
@@ -73,8 +77,12 @@ SHARED_PATHS = (
 )
 
 
-def test_plan(paths: list[str], *, force_full: bool = False) -> dict:
-    """Return a fail-closed plan; an unknown shared UI change runs everything."""
+def test_plan(paths: list[str], *, force_full: bool = False, pull_request: bool = False) -> dict:
+    """Return a fail-closed plan; an unknown shared UI change runs everything.
+
+    Pull requests run the complete browser suite on compact navigation only ("all");
+    classic navigation is covered by the post-merge push, scheduled and manual runs.
+    """
     code = [path for path in paths if not (
         path.endswith((".md", ".rst")) or path.startswith(("docs/", ".agents/"))
         or path == "LICENSE"
@@ -95,10 +103,12 @@ def test_plan(paths: list[str], *, force_full: bool = False) -> dict:
                 break
             areas.update(matched)
         scopes = ["full"] if "full" in areas else ["smoke", *sorted(areas)]
+        if pull_request and scopes == ["full"]:
+            scopes = ["all"]
     return {
         "pytest": bool(code) or force_full,
         "browser_scope": ",".join(scopes) or "none",
-        "shards": [1, 2, 3, 4] if scopes == ["full"] else (
+        "shards": FULL_BROWSER_SHARDS if scopes in (["full"], ["all"]) else (
             [1, 2] if len(scopes) > 1 else [1]
         ),
     }
@@ -127,7 +137,10 @@ def changed_paths(event_name: str, event: dict) -> list[str] | None:
 def main() -> None:
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     paths = changed_paths(os.environ["GITHUB_EVENT_NAME"], event)
-    plan = test_plan(paths or [], force_full=paths is None)
+    plan = test_plan(
+        paths or [], force_full=paths is None,
+        pull_request=os.environ["GITHUB_EVENT_NAME"] == "pull_request",
+    )
     print(json.dumps({"changed_files": paths, **plan}, ensure_ascii=False, indent=2))
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         for name, value in plan.items():

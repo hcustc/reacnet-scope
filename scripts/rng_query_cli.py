@@ -715,22 +715,78 @@ def cmd_candidate_paths(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_export_event(args: argparse.Namespace) -> int:
-    """Export one prepared RNG event as a reproducible evidence ZIP."""
-    from reacnet_scope.event_index import (
-        EVENT_EVIDENCE_STORE,
-        EventNotFoundError,
-    )
-    from reacnet_scope.event_package import (
-        EventPackageError,
-        build_event_package,
-    )
-    from reacnet_scope.indexes import (
-        IndexInvalidError,
-        IndexNotReadyError,
-        IndexStaleError,
-    )
+def _parse_atom_id_spec(spec: str) -> list[int]:
+    """Parse comma-separated atom IDs or inclusive ranges such as ``300..305,310``."""
+    ids: set[int] = set()
+    for token in str(spec or "").split(","):
+        part = token.strip()
+        if not part:
+            continue
+        if ".." in part:
+            lo_s, hi_s = part.split("..", 1)
+            lo, hi = int(lo_s.strip()), int(hi_s.strip())
+            if lo > hi:
+                raise ValueError(f"invalid atom range: {part!r}")
+            ids.update(range(lo, hi + 1))
+        else:
+            ids.add(int(part))
+    if not ids:
+        raise ValueError("--atoms must specify at least one atom ID")
+    return sorted(ids)
+
+
+def cmd_trace_skeleton(args: argparse.Namespace) -> int:
+    """Trace an atom-anchored strict or skeleton-level timeline from a prepared dataset."""
     from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.provenance import parse_lammps_input_units
+    from reacnet_scope.service_types import ServiceError
+    from reacnet_scope.skeleton_lineage import trace_skeleton_lineage
+
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        atoms = _parse_atom_id_spec(args.atoms)
+        lammps_units = None
+        if str(args.lammps_input or "").strip():
+            lammps_units = parse_lammps_input_units(args.lammps_input)
+        report = trace_skeleton_lineage(
+            dataset,
+            anchor_atom_ids=atoms,
+            mode=args.mode,
+            oscillation_max_frames=args.oscillation_max_frames,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
+            min_anchor_overlap=args.min_anchor_overlap,
+            timestep_ps=args.timestep_ps,
+            lammps_units=lammps_units,
+        )
+        if lammps_units is not None:
+            report["lammps_input_units"] = lammps_units
+        payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        if str(args.out_json or "").strip():
+            target = _write_bytes_atomic(
+                args.out_json, payload.encode("utf-8"), force=args.force
+            )
+            print(
+                f"[OK] wrote skeleton lineage ({report['plateau_count']} plateaus "
+                f"from {report['raw_segment_count']} raw segments): {target}"
+            )
+        else:
+            print(payload, end="")
+    except (FileExistsError, FileNotFoundError, OSError, ServiceError, ValueError) as exc:
+        message = exc.message if isinstance(exc, ServiceError) else str(exc)
+        print(f"[ERROR] {message}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_audit_event(args: argparse.Namespace) -> int:
+    """Run 3D MIC geometry audit and optional QC pre-flight summary on an indexed event."""
+    from reacnet_scope.event_index import EVENT_EVIDENCE_STORE, EventNotFoundError
+    from reacnet_scope.event_package import EventPackageError, build_qc_manifest
+    from reacnet_scope.geometry_audit import audit_event_geometry
+    from reacnet_scope.indexes import IndexInvalidError, IndexNotReadyError, IndexStaleError
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.provenance import collect_runtime_provenance, parse_lammps_input_units
     from reacnet_scope.timed_evidence import select_timed_evidence
     from reacnet_scope.trajectory import (
         TrajectoryDependencyError,
@@ -756,17 +812,192 @@ def cmd_export_event(args: argparse.Namespace) -> int:
         if str(args.type_map or "").strip():
             atom_type_map = load_type_element_map(dataset["trajectory"])
             atom_type_map.update(explicit_mapping)
+        lammps_units = parse_lammps_input_units(args.lammps_input) if str(args.lammps_input or "").strip() else None
         viewer = svc.build_rng_event_visualization(
             dataset,
             event,
             before_frames=args.before_frames,
             after_frames=args.after_frames,
+            environment_radius=0.0,
+            max_environment_atoms=0,
+            atom_type_map=atom_type_map,
+            persist_type_map=False,
+            lammps_units=lammps_units,
+        )
+        audit = audit_event_geometry(viewer)
+        qc_manifest = build_qc_manifest(
+            viewer, scope="participants", atom_type_map=atom_type_map, charge=args.charge
+        )
+        report = {
+            "geometry_audit": audit,
+            "qc_manifest": qc_manifest,
+            "provenance": collect_runtime_provenance(
+                extra={
+                    "primary_source": selection.primary_file,
+                    "source_kind": selection.kind,
+                    "lammps_input_units": lammps_units,
+                    "physical_unit_sources": viewer["meta"].get("physical_unit_sources", {}),
+                }
+            ),
+        }
+        payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        if str(args.out_json or "").strip():
+            target = _write_bytes_atomic(args.out_json, payload.encode("utf-8"), force=args.force)
+            print(f"[OK] wrote event audit ({audit['verdict']}): {target}")
+        else:
+            print(payload, end="")
+    except (
+        EventNotFoundError,
+        EventPackageError,
+        FileExistsError,
+        FileNotFoundError,
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+        RuntimeError,
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+        svc.ServiceError,
+        ValueError,
+    ) as exc:
+        message = exc.message if isinstance(exc, svc.ServiceError) else str(exc)
+        print(f"[ERROR] {message}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_classify_isomers(args: argparse.Namespace) -> int:
+    """Classify species SMILES by ring topology and six-ring substitution pattern."""
+    from reacnet_scope.topology_classifier import classify_species_collection
+
+    smiles_list: list[str] = []
+    for raw in args.smiles or []:
+        for token in str(raw).split(","):
+            cleaned = token.strip()
+            if cleaned:
+                smiles_list.append(cleaned)
+    if str(args.species_file or "").strip():
+        sp_path = Path(args.species_file).expanduser().resolve()
+        if not sp_path.is_file():
+            print(f"[ERROR] species file not found: {sp_path}", file=sys.stderr)
+            return 2
+        for line in sp_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.strip().split()
+            if parts:
+                smiles_list.append(parts[0])
+    if not smiles_list:
+        print("[ERROR] provide at least one --smiles or --species-file", file=sys.stderr)
+        return 2
+
+    report = classify_species_collection(smiles_list, formula_filter=args.formula)
+    payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if str(args.out_json or "").strip():
+        try:
+            target = _write_bytes_atomic(args.out_json, payload.encode("utf-8"), force=args.force)
+        except FileExistsError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 2
+        print(f"[OK] wrote isomer classification ({report['species_count']} species): {target}")
+    else:
+        print(payload, end="")
+    return 0
+
+
+def cmd_render_report(args: argparse.Namespace) -> int:
+    """Render saved evidence JSON as a standalone HTML review page."""
+    from reacnet_scope.static_report import render_report
+
+    try:
+        documents = [json.loads(Path(path).expanduser().read_text(encoding="utf-8")) for path in args.inputs]
+        html = render_report(documents, title=args.title)
+        target = _write_bytes_atomic(args.out, html.encode("utf-8"), force=args.force)
+    except (OSError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(f"[OK] wrote evidence review: {target}")
+    return 0
+
+
+def cmd_export_event(args: argparse.Namespace) -> int:
+    """Export one prepared RNG event as a reproducible evidence ZIP."""
+    from reacnet_scope.event_index import (
+        EVENT_EVIDENCE_STORE,
+        EventNotFoundError,
+    )
+    from reacnet_scope.event_package import (
+        EventPackageError,
+        build_event_package,
+    )
+    from reacnet_scope.indexes import (
+        IndexInvalidError,
+        IndexNotReadyError,
+        IndexStaleError,
+    )
+    from reacnet_scope.prepare import discover_dataset
+    from reacnet_scope.skeleton_lineage import find_event_plateau_window
+    from reacnet_scope.timed_evidence import select_timed_evidence
+    from reacnet_scope.trajectory import (
+        TrajectoryDependencyError,
+        TrajectoryFrameError,
+        load_type_element_map,
+    )
+    from reacnet_scope.provenance import (
+        collect_runtime_provenance,
+        parse_lammps_input_units,
+    )
+    from reacnet_scope import services as svc
+
+    try:
+        dataset = discover_dataset(args.case, args.base)
+        selection = select_timed_evidence(
+            timeline_file=dataset["timeline"],
+            reactionevent_file=dataset["reactionevent"],
+            molecules_file=dataset["molecules"],
+        )
+        event = EVENT_EVIDENCE_STORE.get_event(
+            selection.primary_file,
+            selection.molecules_file,
+            args.event_id,
+        )
+        explicit_mapping = svc.parse_event_type_element_map(args.type_map)
+        atom_type_map = None
+        if str(args.type_map or "").strip():
+            atom_type_map = load_type_element_map(dataset["trajectory"])
+            atom_type_map.update(explicit_mapping)
+        window_mode = getattr(args, "window_mode", "fixed")
+        plateau_args = {}
+        if window_mode == "plateau":
+            if args.before_frames is not None or args.after_frames is not None:
+                raise ValueError("Use --before-frames and --after-frames with --window-mode fixed.")
+            plateau_args["plateau_window"] = find_event_plateau_window(dataset, event)
+        lammps_input = str(getattr(args, "lammps_input", "") or "").strip()
+        lammps_units = parse_lammps_input_units(lammps_input) if lammps_input else None
+        viewer = svc.build_rng_event_visualization(
+            dataset,
+            event,
+            before_frames=3 if args.before_frames is None else args.before_frames,
+            after_frames=3 if args.after_frames is None else args.after_frames,
             environment_radius=args.environment_radius,
             max_environment_atoms=args.max_environment_atoms,
             atom_type_map=atom_type_map,
             persist_type_map=False,
+            lammps_units=lammps_units,
+            **plateau_args,
         )
-        package = build_event_package(viewer, scope=args.scope)
+        provenance = collect_runtime_provenance(
+            extra={
+                "primary_source": selection.primary_file,
+                "source_kind": selection.kind,
+                "lammps_input_units": lammps_units,
+            }
+        )
+        package = build_event_package(
+            viewer,
+            scope=args.scope,
+            provenance=provenance,
+            include_qc_manifest=bool(getattr(args, "qc_manifest", False)),
+            charge=int(getattr(args, "charge", 0)),
+        )
         target = _write_bytes_atomic(args.out, package, force=args.force)
     except (
         EventNotFoundError,
@@ -1701,16 +1932,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="导出的原子范围",
     )
     sp_export_event.add_argument(
+        "--window-mode",
+        choices=("fixed", "plateau"),
+        default="fixed",
+        help="fixed: frame padding; plateau: indexed carrier skeleton bounds (up to 100 frames of padding per side)",
+    )
+    sp_export_event.add_argument(
         "--before-frames",
         type=_bounded_int("before_frames", 0, 100),
-        default=3,
-        help="反应前附加帧数",
+        help="反应前附加帧数（fixed 模式默认 3）",
     )
     sp_export_event.add_argument(
         "--after-frames",
         type=_bounded_int("after_frames", 0, 100),
-        default=3,
-        help="反应后附加帧数",
+        help="反应后附加帧数（fixed 模式默认 3）",
     )
     sp_export_event.add_argument(
         "--environment-radius",
@@ -1729,6 +1964,22 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="本次导出的 Type→Element 覆盖，例如 1=C,2=H；不会写入数据集设置",
     )
+    sp_export_event.add_argument(
+        "--lammps-input",
+        default="",
+        help="显式指定 LAMMPS 输入脚本（如 input.lammps），解析 units/timestep 填入物理单位与血缘",
+    )
+    sp_export_event.add_argument(
+        "--qc-manifest",
+        action="store_true",
+        help="在导出 ZIP 中附加 qc_manifest.json（含电子数、推荐自旋多重度与三维几何审计）",
+    )
+    sp_export_event.add_argument(
+        "--charge",
+        type=int,
+        default=0,
+        help="计算 qc_manifest.json 总电子数时的团簇假定净电荷（默认 0）",
+    )
     sp_export_event.add_argument("--out", required=True, help="输出 ZIP 路径")
     sp_export_event.add_argument(
         "--force",
@@ -1736,6 +1987,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="原子替换已有输出文件",
     )
     sp_export_event.set_defaults(func=cmd_export_event)
+
+    sp_render = sub.add_parser("render-report", help="将保存的分析 JSON 生成离线 HTML 审阅页")
+    sp_render.add_argument("inputs", nargs="+", help="trace-skeleton、audit-event 或 classify-isomers JSON")
+    sp_render.add_argument("--out", required=True, help="输出 HTML 路径")
+    sp_render.add_argument("--title", default="ReacNet Scope evidence review", help="审阅页标题")
+    sp_render.add_argument("--force", action="store_true", help="原子替换已有输出文件")
+    sp_render.set_defaults(func=cmd_render_report)
 
     sp_export_dft = sub.add_parser(
         "export-dft-geometry",
@@ -1904,6 +2162,88 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅输出目标展开映射(公式->SMILES), 不绘图",
     )
     sp_plot.set_defaults(func=cmd_species_evolution)
+
+    sp_skeleton = sub.add_parser(
+        "trace-skeleton",
+        help="按锚定重原子追踪 strict 或 skeleton 连续谱系（自动合并高温键级翻转切段）",
+    )
+    sp_skeleton.add_argument("--case", required=True, help="数据集目录或公共前缀")
+    sp_skeleton.add_argument("--base", default="", help="目录包含多个数据集时指定公共前缀")
+    sp_skeleton.add_argument(
+        "--atoms",
+        required=True,
+        help="锚定原子 ID（1-based），支持逗号与区间，例如 300..305",
+    )
+    sp_skeleton.add_argument(
+        "--mode",
+        choices=["skeleton", "strict"],
+        default="skeleton",
+        help="追踪模式：skeleton（合并纯键级翻转与短振荡）或 strict（严格键表段）",
+    )
+    sp_skeleton.add_argument(
+        "--oscillation-max-frames",
+        type=_bounded_int("oscillation_max_frames", 0, 50),
+        default=2,
+        help="skeleton 模式下允许折叠的 A->B->A 短暂振荡最大帧数（0 为不折叠）",
+    )
+    sp_skeleton.add_argument("--start-frame", type=int, default=None, help="起始分析帧过滤")
+    sp_skeleton.add_argument("--end-frame", type=int, default=None, help="结束分析帧过滤")
+    sp_skeleton.add_argument(
+        "--min-anchor-overlap",
+        type=_bounded_int("min_anchor_overlap", 1, 1000),
+        default=1,
+        help="每段至少包含的锚定原子数",
+    )
+    sp_skeleton.add_argument(
+        "--timestep-ps",
+        type=float,
+        default=None,
+        help="显式指定每源步对应的 ps 数",
+    )
+    sp_skeleton.add_argument(
+        "--lammps-input",
+        default="",
+        help="显式指定 LAMMPS 输入文件以自动解析 units/timestep",
+    )
+    sp_skeleton.add_argument("--out-json", default="", help="输出 JSON 路径（留空打印到标准输出）")
+    sp_skeleton.add_argument("--force", action="store_true", help="原子替换已有输出文件")
+    sp_skeleton.set_defaults(func=cmd_trace_skeleton)
+
+    sp_audit = sub.add_parser(
+        "audit-event",
+        help="对已索引 RNG 事件执行三维最小镜像键长审计（真转化 / 键振荡 / 掠过碰撞）与 QC 预检",
+    )
+    sp_audit.add_argument("--case", required=True, help="数据集目录或公共前缀")
+    sp_audit.add_argument("--base", default="", help="目录包含多个数据集时指定公共前缀")
+    sp_audit.add_argument("--event-id", required=True, help="事件索引中的 event_id")
+    sp_audit.add_argument("--before-frames", type=_bounded_int("before_frames", 0, 100), default=3)
+    sp_audit.add_argument("--after-frames", type=_bounded_int("after_frames", 0, 100), default=3)
+    sp_audit.add_argument("--type-map", default="", help="本次审计的 Type→Element 覆盖，例如 1=C,2=H")
+    sp_audit.add_argument("--lammps-input", default="", help="显式指定 LAMMPS 输入文件以记录单位血缘")
+    sp_audit.add_argument("--charge", type=int, default=0, help="团簇假定净电荷（默认 0）")
+    sp_audit.add_argument("--out-json", default="", help="输出 JSON 路径（留空打印到标准输出）")
+    sp_audit.add_argument("--force", action="store_true", help="原子替换已有输出文件")
+    sp_audit.set_defaults(func=cmd_audit_event)
+
+    sp_isomers = sub.add_parser(
+        "classify-isomers",
+        help="按环系拓扑（6-5-6 DF 核 / 5-5 联环等）与六元环取代位点（1,2/1,3/1,4）对物种 SMILES 分类",
+    )
+    sp_isomers.add_argument(
+        "--smiles",
+        action="append",
+        default=[],
+        help="待分类 SMILES，可重复传入或逗号分隔",
+    )
+    sp_isomers.add_argument(
+        "--species-file",
+        default="",
+        help="包含 SMILES 的文本文件（每行首列为 SMILES）",
+    )
+    sp_isomers.add_argument("--formula", default="", help="仅保留指定分子式（如 C6H3ClO2）")
+    sp_isomers.add_argument("--out-json", default="", help="输出 JSON 路径（留空打印到标准输出）")
+    sp_isomers.add_argument("--force", action="store_true", help="原子替换已有输出文件")
+    sp_isomers.set_defaults(func=cmd_classify_isomers)
 
     return p
 

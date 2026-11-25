@@ -82,11 +82,13 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
                 source_species,product_species,reaction_key,event_id);
     ''')
     # Iterate the published-direction summaries, never infer a reverse edge.
+    reaction_sides: dict[str, tuple[set[str], set[str]]] = {}
     for key, count in connection.execute(
         'SELECT reaction_key,total_events FROM reaction_summary WHERE total_events>0 ORDER BY reaction_key'
     ):
         left, right = key.split('->', 1)
         reactants, products = reaction_key(left, right)
+        reaction_sides[str(key)] = (set(reactants), set(products))
         connection.execute('INSERT INTO candidate_reactions VALUES(?,?,?,?)',
                            (key, json.dumps(reactants), json.dumps(products), count))
         for species in set((*reactants, *products)):
@@ -118,6 +120,10 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
                 continue
             if not isinstance(reactants, list) or not isinstance(products, list):
                 continue
+            sides = reaction_sides.get(str(key))
+            if sides is None:
+                continue
+            key_reactants, key_products = sides
             event_transfers: dict[tuple[str, str, str], int] = {}
             for reactant in reactants:
                 if not isinstance(reactant, dict):
@@ -127,7 +133,7 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
                     int(value) for value in reactant.get('atom_ids') or []
                     if isinstance(value, int) and not isinstance(value, bool)
                 }
-                if not source or not source_atoms:
+                if not source or not source_atoms or source not in key_reactants:
                     continue
                 overlaps: list[tuple[str, int]] = []
                 for product in products:
@@ -138,7 +144,7 @@ def materialize_candidate_adjacency(connection: sqlite3.Connection) -> None:
                         int(value) for value in product.get('atom_ids') or []
                         if isinstance(value, int) and not isinstance(value, bool)
                     }
-                    if target:
+                    if target and target in key_products:
                         overlaps.append((target, len(source_atoms & target_atoms)))
                 maximum = max((count for _, count in overlaps), default=0)
                 if maximum <= 0:
@@ -325,7 +331,9 @@ class CandidateReader:
         sql = '''SELECT r.reaction_key,r.reactants,r.products,r.total_events,
                  t.source_species,t.product_species,t.supporting_events,t.max_shared_atoms
             FROM candidate_transfers t JOIN candidate_reactions r USING(reaction_key)
-            WHERE t.'''+('product_species' if incoming else 'source_species')+'=?'
+            WHERE t.'''+('product_species' if incoming else 'source_species')+'''=?
+            AND EXISTS (SELECT 1 FROM json_each(r.reactants) WHERE value=t.source_species)
+            AND EXISTS (SELECT 1 FROM json_each(r.products) WHERE value=t.product_species)'''
         sql += self._direction_filter()
         params = [species]
         exclusion_sql, excluded = self._carrier_filter(

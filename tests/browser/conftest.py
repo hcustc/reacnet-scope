@@ -23,7 +23,8 @@ def _parse_shard(value: str) -> tuple[int, int]:
 def pytest_addoption(parser):
     parser.addoption(
         "--browser-scope", default="full", metavar="full|smoke,AREA",
-        help="full runs both navigation layouts; scoped runs use compact navigation.",
+        help="full runs both navigation layouts; all runs every case on compact navigation; "
+             "scoped runs select related cases on compact navigation.",
     )
     parser.addoption(
         "--browser-shard", type=_parse_shard, metavar="INDEX/TOTAL",
@@ -42,8 +43,8 @@ def pytest_collection_modifyitems(config, items):
     shard = config.getoption("--browser-shard", default=None)
     scope = config.getoption("--browser-scope", default="full")
     scopes = set(scope.split(","))
-    allowed = {"full", "smoke", "abundance", "candidate", "dataset", "events", "species", "reactions"}
-    if not scopes <= allowed or ("full" in scopes and len(scopes) != 1):
+    allowed = {"full", "all", "smoke", "abundance", "candidate", "dataset", "events", "species", "reactions"}
+    if not scopes <= allowed or (scopes & {"full", "all"} and len(scopes) != 1):
         raise pytest.UsageError(f"Invalid --browser-scope: {scope}")
     index, total = shard or (1, 1)
     browser_dir = Path(__file__).parent
@@ -56,9 +57,9 @@ def pytest_collection_modifyitems(config, items):
         areas = {area for marker in item.iter_markers("browser_area") for area in marker.args}
         critical = item.get_closest_marker("browser_smoke") is not None
         classic = getattr(item, "callspec", None) is not None and item.callspec.params.get("workbench") == "0"
-        if "full" not in scopes and (classic or not (
+        if "full" not in scopes and (classic or ("all" not in scopes and not (
             areas & scopes or ("smoke" in scopes and critical)
-        )):
+        ))):
             deselected.append(item)
             continue
         (selected if position % total == index - 1 else deselected).append(item)

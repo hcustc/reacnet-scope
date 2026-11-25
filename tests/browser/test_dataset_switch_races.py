@@ -193,10 +193,27 @@ def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, work
     before = page.evaluate('readAppStore()')
     assert before['dataset_id'] == current['dataset_id']
     held = {}
+    handoff_id = 'late-handoff'
 
     def intercept(route):
         payload = route.request.post_data_json or {}
-        if payload.get('changedPropIds') == ['species-detail-handoff.data']:
+        if not isinstance(payload, dict) or payload.get('changedPropIds') != ['species-detail-handoff.data']:
+            route.continue_()
+            return
+        outputs = payload.get('outputs')
+        writes_species_focus = isinstance(outputs, list) and any(
+            isinstance(output, dict) and output.get('id') == 'species-focus'
+            for output in outputs
+        )
+        # The same input also updates the layout and is reset by the dataset switch.
+        # Hold only the response that sets the original handoff's species focus.
+        original_handoff = any(
+            item.get('id') == 'species-detail-handoff'
+            and isinstance(item.get('value'), dict)
+            and item['value'].get('request_id') == handoff_id
+            for item in payload.get('inputs', ()) if isinstance(item, dict)
+        )
+        if writes_species_focus and original_handoff:
             held['handoff'] = (route, route.fetch())
             page.evaluate('window.handoffHeld = true')
         else:
@@ -207,7 +224,7 @@ def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, work
         page.evaluate(
             "value => window.dash_clientside.set_props('species-detail-handoff', {data: value})",
             {'context': context_key(before), 'species': 'CCO', 'formula': 'C2H6O',
-             'request_id': 'late-handoff'},
+             'request_id': handoff_id},
         )
         page.wait_for_function('window.handoffHeld === true')
         page.locator('#current-dataset-menu > summary').click()
@@ -217,12 +234,14 @@ def test_late_cross_entry_species_detail_cannot_revert_dataset_switch(page, work
         page.locator('#library-use').click()
         expect(page.locator('#topbar-rungroup')).to_have_text(other['label'], timeout=15000)
         page.wait_for_function('id => readAppStore().dataset_id === id', arg=other['dataset_id'])
-        route, response = held.pop('handoff')
+        route, response = held['handoff']
+        assert response.status == 200
         late = response.json()['response']
         # The late detail writes only the Species focus, bound to dataset A.
         assert 'app-store' not in late
         assert late['species-focus']['data']['context'] == context_key(before)
         route.fulfill(response=response)
+        held.pop('handoff')
         # Preparation polling keeps the callback queue busy after the switch,
         # so give the renderer time to apply (or drop) the held response.
         page.wait_for_timeout(1500)

@@ -9,6 +9,7 @@ import pytest
 from reacnet_scope.event_package import (
     EVENT_PACKAGE_SCHEMA_VERSION,
     build_event_package,
+    build_qc_manifest,
     event_changed_bond_distances_csv,
 )
 
@@ -239,3 +240,37 @@ def test_environment_scope_includes_context_atoms() -> None:
         document = json.loads(archive.read("event.json"))
         assert document["selection"]["atom_ids"] == [1, 2, 3]
         assert document["frames"][0]["atom_count"] == 3
+
+
+def test_nanometre_coordinates_keep_native_csv_and_export_angstrom_extxyz() -> None:
+    viewer = _viewer()
+    viewer["meta"]["coordinate_length_unit"] = "nm"
+    payload = build_event_package(viewer, include_qc_manifest=True)
+    with ZipFile(io.BytesIO(payload)) as archive:
+        event = json.loads(archive.read("event.json"))
+        qc = json.loads(archive.read("qc_manifest.json"))
+        distances = archive.read("changed_bond_distances.csv").decode().splitlines()
+        images = ase_read(io.StringIO(archive.read("trajectory.extxyz").decode()), index=":", format="extxyz")
+    assert event["coordinate_length_unit"] == "nm"
+    assert distances[1].split(",")[4:6] == ["0.4", "nm"]
+    assert qc["geometry_audit"]["pairs"][0]["start_distance_ang"] == 4.0
+    assert images[0].positions[:, 0].tolist() == [-2.0, 2.0]
+    assert images[0].cell[0, 0] == 100.0
+
+
+def test_qc_manifest_flags_missing_partner_at_exact_endpoint() -> None:
+    viewer = _viewer()
+    viewer["event"]["reactant_participants"] = [
+        {"species": "[C]", "atom_ids": [1]}, {"species": "[O]", "atom_ids": [2]},
+    ]
+    viewer["event"]["product_participants"] = [{"species": "[C][O]", "atom_ids": [1, 2]}]
+    viewer["frames"][0]["atoms"] = [atom for atom in viewer["frames"][0]["atoms"] if atom["id"] != 2]
+    manifest = build_qc_manifest(viewer)
+
+    coverage = manifest["participant_coverage"]
+    assert coverage["status"] == "incomplete"
+    assert coverage["reactant"]["participants"][1]["missing_atom_ids"] == [2]
+    assert coverage["product"]["complete"]
+    assert manifest["incomplete_coordinate_timesteps"] == [0]
+    assert manifest["total_electrons"] is None
+    assert manifest["recommended_multiplicities"] == []

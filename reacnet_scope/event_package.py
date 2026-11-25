@@ -11,17 +11,22 @@ import csv
 import io
 import json
 import math
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from .geometry_audit import audit_event_geometry
+from .provenance import angstroms_per_length_unit
 from .trajectory import TrajectoryDependencyError, normalize_type_element_map
 
 
 EVENT_PACKAGE_SCHEMA_VERSION = "reacnet-scope/event-package/v2"
+QC_MANIFEST_SCHEMA_VERSION = "reacnet-scope/qc-manifest/v1"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _MEMBER_ORDER = (
     "event.json",
+    "qc_manifest.json",
     "frames.csv",
     "changed_bond_distances.csv",
     "trajectory.lammpstrj",
@@ -189,7 +194,7 @@ def event_trajectory_text(
     return "\n".join(chunks) + "\n"
 
 
-def _extxyz_text(frames: list[dict[str, Any]], event_id: str) -> str:
+def _extxyz_text(frames: list[dict[str, Any]], event_id: str, *, scale: float = 1.0) -> str:
     try:
         import numpy as np
         from ase import Atoms
@@ -206,12 +211,12 @@ def _extxyz_text(frames: list[dict[str, Any]], event_id: str) -> str:
         symbols = [str(atom["element"]) for atom in atoms_data]
         positions = [
             [
-                float(atom.get(f"display_{axis}", atom.get(axis, 0.0)))
+                float(atom.get(f"display_{axis}", atom.get(axis, 0.0))) * scale
                 for axis in ("x", "y", "z")
             ]
             for atom in atoms_data
         ]
-        cell = frame.get("cell") or [[0.0, 0.0, 0.0]] * 3
+        cell = np.asarray(frame.get("cell") or [[0.0, 0.0, 0.0]] * 3) * scale
         pbc = frame.get("pbc") or [False, False, False]
         image = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
         image.new_array(
@@ -268,7 +273,7 @@ def _coordinate_length_unit(view: Mapping[str, Any]) -> str:
     value = str(
         (view.get("meta") or {}).get("coordinate_length_unit") or ""
     ).strip().lower()
-    return "angstrom" if value in {"angstrom", "å"} else ""
+    return "angstrom" if value == "å" else value
 
 
 def _csv_json(value: Any) -> str:
@@ -520,12 +525,204 @@ def _zip_member(name: str, payload: bytes) -> tuple[ZipInfo, bytes]:
     return info, payload
 
 
+def _atomic_number(symbol: str) -> int | None:
+    from rdkit import Chem
+
+    cleaned = str(symbol or "").strip().capitalize()
+    if not cleaned:
+        return None
+    try:
+        z = Chem.GetPeriodicTable().GetAtomicNumber(cleaned)
+    except RuntimeError:
+        return None
+    return int(z) if z > 0 else None
+
+
+def _hill_formula_from_counts(counts: Mapping[str, int]) -> str:
+    remaining = {k: int(v) for k, v in counts.items() if int(v) > 0}
+    parts: list[str] = []
+    if "C" in remaining:
+        c = remaining.pop("C")
+        parts.append(f"C{c if c > 1 else ''}")
+        if "H" in remaining:
+            h = remaining.pop("H")
+            parts.append(f"H{h if h > 1 else ''}")
+    for elem in sorted(remaining):
+        n = remaining[elem]
+        parts.append(f"{elem}{n if n > 1 else ''}")
+    return "".join(parts)
+
+
+def _participant_coverage(
+    view: Mapping[str, Any], frames: list[dict[str, Any]], selected_ids: set[int]
+) -> dict[str, Any]:
+    """Check each indexed molecule against the atoms at its exact source frame."""
+    event = view.get("event") or {}
+    if event.get("association_status") != "matched" or not (
+        event.get("reactant_participants") and event.get("product_participants")
+    ):
+        return {"status": "unavailable", "reason": "Missing matched participant records."}
+
+    expected_ids = set(_scope_atom_ids(view, "participants"))
+    frame_ids = {
+        int(frame.get("source_timestep", frame["frame"])): {int(atom["id"]) for atom in frame["atoms"]}
+        for frame in frames
+    }
+    sides = {}
+    for side, field in (("reactant", "before_timestep"), ("product", "after_timestep")):
+        timestep = event.get(field)
+        present = frame_ids.get(timestep, set())
+        covered: set[int] = set()
+        duplicate: set[int] = set()
+        participants = []
+        for participant in event[f"{side}_participants"]:
+            ids = {int(atom) for atom in participant["atom_ids"]}
+            duplicate.update(ids & covered)
+            covered.update(ids)
+            missing = sorted(ids - present)
+            participants.append({
+                "species": participant["species"],
+                "atom_ids": sorted(ids),
+                "missing_atom_ids": missing,
+                "complete": bool(ids) and not missing,
+            })
+        sides[side] = {
+            "source_timestep": timestep,
+            "frame_present": timestep in frame_ids,
+            "participants": participants,
+            "unassigned_atom_ids": sorted(expected_ids - covered),
+            "duplicate_atom_ids": sorted(duplicate),
+            "unexpected_atom_ids": sorted(covered - expected_ids),
+            "complete": covered == expected_ids and not duplicate and all(
+                participant["complete"] for participant in participants
+            ),
+        }
+    return {
+        "status": "complete" if all(side["complete"] for side in sides.values()) else "incomplete",
+        "outside_scope_atom_ids": sorted(expected_ids - selected_ids),
+        **sides,
+    }
+
+
+def build_qc_manifest(
+    view: Mapping[str, Any],
+    *,
+    scope: str = "participants",
+    atom_type_map: Mapping[Any, Any] | None = None,
+    charge: int = 0,
+) -> dict[str, Any]:
+    """Build a deterministic MD-to-QC pre-flight manifest for an event cluster.
+
+    Computes stoichiometry, total electron count, spin-multiplicity suggestions,
+    core/participant atom IDs, and 3D geometry audit verdict without guessing
+    missing element identities.
+    """
+    normalized_scope = _normalized_scope(scope)
+    mapping = _effective_type_map(view, atom_type_map)
+    atom_ids = _scope_atom_ids(view, normalized_scope)
+    frames = _selected_frames(view, atom_ids=atom_ids, type_element_map=mapping)
+    first_atoms = frames[0]["atoms"]
+    selected_ids = set(atom_ids)
+    first_elements = {
+        int(atom["id"]): str(atom.get("element") or "").strip().capitalize()
+        for atom in first_atoms
+    }
+    elements = list(first_elements.values())
+    complete_timesteps = {
+        int(frame.get("source_timestep", frame["frame"])) for frame in frames
+        if len(frame["atoms"]) == len(atom_ids)
+        and {int(atom["id"]) for atom in frame["atoms"]} == selected_ids
+    }
+    incomplete_timesteps = sorted({
+        int(frame.get("source_timestep", frame["frame"])) for frame in view.get("frames", ())
+    } - complete_timesteps)
+    complete_elements = not incomplete_timesteps and all(
+        first_elements.get(int(atom["id"])) == str(atom.get("element") or "").strip().capitalize()
+        for frame in frames for atom in frame["atoms"]
+    ) and all(_atomic_number(element) is not None for element in elements)
+    coverage = _participant_coverage(view, frames, selected_ids)
+
+    element_counts = dict(sorted(Counter(e for e in elements if e).items()))
+    formula = _hill_formula_from_counts(element_counts) if complete_elements else ""
+
+    total_electrons: int | None = None
+    electron_parity: str | None = None
+    recommended_multiplicities: list[int] = []
+    spin_guidance = "Element mapping is incomplete; confirm all atom elements before QC submission."
+    if coverage["status"] == "incomplete":
+        spin_guidance = "Restore the complete event participants before assessing cluster spin."
+    elif complete_elements:
+        z_values = [_atomic_number(e) for e in elements]
+        if all(z is not None for z in z_values):
+            total_electrons = sum(int(z) for z in z_values if z is not None) - int(charge)
+            if total_electrons >= 0:
+                if total_electrons % 2 == 0:
+                    electron_parity = "even"
+                    recommended_multiplicities = [1, 3]
+                    spin_guidance = (
+                        "Even-electron cluster: evaluate closed-shell/broken-symmetry "
+                        "singlet (M=1) and triplet (M=3) along reactive frames."
+                    )
+                else:
+                    electron_parity = "odd"
+                    recommended_multiplicities = [2, 4]
+                    spin_guidance = (
+                        "Odd-electron radical cluster: evaluate doublet (M=2) and "
+                        "quartet (M=4) spin states."
+                    )
+
+    groups = view.get("atom_groups") or {}
+    core_ids = sorted({int(a) for a in (groups.get("core") or []) if int(a) in selected_ids})
+    selected_view = {**dict(view), "frames": frames}
+    audit = audit_event_geometry(selected_view)
+
+    return {
+        "schema_version": QC_MANIFEST_SCHEMA_VERSION,
+        "event_id": str(view.get("event_id") or ""),
+        "scope": normalized_scope,
+        "atom_count": len(atom_ids),
+        "atom_ids": atom_ids,
+        "core_atom_ids": core_ids,
+        "complete_elements": complete_elements,
+        "participant_coverage": coverage,
+        "incomplete_coordinate_timesteps": incomplete_timesteps,
+        "element_counts": element_counts,
+        "formula": formula,
+        "assumed_charge": int(charge),
+        "total_electrons": total_electrons,
+        "electron_parity": electron_parity,
+        "recommended_multiplicities": recommended_multiplicities,
+        "spin_guidance": spin_guidance,
+        "frame_count": len(frames),
+        "geometry_audit": {
+            "verdict": audit["verdict"],
+            "reasons": audit["reasons"],
+            "pairs": [
+                {
+                    "atoms": p["atoms"],
+                    "elements": p["elements"],
+                    "role": p["role"],
+                    "start_distance_ang": p["start_distance_ang"],
+                    "end_distance_ang": p["end_distance_ang"],
+                    "min_distance_ang": p["min_distance_ang"],
+                    "max_distance_ang": p["max_distance_ang"],
+                    "cutoff_crossings": p["cutoff_crossings"],
+                }
+                for p in audit["pairs"]
+            ],
+        },
+    }
+
+
 def build_event_package(
     view: Mapping[str, Any],
     *,
     scope: str = "participants",
     source_signatures: Mapping[str, Any] | None = None,
     atom_type_map: Mapping[Any, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    include_qc_manifest: bool = False,
+    charge: int = 0,
 ) -> bytes:
     """Build a reproducible ZIP without reopening any source data."""
     normalized_scope = _normalized_scope(scope)
@@ -544,7 +741,9 @@ def build_event_package(
         for frame in frames
         for atom in frame["atoms"]
     )
-    extxyz = _extxyz_text(frames, event_id) if complete_elements else ""
+    coordinate_length_unit = _coordinate_length_unit(view)
+    scale = angstroms_per_length_unit(coordinate_length_unit) or 1.0
+    extxyz = _extxyz_text(frames, event_id, scale=scale) if complete_elements else ""
     lammps = event_trajectory_text(
         view,
         scope=normalized_scope,
@@ -564,7 +763,6 @@ def build_event_package(
         timestep_ps = None
     if timestep_ps is not None and timestep_ps <= 0:
         timestep_ps = None
-    coordinate_length_unit = _coordinate_length_unit(view)
     event = dict(view.get("event") or {})
     event.setdefault("event_id", event_id)
     event.setdefault("reaction_smiles", str(meta.get("reaction_smiles") or ""))
@@ -620,7 +818,9 @@ def build_event_package(
                 "ASE-parsed Cartesian source positions before viewer re-centering"
             ),
             "trajectory_extxyz": (
-                "minimum-image, reaction-core-centered viewer positions"
+                "minimum-image, reaction-core-centered viewer positions converted to angstrom"
+                if complete_elements and scale != 1.0
+                else "minimum-image, reaction-core-centered viewer positions"
                 if complete_elements
                 else "omitted: incomplete element mapping"
             ),
@@ -628,6 +828,10 @@ def build_event_package(
         "type_element_map": mapping,
         "extxyz_included": complete_elements,
     }
+    if "physical_unit_sources" in meta:
+        document["physical_unit_sources"] = _json_safe(meta["physical_unit_sources"])
+    if provenance is not None:
+        document["provenance"] = _json_safe(provenance)
     payloads: dict[str, bytes] = {
         "event.json": (
             json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)
@@ -647,6 +851,17 @@ def build_event_package(
     }
     if complete_elements:
         payloads["trajectory.extxyz"] = extxyz.encode("utf-8")
+    if include_qc_manifest:
+        qc_doc = build_qc_manifest(
+            view,
+            scope=normalized_scope,
+            atom_type_map=mapping,
+            charge=charge,
+        )
+        payloads["qc_manifest.json"] = (
+            json.dumps(_json_safe(qc_doc), ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
 
     output = io.BytesIO()
     with ZipFile(output, mode="w") as archive:
@@ -660,8 +875,10 @@ def build_event_package(
 
 __all__ = [
     "EVENT_PACKAGE_SCHEMA_VERSION",
+    "QC_MANIFEST_SCHEMA_VERSION",
     "EventPackageError",
     "build_event_package",
+    "build_qc_manifest",
     "event_changed_bond_distances_csv",
     "event_frames_csv",
     "event_trajectory_text",

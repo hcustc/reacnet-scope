@@ -1554,13 +1554,16 @@ def _rate_display(value: Any, unit: str) -> str:
 
 def channel_timestep_ps(artifacts: Mapping[str, Any]) -> float | None:
     """Return the confirmed physical-time conversion used by channel rates."""
+    from reacnet_scope.timed_evidence import read_timeline_physical_units
+
     for artifact in ("species", "trajectory"):
         source_file = str(artifacts.get(artifact) or "").strip()
         if source_file:
             timestep_ps = load_timestep_ps(source_file)
             if timestep_ps is not None:
                 return timestep_ps
-    return None
+    units = read_timeline_physical_units(str(artifacts.get("timeline") or ""))
+    return units.timestep_ps if units else None
 
 
 def confirm_channel_timestep_ps(
@@ -1657,6 +1660,11 @@ def channel_volume_evidence(
         }
     try:
         coordinate_unit = load_coordinate_length_unit(str(trajectory_path))
+        if coordinate_unit is None:
+            from reacnet_scope.timed_evidence import read_timeline_physical_units
+
+            units = read_timeline_physical_units(str(artifacts.get("timeline") or ""))
+            coordinate_unit = units.length_unit if units else None
     except TrajectoryFrameError as exc:
         return {
             "ready": False,

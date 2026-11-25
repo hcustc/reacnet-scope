@@ -92,7 +92,6 @@ from reacnet_scope.trajectory import (  # noqa: E402
     TrajectoryDependencyError,
     TrajectoryFrameError,
     dataset_settings_path,
-    load_coordinate_length_unit,
     load_type_element_map,
     load_timestep_ps,
     normalize_type_element_map,
@@ -1539,8 +1538,13 @@ def build_rng_event_visualization(
     max_environment_atoms: int = 500,
     atom_type_map: Mapping[Any, Any] | None = None,
     persist_type_map: bool = True,
+    plateau_window: Mapping[str, Any] | None = None,
+    lammps_units: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an ASE/PBC-aware local view from indexed trajectory frames."""
+    from .provenance import angstroms_per_length_unit
+    from .trajectory import resolve_trajectory_units
+
     trajectory_file = (artifacts.get("trajectory") or "").strip()
     if not trajectory_file or not Path(trajectory_file).is_file():
         raise ServiceError("缺少原始轨迹文件", reason="missing_trajectory")
@@ -1576,6 +1580,32 @@ def build_rng_event_visualization(
         left, right = right, left
     start = max(0, left - max(0, int(before_frames)))
     stop = min(len(available), right + max(0, int(after_frames)) + 1)
+    plateau_extraction = {}
+    if plateau_window is not None:
+        from .skeleton_lineage import EVENT_PLATEAU_MAX_PADDING
+
+        lower = int(plateau_window["start_timestep"])
+        upper = int(plateau_window["end_timestep"])
+        if not lower <= before_timestep < after_timestep <= upper or (
+            available[left] != before_timestep or available[right] != after_timestep
+        ):
+            raise ServiceError(
+                "Plateau export requires both exact trajectory endpoint frames.",
+                reason="missing_plateau_endpoints",
+            )
+        plateau_start = bisect_left(available, lower)
+        plateau_stop = bisect_right(available, upper)
+        start = max(plateau_start, left - EVENT_PLATEAU_MAX_PADDING)
+        stop = min(plateau_stop, right + EVENT_PLATEAU_MAX_PADDING + 1)
+        if stop - start > 2 * EVENT_PLATEAU_MAX_PADDING + 2:
+            raise ServiceError("Plateau window exceeds 202 trajectory frames.", reason="plateau_too_large")
+        before_frames = left - start
+        after_frames = stop - right - 1
+        plateau_extraction = {
+            "window_mode": "plateau",
+            "plateau_window": dict(plateau_window),
+            "padding_truncated": start != plateau_start or stop != plateau_stop,
+        }
     selected_frames = available[start:stop]
     offsets = index.offsets_for(selected_frames)
     if not offsets:
@@ -1609,8 +1639,8 @@ def build_rng_event_visualization(
             type_map_path = dataset_settings_path(trajectory_file)
             if not type_map_path.is_file():
                 type_map_path = None
-        timestep_ps = load_timestep_ps(trajectory_file)
-        coordinate_length_unit = load_coordinate_length_unit(trajectory_file)
+        units = resolve_trajectory_units(artifacts, lammps_units=lammps_units)
+        scale = angstroms_per_length_unit(units["coordinate_length_unit"]) or 1.0
 
         parsed_frames: dict[int, dict[str, Any]] = {}
         with open(trajectory_file, "rb") as source:
@@ -1640,10 +1670,11 @@ def build_rng_event_visualization(
         environment = select_local_environment(
             parsed_frames[anchor_frame],
             atom_ids,
-            radius=float(environment_radius),
+            radius=float(environment_radius) / scale,
             max_environment_atoms=int(max_environment_atoms),
         )
         environment["max_environment_atoms"] = int(max_environment_atoms)
+        environment["radius"] = float(environment_radius)
     except TrajectoryDependencyError as exc:
         raise ServiceError(str(exc), reason="missing_ase") from exc
     except (TrajectoryFrameError, OSError, UnicodeError, ValueError) as exc:
@@ -1699,7 +1730,10 @@ def build_rng_event_visualization(
                 )
             if not atoms:
                 continue
-            if int(frame) <= before_timestep:
+            if plateau_window is not None and int(frame) not in (before_timestep, after_timestep):
+                # The carrier's connectivity does not identify every participant's bond state.
+                frame_bonds, bond_state = [], "unassigned"
+            elif int(frame) <= before_timestep:
                 frame_bonds, bond_state = reactant_bonds, "before"
             elif int(frame) >= after_timestep:
                 frame_bonds, bond_state = product_bonds, "after"
@@ -1818,6 +1852,7 @@ def build_rng_event_visualization(
             "coordinate_treatment": "ASE minimum-image, reaction-core centered",
             "anchor_frame": anchor_frame,
             "extraction": {
+                **plateau_extraction,
                 "before_frames": int(before_frames),
                 "after_frames": int(after_frames),
                 "environment_radius": float(environment_radius),
@@ -1825,8 +1860,7 @@ def build_rng_event_visualization(
             },
             "environment": environment,
             "type_element_map": resolved_type_map,
-            "timestep_ps": timestep_ps,
-            "coordinate_length_unit": coordinate_length_unit,
+            **units,
             "native_element_column": "element"
             in {
                 str(value).strip().lower()

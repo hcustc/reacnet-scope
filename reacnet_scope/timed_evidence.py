@@ -18,6 +18,7 @@ from .rng_events import MoleculeRow, reaction_key
 from ._official_timeline import (
     OfficialTimelineError,
     OfficialTimelineView,
+    TimelinePhysicalUnits,
     inspect_official_timeline,
 )
 
@@ -132,6 +133,7 @@ class TimedEvidenceSelection:
     molecule_enabled: bool = False
     transition_evidence_enabled: bool = False
     frame_count: int | None = None
+    physical_units: TimelinePhysicalUnits | None = None
 
     @property
     def capabilities(self) -> tuple[str, ...]:
@@ -156,6 +158,7 @@ class TimedEvidenceSelection:
             ),
             "frame_count": self.frame_count,
             "capabilities": list(self.capabilities),
+            **({"physical_units": self.physical_units.as_dict()} if self.physical_units is not None else {}),
         }
 
 
@@ -217,7 +220,7 @@ class NativeHdf5EvidenceAdapter:
         self._handle = h5py.File(self.selection.timeline_file, "r")
         try:
             if self.selection.schema_version == "1.1":
-                frames = inspect_official_timeline(self._handle)
+                frames, _units = inspect_official_timeline(self._handle)
                 self._handle = OfficialTimelineView(self._handle, frames)
             self._load_indexes()
         except OfficialTimelineError as exc:
@@ -1117,7 +1120,7 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
                 )
             if schema_version == "1.1":
                 try:
-                    frames = inspect_official_timeline(handle)
+                    frames, physical_units = inspect_official_timeline(handle)
                 except OfficialTimelineError as exc:
                     raise TimedEvidenceDataError(str(exc), state=exc.state) from exc
                 resolved = str(path.resolve())
@@ -1126,6 +1129,7 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
                     source_files=(resolved,), timeline_file=resolved,
                     schema_version=schema_version, molecule_enabled=True,
                     transition_evidence_enabled=True, frame_count=frames,
+                    physical_units=physical_units,
                 )
             status = _attribute_text(handle.attrs.get("status", ""))
             if status != "complete":
@@ -1426,6 +1430,12 @@ def select_timed_evidence(
         reaction_enabled=True,
         molecule_enabled=molecule_enabled,
     )
+
+
+def read_timeline_physical_units(timeline_file: str = "") -> TimelinePhysicalUnits | None:
+    """Read optional units from a selected native timeline without scanning frame data."""
+    path = Path(timeline_file).expanduser()
+    return _inspect_native_timeline(path).physical_units if timeline_file and path.is_file() else None
 
 
 def source_signatures(

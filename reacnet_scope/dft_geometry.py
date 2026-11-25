@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .indexes import TRAJECTORY_INDEX_STORE, event_evidence_index_path
+from .timed_evidence import read_timeline_physical_units
 from .trajectory import (
     TrajectoryDependencyError,
     TrajectoryFrameError,
@@ -940,6 +941,9 @@ def build_dft_geometry_bundle(
         str(request.source_length_unit or "").strip().lower()
         or load_coordinate_length_unit(trajectory_file)
     )
+    if source_unit is None:
+        units = read_timeline_physical_units(str(artifacts.get("timeline") or ""))
+        source_unit = units.length_unit if units else None
     if source_unit in {"å"}:
         source_unit = "angstrom"
     if source_unit != "angstrom":

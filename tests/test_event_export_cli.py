@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -34,6 +36,9 @@ def _prepared_dataset(
     monkeypatch,
     *,
     configured_workspace: bool = True,
+    extended_product: bool = False,
+    unreported_states: str = "",
+    last_timestep: int = 60,
 ) -> tuple[Path, str]:
     if configured_workspace:
         monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
@@ -43,16 +48,20 @@ def _prepared_dataset(
     reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
     molecules = tmp_path / "run.lammpstrj.molecules.csv"
     reaction = tmp_path / "run.lammpstrj.reactionabcd"
-    trajectory.write_text(_frame(0) + _frame(10), encoding="utf-8")
+    timesteps = range(0, last_timestep + 1, 10) if extended_product or unreported_states else (0, 10)
+    trajectory.write_text("".join(_frame(step) for step in timesteps), encoding="utf-8")
     reactionevent.write_text(
-        "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n",
+        "Timestep_Index,Reactant,Product\n0,[C]+[O],[C][O]\n"
+        + ("1,[C][O],[C]=[O]\n" if extended_product else ""),
         encoding="utf-8",
     )
     molecules.write_text(
         "Timestep,Species,AtomIDs,BondIDs\n"
         "0,[C],0,\n"
         "0,[O],1,\n"
-        "10,[C][O],0;1,0-1-1\n",
+        "10,[C][O],0;1,0-1-1\n"
+        + ("".join(f"{step},[C]=[O],0;1,0-1-2\n" for step in range(20, 70, 10)) if extended_product else "")
+        + unreported_states,
         encoding="utf-8",
     )
     reaction.write_text("1 [C]+[O]->[C][O]\n", encoding="utf-8")
@@ -65,6 +74,168 @@ def _prepared_dataset(
         limit=1,
     )["rows"][0]["event_id"]
     return trajectory, event_id
+
+
+def test_export_event_plateau_preserves_endpoints_and_extends_bond_order_variants(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _, event_id = _prepared_dataset(tmp_path, monkeypatch, extended_product=True)
+    target = tmp_path / "plateau.zip"
+    assert cli.main([
+        "export-event", "--case", str(tmp_path), "--event-id", event_id,
+        "--window-mode", "plateau", "--qc-manifest", "--type-map", "1=C,2=O",
+        "--out", str(target),
+    ]) == 0
+    with ZipFile(target) as archive:
+        event = json.loads(archive.read("event.json"))
+        manifest = json.loads(archive.read("qc_manifest.json"))
+    assert [frame["source_timestep"] for frame in event["frames"]] == list(range(0, 70, 10))
+    assert [frame["bond_state"] for frame in event["frames"]] == ["before", "after", *["unassigned"] * 5]
+    selection = event["selection"]["extraction_parameters"]
+    assert selection["window_mode"] == "plateau"
+    assert selection["plateau_window"]["reactant_carrier_atom_ids"] == [[1], [2]]
+    assert selection["padding_truncated"] is False
+    assert manifest["participant_coverage"]["status"] == "complete"
+    assert manifest["total_electrons"] == 14
+
+
+@pytest.mark.parametrize("interruption", [
+    "40,[C],0,\n40,[O],1,\n",                      # carrier splits
+    "40,[C][O],0;1,0-1-1\n40,[O],1,\n",            # partial atom conflict
+    "40,[C][O],0;1,0-1-1\n40,[C]=[O],0;1,0-1-2\n", # overlapping bond-order assignments
+])
+def test_plateau_uses_unreported_states_and_stops_before_interruption(tmp_path, monkeypatch, interruption):
+    # Only the 0 -> 10 reaction has an event port. The later exact states have
+    # occupancy, and the original state returns after the interruption.
+    tail = ("20,[C][O],0;1,0-1-2\n30,[C][O],0;1,0-1-1\n" + interruption
+            + "50,[C][O],0;1,0-1-1\n60,[C][O],0;1,0-1-1\n")
+    _, event_id = _prepared_dataset(tmp_path, monkeypatch, unreported_states=tail)
+    out = tmp_path / "plateau.zip"
+    assert cli.main(["export-event", "--case", str(tmp_path), "--event-id", event_id,
+                     "--window-mode", "plateau", "--out", str(out)]) == 0
+    with ZipFile(out) as archive:
+        doc = json.loads(archive.read("event.json"))
+    assert [f["source_timestep"] for f in doc["frames"]] == [0, 10, 20, 30]
+    assert [f["bond_state"] for f in doc["frames"]] == ["before", "after", "unassigned", "unassigned"]
+
+
+@pytest.mark.parametrize("boundary", ["source", "missing_frame"])
+def test_plateau_stops_at_analyzed_frame_boundary(tmp_path, monkeypatch, boundary):
+    from reacnet_scope.indexes import event_evidence_index_path
+
+    trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch, extended_product=True)
+    index = event_evidence_index_path(str(trajectory) + ".reactionevent.csv")
+    with closing(sqlite3.connect(index)) as con, con:
+        if boundary == "source":
+            con.execute("UPDATE lineage_frames SET source_id=2 WHERE frame>=4")
+        else:
+            con.execute("DELETE FROM lineage_frames WHERE frame=4")
+    out = tmp_path / "bounded.zip"
+    assert cli.main(["export-event", "--case", str(tmp_path), "--event-id", event_id,
+                     "--window-mode", "plateau", "--out", str(out)]) == 0
+    with ZipFile(out) as archive:
+        frames = json.loads(archive.read("event.json"))["frames"]
+    assert [f["source_timestep"] for f in frames] == [0, 10, 20, 30]
+
+
+def test_plateau_crosses_occupancy_blocks_and_retains_padding_limit(tmp_path, monkeypatch):
+    from reacnet_scope import lineage_segments
+
+    monkeypatch.setattr(lineage_segments, "FRAME_BLOCK", 8)
+    tail = "".join(f"{step},[C][O],0;1,0-1-{1 + (step // 10) % 2}\n"
+                   for step in range(20, 1040, 10))
+    _, event_id = _prepared_dataset(tmp_path, monkeypatch, unreported_states=tail, last_timestep=1030)
+    out = tmp_path / "capped.zip"
+    assert cli.main(["export-event", "--case", str(tmp_path), "--event-id", event_id,
+                     "--window-mode", "plateau", "--out", str(out)]) == 0
+    with ZipFile(out) as archive:
+        doc = json.loads(archive.read("event.json"))
+    assert [f["source_timestep"] for f in doc["frames"]] == list(range(0, 1020, 10))
+    assert doc["selection"]["extraction_parameters"]["padding_truncated"]
+
+
+def test_existing_lineage_lookup_preparation_is_atomic_and_retryable(tmp_path, monkeypatch):
+    from reacnet_scope import lineage_segments
+    from reacnet_scope.indexes import event_evidence_index_path
+
+    trajectory, event_id = _prepared_dataset(tmp_path, monkeypatch)
+    source, molecules = str(trajectory) + ".reactionevent.csv", str(trajectory) + ".molecules.csv"
+    index = event_evidence_index_path(source)
+    args = ["export-event", "--case", str(tmp_path), "--event-id", event_id,
+            "--window-mode", "plateau", "--out", str(tmp_path / "export.zip")]
+    with closing(sqlite3.connect(index)) as con, con:
+        con.execute("DROP TABLE lineage_atom_states")
+        con.execute("DROP TABLE lineage_state_ids")
+    assert cli.main(args) != 0
+
+    build = lineage_segments.build_state_atom_lookup
+    def interrupted(con):
+        build(con)
+        raise RuntimeError("interrupted")
+    with monkeypatch.context() as patch:
+        patch.setattr(lineage_segments, "build_state_atom_lookup", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            EVENT_EVIDENCE_STORE.build(source, molecules)
+    with closing(sqlite3.connect(index)) as con:
+        assert not con.execute("SELECT 1 FROM sqlite_master WHERE name='lineage_atom_states'").fetchone()
+    EVENT_EVIDENCE_STORE.build(source, molecules)
+    EVENT_EVIDENCE_STORE.build(source, molecules)
+    assert cli.main(args) == 0
+
+    # Partial lookup state (only lineage_state_ids dropped) is detected and repaired.
+    with closing(sqlite3.connect(index)) as con, con:
+        con.execute("DROP TABLE lineage_state_ids")
+    assert cli.main([*args, "--force"]) != 0
+    EVENT_EVIDENCE_STORE.build(source, molecules)
+    assert cli.main([*args, "--force"]) == 0
+
+
+def test_plateau_extends_reactant_backward_across_blocks_and_stops_at_interruption(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from reacnet_scope import lineage_segments
+
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(lineage_segments, "FRAME_BLOCK", 8)
+    trajectory = tmp_path / "run.lammpstrj"
+    reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
+    molecules = tmp_path / "run.lammpstrj.molecules.csv"
+    reaction = tmp_path / "run.lammpstrj.reactionabcd"
+
+    # Event occurs at frame 12 (timestep 120 -> 130): [C][O] -> [C] + [O].
+    # Frames 3..12 carry [C][O] across a FRAME_BLOCK=8 boundary with bond-order flips;
+    # frame 2 has a partial-atom conflict, while frames 0..1 carry [C][O] again.
+    timesteps = range(0, 140, 10)
+    trajectory.write_text("".join(_frame(step) for step in timesteps), encoding="utf-8")
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n12,[C][O],[C]+[O]\n",
+        encoding="utf-8",
+    )
+    mol_rows = ["Timestep,Species,AtomIDs,BondIDs\n"]
+    for step in (0, 10):
+        mol_rows.append(f"{step},[C][O],0;1,0-1-1\n")
+    mol_rows.append("20,[C][O],0;1,0-1-1\n20,[O],1,\n")
+    for step in range(30, 130, 10):
+        mol_rows.append(f"{step},[C][O],0;1,0-1-{1 + (step // 10) % 2}\n")
+    mol_rows.append("130,[C],0,\n130,[O],1,\n")
+    molecules.write_text("".join(mol_rows), encoding="utf-8")
+    reaction.write_text("1 [C][O]->[C]+[O]\n", encoding="utf-8")
+
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    event_id = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent), str(molecules), "[C][O]->[C]+[O]", limit=1
+    )["rows"][0]["event_id"]
+
+    out = tmp_path / "backward.zip"
+    assert cli.main([
+        "export-event", "--case", str(tmp_path), "--event-id", event_id,
+        "--window-mode", "plateau", "--out", str(out),
+    ]) == 0
+    with ZipFile(out) as archive:
+        doc = json.loads(archive.read("event.json"))
+    assert [f["source_timestep"] for f in doc["frames"]] == list(range(30, 140, 10))
+    assert [f["bond_state"] for f in doc["frames"]] == [*["unassigned"] * 9, "before", "after"]
 
 
 def test_export_event_cli_writes_package_without_persisting_type_override(

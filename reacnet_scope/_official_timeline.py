@@ -8,7 +8,10 @@ converted HDF5 file or frame-by-atom membership matrix is materialized.
 from __future__ import annotations
 
 import json
+import math
+import sys
 from collections import Counter
+from dataclasses import asdict, dataclass
 from itertools import groupby, zip_longest
 from typing import Any, Iterator, Sequence
 
@@ -18,6 +21,33 @@ import numpy as np
 from .rng_events import MoleculeRow, net_reaction_key
 
 BLOCK_ROWS = 65_536
+_PS_PER_UNIT = {"fs": 1e-3, "ps": 1.0, "ns": 1e3}
+_LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
+
+
+@dataclass(frozen=True)
+class TimelinePhysicalUnits:
+    """Caller-supplied units from RNG's schema 1.1 configuration."""
+
+    timestep_value: float | None
+    time_unit: str | None
+    length_unit: str | None
+    inputfiletype: str | None
+
+    @property
+    def timestep_ps(self) -> float | None:
+        # RNG's XYZ and extXYZ parsers may emit frame ordinals as timesteps.
+        if (
+            self.inputfiletype not in _LAMMPS_STEP_INPUTS
+            or self.time_unit is None
+            or self.timestep_value is None
+        ):
+            return None
+        value = self.timestep_value * _PS_PER_UNIT[self.time_unit]
+        return value if math.isfinite(value) and value > 0 else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "timestep_ps": self.timestep_ps}
 
 
 class OfficialTimelineError(ValueError):
@@ -30,7 +60,28 @@ def _text(value: Any) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
-def inspect_official_timeline(handle: h5py.File) -> int:
+def _physical_units(parameters: dict[str, Any]) -> TimelinePhysicalUnits | None:
+    step = parameters.get("timestep_value")
+    time_unit = parameters.get("time_unit")
+    length_unit = parameters.get("length_unit")
+    if step is None and time_unit is None and length_unit is None:
+        return None
+    if step is not None and (
+        type(step) not in (int, float) or not 0 < step <= sys.float_info.max
+    ):
+        raise OfficialTimelineError("invalid configuration.parameters.timestep_value")
+    if time_unit is not None and time_unit not in ("fs", "ps", "ns"):
+        raise OfficialTimelineError("invalid configuration.parameters.time_unit")
+    if length_unit is not None and length_unit not in ("angstrom", "bohr", "nm"):
+        raise OfficialTimelineError("invalid configuration.parameters.length_unit")
+    input_type = parameters.get("inputfiletype")
+    return TimelinePhysicalUnits(
+        float(step) if step is not None else None, time_unit, length_unit,
+        input_type if isinstance(input_type, str) else None,
+    )
+
+
+def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalUnits | None]:
     """Validate metadata/column alignment without scanning payload tables."""
     if _text(handle.attrs.get("schema_version", "")) != "1.1":
         raise OfficialTimelineError("unsupported schema version")
@@ -117,7 +168,7 @@ def inspect_official_timeline(handle: h5py.File) -> int:
         column(name, size=rows + 1)
         if int(handle[name][0]) != 0 or int(handle[name][-1]) != payload:
             raise OfficialTimelineError(f"invalid endpoints in {name}")
-    return frames
+    return frames, _physical_units(parameters)
 
 
 class _Column:
