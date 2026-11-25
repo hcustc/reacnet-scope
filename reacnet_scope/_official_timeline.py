@@ -54,13 +54,31 @@ class TimelinePhysicalUnits:
 
 
 @dataclass(frozen=True)
+class TimelineBondHysteresis:
+    """Immutable, validated RNG bond-hysteresis thresholds."""
+
+    form: float
+    break_threshold: float
+    pair_break: tuple[tuple[str, float], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "form": self.form,
+            "break": self.break_threshold,
+        }
+        if self.pair_break:
+            payload["pair_break"] = dict(self.pair_break)
+        return payload
+
+
+@dataclass(frozen=True)
 class TimelineBondDetection:
     """Recorded RNG signal basis and optional bond-hysteresis thresholds."""
 
     molecule_range_basis: str
     run_hmm: bool
     inputfiletype: str | None = None
-    bond_hysteresis: dict[str, Any] | None = None
+    bond_hysteresis: TimelineBondHysteresis | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -70,13 +88,7 @@ class TimelineBondDetection:
         if self.inputfiletype is not None:
             payload["inputfiletype"] = self.inputfiletype
         if self.bond_hysteresis is not None:
-            hysteresis: dict[str, Any] = {
-                "form": self.bond_hysteresis["form"],
-                "break": self.bond_hysteresis["break"],
-            }
-            if "pair_break" in self.bond_hysteresis:
-                hysteresis["pair_break"] = dict(sorted(self.bond_hysteresis["pair_break"].items()))
-            payload["bond_hysteresis"] = hysteresis
+            payload["bond_hysteresis"] = self.bond_hysteresis.as_dict()
         return payload
 
 
@@ -123,7 +135,10 @@ def _hysteresis_threshold(value: Any) -> float:
     return numeric
 
 
-def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> dict[str, Any] | None:
+def _validate_bond_hysteresis(
+    version: str,
+    parameters: dict[str, Any],
+) -> TimelineBondHysteresis | None:
     hysteresis = parameters.get("bond_hysteresis")
     if hysteresis is None:
         return None
@@ -139,7 +154,7 @@ def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> dict[
         valid = kind in ("dump", "lammpsdumpfile", "xyz", "extxyz") and 0 < form < break_threshold
     if not valid:
         raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
-    normalized: dict[str, Any] = {"form": form, "break": break_threshold}
+    pair_break_items: tuple[tuple[str, float], ...] = ()
     if "pair_break" in hysteresis:
         pairs = hysteresis["pair_break"]
         if kind in ("bond", "lammpsbondfile") or not isinstance(pairs, dict) or not pairs:
@@ -156,8 +171,12 @@ def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> dict[
                 raise OfficialTimelineError("invalid bond_hysteresis pair_break override")
             seen.add(key)
             pair_break["-".join(key)] = limit
-        normalized["pair_break"] = dict(sorted(pair_break.items()))
-    return normalized
+        pair_break_items = tuple(sorted(pair_break.items()))
+    return TimelineBondHysteresis(
+        form=form,
+        break_threshold=break_threshold,
+        pair_break=pair_break_items,
+    )
 
 
 def inspect_official_timeline(

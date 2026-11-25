@@ -619,9 +619,15 @@ def test_hysteresis_and_pair_break_provenance_propagate_to_exports_and_audit(tmp
     }
     selection = select_timed_evidence(timeline_file=str(path))
     assert selection.bond_detection is not None
+    assert hash(selection) == hash(select_timed_evidence(timeline_file=str(path)))
     assert selection.bond_detection.as_dict() == expected
     assert selection.as_dict()["bond_detection"] == expected
     assert timed_evidence.read_timeline_bond_detection(str(path)).as_dict() == expected
+    with pytest.raises(AttributeError):
+        selection.bond_detection.bond_hysteresis.break_threshold = 0.5  # type: ignore[misc]
+    exported_dict = selection.as_dict()
+    exported_dict["bond_detection"]["bond_hysteresis"]["break"] = 0.5
+    assert selection.as_dict()["bond_detection"] == expected
 
     EVENT_EVIDENCE_STORE.build(str(path))
     TRAJECTORY_INDEX_STORE.build(str(trajectory))
@@ -654,3 +660,48 @@ def test_hysteresis_and_pair_break_provenance_propagate_to_exports_and_audit(tmp
     plain_detection = select_timed_evidence(timeline_file=str(plain_path)).bond_detection
     assert plain_detection is not None
     assert plain_detection.as_dict() == {"molecule_range_basis": "observed signal", "run_hmm": False}
+
+
+@pytest.mark.parametrize("command", ["export-event", "audit-event"])
+def test_atomic_timeline_replacement_after_event_lookup_aborts_cli(tmp_path, monkeypatch, command):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    trajectory = tmp_path / "run.lammpstrj"
+    trajectory.write_text(_frame(0) + _frame(10))
+    (tmp_path / "run.lammpstrj.reactionabcd").write_text("1 [C]+[O]->[C][O]\n")
+    timeline_path = Path(f"{trajectory}.timeline.h5")
+
+    def write_variant(target: Path, break_value: float) -> Path:
+        write_official_timeline(
+            target,
+            parameters={
+                "inputfiletype": "dump",
+                "runHMM": False,
+                "bond_hysteresis": {"form": 1.25, "break": break_value},
+            },
+        )
+        with h5py.File(target, "r+") as handle:
+            handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+        return target
+
+    write_variant(timeline_path, 1.35)
+    EVENT_EVIDENCE_STORE.build(str(timeline_path))
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    row = EVENT_EVIDENCE_STORE.query_events(str(timeline_path), "", "[C]+[O]->[C][O]", limit=1)["rows"][0]
+
+    replacement = write_variant(tmp_path / "replacement.timeline.h5", 1.75)
+    original_get_event = EVENT_EVIDENCE_STORE.get_event
+
+    def get_event_then_replace(*args, **kwargs):
+        result = original_get_event(*args, **kwargs)
+        replacement.replace(timeline_path)
+        return result
+
+    monkeypatch.setattr(EVENT_EVIDENCE_STORE, "get_event", get_event_then_replace)
+    out_file = tmp_path / ("event.zip" if command == "export-event" else "audit.json")
+    argv = [
+        command, "--case", str(tmp_path), "--event-id", row["event_id"],
+        "--type-map", "1=C,2=O", "--before-frames", "0", "--after-frames", "0",
+        *(["--qc-manifest", "--out", str(out_file)] if command == "export-event" else ["--out-json", str(out_file)]),
+    ]
+    assert cli.main(argv) == 2
+    assert not out_file.exists()
