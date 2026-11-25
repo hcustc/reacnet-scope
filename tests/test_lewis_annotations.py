@@ -577,5 +577,103 @@ def test_optimal_uniqueness_budget_exhaustion_preserves_primary_candidate(monkey
     assert cp2["status"] == "generated"
     assert cp2["candidate_smiles"] is not None
     assert cp2["optimal_uniqueness"] == "inconclusive_budget"
+    assert cp2["optimal_uniqueness_reason"] == "extra_assignment_cap"
     assert cp2["alternative_candidate_smiles"] == []
     assert cp2["optimal_assignments_checked"] == 2
+    assert cp2["unverified_optimal_assignments"] == 0
+
+
+def test_unverified_alternative_assignment_never_reports_unique(monkeypatch):
+    original_sanitize = Chem.SanitizeMol
+    calls = {"count": 0}
+
+    def fail_second_sanitize(mol, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            return Chem.SanitizeFlags.SANITIZE_PROPERTIES
+        return original_sanitize(mol, *args, **kwargs)
+
+    monkeypatch.setattr(Chem, "SanitizeMol", fail_second_sanitize)
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["optimal_uniqueness"] == "inconclusive_unverified_alternative"
+    assert propargyl["optimal_uniqueness_reason"] == "alternative_representation_rejected"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert propargyl["unverified_optimal_assignments"] == 1
+    assert propargyl["alternative_candidate_smiles"] == []
+
+
+@pytest.mark.parametrize(("mode", "expected_reason", "expected_status"), [
+    ("solver_status_4", "solver_failed", 4),
+    ("invalid_integer", "invalid_integer_solution", 0),
+])
+def test_uniqueness_solver_failure_is_separated_from_budget_limit(monkeypatch, mode, expected_reason, expected_status):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    def wrapped(objective, *args, **kwargs):
+        # The uniqueness pass uses an all-zero objective vector after all 8 stages finish.
+        if not any(objective):
+            if mode == "solver_status_4":
+                return SimpleNamespace(status=4, message="Internal solver failure", x=None, mip_node_count=0)
+            return SimpleNamespace(status=0, message="Optimal", x=[0.5] * len(objective), mip_node_count=0)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["candidate_smiles"] == "[C-]#[O+]"
+    assert co["solver_status"] == 0
+    assert co["optimal_uniqueness"] == "inconclusive_solver_error"
+    assert co["optimal_uniqueness_reason"] == expected_reason
+    assert co["optimal_uniqueness_solver_status"] == expected_status
+    assert co["optimal_assignments_checked"] == 1
+    assert co["unverified_optimal_assignments"] == 0
+
+
+def test_dash_annotation_panel_distinguishes_uniqueness_failure_modes():
+    from scripts.webapp_dash.lewis_workbench import annotation_panel
+
+    def _text(node) -> str:
+        if node is None:
+            return ""
+        if isinstance(node, str):
+            return node
+        if isinstance(node, list):
+            return " ".join(_text(item) for item in node)
+        children = getattr(node, "children", None)
+        return _text(children)
+
+    unverified = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[H]C#C[C]([H])[H]",
+        "optimal_uniqueness": "inconclusive_unverified_alternative",
+        "unverified_optimal_assignments": 1,
+    }))
+    assert "未通过校验" in unverified
+    assert "无法宣称模型最优解唯一" in unverified
+
+    solver_err = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_solver_error",
+        "optimal_uniqueness_reason": "solver_failed",
+        "optimal_uniqueness_solver_status": 4,
+    }))
+    assert "复求失败" in solver_err
+    assert "增加预算通常无效" in solver_err
+    assert "求解器状态码：4" in solver_err
+    assert "达到检查上限" not in solver_err
+
+    invalid_int = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_solver_error",
+        "optimal_uniqueness_reason": "invalid_integer_solution",
+        "optimal_uniqueness_solver_status": 0,
+    }))
+    assert "违反整数或约束检查" in invalid_int
+    assert "达到检查上限" not in invalid_int

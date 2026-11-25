@@ -38,7 +38,9 @@ _UNIQUENESS = {
     "unique_assignment": "模型最优解唯一（当前 8 级目标下无其他同分分配）",
     "unique_canonical_smiles": "模型最优解仅含等价共振/对称分配（规范 SMILES 唯一）",
     "multiple_optimal_candidates": "模型存在多个等优候选（建议结合键长或量化复核）",
-    "inconclusive_budget": "模型最优解唯一性达到检查上限，未穷尽",
+    "inconclusive_unverified_alternative": "求解器找到其他等优整数分配，但其结构表示未通过校验，无法宣称模型最优解唯一",
+    "inconclusive_budget": "模型最优解唯一性达到检查上限或时间/节点预算，未穷尽",
+    "inconclusive_solver_error": "模型最优解唯一性复求失败，无法判定是否唯一（增加预算通常无效）",
 }
 
 
@@ -58,6 +60,13 @@ def annotation_panel(annotation):
         uniqueness = value.get("optimal_uniqueness")
         if uniqueness in _UNIQUENESS:
             note = _UNIQUENESS[uniqueness]
+            if uniqueness == "inconclusive_unverified_alternative" and value.get("unverified_optimal_assignments"):
+                note += f"（未通过校验：{value['unverified_optimal_assignments']} 个）"
+            elif uniqueness == "inconclusive_solver_error":
+                if value.get("optimal_uniqueness_reason") == "invalid_integer_solution":
+                    note += "；返回解违反整数或约束检查"
+                elif value.get("optimal_uniqueness_solver_status") is not None:
+                    note += f"；求解器状态码：{value['optimal_uniqueness_solver_status']}"
             alts = value.get("alternative_candidate_smiles") or []
             if alts:
                 note += f"；示例替代：{', '.join(str(item) for item in alts)}"

@@ -82,7 +82,7 @@ prepare_lewis_annotations(
   RDKit 自由基电子；两者都不能证明真实 CF₂ 的单重态/三重态。
 - 原始 SMILES 定义的显式/隐式氢被保留；无法可靠解析氢数时拒判，不能任意补氢。
 - `optimization_complete` 表示有界模型优化是否完成；`candidate_search_complete=false`
-  表示没有穷举全部可行/次优候选。`optimal_uniqueness` 报告在锁定当前 8 级目标最优值后、有界无好割（最多 8 次额外复求）的等优解唯一性检查结果：`unique_assignment`（模型最优分配唯一）、`unique_canonical_smiles`（仅有等价共振或图对称分配，规范 SMILES 与对称轨道电子分配一致）、`multiple_optimal_candidates`（存在其他等优候选，并在 `alternative_candidate_smiles` 列出示例替代 SMILES，建议结合键长或量化复核）或 `inconclusive_budget`（达到复求次数或时间/节点预算，不影响主候选）。成功返回一个唯一最优模型解仍不证明真实电子态、自旋或化学有效性。
+  表示没有穷举全部可行/次优候选。`optimal_uniqueness` 报告在锁定当前 8 级目标最优值后、有界无好割（最多 8 次额外复求）的等优解唯一性检查结果，同时分开记录已找到的整数分配数（`optimal_assignments_checked`）与未通过表示校验的替代分配数（`unverified_optimal_assignments`）：仅在复求不可行且 `unverified_optimal_assignments=0` 时，才报告 `unique_assignment`（仅 1 组最优分配）或 `unique_canonical_smiles`（多组分配均通过校验且规范 SMILES 与图对称轨道电子分配一致）；找到有效差异候选时报告 `multiple_optimal_candidates` 及示例 `alternative_candidate_smiles`；找到其他整数分配但未能通过表示校验时报告 `inconclusive_unverified_alternative`（不宣称唯一）；达到复求次数或时间/节点预算时报告 `inconclusive_budget`，复求阶段遇到求解器内部错误或非法整数解时报告 `inconclusive_solver_error`（并通过 `optimal_uniqueness_reason` 与 `optimal_uniqueness_solver_status` 单独记录原因，不覆盖主优化状态且保留主候选）。成功返回一个唯一最优模型解仍不证明真实电子态、自旋或化学有效性。
   `candidate_count` 是返回的候选数，不是已穷举的结构数。`candidate_rejected` 只说明返回的
   这个候选未通过表示检查，不意味着模型内其他候选全部不成立。
 - 超时或节点截断不采用中途解。低频、自由基、离子、不支持或未找到候选都不会自动删除物种。

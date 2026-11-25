@@ -121,6 +121,7 @@ def method_metadata() -> dict:
             "optimal_uniqueness_policy": {
                 "scope": "equal_optimal_objectives_only",
                 "max_extra_assignments": _MAX_OPTIMAL_UNIQUENESS_CHECKS,
+                "failure_separation": "budget_vs_solver_error_vs_unverified_alternative",
                 "claim": "model_optimum_tie_check_not_exhaustive_electronic_search",
             }}
 
@@ -455,7 +456,25 @@ def _check_optimal_uniqueness(
     cut_ubs: list[float] = []
     current_values = primary_values
     checked = 1
+    unverified = 0
+    last_solver_status: int | None = None
     zero_obj = np.zeros(total_width)
+
+    def _outcome(
+        status: str,
+        reason: str,
+        *,
+        alternatives: list[str] | None = None,
+    ) -> dict:
+        return {
+            "optimal_uniqueness": status,
+            "optimal_uniqueness_reason": reason,
+            "optimal_uniqueness_solver_status": last_solver_status,
+            "alternative_candidate_smiles": alternatives or [],
+            "optimal_assignments_checked": checked,
+            "unverified_optimal_assignments": unverified,
+            "solver_nodes_used": used_nodes,
+        }
 
     for _ in range(_MAX_OPTIMAL_UNIQUENESS_CHECKS):
         row, ub = _cut_row(current_values)
@@ -463,12 +482,7 @@ def _check_optimal_uniqueness(
         cut_ubs.append(float(ub))
         remaining = deadline - time.monotonic()
         if remaining <= 0 or used_nodes >= options.max_nodes:
-            return {
-                "optimal_uniqueness": "inconclusive_budget",
-                "alternative_candidate_smiles": [],
-                "optimal_assignments_checked": checked,
-                "solver_nodes_used": used_nodes,
-            }
+            return _outcome("inconclusive_budget", "solver_budget")
         all_matrix = np.vstack((ext_matrix, np.asarray(cut_rows)))
         all_lb = np.concatenate((ext_rhs, np.full(len(cut_ubs), -np.inf)))
         all_ub = np.concatenate((ext_rhs, np.asarray(cut_ubs)))
@@ -480,50 +494,37 @@ def _check_optimal_uniqueness(
             options={"time_limit": remaining, "node_limit": options.max_nodes - used_nodes, "mip_rel_gap": 0.0},
         )
         used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
+        last_solver_status = int(result.status)
         if result.status == 2:
-            return {
-                "optimal_uniqueness": "unique_assignment" if checked == 1 else "unique_canonical_smiles",
-                "alternative_candidate_smiles": [],
-                "optimal_assignments_checked": checked,
-                "solver_nodes_used": used_nodes,
-            }
+            if unverified > 0:
+                return _outcome("inconclusive_unverified_alternative", "alternative_representation_rejected")
+            if checked == 1:
+                return _outcome("unique_assignment", "no_other_optimal_assignment")
+            return _outcome("unique_canonical_smiles", "equivalent_optimal_assignments_only")
+        if result.status == 1:
+            return _outcome("inconclusive_budget", "solver_budget")
         if result.status != 0 or result.x is None:
-            return {
-                "optimal_uniqueness": "inconclusive_budget",
-                "alternative_candidate_smiles": [],
-                "optimal_assignments_checked": checked,
-                "solver_nodes_used": used_nodes,
-            }
+            return _outcome("inconclusive_solver_error", "solver_failed")
         alt_values = np.rint(result.x)
         if (not np.allclose(alt_values, result.x, atol=1e-5)
                 or not np.allclose(ext_matrix @ alt_values, ext_rhs)
                 or np.any(np.asarray(cut_rows) @ alt_values > np.asarray(cut_ubs) + 1e-5)
                 or np.any(alt_values < ext_lower) or np.any(alt_values > ext_upper)):
-            return {
-                "optimal_uniqueness": "inconclusive_budget",
-                "alternative_candidate_smiles": [],
-                "optimal_assignments_checked": checked,
-                "solver_nodes_used": used_nodes,
-            }
+            return _outcome("inconclusive_solver_error", "invalid_integer_solution")
         current_values = alt_values
+        checked += 1
         extracted, error = _extract_candidate(graph, states, offsets, alt_values, options, original_key)
         if error is not None:
+            unverified += 1
             continue
-        checked += 1
         alt_smiles = extracted["candidate_smiles"]
         if _signature(alt_smiles, extracted["model_atoms"]) != primary_sig:
-            return {
-                "optimal_uniqueness": "multiple_optimal_candidates",
-                "alternative_candidate_smiles": [alt_smiles] if alt_smiles != primary_smiles else [],
-                "optimal_assignments_checked": checked,
-                "solver_nodes_used": used_nodes,
-            }
-    return {
-        "optimal_uniqueness": "inconclusive_budget",
-        "alternative_candidate_smiles": [],
-        "optimal_assignments_checked": checked,
-        "solver_nodes_used": used_nodes,
-    }
+            return _outcome(
+                "multiple_optimal_candidates",
+                "distinct_optimal_candidate_found",
+                alternatives=[alt_smiles] if alt_smiles != primary_smiles else [],
+            )
+    return _outcome("inconclusive_budget", "extra_assignment_cap")
 
 
 def _solve(graph, options: LewisOptions, seconds: float) -> dict:
@@ -671,8 +672,11 @@ def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
               "original_smiles": smiles, "candidate_smiles": None,
               "candidate_count": 0, "candidate_search_complete": False,
               "optimal_uniqueness": "not_evaluated",
+              "optimal_uniqueness_reason": None,
+              "optimal_uniqueness_solver_status": None,
               "alternative_candidate_smiles": [],
               "optimal_assignments_checked": 0,
+              "unverified_optimal_assignments": 0,
               "optimization_complete": False, "truncated": False,
               "input_graph_id": None, "input_source": input_source,
               "coverage": "selected_representative_only" if miso == 2 else
