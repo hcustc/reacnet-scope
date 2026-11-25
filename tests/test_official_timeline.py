@@ -103,12 +103,26 @@ def write_official_timeline(path: Path, *, copies: int = 1, reverse: bool = Fals
     return path
 
 
-def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(tmp_path):
+@pytest.mark.parametrize("version,descriptors", [
+    ("1.1", ()),
+    ("1.2", ()),
+    ("1.2", ("formula",)),
+    ("1.2", ("ring_system",)),
+    ("1.2", ("formula", "ring_system")),
+])
+def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(tmp_path, version, descriptors):
     upstream = write_official_timeline(tmp_path / "official.timeline.h5")
+    with h5py.File(upstream, "r+") as handle:
+        handle.attrs["schema_version"] = version
+        if "formula" in descriptors:
+            handle.create_dataset("species/formula", data=["C", "O", "CO"], dtype=h5py.string_dtype())
+        if "ring_system" in descriptors:
+            handle.create_dataset("species/ring_system", data=["acyclic"] * 3, dtype=h5py.string_dtype())
     fork = write_timeline(tmp_path / "fork.timeline.h5", schema_version="2")
     evidence = []
-    for path in (upstream, fork):
+    for path, expected_version in ((upstream, version), (fork, "2")):
         selection = select_timed_evidence(timeline_file=str(path))
+        assert selection.schema_version == expected_version
         with NativeHdf5EvidenceAdapter(selection) as adapter:
             evidence.append(adapter.transition(0, None))
             assert adapter.uses_exact_transition_evidence
@@ -117,15 +131,56 @@ def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(t
     assert evidence[0].after_molecules[0].bond_ids == ("0-1-1",)
 
 
-def test_selection_and_resource_estimates_do_not_scan_official_payload(tmp_path, monkeypatch):
+@pytest.mark.parametrize("field", ["formula", "ring_system"])
+@pytest.mark.parametrize("mode", ["length", "int_dtype", "fixed_string", "ndim", "group"])
+def test_invalid_optional_descriptor_contract(tmp_path, field, mode):
     path = write_official_timeline(tmp_path / "test.timeline.h5")
+    with h5py.File(path, "r+") as handle:
+        handle.attrs["schema_version"] = "1.2"
+        if mode == "length":
+            handle.create_dataset(f"species/{field}", data=["one"], dtype=h5py.string_dtype())
+        elif mode == "int_dtype":
+            handle.create_dataset(f"species/{field}", data=[1, 2, 3], dtype="<i8")
+        elif mode == "fixed_string":
+            handle.create_dataset(f"species/{field}", data=np.asarray([b"C", b"O", b"CO"], dtype="S4"))
+        elif mode == "ndim":
+            handle.create_dataset(f"species/{field}", data=[["C"], ["O"], ["CO"]], dtype=h5py.string_dtype())
+        else:
+            handle.create_group(f"species/{field}")
+    with pytest.raises(TimedEvidenceDataError, match=f"incompatible column species/{field}") as caught:
+        select_timed_evidence(timeline_file=str(path))
+    assert caught.value.state == "incompatible"
+
+
+@pytest.mark.parametrize("field", ["formula", "ring_system"])
+def test_empty_optional_descriptor_is_rejected_before_publication(tmp_path, monkeypatch, field):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    path = write_official_timeline(tmp_path / "test.timeline.h5")
+    with h5py.File(path, "r+") as handle:
+        handle.attrs["schema_version"] = "1.2"
+        handle.create_dataset(f"species/{field}", data=["C", "", "CO"], dtype=h5py.string_dtype())
+    assert select_timed_evidence(timeline_file=str(path)).schema_version == "1.2"
+    with pytest.raises(TimedEvidenceDataError, match=f"empty value in species/{field}") as caught:
+        EVENT_EVIDENCE_STORE.build(str(path))
+    assert caught.value.state == "incompatible"
+    assert EVENT_EVIDENCE_STORE.status(str(path))["state"] != "ready"
+
+
+@pytest.mark.parametrize("version", ["1.1", "1.2"])
+def test_selection_and_resource_estimates_do_not_scan_official_payload(tmp_path, monkeypatch, version):
+    path = write_official_timeline(tmp_path / "test.timeline.h5")
+    if version == "1.2":
+        with h5py.File(path, "r+") as handle:
+            handle.attrs["schema_version"] = "1.2"
+            handle.create_dataset("species/formula", data=["C", "O", "CO"], dtype=h5py.string_dtype())
+            handle.create_dataset("species/ring_system", data=["acyclic"] * 3, dtype=h5py.string_dtype())
 
     def forbidden(*args, **kwargs):
         raise AssertionError("selection must not prepare event blocks")
 
     monkeypatch.setattr(official.OfficialTimelineView, "__init__", forbidden)
     selection = select_timed_evidence(timeline_file=str(path))
-    assert selection.schema_version == "1.1"
+    assert selection.schema_version == version
     assert selection.frame_count == 2
     assert timed_evidence.native_membership_bytes(selection) == 16
 
@@ -153,7 +208,7 @@ def test_bounded_normalization_without_optional_full_array_caches(tmp_path, monk
 
 
 @pytest.mark.parametrize("attribute,value,state", [
-    ("schema_version", "1.2", "incompatible"),
+    ("schema_version", "1.3", "incompatible"),
     ("status", "incomplete", "incomplete"),
     ("format", "another-format", "incompatible"),
     ("capabilities", '[]', "incompatible"),

@@ -118,10 +118,10 @@ Path Verification 和 Species Fate Analysis 不挂载独立 Dash 页面；公共
 完整的信息架构与功能归属见[设计基准第 10 节](docs/software-design-baseline.md#10-dash-信息架构与会话)；
 设计决策的有效状态见 [ADR 索引](docs/adr/README.md)。
 
-ReacNetGenerator 官方 schema `1.1` 和既有 fork schema `1`/`2` 的
+ReacNetGenerator 官方 schema `1.1`、`1.2` 和既有 fork schema `1`/`2` 的
 `.timeline.h5` 会被自动识别；这两套版本编号属于各自的格式契约。其中
 Reaction Evidence 是事件检索所需能力，Molecular Evidence 是原子、键、帧与
-timestep 的增强证据。官方 `1.1` 与 fork `2` 的逐事件 Transition Evidence
+timestep 的增强证据。官方 `1.1`、`1.2` 与 fork `2` 的逐事件 Transition Evidence
 会被直接用于索引，无需重建完整的帧—原子成员矩阵。适配只读原始文件，统一字典
 ID、分子定义与键端点列，并在离线准备阶段检查聚合计数和逐事件证据的一致性。
 目前仍仅支持单输入来源的 timeline；多来源和未知版本会明确报告不支持。
@@ -234,7 +234,7 @@ CLI 默认在事件两侧各取 3 帧。指定 `--window-mode plateau` 可根据
 指定 `--qc-manifest` 可核对两个确切端点的各参与分子原子覆盖，包括共同反应物
 和离去碎片。`--lammps-input input.lammps` 可提供输入脚本中明确的单位信息。
 
-Scope 可直接读取 RNG 1.1 `timeline.h5` 的 `configuration.parameters` 中保存的
+Scope 可直接读取 RNG 1.1 / 1.2 `timeline.h5` 的 `configuration.parameters` 中保存的
 物理单位。已明确输入或在 Dataset Workspace 确认的单位优先，其次使用 HDF5
 元数据，最后使用提供的 LAMMPS 输入。自动时间换算需要明确的步长、时间单位和
 LAMMPS 源步号。旧文件缺少单位时可沿用现有设置，或继续输出原始步号。

@@ -1,4 +1,4 @@
-"""Read-only normalization of the upstream RNG 1.1 timeline contract.
+"""Read-only normalization of the upstream RNG 1.1 and 1.2 timeline contracts.
 
 Only the timed-evidence adapter uses this module. Selection inspects metadata;
 offline adapter preparation derives transition blocks in bounded reads. No
@@ -20,6 +20,8 @@ import numpy as np
 
 from .rng_events import MoleculeRow, net_reaction_key
 
+OFFICIAL_TIMELINE_SCHEMAS = frozenset({"1.1", "1.2"})
+_OPTIONAL_SPECIES_COLUMNS = ("species/formula", "species/ring_system")
 BLOCK_ROWS = 65_536
 _PS_PER_UNIT = {"fs": 1e-3, "ps": 1.0, "ns": 1e3}
 _LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
@@ -27,7 +29,7 @@ _LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
 
 @dataclass(frozen=True)
 class TimelinePhysicalUnits:
-    """Caller-supplied units from RNG's schema 1.1 configuration."""
+    """Caller-supplied units from the RNG timeline configuration."""
 
     timestep_value: float | None
     time_unit: str | None
@@ -52,7 +54,7 @@ class TimelinePhysicalUnits:
 
 class OfficialTimelineError(ValueError):
     def __init__(self, message: str, *, state: str = "incompatible") -> None:
-        super().__init__(f"timeline HDF5 1.1: {message}")
+        super().__init__(f"official timeline HDF5: {message}")
         self.state = state
 
 
@@ -83,7 +85,8 @@ def _physical_units(parameters: dict[str, Any]) -> TimelinePhysicalUnits | None:
 
 def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalUnits | None]:
     """Validate metadata/column alignment without scanning payload tables."""
-    if _text(handle.attrs.get("schema_version", "")) != "1.1":
+    version = _text(handle.attrs.get("schema_version", ""))
+    if version not in OFFICIAL_TIMELINE_SCHEMAS:
         raise OfficialTimelineError("unsupported schema version")
     if _text(handle.attrs.get("format", "")) != "reacnetgenerator-timeline":
         raise OfficialTimelineError("unexpected format")
@@ -114,8 +117,10 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
 
     def column(name: str, *, text: bool = False, size: int | None = None) -> int:
         value = handle.get(name)
-        if not isinstance(value, h5py.Dataset):
+        if value is None:
             raise OfficialTimelineError(f"missing dataset {name}", state="incomplete")
+        if not isinstance(value, h5py.Dataset):
+            raise OfficialTimelineError(f"incompatible column {name}")
         string = h5py.check_string_dtype(value.dtype)
         valid_type = (
             string is not None and string.encoding == "utf-8" and string.length is None
@@ -137,7 +142,11 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
     column("frames/source_frame", size=frames)
     column("atoms/type")
     column("atoms/type_name", text=True)
-    column("species/name", text=True)
+    species = column("species/name", text=True)
+    if version == "1.2":
+        for path in _OPTIONAL_SPECIES_COLUMNS:
+            if path in handle:
+                column(path, text=True, size=species)
     molecules = column("molecules/species_id")
     atoms = column("molecules/atom_index")
     bonds = column("molecules/bond_order")
@@ -269,6 +278,13 @@ class OfficialTimelineView:
                 raise OfficialTimelineError("invalid frame source references")
             frame_offset += len(sources)
         species_count = len(self.raw["species/name"])
+        if _text(self.raw.attrs.get("schema_version", "")) == "1.2":
+            for path in _OPTIONAL_SPECIES_COLUMNS:
+                if path in self.raw:
+                    dataset = self.raw[path].asstr()
+                    for start in range(0, species_count, BLOCK_ROWS):
+                        if any(not value for value in dataset[start:start + BLOCK_ROWS]):
+                            raise OfficialTimelineError(f"empty value in {path}")
         for (ids,) in self._chunks("molecules/species_id"):
             if np.any(ids < 0) or np.any(ids >= species_count):
                 raise OfficialTimelineError("unknown molecule species")
