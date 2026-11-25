@@ -745,12 +745,9 @@ def cmd_trace_skeleton(args: argparse.Namespace) -> int:
     try:
         dataset = discover_dataset(args.case, args.base)
         atoms = _parse_atom_id_spec(args.atoms)
-        timestep_ps = args.timestep_ps
         lammps_units = None
         if str(args.lammps_input or "").strip():
             lammps_units = parse_lammps_input_units(args.lammps_input)
-            if timestep_ps is None:
-                timestep_ps = lammps_units.get("timestep_ps")
         report = trace_skeleton_lineage(
             dataset,
             anchor_atom_ids=atoms,
@@ -759,7 +756,8 @@ def cmd_trace_skeleton(args: argparse.Namespace) -> int:
             start_frame=args.start_frame,
             end_frame=args.end_frame,
             min_anchor_overlap=args.min_anchor_overlap,
-            timestep_ps=timestep_ps,
+            timestep_ps=args.timestep_ps,
+            lammps_units=lammps_units,
         )
         if lammps_units is not None:
             report["lammps_input_units"] = lammps_units
@@ -814,6 +812,7 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
         if str(args.type_map or "").strip():
             atom_type_map = load_type_element_map(dataset["trajectory"])
             atom_type_map.update(explicit_mapping)
+        lammps_units = parse_lammps_input_units(args.lammps_input) if str(args.lammps_input or "").strip() else None
         viewer = svc.build_rng_event_visualization(
             dataset,
             event,
@@ -823,10 +822,8 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
             max_environment_atoms=0,
             atom_type_map=atom_type_map,
             persist_type_map=False,
+            lammps_units=lammps_units,
         )
-        lammps_units = None
-        if str(args.lammps_input or "").strip():
-            lammps_units = parse_lammps_input_units(args.lammps_input)
         audit = audit_event_geometry(viewer)
         qc_manifest = build_qc_manifest(
             viewer, scope="participants", atom_type_map=atom_type_map, charge=args.charge
@@ -839,6 +836,7 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
                     "primary_source": selection.primary_file,
                     "source_kind": selection.kind,
                     "lammps_input_units": lammps_units,
+                    "physical_unit_sources": viewer["meta"].get("physical_unit_sources", {}),
                 }
             ),
         }
@@ -972,6 +970,8 @@ def cmd_export_event(args: argparse.Namespace) -> int:
             if args.before_frames is not None or args.after_frames is not None:
                 raise ValueError("Use --before-frames and --after-frames with --window-mode fixed.")
             plateau_args["plateau_window"] = find_event_plateau_window(dataset, event)
+        lammps_input = str(getattr(args, "lammps_input", "") or "").strip()
+        lammps_units = parse_lammps_input_units(lammps_input) if lammps_input else None
         viewer = svc.build_rng_event_visualization(
             dataset,
             event,
@@ -981,17 +981,9 @@ def cmd_export_event(args: argparse.Namespace) -> int:
             max_environment_atoms=args.max_environment_atoms,
             atom_type_map=atom_type_map,
             persist_type_map=False,
+            lammps_units=lammps_units,
             **plateau_args,
         )
-        lammps_units = None
-        if str(getattr(args, "lammps_input", "") or "").strip():
-            lammps_units = parse_lammps_input_units(args.lammps_input)
-            meta = dict(viewer.get("meta") or {})
-            if meta.get("timestep_ps") is None and lammps_units.get("timestep_ps") is not None:
-                meta["timestep_ps"] = lammps_units["timestep_ps"]
-            if not meta.get("coordinate_length_unit") and lammps_units.get("coordinate_length_unit"):
-                meta["coordinate_length_unit"] = lammps_units["coordinate_length_unit"]
-            viewer = {**dict(viewer), "meta": meta}
         provenance = collect_runtime_provenance(
             extra={
                 "primary_source": selection.primary_file,

@@ -16,7 +16,7 @@ from reacnet_scope.event_index import EVENT_EVIDENCE_STORE
 from reacnet_scope.indexes import TRAJECTORY_INDEX_STORE
 from reacnet_scope.datasets import discover_dataset_candidates
 from reacnet_scope.prepare import discover_dataset
-from reacnet_scope.trajectory import save_linked_trajectory
+from reacnet_scope.trajectory import resolve_trajectory_units, save_linked_trajectory, save_timestep_ps
 from reacnet_scope.timed_evidence import (
     NativeHdf5EvidenceAdapter, TimedEvidenceDataError, select_timed_evidence,
 )
@@ -25,7 +25,7 @@ from tests.test_event_export_cli import _frame
 from tests.test_timed_evidence import write_legacy_evidence, write_timeline
 
 
-def write_official_timeline(path: Path, *, copies: int = 1, reverse: bool = False) -> Path:
+def write_official_timeline(path: Path, *, copies: int = 1, reverse: bool = False, parameters=None) -> Path:
     """Independent upstream 1.1 fixture: C + O -> CO, optionally back later."""
     strings = h5py.string_dtype("utf-8")
     frames = 5 if reverse else 2
@@ -34,7 +34,7 @@ def write_official_timeline(path: Path, *, copies: int = 1, reverse: bool = Fals
             "format": "reacnetgenerator-timeline", "schema_version": "1.1",
             "status": "complete", "rng_version": "test", "created_utc": "2026-01-01T00:00:00Z",
             "capabilities": json.dumps(["molecule_ranges", "reaction_events", "transition_evidence"]),
-            "configuration": json.dumps({"parameters": {"runHMM": False, "stepinterval": 1},
+            "configuration": json.dumps({"parameters": {"runHMM": False, "stepinterval": 1, **(parameters or {})},
                                          "explicit_parameters": []}),
             "atom_index_convention": "zero-based RNG canonical atom order",
             "molecule_range_basis": "observed signal",
@@ -301,7 +301,8 @@ def test_event_ids_are_independent_of_upstream_or_fork_storage(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("output_directory", [False, True])
-def test_official_events_export_matching_trajectory_and_dft_geometry(tmp_path, monkeypatch, output_directory):
+@pytest.mark.parametrize("with_units", [False, True])
+def test_official_events_export_matching_trajectory_and_dft_geometry(tmp_path, monkeypatch, output_directory, with_units):
     monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
     trajectory = tmp_path / "run.lammpstrj"
     trajectory.write_text(_frame(0) + _frame(10))
@@ -309,7 +310,11 @@ def test_official_events_export_matching_trajectory_and_dft_geometry(tmp_path, m
     case.mkdir(exist_ok=True)
     reaction = case / "reactionabcd" if output_directory else Path(f"{trajectory}.reactionabcd")
     reaction.write_text("1 [C]+[O]->[C][O]\n")
-    path = write_official_timeline(case / "timeline.h5" if output_directory else Path(f"{trajectory}.timeline.h5"))
+    metadata = {"timestep_value": 2.0, "time_unit": "fs", "length_unit": "angstrom", "inputfiletype": "dump"}
+    path = write_official_timeline(
+        case / "timeline.h5" if output_directory else Path(f"{trajectory}.timeline.h5"),
+        parameters=metadata if with_units else None,
+    )
     if output_directory:
         save_linked_trajectory(str(path), str(trajectory))
     EVENT_EVIDENCE_STORE.build(str(path))
@@ -317,7 +322,7 @@ def test_official_events_export_matching_trajectory_and_dft_geometry(tmp_path, m
     row = EVENT_EVIDENCE_STORE.query_events(str(path), "", "[C]+[O]->[C][O]", limit=1)["rows"][0]
     for command, extra in (
         ("export-event", ["--before-frames", "0", "--after-frames", "0"]),
-        ("export-dft-geometry", ["--source-unit", "angstrom", "--state", "reactants=0,1",
+        ("export-dft-geometry", [*([] if with_units else ["--source-unit", "angstrom"]), "--state", "reactants=0,1",
                                  "--state", "products=0,1", "--confirm-isolated-cluster"]),
     ):
         target = tmp_path / f"{command}.zip"
@@ -328,6 +333,51 @@ def test_official_events_export_matching_trajectory_and_dft_geometry(tmp_path, m
             event = document["event"] if command == "export-event" else document
             assert event["event_id"] == row["event_id"]
             assert any(name.endswith((".xyz", ".extxyz")) for name in archive.namelist())
+            if command == "export-event":
+                assert document["time_axis"]["timestep_ps"] == (0.002 if with_units else None)
+                assert document["frames"][1]["time_ps"] == (0.02 if with_units else None)
+                assert document["coordinate_length_unit"] == ("angstrom" if with_units else None)
+                if with_units:
+                    assert set(document["physical_unit_sources"].values()) == {"timeline_configuration"}
+
+
+@pytest.mark.parametrize(("input_type", "unit", "expected_ps"), [
+    ("bond", "ns", 2000.0), ("dump", "ps", 2.0), ("lammpsdumpfile", "fs", 0.002),
+    ("xyz", "fs", None), ("extxyz", "ps", None), ("dump", None, None),
+])
+def test_timeline_time_conversion_uses_source_steps(tmp_path, input_type, unit, expected_ps):
+    path = write_official_timeline(tmp_path / "case.timeline.h5", parameters={
+        "timestep_value": 2.0, "time_unit": unit, "inputfiletype": input_type,
+    })
+    selected = select_timed_evidence(timeline_file=str(path))
+    assert selected.physical_units.timestep_ps == expected_ps
+    assert services.channel_timestep_ps({"timeline": str(path)}) == expected_ps
+
+
+def test_invalid_timeline_units_fail_at_selection(tmp_path):
+    path = write_official_timeline(tmp_path / "case.timeline.h5", parameters={"timestep_value": True})
+    with pytest.raises(TimedEvidenceDataError, match="timestep_value"):
+        select_timed_evidence(timeline_file=str(path))
+
+
+def test_unit_sources_resolve_each_field_and_keep_explicit_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    path = write_official_timeline(tmp_path / "case.timeline.h5", parameters={
+        "timestep_value": 2.0, "time_unit": "fs", "inputfiletype": "dump",
+    })
+    trajectory = tmp_path / "run.lammpstrj"
+    trajectory.write_text(_frame(0))
+    artifacts = {"timeline": str(path), "trajectory": str(trajectory)}
+    fallback = {"timestep_ps": 0.1, "coordinate_length_unit": "angstrom"}
+    units = resolve_trajectory_units(artifacts, lammps_units=fallback)
+    assert units["timestep_ps"] == 0.002
+    assert units["coordinate_length_unit"] == "angstrom"
+    assert units["physical_unit_sources"] == {
+        "timestep_ps": "timeline_configuration", "coordinate_length_unit": "lammps_input",
+    }
+    save_timestep_ps(str(trajectory), 0.03)
+    assert resolve_trajectory_units(artifacts, lammps_units=fallback)["timestep_ps"] == 0.03
+    assert resolve_trajectory_units(artifacts, lammps_units=fallback, timestep_ps=0.01)["timestep_ps"] == 0.01
 
 
 def test_official_output_directory_discovery_and_explicit_file_collections(tmp_path, monkeypatch):

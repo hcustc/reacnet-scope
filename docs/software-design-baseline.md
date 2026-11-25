@@ -504,6 +504,11 @@ CLI 平台窗以已匹配事件的两侧确切帧和索引中的连续骨架为�
 来源边界。每侧额外读取至多 100 个轨迹帧，记录裁剪。额外帧的参与者键态留空。
 可选 QC manifest 在两侧确切帧分别核对所有记录的参与分子及原子覆盖，并报告缺失伙伴。
 
+RNG 1.1 的 `configuration.parameters` 可提供源步长、时间单位和坐标长度单位。单个
+单位按显式输入、已有数据集确认、HDF5 元数据、LAMMPS 输入依次取值。自动
+时间换算仅用于已知记录真实源步号的 LAMMPS dump/bond 输入。事件包按原值保留
+源轨迹坐标、CSV 距离及长度单位，明确来源的 ExtXYZ 坐标和几何审计距离转换为 Å。
+
 #### 11.8.1 DFT Initial Geometry
 
 - 只接受具有精确 Molecular Evidence 的 `matched` Reaction Occurrence；其他事件失败关闭，不按空间距离或 SMILES 顺序猜参与分子。

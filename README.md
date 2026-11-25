@@ -203,8 +203,8 @@ Type → Element，或显式选择全部原子/指定 Atom IDs。详细边界见
 - `README.txt`：来源、坐标处理、限制和 ASE/OVITO 打开命令。
 
 轨迹页还可单独下载帧 CSV 和键变距离 CSV。只有数据集已经确认
-`timestep → ps` 换算时才写入 `time_ps`；只有坐标长度单位已经确认为 Å 时，距离
-单位才写为 `angstrom`，否则相应单位字段保持空白。距离只针对 RNG 证据中发生
+`timestep → ps` 换算时才写入 `time_ps`。确认的坐标和距离单位会写入 CSV，单位未知时
+相应字段保持空白。距离只针对 RNG 证据中发生
 形成、断裂或键级变化的原子对计算，不据此推断中间帧键级。
 
 元素映射不完整时仍可下载 ZIP 和 LAMMPS 轨迹，仅省略
@@ -227,6 +227,12 @@ CLI 默认在事件两侧各取 3 帧。指定 `--window-mode plateau` 可根据
 
 指定 `--qc-manifest` 可核对两个确切端点的各参与分子原子覆盖，包括共同反应物
 和离去碎片。`--lammps-input input.lammps` 可提供输入脚本中明确的单位信息。
+
+Scope 可直接读取 RNG 1.1 `timeline.h5` 的 `configuration.parameters` 中保存的
+物理单位。已明确输入或在 Dataset Workspace 确认的单位优先，其次使用 HDF5
+元数据，最后使用提供的 LAMMPS 输入。自动时间换算需要明确的步长、时间单位和
+LAMMPS 源步号。旧文件缺少单位时可沿用现有设置，或继续输出原始步号。
+事件包的坐标和距离 CSV 记录源单位，具有已确认长度单位的 ExtXYZ 按 Å 导出。
 
 `trace-skeleton`、`audit-event` 和 `classify-isomers` 的 JSON 结果可合并成单文件
 离线审阅页。页面保留原始 JSON，支持在浏览器中展开查看。

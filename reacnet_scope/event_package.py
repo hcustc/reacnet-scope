@@ -17,6 +17,7 @@ from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .geometry_audit import audit_event_geometry
+from .provenance import angstroms_per_length_unit
 from .trajectory import TrajectoryDependencyError, normalize_type_element_map
 
 
@@ -193,7 +194,7 @@ def event_trajectory_text(
     return "\n".join(chunks) + "\n"
 
 
-def _extxyz_text(frames: list[dict[str, Any]], event_id: str) -> str:
+def _extxyz_text(frames: list[dict[str, Any]], event_id: str, *, scale: float = 1.0) -> str:
     try:
         import numpy as np
         from ase import Atoms
@@ -210,12 +211,12 @@ def _extxyz_text(frames: list[dict[str, Any]], event_id: str) -> str:
         symbols = [str(atom["element"]) for atom in atoms_data]
         positions = [
             [
-                float(atom.get(f"display_{axis}", atom.get(axis, 0.0)))
+                float(atom.get(f"display_{axis}", atom.get(axis, 0.0))) * scale
                 for axis in ("x", "y", "z")
             ]
             for atom in atoms_data
         ]
-        cell = frame.get("cell") or [[0.0, 0.0, 0.0]] * 3
+        cell = np.asarray(frame.get("cell") or [[0.0, 0.0, 0.0]] * 3) * scale
         pbc = frame.get("pbc") or [False, False, False]
         image = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
         image.new_array(
@@ -272,7 +273,7 @@ def _coordinate_length_unit(view: Mapping[str, Any]) -> str:
     value = str(
         (view.get("meta") or {}).get("coordinate_length_unit") or ""
     ).strip().lower()
-    return "angstrom" if value in {"angstrom", "å"} else ""
+    return "angstrom" if value == "å" else value
 
 
 def _csv_json(value: Any) -> str:
@@ -740,7 +741,9 @@ def build_event_package(
         for frame in frames
         for atom in frame["atoms"]
     )
-    extxyz = _extxyz_text(frames, event_id) if complete_elements else ""
+    coordinate_length_unit = _coordinate_length_unit(view)
+    scale = angstroms_per_length_unit(coordinate_length_unit) or 1.0
+    extxyz = _extxyz_text(frames, event_id, scale=scale) if complete_elements else ""
     lammps = event_trajectory_text(
         view,
         scope=normalized_scope,
@@ -760,7 +763,6 @@ def build_event_package(
         timestep_ps = None
     if timestep_ps is not None and timestep_ps <= 0:
         timestep_ps = None
-    coordinate_length_unit = _coordinate_length_unit(view)
     event = dict(view.get("event") or {})
     event.setdefault("event_id", event_id)
     event.setdefault("reaction_smiles", str(meta.get("reaction_smiles") or ""))
@@ -816,7 +818,9 @@ def build_event_package(
                 "ASE-parsed Cartesian source positions before viewer re-centering"
             ),
             "trajectory_extxyz": (
-                "minimum-image, reaction-core-centered viewer positions"
+                "minimum-image, reaction-core-centered viewer positions converted to angstrom"
+                if complete_elements and scale != 1.0
+                else "minimum-image, reaction-core-centered viewer positions"
                 if complete_elements
                 else "omitted: incomplete element mapping"
             ),
@@ -824,6 +828,8 @@ def build_event_package(
         "type_element_map": mapping,
         "extxyz_included": complete_elements,
     }
+    if "physical_unit_sources" in meta:
+        document["physical_unit_sources"] = _json_safe(meta["physical_unit_sources"])
     if provenance is not None:
         document["provenance"] = _json_safe(provenance)
     payloads: dict[str, bytes] = {

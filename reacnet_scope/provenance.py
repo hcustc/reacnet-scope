@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import subprocess
 from collections.abc import Mapping
 from functools import lru_cache
@@ -22,6 +23,18 @@ _LAMMPS_UNITS: dict[str, tuple[str | None, float | None, str | None]] = {
     "cgs": ("s", 1e12, "centimeter"),
     "lj": (None, None, None),
 }
+
+
+def angstroms_per_length_unit(unit: str | None) -> float | None:
+    """Return the Å conversion for a recorded RNG or LAMMPS length unit."""
+    if unit == "bohr":
+        from scipy.constants import angstrom, physical_constants
+
+        return float(physical_constants["Bohr radius"][0] / angstrom)
+    return {
+        "angstrom": 1.0, "å": 1.0, "nm": 10.0, "nanometer": 10.0,
+        "micrometer": 1e4, "centimeter": 1e8, "meter": 1e10,
+    }.get(unit)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -65,7 +78,7 @@ def parse_lammps_input_units(input_path: str | Path) -> dict[str, Any]:
             except ValueError:
                 raw_timestep = None
             else:
-                raw_timestep = parsed if parsed > 0 else None
+                raw_timestep = parsed if math.isfinite(parsed) and parsed > 0 else None
 
     time_unit, ps_factor, length_unit = _LAMMPS_UNITS.get(
         units_style or "", (None, None, None)
@@ -75,6 +88,8 @@ def parse_lammps_input_units(input_path: str | Path) -> dict[str, Any]:
         if raw_timestep is not None and ps_factor is not None
         else None
     )
+    if timestep_ps is not None and (not math.isfinite(timestep_ps) or timestep_ps <= 0):
+        timestep_ps = None
 
     if timestep_ps is not None and length_unit is not None:
         status = "confirmed_from_lammps_input"

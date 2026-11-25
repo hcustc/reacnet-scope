@@ -18,6 +18,8 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .provenance import angstroms_per_length_unit
+
 
 GEOMETRY_AUDIT_SCHEMA = "reacnet-scope/geometry-audit/v1"
 
@@ -91,6 +93,8 @@ def audit_event_geometry(
 ) -> dict[str, Any]:
     """Audit changed bond trajectories in a viewer payload using MIC distances."""
     event_id = str(view.get("event_id") or "")
+    unit = (view.get("meta") or {}).get("coordinate_length_unit")
+    scale = angstroms_per_length_unit(unit) or 1.0
     frames = sorted(
         view.get("frames") or [],
         key=lambda item: int(item.get("frame") or 0),
@@ -153,7 +157,7 @@ def audit_event_geometry(
                 {
                     "frame": int(frame.get("frame") or 0),
                     "bond_state": str(frame.get("bond_state") or ""),
-                    "distance_ang": round(dist, 4),
+                    "distance_ang": round(dist * scale, 4),
                 }
             )
         if len(series) < 2:
