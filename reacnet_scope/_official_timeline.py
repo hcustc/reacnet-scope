@@ -18,6 +18,7 @@ from typing import Any, Iterator, Sequence
 import h5py
 import numpy as np
 
+from .formula import ELEMENT_SYMBOLS
 from .rng_events import MoleculeRow, net_reaction_key
 
 OFFICIAL_TIMELINE_SCHEMAS = frozenset({"1.1", "1.2"})
@@ -112,14 +113,12 @@ def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
     if not valid:
         raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
     if "pair_break" in hysteresis:
-        from .formula import ELEMENT_SYMBOLS
-
         pairs = hysteresis["pair_break"]
         if kind in ("bond", "lammpsbondfile") or not isinstance(pairs, dict) or not pairs:
             raise OfficialTimelineError("invalid bond_hysteresis pair_break configuration")
         seen = set()
         for name, value in pairs.items():
-            elements = name.split("-")
+            elements = name.split("-") if isinstance(name, str) else []
             if len(elements) != 2 or not all(e in ELEMENT_SYMBOLS for e in elements):
                 raise OfficialTimelineError("invalid bond_hysteresis element pair")
             key = tuple(sorted(elements))

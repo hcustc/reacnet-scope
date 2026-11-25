@@ -167,26 +167,64 @@ def test_hysteresis_source(tmp_path, version, kind, hmm, form, break_threshold, 
         assert exc.value.state == "incompatible"
 
 
-@pytest.mark.parametrize(("kind", "pairs", "valid"), [
-    ("dump", {"H-H": 1.75, "C-O": 1.30}, True),
-    ("dump", {"O-H": 1.6, "H-O": 1.5}, False),
-    ("dump", {"H-Qq": 1.75}, False), ("dump", {"H-H": True}, False),
-    ("dump", {"H-H": float("inf")}, False), ("dump", {"H-H": 1.25}, False),
-    ("dump", {}, False), ("bond", {"H-H": 1.75}, False),
+@pytest.mark.parametrize(("version", "kind", "hmm", "basis", "form", "break_threshold", "pairs", "valid"), [
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": 1.75, "C-O": 1.30}, True),
+    ("1.2", "lammpsdumpfile", False, "hysteresis signal", 1.25, 1.35, {"O-H": 1.6}, True),
+    ("1.2", "extxyz", True, "HMM signal", 1.25, 1.35, {"H-H": 1.75}, True),
+    ("1.1", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"O-H": 1.6, "H-O": 1.5}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-Qq": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-X": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H-H": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"h-h": 1.75}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": True}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": float("inf")}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": float("nan")}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": -1.5}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": 1.25}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": 1.20}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {"H-H": 10**400}, False),
+    ("1.2", "dump", False, "hysteresis signal", 10**20, 10**21, {"H-H": 10**20 + 1}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, {}, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, None, False),
+    ("1.2", "dump", False, "hysteresis signal", 1.25, 1.35, ["H-H"], False),
+    ("1.2", "bond", False, "hysteresis signal", 1.25, 0.5, {"H-H": 1.75}, False),
+    ("1.2", "lammpsbondfile", False, "hysteresis signal", 1.25, 0.5, {"H-H": 1.75}, False),
 ])
-def test_coordinate_pair_break_metadata(tmp_path, kind, pairs, valid):
+def test_coordinate_pair_break_metadata(tmp_path, version, kind, hmm, basis, form, break_threshold, pairs, valid):
     path = write_official_timeline(tmp_path / "test.timeline.h5", parameters={
-        "inputfiletype": kind, "runHMM": False,
-        "bond_hysteresis": {"form": 1.25, "break": 0.5 if kind == "bond" else 1.35, "pair_break": pairs},
+        "inputfiletype": kind, "runHMM": hmm,
+        "bond_hysteresis": {"form": form, "break": break_threshold, "pair_break": pairs},
     })
     with h5py.File(path, "r+") as handle:
-        handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+        handle.attrs.update(schema_version=version, molecule_range_basis=basis)
     if valid:
         with NativeHdf5EvidenceAdapter(select_timed_evidence(timeline_file=str(path))) as adapter:
             assert adapter.transition(0, None).after_molecules[0].bond_ids == ("0-1-1",)
     else:
-        with pytest.raises(TimedEvidenceDataError, match="bond_hysteresis"):
+        with pytest.raises(TimedEvidenceDataError, match="bond_hysteresis") as exc:
             select_timed_evidence(timeline_file=str(path))
+        assert exc.value.state == "incompatible"
+
+
+def test_invalid_pair_break_rejects_non_string_keys_and_never_falls_back_to_csv(tmp_path):
+    with pytest.raises(official.OfficialTimelineError, match="bond_hysteresis"):
+        official._validate_bond_hysteresis("1.2", {
+            "inputfiletype": "dump",
+            "bond_hysteresis": {"form": 1.25, "break": 1.35, "pair_break": {("H", "H"): 1.75}},
+        })
+    base = tmp_path / "run.lammpstrj"
+    reaction, molecules = write_legacy_evidence(base)
+    path = write_official_timeline(Path(f"{base}.timeline.h5"), parameters={
+        "inputfiletype": "dump", "runHMM": False,
+        "bond_hysteresis": {"form": 1.25, "break": 1.35, "pair_break": {"H-H": 1.25}},
+    })
+    with h5py.File(path, "r+") as handle:
+        handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+    with pytest.raises(TimedEvidenceDataError, match="bond_hysteresis") as exc:
+        select_timed_evidence(timeline_file=str(path), reactionevent_file=str(reaction), molecules_file=str(molecules))
+    assert exc.value.state == "incompatible"
 
 
 @pytest.mark.parametrize("hysteresis", [
