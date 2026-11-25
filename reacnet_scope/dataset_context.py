@@ -371,9 +371,6 @@ def current_dataset_from_validation(
             validation.get("analysis_capabilities") or {}
         ),
         "artifacts": dict(validation.get("artifacts") or {}),
-        "selected_smiles": "",
-        "selected_formula": "",
-        "selected_species_source": "",
         "inputs_pending": bool(inputs_pending),
     }
 
@@ -455,9 +452,6 @@ def _revision_changed_context(
         "capabilities": capabilities,
         "readiness": readiness,
         "analysis_capabilities": analysis_capabilities,
-        "selected_smiles": "",
-        "selected_formula": "",
-        "selected_species_source": "",
         "inputs_pending": True,
     }
 

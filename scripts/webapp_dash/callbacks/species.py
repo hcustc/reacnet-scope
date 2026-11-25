@@ -18,7 +18,12 @@ from dash import (
 )
 from dash.exceptions import PreventUpdate
 from reacnet_scope import services as svc
-from scripts.webapp_dash.candidate_workbench import context_key
+from scripts.webapp_dash.dataset_scope import (
+    context_key,
+    current_species_focus,
+    empty_species_focus,
+    species_focus_for,
+)
 from scripts.webapp_dash.navigation import (
     PAGE_LABELS,
     PAGE_WORKSPACES,
@@ -290,7 +295,7 @@ def register(app: Any) -> None:
             "disabled",
             allow_duplicate=True,
         ),
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Output("evolution-targets", "value", allow_duplicate=True),
         Input("species-search-btn", "n_clicks"),
         State("species-query", "value"),
@@ -321,17 +326,9 @@ def register(app: Any) -> None:
             True,
         )
         store = store or {}
-        cleared_store = {
-            **store,
-            "selected_smiles": "",
-            "selected_formula": "",
-            "selected_species_source": "",
-            # This callback executes a fresh species query, so preserved
-            # inputs are no longer pending.  The shared marker callback sets
-            # the same value; keeping them identical avoids a last-writer
-            # race between callbacks triggered by the same button.
-            "inputs_pending": False,
-        }
+        # A fresh query clears the Species focus. ``inputs_pending`` is
+        # cleared by the shared query marker in page_navigation.
+        cleared_focus = empty_species_focus()
         artifacts = store.get("artifacts", {}) or {}
         if not artifacts.get("reaction"):
             return (
@@ -345,7 +342,7 @@ def register(app: Any) -> None:
                 0,
                 "导出全部 CSV",
                 *cleared_structure_results,
-                cleared_store,
+                cleared_focus,
                 "",
             )
         try:
@@ -369,7 +366,7 @@ def register(app: Any) -> None:
                 0,
                 "导出全部 CSV",
                 *cleared_structure_results,
-                cleared_store,
+                cleared_focus,
                 "",
             )
 
@@ -410,7 +407,7 @@ def register(app: Any) -> None:
                 else "导出全部结构 CSV"
             ),
             *cleared_structure_results,
-            cleared_store,
+            cleared_focus,
             "",
         )
 
@@ -426,9 +423,11 @@ def register(app: Any) -> None:
         Input("app-store", "data"),
         Input("species-grid-store", "data"),
         Input({"type": "dataset-bound-operation", "name": "species"}, "data"),
+        Input("species-focus", "data"),
     )
-    def _update_species_state(store, grid_store, running):
+    def _update_species_state(store, grid_store, running, focus):
         store = store or {}
+        focus = current_species_focus(focus, store)
         grid_store = grid_store or {}
         has_reaction_data = bool((store.get("artifacts") or {}).get("reaction"))
         rows = grid_store.get("rows") or []
@@ -449,10 +448,10 @@ def register(app: Any) -> None:
                 ]
             return empty, {"display": "flex"}, {"display": "none"}, {}, True, True, {"display": "none"}, {}
 
-        if (store.get("selected_species_source") == "cross_entry_detail"
-                and store.get("selected_smiles")):
+        if (focus["selected_species_source"] == "cross_entry_detail"
+                and focus["selected_smiles"]):
             # This detail is opened without a Species search result. Keep its
-            # mounted card visible when app-store changes to the local focus.
+            # mounted card visible when the Species focus changes.
             return ([], {"display": "none"}, {"display": "block"},
                     {"display": "none"}, False, not bool(rows),
                     {"display": "none"}, {"display": "block"})
@@ -487,7 +486,7 @@ def register(app: Any) -> None:
         Output("species-structure-grid", "selectedRows"),
         Output("species-structure-grid", "paginationGoTo"),
         Output("species-structure-csv-btn", "disabled"),
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Input("species-grid", "selectedRows"),
         State("species-grid", "rowData"),
         State("species-grid-store", "data"),
@@ -528,13 +527,7 @@ def register(app: Any) -> None:
             )
         row = _selected_table_row(selected_rows, formula_rows)
         formula = str((row or {}).get("formula") or "").strip()
-        current_store = store if isinstance(store, dict) else {}
-        cleared_store = {
-            **current_store,
-            "selected_smiles": "",
-            "selected_formula": "",
-            "selected_species_source": "",
-        }
+        cleared_focus = empty_species_focus()
         if not formula:
             return (
                 {"display": "none"},
@@ -546,7 +539,7 @@ def register(app: Any) -> None:
                 [],
                 0,
                 True,
-                cleared_store,
+                cleared_focus,
             )
         artifacts = ((store or {}).get("artifacts") or {})
         try:
@@ -566,7 +559,7 @@ def register(app: Any) -> None:
                 [],
                 0,
                 True,
-                cleared_store,
+                cleared_focus,
             )
         rows = result.get("rows") or []
         total = int(result.get("n_rows") or len(rows))
@@ -581,7 +574,7 @@ def register(app: Any) -> None:
             [],
             0,
             not bool(rows),
-            cleared_store,
+            cleared_focus,
         )
 
     @app.callback(
@@ -735,7 +728,7 @@ def register(app: Any) -> None:
         Output("detail-empty", "style"),
         Output("species-to-channels-btn", "disabled"),
         Output("species-to-evolution-btn", "disabled"),
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Output("evolution-targets", "value"),
         Input("species-grid", "selectedRows"),
         Input("species-structure-grid", "selectedRows"),
@@ -743,6 +736,7 @@ def register(app: Any) -> None:
         State("species-structure-grid", "rowData"),
         State("app-store", "data"),
         State("species-grid-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
         running=[
             (
@@ -765,8 +759,10 @@ def register(app: Any) -> None:
         structure_rows,
         store,
         grid_store,
+        focus,
     ):
         store = store or {}
+        has_focus = bool(current_species_focus(focus, store)["selected_smiles"])
         is_mass_search = str((grid_store or {}).get("query_kind") or "") == "mass"
         if is_mass_search:
             selected_rows = structure_selected_rows
@@ -779,12 +775,6 @@ def register(app: Any) -> None:
             table_rows = formula_rows or (grid_store or {}).get("rows") or []
             selected_source = "species_grid"
         if not selected_rows or len(selected_rows) == 0:
-            cleared_store = {
-                **store,
-                "selected_smiles": "",
-                "selected_formula": "",
-                "selected_species_source": "",
-            }
             return (
                 {"display": "none"},
                 {"display": "none"},
@@ -792,7 +782,7 @@ def register(app: Any) -> None:
                 {"display": "block"},
                 True,
                 True,
-                cleared_store if store.get("selected_smiles") else no_update,
+                empty_species_focus() if has_focus else no_update,
                 "",
             )
         row = _selected_table_row(selected_rows, table_rows)
@@ -800,12 +790,6 @@ def register(app: Any) -> None:
             raise PreventUpdate
         smiles = (row.get("smiles") or "").strip()
         if not smiles:
-            cleared_store = {
-                **store,
-                "selected_smiles": "",
-                "selected_formula": "",
-                "selected_species_source": "",
-            }
             return (
                 {"display": "none"},
                 {"display": "none"},
@@ -813,7 +797,7 @@ def register(app: Any) -> None:
                 {"display": "block"},
                 True,
                 True,
-                cleared_store if store.get("selected_smiles") else no_update,
+                empty_species_focus() if has_focus else no_update,
                 "",
             )
         artifacts = store.get("artifacts", {}) or {}
@@ -879,12 +863,6 @@ def register(app: Any) -> None:
 
         children = [structure_panel, info_panel]
 
-        updated_store = {
-            **store,
-            "selected_smiles": smiles,
-            "selected_formula": formula,
-            "selected_species_source": selected_source,
-        }
         return (
             {"display": "block"},
             {"display": "grid"},
@@ -892,7 +870,7 @@ def register(app: Any) -> None:
             {"display": "none"},
             False,
             False,
-            updated_store,
+            species_focus_for(store, smiles, formula, selected_source),
             evolution_target,
         )
 
@@ -1019,7 +997,7 @@ def register(app: Any) -> None:
                 "request_id": time.time_ns()}
 
     @app.callback(
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Output("species-workspace-stage", "data", allow_duplicate=True),
         Output("species-results-card", "style", allow_duplicate=True),
         Output("species-results", "style", allow_duplicate=True),
@@ -1039,9 +1017,10 @@ def register(app: Any) -> None:
         Input("species-detail-handoff", "data"),
         State("app-store", "data"),
         State("page-store", "data"),
+        State("species-focus", "data"),
         prevent_initial_call=True,
     )
-    def _open_species_from_another_entry(handoff, dataset, page):
+    def _open_species_from_another_entry(handoff, dataset, page, focus):
         store = dataset or {}
         if not isinstance(handoff, dict) or handoff.get("context") != context_key(store):
             raise PreventUpdate
@@ -1058,17 +1037,14 @@ def register(app: Any) -> None:
             "page": state["page"], "entry": state.get("entry"),
             "compare_sources": state.get("compare_sources"),
             "context": context_key(store),
-            "focus": {key: store.get(key) for key in
-                      ("selected_smiles", "selected_formula", "selected_species_source")},
+            "focus": {key: value for key, value in
+                      current_species_focus(focus, store).items() if key != "context"},
         }
         if isinstance(handoff.get("origin_frame"), dict):
             frame = dict(handoff["origin_frame"])
         stack = [*(state.get("return_stack") or []), frame][-4:]
         back_label = _species_return_label(frame)
-        updated_store = {**store, "selected_smiles": smiles,
-                         "selected_formula": formula,
-                         "selected_species_source": "cross_entry_detail"}
-        return (updated_store, "detail", {"display": "block"}, {"display": "block"},
+        return (species_focus_for(store, smiles, formula, "cross_entry_detail"), "detail", {"display": "block"}, {"display": "block"},
                 {"display": "block"}, {"display": "grid"},
                 _species_detail_children(detail, smiles), {"display": "none"},
                 f"smiles:{smiles}", {"page": "species", "version": 2, "return_stack": stack},
@@ -1090,7 +1066,7 @@ def register(app: Any) -> None:
 
     @app.callback(
         Output("page-store", "data", allow_duplicate=True),
-        Output("app-store", "data", allow_duplicate=True),
+        Output("species-focus", "data", allow_duplicate=True),
         Output("species-detail-handoff", "data", allow_duplicate=True),
         Output("species-query-feedback", "children", allow_duplicate=True),
         Output("navigation-command", "data", allow_duplicate=True),
@@ -1121,9 +1097,12 @@ def register(app: Any) -> None:
                     {"display": "none"}, "← 返回来处", "results", {}, {},
                     {"display": "none"}, {"display": "none"}, {"display": "none"})
         focus = frame.get("focus") or {}
-        updated_store = (no_update if frame.get("independent") else
-                         {**store, **{key: focus.get(key) or "" for key in
-                                      ("selected_smiles", "selected_formula", "selected_species_source")}})
+        restored_focus = (no_update if frame.get("independent") else species_focus_for(
+            store,
+            str(focus.get("selected_smiles") or ""),
+            str(focus.get("selected_formula") or ""),
+            str(focus.get("selected_species_source") or ""),
+        ))
         previous = {"page": resolve_page_id(frame.get("page")), "version": 2}
         if frame.get("entry"):
             previous["entry"] = frame["entry"]
@@ -1131,7 +1110,7 @@ def register(app: Any) -> None:
             previous["compare_sources"] = True
         if stack:
             previous["return_stack"] = stack
-        return previous, updated_store, None, no_update, {
+        return previous, restored_focus, None, no_update, {
             "page": previous["page"], "entry": previous.get("entry"), "token": time.time_ns(),
         }, ({"display": "none"} if previous["page"] != "species" or not stack else {}), (
             _species_return_label(stack[-1]) if stack else "← 返回来处"

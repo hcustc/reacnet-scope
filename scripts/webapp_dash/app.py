@@ -32,6 +32,7 @@ if str(_TOOL_ROOT) not in sys.path:
 from scripts.webapp_dash.background import SpawnDiskcacheManager
 from scripts.webapp_dash.chart_presentation import empty_chart_figure as _empty_chart_figure
 from scripts.webapp_dash import candidate_workbench
+from scripts.webapp_dash.dataset_scope import empty_species_focus
 from scripts.webapp_dash import lineage_explorer
 from scripts.webapp_dash import file_import
 from scripts.webapp_dash import callbacks as cb  # noqa: E402
@@ -3253,6 +3254,9 @@ def build_layout() -> html.Div:
                 data=cb.initial_store(),
             ),
             dcc.Store(id="page-store", storage_type="session", data={"page": START_PAGE, "version": 2}),
+            # The exact Species shown by the Species detail, bound to one
+            # dataset context; kept apart from ``app-store`` (ADR-0030).
+            dcc.Store(id="species-focus", storage_type="memory", data=empty_species_focus()),
             dcc.Store(id="rxn-channel-focus-store", storage_type="memory", data=None),
             dcc.Store(id="dataset-switch-transaction", storage_type="memory", data={}),
             dcc.Store(id="dataset-switch-request", storage_type="memory", data={}),

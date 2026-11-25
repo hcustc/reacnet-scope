@@ -20,6 +20,7 @@ from dash import (
 from dash.exceptions import PreventUpdate
 from reacnet_scope import services as svc
 from scripts.webapp_dash.chart_presentation import empty_chart_figure
+from scripts.webapp_dash.dataset_scope import empty_species_focus
 from scripts.webapp_dash.navigation import (
     PAGE_LABELS,
 )
@@ -37,9 +38,6 @@ def initial_store() -> dict[str, Any]:
         "analysis_capabilities": {},
         "readiness": {},
         "artifacts": {},
-        "selected_smiles": "",
-        "selected_formula": "",
-        "selected_species_source": "",
         "inputs_pending": False,
     }
 
@@ -58,6 +56,7 @@ def _dataset_bound_resets() -> tuple[tuple[Output, Any], ...]:
         reset("cp-event-page", "data", None),
         reset("species-workspace-stage", "data", "results"),
         reset("species-detail-handoff", "data", None),
+        reset("species-focus", "data", empty_species_focus()),
         reset("rxn-grid-store", "data", {"rows": []}),
         reset("reaction-event-request", "data", None),
         reset("reaction-event-response", "data", None),

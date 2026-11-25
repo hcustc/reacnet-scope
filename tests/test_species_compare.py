@@ -15,6 +15,7 @@ from reacnet_scope.composition import SPECIES_COMPOSITION_STORE
 from reacnet_scope.queries import exact_mass_cached
 from reacnet_scope.trajectory import save_timestep_ps
 from scripts.webapp_dash.app import create_app
+from scripts.webapp_dash.dataset_scope import species_focus_for
 
 
 def _source(tmp_path: Path, name: str, lines: list[str]) -> str:
@@ -595,6 +596,12 @@ def test_evolution_handoff_adds_current_source_and_exact_species(tmp_path):
     species_file.write_text("Timestep 0: C 1\n", encoding="utf-8")
     client = create_app().server.test_client()
     remove_pattern = '{"path":["ALL"],"type":"species-compare-remove"}'
+    current = {
+        "label": "current run",
+        "dataset_id": "dataset-1",
+        "source_revision": {"fingerprint": "revision-1"},
+        "artifacts": {"species": str(species_file)},
+    }
 
     result = _post_callback(
         client,
@@ -608,13 +615,8 @@ def test_evolution_handoff_adds_current_source_and_exact_species(tmp_path):
         },
         {
             "species-compare-sources-store": [],
-            "app-store": {
-                "label": "current run",
-                "dataset_id": "dataset-1",
-                "source_revision": {"fingerprint": "revision-1"},
-                "selected_smiles": "C",
-                "artifacts": {"species": str(species_file)},
-            },
+            "app-store": current,
+            "species-focus": species_focus_for(current, "C"),
         },
     )
 
@@ -671,11 +673,12 @@ def test_evolution_comparison_handoff_uses_current_detail_species(tmp_path):
     source = tmp_path / "current.species"
     source.write_text("Timestep 0: C 1 O 2\n")
     dataset = {"dataset_id": "a", "source_revision": {"fingerprint": "r1"},
-               "selected_smiles": "O", "artifacts": {"species": str(source)}}
+               "artifacts": {"species": str(source)}}
     client = create_app().server.test_client()
     result = _post_callback(client, "species-compare-sources-store.data",
                             "evolution-open-compare-btn.n_clicks",
                             {"evolution-open-compare-btn": 1},
-                            {"app-store": dataset, "species-compare-sources-store": []})
+                            {"app-store": dataset, "species-compare-sources-store": [],
+                             "species-focus": species_focus_for(dataset, "O")})
     assert result["species-compare-sources-store"]["data"][0]["target_smiles"] == "O"
     assert "app-store" not in result

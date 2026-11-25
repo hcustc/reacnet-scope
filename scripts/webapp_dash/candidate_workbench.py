@@ -5,7 +5,6 @@ never repopulate a new dataset or replace a more recent search.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import Counter
 from urllib.parse import urlencode
@@ -18,12 +17,7 @@ import dash_bootstrap_components as dbc
 
 from reacnet_scope import services as svc
 from . import candidate_graph
-
-
-def context_key(store):
-    store = store or {}
-    return hashlib.sha256(json.dumps({k: store.get(k) for k in
-        ('dataset_id', 'source_revision', 'artifacts')}, sort_keys=True).encode()).hexdigest()
+from .dataset_scope import context_key, current_species_focus
 
 
 def accept_result(raw, request, store):
@@ -498,14 +492,15 @@ def register_callbacks(app):
                           Input(f'cp-{side}-find', 'n_clicks'), Input(f'cp-{side}-current', 'n_clicks'),
                           Input('cp-context', 'data'), State('app-store', 'data'),
                           State(f'cp-{side}-query', 'value'), State(f'cp-{side}', 'options'),
-                          State(f'cp-{side}', 'value'), prevent_initial_call=True)
-            def find_constraint(_find, _current, _context, store, query, options, selected):
+                          State(f'cp-{side}', 'value'), State('species-focus', 'data'),
+                          prevent_initial_call=True)
+            def find_constraint(_find, _current, _context, store, query, options, selected, focus):
                 if ctx.triggered_id == 'cp-context':
                     return [], [], '', ''
                 selected = list(selected or [])
                 kept = [option for option in options or [] if option['value'] in selected]
                 if ctx.triggered_id == f'cp-{side}-current':
-                    query = str((store or {}).get('selected_smiles') or '').strip()
+                    query = current_species_focus(focus, store)['selected_smiles'].strip()
                 text = str(query or '').strip()
                 if not text:
                     return kept, selected, '请输入分子式或精确 RNG SMILES，或先选定当前物种。', no_update
@@ -788,20 +783,20 @@ def register_callbacks(app):
             return {}, {'display': 'none'}
         return {'display': 'none'}, {'display': 'none'}
 
-    @app.callback(Output('cp-from-species', 'disabled'), Input('app-store', 'data'), prevent_initial_call=True)
-    def shortcuts(store):
-        disabled = not bool((store or {}).get('selected_smiles'))
-        return disabled
+    @app.callback(Output('cp-from-species', 'disabled'), Input('species-focus', 'data'),
+                  Input('app-store', 'data'), prevent_initial_call=True)
+    def shortcuts(focus, store):
+        return not current_species_focus(focus, store)['selected_smiles']
 
     @app.callback(Output('reaction-task-tabs', 'value'), Output('cp-mode', 'value'),
                   Output('cp-species-handoff', 'data'),
                   Input('cp-from-species', 'n_clicks'),
-                  State('app-store', 'data'),
+                  State('app-store', 'data'), State('species-focus', 'data'),
                   prevent_initial_call=True)
-    def open_shortcut(clicks, store):
+    def open_shortcut(clicks, store, focus):
         if ctx.triggered_id != 'cp-from-species' or not clicks:
             raise PreventUpdate
-        species = str((store or {}).get('selected_smiles') or '').strip()
+        species = current_species_focus(focus, store)['selected_smiles'].strip()
         if not species:
             raise PreventUpdate
         return 'candidates', 'explore', {
@@ -822,9 +817,10 @@ def register_callbacks(app):
                           State('app-store', 'data'), State(f'cp-{side}-query', 'value'),
                           State(f'cp-{side}', 'options'), State(f'cp-{side}', 'value'),
                           State(f'cp-{side}-manual-search', 'data'),
+                          State('species-focus', 'data'),
                           prevent_initial_call=True)
             def find(_find, _current, _context, handoff, nav, mode,
-                     store, query, options, value, manual_search):
+                     store, query, options, value, manual_search, species_focus):
                 if ctx.triggered_id == 'cp-context':
                     # Dataset changes must never retain a previous selection.
                     return [], None, '', False, ''
@@ -856,7 +852,7 @@ def register_callbacks(app):
                     return no_update, no_update, no_update, no_update, no_update
                 current = ctx.triggered_id == f'cp-{side}-current'
                 if current:
-                    species = str((store or {}).get('selected_smiles') or '').strip()
+                    species = current_species_focus(species_focus, store)['selected_smiles'].strip()
                     if not species:
                         return [], None, '请先在物种检索中选择一个精确结构。', False, no_update
                     return [species_option(species)], species, '已带入当前选中的精确物种。', False, ''

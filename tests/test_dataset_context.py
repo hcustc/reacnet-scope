@@ -264,8 +264,8 @@ def test_commit_replaces_bound_selection_but_marks_preserved_inputs_pending() ->
 
     current = dataset_context.current_dataset_from_validation(validation)
 
-    assert current["selected_smiles"] == ""
-    assert current["selected_formula"] == ""
+    # The Species focus is browser state kept outside the dataset context.
+    assert not {"selected_smiles", "selected_formula", "selected_species_source"} & set(current)
     assert current["inputs_pending"] is True
     assert current["context_state"] == "active"
 
