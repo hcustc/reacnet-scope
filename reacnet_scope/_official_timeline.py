@@ -83,6 +83,35 @@ def _physical_units(parameters: dict[str, Any]) -> TimelinePhysicalUnits | None:
     )
 
 
+def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
+    hysteresis = parameters.get("bond_hysteresis")
+    if hysteresis is None:
+        return False
+    if version != "1.2" or not isinstance(hysteresis, dict) or set(hysteresis) != {"form", "break"}:
+        raise OfficialTimelineError("invalid bond_hysteresis configuration")
+    parsed: list[float] = []
+    for key in ("form", "break"):
+        value = hysteresis[key]
+        if type(value) not in (int, float):
+            raise OfficialTimelineError("invalid bond_hysteresis thresholds")
+        try:
+            numeric = float(value)
+        except OverflowError as exc:
+            raise OfficialTimelineError("invalid bond_hysteresis thresholds") from exc
+        if not math.isfinite(numeric) or numeric < 0:
+            raise OfficialTimelineError("invalid bond_hysteresis thresholds")
+        parsed.append(numeric)
+    form, break_threshold = parsed
+    kind = parameters.get("inputfiletype")
+    if kind in ("bond", "lammpsbondfile"):
+        valid = form > break_threshold
+    else:
+        valid = kind in ("dump", "lammpsdumpfile", "xyz", "extxyz") and 0 < form < break_threshold
+    if not valid:
+        raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
+    return True
+
+
 def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalUnits | None]:
     """Validate metadata/column alignment without scanning payload tables."""
     version = _text(handle.attrs.get("schema_version", ""))
@@ -107,23 +136,8 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
         raise OfficialTimelineError("invalid explicit parameter names")
     if type(hmm) is not bool or type(stride) is not int or stride < 1:
         raise OfficialTimelineError("invalid HMM or sampling configuration")
-    hysteresis = parameters.get("bond_hysteresis")
-    if hysteresis is not None:
-        if version != "1.2" or not isinstance(hysteresis, dict) or set(hysteresis) != {"form", "break"}:
-            raise OfficialTimelineError("invalid bond_hysteresis configuration")
-        form, break_threshold = hysteresis["form"], hysteresis["break"]
-        if any(type(v) not in (float, int) or not 0 <= v <= sys.float_info.max for v in (form, break_threshold)):
-            raise OfficialTimelineError("invalid bond_hysteresis thresholds")
-        kind = parameters.get("inputfiletype")
-        if kind in ("bond", "lammpsbondfile"):
-            valid = form > break_threshold
-        else:
-            valid = kind in ("dump", "lammpsdumpfile", "xyz", "extxyz") and 0 < form < break_threshold
-        if not valid:
-            raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
-    basis = "hysteresis signal" if hysteresis is not None else "observed signal"
-    if hmm:
-        basis = "HMM signal"
+    has_hysteresis = _validate_bond_hysteresis(version, parameters)
+    basis = "HMM signal" if hmm else ("hysteresis signal" if has_hysteresis else "observed signal")
     if _text(handle.attrs.get("molecule_range_basis", "")) != basis:
         raise OfficialTimelineError("molecule range basis disagrees with configuration")
     if _text(handle.attrs.get("atom_index_convention", "")) != (

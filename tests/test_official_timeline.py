@@ -133,11 +133,24 @@ def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(t
 
 @pytest.mark.parametrize(("version", "kind", "hmm", "form", "break_threshold", "basis", "valid"), [
     ("1.2", "bond", False, .6, .3, "hysteresis signal", True),
+    ("1.2", "bond", False, .6, 0.0, "hysteresis signal", True),
+    ("1.2", "dump", False, 1.2, 1.4, "hysteresis signal", True),
     ("1.2", "extxyz", True, 1.2, 1.4, "HMM signal", True),
     ("1.1", "bond", False, .6, .3, "hysteresis signal", False),
     ("1.2", "dump", False, .6, .3, "hysteresis signal", False),
+    ("1.2", "dump", False, 0.0, 1.4, "hysteresis signal", False),
+    ("1.2", "bond", False, .5, .5, "hysteresis signal", False),
+    ("1.2", "bond", False, .6, -.1, "hysteresis signal", False),
     ("1.2", "bond", False, .6, .3, "observed signal", False),
+    ("1.2", "bond", True, .6, .3, "hysteresis signal", False),
     ("1.2", "bond", False, True, .3, "hysteresis signal", False),
+    ("1.2", None, False, 1.2, 1.4, "hysteresis signal", False),
+    ("1.2", "other", False, 1.2, 1.4, "hysteresis signal", False),
+    ("1.2", "dump", False, 10**20, 10**20 + 1, "hysteresis signal", False),
+    ("1.2", "bond", False, 10**20 + 1, 10**20, "hysteresis signal", False),
+    ("1.2", "bond", False, 10**400, .3, "hysteresis signal", False),
+    ("1.2", "dump", False, 1.2, float("inf"), "hysteresis signal", False),
+    ("1.2", "dump", False, float("nan"), 1.4, "hysteresis signal", False),
 ])
 def test_hysteresis_source(tmp_path, version, kind, hmm, form, break_threshold, basis, valid):
     path = write_official_timeline(tmp_path / "test.timeline.h5", parameters={
@@ -152,6 +165,24 @@ def test_hysteresis_source(tmp_path, version, kind, hmm, form, break_threshold, 
         with pytest.raises(TimedEvidenceDataError) as exc:
             select_timed_evidence(timeline_file=str(path))
         assert exc.value.state == "incompatible"
+
+
+@pytest.mark.parametrize("hysteresis", [
+    [0.6, 0.3],
+    {"form": 0.6},
+    {"form": 0.6, "break": 0.3, "extra": 1},
+    None,
+])
+def test_invalid_hysteresis_configuration_shapes(tmp_path, hysteresis):
+    path = write_official_timeline(tmp_path / "test.timeline.h5", parameters={
+        "inputfiletype": "bond", "runHMM": False,
+        **({} if hysteresis is None else {"bond_hysteresis": hysteresis}),
+    })
+    with h5py.File(path, "r+") as handle:
+        handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+    with pytest.raises(TimedEvidenceDataError) as exc:
+        select_timed_evidence(timeline_file=str(path))
+    assert exc.value.state == "incompatible"
 
 
 @pytest.mark.parametrize("field", ["formula", "ring_system"])
