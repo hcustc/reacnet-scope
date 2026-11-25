@@ -738,7 +738,7 @@ def test_dash_annotation_panel_distinguishes_uniqueness_failure_modes():
     assert "复求失败" in solver_err
     assert "增加预算通常无效" in solver_err
     assert "求解器状态码：4" in solver_err
-    assert "达到检查上限" not in solver_err
+    assert "求解资源上限" not in solver_err
 
     invalid_int = _text(annotation_panel({
         "status": "generated",
@@ -749,15 +749,16 @@ def test_dash_annotation_panel_distinguishes_uniqueness_failure_modes():
         "optimal_uniqueness_solver_status": 0,
     }))
     assert "违反整数或约束检查" in invalid_int
-    assert "达到检查上限" not in invalid_int
+    assert "求解资源上限" not in invalid_int
 
-    budget = _text(annotation_panel({
+    memory_limited = _text(annotation_panel({
         "status": "generated",
         "reason": "ok",
         "candidate_smiles": "[C-]#[O+]",
         "optimal_uniqueness": "inconclusive_budget",
         "optimal_uniqueness_reason": "solver_budget",
         "optimal_uniqueness_solver_status": 4,
+        "optimal_uniqueness_solver_message": "(HiGHS Status 18: Memory limit reached)",
     }))
-    assert "达到检查上限或时间/节点预算" in budget
-    assert "增加预算通常无效" not in budget
+    assert "检查次数或求解资源上限" in memory_limited
+    assert "增加预算通常无效" not in memory_limited

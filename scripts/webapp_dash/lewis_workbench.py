@@ -39,7 +39,7 @@ _UNIQUENESS = {
     "unique_canonical_smiles": "模型最优解仅含等价共振/对称分配（规范 SMILES 唯一）",
     "multiple_optimal_candidates": "模型存在多个等优候选（建议结合键长或量化复核）",
     "inconclusive_unverified_alternative": "求解器找到其他等优整数分配，但其结构表示未通过校验，无法宣称模型最优解唯一",
-    "inconclusive_budget": "模型最优解唯一性达到检查上限或时间/节点预算，未穷尽",
+    "inconclusive_budget": "已达到检查次数或求解资源上限，未能判定模型最优解是否唯一",
     "inconclusive_solver_error": "模型最优解唯一性复求失败，无法判定是否唯一（增加预算通常无效）",
 }
 
