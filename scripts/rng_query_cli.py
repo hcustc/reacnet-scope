@@ -802,6 +802,16 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
             reactionevent_file=dataset["reactionevent"],
             molecules_file=dataset["molecules"],
         )
+        timeline_identity = (
+            (
+                os.stat(selection.timeline_file).st_dev,
+                os.stat(selection.timeline_file).st_ino,
+                os.stat(selection.timeline_file).st_size,
+                os.stat(selection.timeline_file).st_mtime_ns,
+            )
+            if selection.timeline_file
+            else None
+        )
         event = EVENT_EVIDENCE_STORE.get_event(
             selection.primary_file,
             selection.molecules_file,
@@ -824,6 +834,18 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
             persist_type_map=False,
             lammps_units=lammps_units,
         )
+        if timeline_identity is not None:
+            current_stat = os.stat(selection.timeline_file)
+            if (
+                current_stat.st_dev,
+                current_stat.st_ino,
+                current_stat.st_size,
+                current_stat.st_mtime_ns,
+            ) != timeline_identity:
+                raise IndexStaleError(
+                    "Timeline source changed during audit; rebuild the event index and retry."
+                )
+        bond_detection = viewer["meta"].get("bond_detection")
         audit = audit_event_geometry(viewer)
         qc_manifest = build_qc_manifest(
             viewer, scope="participants", atom_type_map=atom_type_map, charge=args.charge
@@ -837,6 +859,11 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
                     "source_kind": selection.kind,
                     "lammps_input_units": lammps_units,
                     "physical_unit_sources": viewer["meta"].get("physical_unit_sources", {}),
+                    **(
+                        {"bond_detection": bond_detection}
+                        if bond_detection is not None
+                        else {}
+                    ),
                 }
             ),
         }
@@ -954,6 +981,16 @@ def cmd_export_event(args: argparse.Namespace) -> int:
             reactionevent_file=dataset["reactionevent"],
             molecules_file=dataset["molecules"],
         )
+        timeline_identity = (
+            (
+                os.stat(selection.timeline_file).st_dev,
+                os.stat(selection.timeline_file).st_ino,
+                os.stat(selection.timeline_file).st_size,
+                os.stat(selection.timeline_file).st_mtime_ns,
+            )
+            if selection.timeline_file
+            else None
+        )
         event = EVENT_EVIDENCE_STORE.get_event(
             selection.primary_file,
             selection.molecules_file,
@@ -984,11 +1021,28 @@ def cmd_export_event(args: argparse.Namespace) -> int:
             lammps_units=lammps_units,
             **plateau_args,
         )
+        if timeline_identity is not None:
+            current_stat = os.stat(selection.timeline_file)
+            if (
+                current_stat.st_dev,
+                current_stat.st_ino,
+                current_stat.st_size,
+                current_stat.st_mtime_ns,
+            ) != timeline_identity:
+                raise IndexStaleError(
+                    "Timeline source changed during export; rebuild the event index and retry."
+                )
+        bond_detection = viewer["meta"].get("bond_detection")
         provenance = collect_runtime_provenance(
             extra={
                 "primary_source": selection.primary_file,
                 "source_kind": selection.kind,
                 "lammps_input_units": lammps_units,
+                **(
+                    {"bond_detection": bond_detection}
+                    if bond_detection is not None
+                    else {}
+                ),
             }
         )
         package = build_event_package(

@@ -1542,7 +1542,9 @@ def build_rng_event_visualization(
     lammps_units: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an ASE/PBC-aware local view from indexed trajectory frames."""
+    from .event_index import event_evidence_index_path
     from .provenance import angstroms_per_length_unit
+    from .timed_evidence import read_timeline_bond_detection
     from .trajectory import resolve_trajectory_units
 
     trajectory_file = (artifacts.get("trajectory") or "").strip()
@@ -1639,7 +1641,42 @@ def build_rng_event_visualization(
             type_map_path = dataset_settings_path(trajectory_file)
             if not type_map_path.is_file():
                 type_map_path = None
+        timeline_file = str(artifacts.get("timeline") or "").strip()
+        timeline_stat_before = None
+        if timeline_file and Path(timeline_file).is_file():
+            timeline_stat_before = os.stat(timeline_file)
+            if event_evidence_index_path(os.path.abspath(timeline_file)).is_file():
+                try:
+                    EVENT_EVIDENCE_STORE.open_required(timeline_file, "")
+                except IndexStaleError as exc:
+                    raise ServiceError(str(exc), reason="event_index_stale") from exc
+                except IndexInvalidError as exc:
+                    raise ServiceError(str(exc), reason="event_index_invalid") from exc
         units = resolve_trajectory_units(artifacts, lammps_units=lammps_units)
+        bond_detection = read_timeline_bond_detection(timeline_file)
+        if timeline_stat_before is not None:
+            try:
+                timeline_stat_after = os.stat(timeline_file)
+            except FileNotFoundError as exc:
+                raise ServiceError(
+                    "Timeline source disappeared while building event view.",
+                    reason="event_index_stale",
+                ) from exc
+            if (
+                timeline_stat_after.st_dev,
+                timeline_stat_after.st_ino,
+                timeline_stat_after.st_size,
+                timeline_stat_after.st_mtime_ns,
+            ) != (
+                timeline_stat_before.st_dev,
+                timeline_stat_before.st_ino,
+                timeline_stat_before.st_size,
+                timeline_stat_before.st_mtime_ns,
+            ):
+                raise ServiceError(
+                    "Timeline source changed while building event view; rebuild or retry.",
+                    reason="event_index_stale",
+                )
         scale = angstroms_per_length_unit(units["coordinate_length_unit"]) or 1.0
 
         parsed_frames: dict[int, dict[str, Any]] = {}
@@ -1861,6 +1898,11 @@ def build_rng_event_visualization(
             "environment": environment,
             "type_element_map": resolved_type_map,
             **units,
+            **(
+                {"bond_detection": bond_detection.as_dict()}
+                if bond_detection is not None
+                else {}
+            ),
             "native_element_column": "element"
             in {
                 str(value).strip().lower()

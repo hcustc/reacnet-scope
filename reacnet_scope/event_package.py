@@ -676,7 +676,8 @@ def build_qc_manifest(
     selected_view = {**dict(view), "frames": frames}
     audit = audit_event_geometry(selected_view)
 
-    return {
+    meta = view.get("meta") or {}
+    manifest: dict[str, Any] = {
         "schema_version": QC_MANIFEST_SCHEMA_VERSION,
         "event_id": str(view.get("event_id") or ""),
         "scope": normalized_scope,
@@ -712,6 +713,9 @@ def build_qc_manifest(
             ],
         },
     }
+    if "bond_detection" in meta:
+        manifest["bond_detection"] = _json_safe(meta["bond_detection"])
+    return manifest
 
 
 def build_event_package(
@@ -830,6 +834,8 @@ def build_event_package(
     }
     if "physical_unit_sources" in meta:
         document["physical_unit_sources"] = _json_safe(meta["physical_unit_sources"])
+    if "bond_detection" in meta:
+        document["bond_detection"] = _json_safe(meta["bond_detection"])
     if provenance is not None:
         document["provenance"] = _json_safe(provenance)
     payloads: dict[str, bytes] = {
