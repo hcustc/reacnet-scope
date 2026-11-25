@@ -1543,6 +1543,7 @@ def build_rng_event_visualization(
 ) -> dict[str, Any]:
     """Build an ASE/PBC-aware local view from indexed trajectory frames."""
     from .provenance import angstroms_per_length_unit
+    from .timed_evidence import read_timeline_bond_detection
     from .trajectory import resolve_trajectory_units
 
     trajectory_file = (artifacts.get("trajectory") or "").strip()
@@ -1640,6 +1641,7 @@ def build_rng_event_visualization(
             if not type_map_path.is_file():
                 type_map_path = None
         units = resolve_trajectory_units(artifacts, lammps_units=lammps_units)
+        bond_detection = read_timeline_bond_detection(str(artifacts.get("timeline") or ""))
         scale = angstroms_per_length_unit(units["coordinate_length_unit"]) or 1.0
 
         parsed_frames: dict[int, dict[str, Any]] = {}
@@ -1861,6 +1863,11 @@ def build_rng_event_visualization(
             "environment": environment,
             "type_element_map": resolved_type_map,
             **units,
+            **(
+                {"bond_detection": bond_detection.as_dict()}
+                if bond_detection is not None
+                else {}
+            ),
             "native_element_column": "element"
             in {
                 str(value).strip().lower()

@@ -582,3 +582,75 @@ def test_official_default_name_does_not_silently_join_another_dataset(tmp_path):
     with pytest.raises(RuntimeError, match="ambiguous"):
         discover_dataset(str(tmp_path))
     assert discover_dataset(str(tmp_path), "timeline.h5")["timeline"] == str(tmp_path / "timeline.h5")
+
+
+def test_hysteresis_and_pair_break_provenance_propagate_to_exports_and_audit(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    trajectory = tmp_path / "run.lammpstrj"
+    trajectory.write_text(_frame(0) + _frame(10))
+    (tmp_path / "run.lammpstrj.reactionabcd").write_text("1 [C]+[O]->[C][O]\n")
+    path = write_official_timeline(
+        Path(f"{trajectory}.timeline.h5"),
+        parameters={
+            "inputfiletype": "dump",
+            "runHMM": False,
+            "timestep_value": 2.0,
+            "time_unit": "fs",
+            "length_unit": "angstrom",
+            "bond_hysteresis": {
+                "form": 1.25,
+                "break": 1.35,
+                "pair_break": {"O-H": 1.6, "H-H": 1.75},
+            },
+        },
+    )
+    with h5py.File(path, "r+") as handle:
+        handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+
+    expected = {
+        "molecule_range_basis": "hysteresis signal",
+        "run_hmm": False,
+        "inputfiletype": "dump",
+        "bond_hysteresis": {
+            "form": 1.25,
+            "break": 1.35,
+            "pair_break": {"H-H": 1.75, "H-O": 1.6},
+        },
+    }
+    selection = select_timed_evidence(timeline_file=str(path))
+    assert selection.bond_detection is not None
+    assert selection.bond_detection.as_dict() == expected
+    assert selection.as_dict()["bond_detection"] == expected
+    assert timed_evidence.read_timeline_bond_detection(str(path)).as_dict() == expected
+
+    EVENT_EVIDENCE_STORE.build(str(path))
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    row = EVENT_EVIDENCE_STORE.query_events(str(path), "", "[C]+[O]->[C][O]", limit=1)["rows"][0]
+
+    target = tmp_path / "event.zip"
+    assert cli.main([
+        "export-event", "--case", str(tmp_path), "--event-id", row["event_id"],
+        "--type-map", "1=C,2=O", "--before-frames", "0", "--after-frames", "0",
+        "--qc-manifest", "--out", str(target),
+    ]) == 0
+    with ZipFile(target) as archive:
+        event_doc = json.loads(archive.read("event.json"))
+        qc_doc = json.loads(archive.read("qc_manifest.json"))
+        assert event_doc["bond_detection"] == expected
+        assert event_doc["provenance"]["bond_detection"] == expected
+        assert qc_doc["bond_detection"] == expected
+
+    audit_path = tmp_path / "audit.json"
+    assert cli.main([
+        "audit-event", "--case", str(tmp_path), "--event-id", row["event_id"],
+        "--type-map", "1=C,2=O", "--before-frames", "0", "--after-frames", "0",
+        "--out-json", str(audit_path),
+    ]) == 0
+    audit_doc = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit_doc["qc_manifest"]["bond_detection"] == expected
+    assert audit_doc["provenance"]["bond_detection"] == expected
+
+    plain_path = write_official_timeline(tmp_path / "plain.timeline.h5")
+    plain_detection = select_timed_evidence(timeline_file=str(plain_path)).bond_detection
+    assert plain_detection is not None
+    assert plain_detection.as_dict() == {"molecule_range_basis": "observed signal", "run_hmm": False}

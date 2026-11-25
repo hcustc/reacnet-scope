@@ -53,6 +53,33 @@ class TimelinePhysicalUnits:
         return {**asdict(self), "timestep_ps": self.timestep_ps}
 
 
+@dataclass(frozen=True)
+class TimelineBondDetection:
+    """Recorded RNG signal basis and optional bond-hysteresis thresholds."""
+
+    molecule_range_basis: str
+    run_hmm: bool
+    inputfiletype: str | None = None
+    bond_hysteresis: dict[str, Any] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "molecule_range_basis": self.molecule_range_basis,
+            "run_hmm": self.run_hmm,
+        }
+        if self.inputfiletype is not None:
+            payload["inputfiletype"] = self.inputfiletype
+        if self.bond_hysteresis is not None:
+            hysteresis: dict[str, Any] = {
+                "form": self.bond_hysteresis["form"],
+                "break": self.bond_hysteresis["break"],
+            }
+            if "pair_break" in self.bond_hysteresis:
+                hysteresis["pair_break"] = dict(sorted(self.bond_hysteresis["pair_break"].items()))
+            payload["bond_hysteresis"] = hysteresis
+        return payload
+
+
 class OfficialTimelineError(ValueError):
     def __init__(self, message: str, *, state: str = "incompatible") -> None:
         super().__init__(f"official timeline HDF5: {message}")
@@ -96,10 +123,10 @@ def _hysteresis_threshold(value: Any) -> float:
     return numeric
 
 
-def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
+def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> dict[str, Any] | None:
     hysteresis = parameters.get("bond_hysteresis")
     if hysteresis is None:
-        return False
+        return None
     if (version != "1.2" or not isinstance(hysteresis, dict)
             or set(hysteresis) not in ({"form", "break"}, {"form", "break", "pair_break"})):
         raise OfficialTimelineError("invalid bond_hysteresis configuration")
@@ -112,23 +139,30 @@ def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
         valid = kind in ("dump", "lammpsdumpfile", "xyz", "extxyz") and 0 < form < break_threshold
     if not valid:
         raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
+    normalized: dict[str, Any] = {"form": form, "break": break_threshold}
     if "pair_break" in hysteresis:
         pairs = hysteresis["pair_break"]
         if kind in ("bond", "lammpsbondfile") or not isinstance(pairs, dict) or not pairs:
             raise OfficialTimelineError("invalid bond_hysteresis pair_break configuration")
         seen = set()
+        pair_break: dict[str, float] = {}
         for name, value in pairs.items():
             elements = name.split("-") if isinstance(name, str) else []
             if len(elements) != 2 or not all(e in ELEMENT_SYMBOLS for e in elements):
                 raise OfficialTimelineError("invalid bond_hysteresis element pair")
             key = tuple(sorted(elements))
-            if key in seen or _hysteresis_threshold(value) <= form:
+            limit = _hysteresis_threshold(value)
+            if key in seen or limit <= form:
                 raise OfficialTimelineError("invalid bond_hysteresis pair_break override")
             seen.add(key)
-    return True
+            pair_break["-".join(key)] = limit
+        normalized["pair_break"] = dict(sorted(pair_break.items()))
+    return normalized
 
 
-def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalUnits | None]:
+def inspect_official_timeline(
+    handle: h5py.File,
+) -> tuple[int, TimelinePhysicalUnits | None, TimelineBondDetection]:
     """Validate metadata/column alignment without scanning payload tables."""
     version = _text(handle.attrs.get("schema_version", ""))
     if version not in OFFICIAL_TIMELINE_SCHEMAS:
@@ -152,14 +186,21 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
         raise OfficialTimelineError("invalid explicit parameter names")
     if type(hmm) is not bool or type(stride) is not int or stride < 1:
         raise OfficialTimelineError("invalid HMM or sampling configuration")
-    has_hysteresis = _validate_bond_hysteresis(version, parameters)
-    basis = "HMM signal" if hmm else ("hysteresis signal" if has_hysteresis else "observed signal")
+    hysteresis = _validate_bond_hysteresis(version, parameters)
+    basis = "HMM signal" if hmm else ("hysteresis signal" if hysteresis is not None else "observed signal")
     if _text(handle.attrs.get("molecule_range_basis", "")) != basis:
         raise OfficialTimelineError("molecule range basis disagrees with configuration")
     if _text(handle.attrs.get("atom_index_convention", "")) != (
         "zero-based RNG canonical atom order"
     ):
         raise OfficialTimelineError("unsupported atom index convention")
+    input_type = parameters.get("inputfiletype")
+    bond_detection = TimelineBondDetection(
+        molecule_range_basis=basis,
+        run_hmm=hmm,
+        inputfiletype=input_type if isinstance(input_type, str) else None,
+        bond_hysteresis=hysteresis,
+    )
 
     def column(name: str, *, text: bool = False, size: int | None = None) -> int:
         value = handle.get(name)
@@ -223,7 +264,7 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
         column(name, size=rows + 1)
         if int(handle[name][0]) != 0 or int(handle[name][-1]) != payload:
             raise OfficialTimelineError(f"invalid endpoints in {name}")
-    return frames, _physical_units(parameters)
+    return frames, _physical_units(parameters), bond_detection
 
 
 class _Column:

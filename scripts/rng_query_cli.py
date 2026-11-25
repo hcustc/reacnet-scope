@@ -837,6 +837,11 @@ def cmd_audit_event(args: argparse.Namespace) -> int:
                     "source_kind": selection.kind,
                     "lammps_input_units": lammps_units,
                     "physical_unit_sources": viewer["meta"].get("physical_unit_sources", {}),
+                    **(
+                        {"bond_detection": selection.bond_detection.as_dict()}
+                        if selection.bond_detection is not None
+                        else {}
+                    ),
                 }
             ),
         }
@@ -989,6 +994,11 @@ def cmd_export_event(args: argparse.Namespace) -> int:
                 "primary_source": selection.primary_file,
                 "source_kind": selection.kind,
                 "lammps_input_units": lammps_units,
+                **(
+                    {"bond_detection": selection.bond_detection.as_dict()}
+                    if selection.bond_detection is not None
+                    else {}
+                ),
             }
         )
         package = build_event_package(
