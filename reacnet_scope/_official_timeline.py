@@ -18,6 +18,7 @@ from typing import Any, Iterator, Sequence
 import h5py
 import numpy as np
 
+from .formula import ELEMENT_SYMBOLS
 from .rng_events import MoleculeRow, net_reaction_key
 
 OFFICIAL_TIMELINE_SCHEMAS = frozenset({"1.1", "1.2"})
@@ -83,25 +84,27 @@ def _physical_units(parameters: dict[str, Any]) -> TimelinePhysicalUnits | None:
     )
 
 
+def _hysteresis_threshold(value: Any) -> float:
+    if type(value) not in (int, float):
+        raise OfficialTimelineError("invalid bond_hysteresis thresholds")
+    try:
+        numeric = float(value)
+    except OverflowError as exc:
+        raise OfficialTimelineError("invalid bond_hysteresis thresholds") from exc
+    if not math.isfinite(numeric) or numeric < 0:
+        raise OfficialTimelineError("invalid bond_hysteresis thresholds")
+    return numeric
+
+
 def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
     hysteresis = parameters.get("bond_hysteresis")
     if hysteresis is None:
         return False
-    if version != "1.2" or not isinstance(hysteresis, dict) or set(hysteresis) != {"form", "break"}:
+    if (version != "1.2" or not isinstance(hysteresis, dict)
+            or set(hysteresis) not in ({"form", "break"}, {"form", "break", "pair_break"})):
         raise OfficialTimelineError("invalid bond_hysteresis configuration")
-    parsed: list[float] = []
-    for key in ("form", "break"):
-        value = hysteresis[key]
-        if type(value) not in (int, float):
-            raise OfficialTimelineError("invalid bond_hysteresis thresholds")
-        try:
-            numeric = float(value)
-        except OverflowError as exc:
-            raise OfficialTimelineError("invalid bond_hysteresis thresholds") from exc
-        if not math.isfinite(numeric) or numeric < 0:
-            raise OfficialTimelineError("invalid bond_hysteresis thresholds")
-        parsed.append(numeric)
-    form, break_threshold = parsed
+    form = _hysteresis_threshold(hysteresis["form"])
+    break_threshold = _hysteresis_threshold(hysteresis["break"])
     kind = parameters.get("inputfiletype")
     if kind in ("bond", "lammpsbondfile"):
         valid = form > break_threshold
@@ -109,6 +112,19 @@ def _validate_bond_hysteresis(version: str, parameters: dict[str, Any]) -> bool:
         valid = kind in ("dump", "lammpsdumpfile", "xyz", "extxyz") and 0 < form < break_threshold
     if not valid:
         raise OfficialTimelineError("bond_hysteresis thresholds disagree with input type")
+    if "pair_break" in hysteresis:
+        pairs = hysteresis["pair_break"]
+        if kind in ("bond", "lammpsbondfile") or not isinstance(pairs, dict) or not pairs:
+            raise OfficialTimelineError("invalid bond_hysteresis pair_break configuration")
+        seen = set()
+        for name, value in pairs.items():
+            elements = name.split("-") if isinstance(name, str) else []
+            if len(elements) != 2 or not all(e in ELEMENT_SYMBOLS for e in elements):
+                raise OfficialTimelineError("invalid bond_hysteresis element pair")
+            key = tuple(sorted(elements))
+            if key in seen or _hysteresis_threshold(value) <= form:
+                raise OfficialTimelineError("invalid bond_hysteresis pair_break override")
+            seen.add(key)
     return True
 
 
