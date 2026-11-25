@@ -284,13 +284,15 @@ Current Dataset、页面和工作流选择属于浏览器会话；索引、任�
   成功序列化或通过 RDKit 检查不证明真实电子态、稳定性、唯一性或化学有效性。
   主候选通过表示校验后，在锁定 8 级目标最优值下执行有界无好割等优解检查（共享单结构时间/节点预算，
   最多 8 次额外复求），分别计数找到的整数分配（`optimal_assignments_checked`）与未通过表示校验的
-  替代分配（`unverified_optimal_assignments`）：仅当复求不可行且未出现任何未验证替代分配时，才可
+  替代分配（`unverified_optimal_assignments`）：仅当底层求解器明确证明复求不可行（例如 HiGHS Status 8
+  `Infeasible`，排除同映射到 SciPy `status=2` 的 `Model error`）且未出现任何未验证替代分配时，才可
   报告 `unique_assignment`（仅 1 组分配）或 `unique_canonical_smiles`（多组分配均通过校验且规范
   SMILES 与图对称轨道电子分配一致）；找到有效差异候选报告 `multiple_optimal_candidates` 与示例
-  `alternative_candidate_smiles`；找到其他整数分配但未能验证其表示时报告
-  `inconclusive_unverified_alternative`（不得误报唯一）；预算/次数受限报告 `inconclusive_budget`，
-  求解器错误或非法整数解报告 `inconclusive_solver_error` 并单独记录 `optimal_uniqueness_reason` 与
-  `optimal_uniqueness_solver_status`，均保留已验证的主候选。
+  `alternative_candidate_smiles`；找到其他整数分配但未能验证其表示（含重读解析失败）时报告
+  `inconclusive_unverified_alternative`（不得误报唯一或丢弃主候选）；预算/次数受限（含节点/时间/迭代/内存上限，
+  如 HiGHS Status 16 `Solution limit reached`）报告 `inconclusive_budget`，求解器错误或非法整数解报告
+  `inconclusive_solver_error` 并单独记录 `optimal_uniqueness_reason`、`optimal_uniqueness_solver_status` 与
+  `optimal_uniqueness_solver_message`，均保留已验证的主候选。
 - v5 禁止卤素正电，负电仅允许 N/O/卤素或只有一个重原子邻居的 C；带电原子须沿
   原连接边一对一匹配异号电荷。中性 C 允许非键合电子的孤对/未配对分配。按带电原子
   缺壳层、小环高阶键、未配对电子、总缺壳层、电荷数、芳香六元环偏好、扩展壳层、

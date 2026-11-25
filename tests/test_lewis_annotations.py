@@ -603,6 +603,79 @@ def test_unverified_alternative_assignment_never_reports_unique(monkeypatch):
     assert propargyl["alternative_candidate_smiles"] == []
 
 
+def test_alternative_smiles_reparse_failure_preserves_primary_candidate(monkeypatch):
+    baseline = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert baseline["optimal_uniqueness"] == "multiple_optimal_candidates"
+    alt_smiles = baseline["alternative_candidate_smiles"][0]
+    original_from_smiles = Chem.MolFromSmiles
+
+    def fail_alternative_parse(smiles, *args, **kwargs):
+        if smiles == alt_smiles:
+            return None
+        return original_from_smiles(smiles, *args, **kwargs)
+
+    monkeypatch.setattr(Chem, "MolFromSmiles", fail_alternative_parse)
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["candidate_smiles"] == baseline["candidate_smiles"]
+    assert propargyl["optimal_uniqueness"] == "inconclusive_unverified_alternative"
+    assert propargyl["optimal_uniqueness_reason"] == "alternative_representation_rejected"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert propargyl["unverified_optimal_assignments"] == 1
+    assert propargyl["alternative_candidate_smiles"] == []
+
+
+def test_highs_model_error_status_2_is_not_treated_as_uniqueness_proof(monkeypatch):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    model_error_msg = "(HiGHS Status 2: model_status is Model error; primal_status is None)"
+
+    def wrapped(objective, *args, **kwargs):
+        if not any(objective):
+            return SimpleNamespace(status=2, message=model_error_msg, x=None, mip_node_count=0)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["candidate_smiles"] is not None
+    assert propargyl["solver_status"] == 0
+    assert propargyl["optimal_uniqueness"] == "inconclusive_solver_error"
+    assert propargyl["optimal_uniqueness_reason"] == "solver_failed"
+    assert propargyl["optimal_uniqueness_solver_status"] == 2
+    assert propargyl["optimal_uniqueness_solver_message"] == model_error_msg
+    assert propargyl["optimal_assignments_checked"] == 1
+    assert propargyl["unverified_optimal_assignments"] == 0
+
+
+def test_highs_solution_limit_status_4_is_classified_as_budget_limit(monkeypatch):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    node_limit_msg = (
+        "The HiGHS status code was not recognized. "
+        "(HiGHS Status 16: model_status is Solution limit reached; primal_status is None)"
+    )
+
+    def wrapped(objective, *args, **kwargs):
+        if not any(objective):
+            return SimpleNamespace(status=4, message=node_limit_msg, x=None, mip_node_count=1)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["candidate_smiles"] == "[C-]#[O+]"
+    assert co["solver_status"] == 0
+    assert co["optimal_uniqueness"] == "inconclusive_budget"
+    assert co["optimal_uniqueness_reason"] == "solver_budget"
+    assert co["optimal_uniqueness_solver_status"] == 4
+    assert co["optimal_uniqueness_solver_message"] == node_limit_msg
+    assert co["optimal_assignments_checked"] == 1
+    assert co["unverified_optimal_assignments"] == 0
+
+
 @pytest.mark.parametrize(("mode", "expected_reason", "expected_status"), [
     ("solver_status_4", "solver_failed", 4),
     ("invalid_integer", "invalid_integer_solution", 0),
@@ -677,3 +750,14 @@ def test_dash_annotation_panel_distinguishes_uniqueness_failure_modes():
     }))
     assert "违反整数或约束检查" in invalid_int
     assert "达到检查上限" not in invalid_int
+
+    budget = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_budget",
+        "optimal_uniqueness_reason": "solver_budget",
+        "optimal_uniqueness_solver_status": 4,
+    }))
+    assert "达到检查上限或时间/节点预算" in budget
+    assert "增加预算通常无效" not in budget

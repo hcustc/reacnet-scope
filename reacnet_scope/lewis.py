@@ -11,6 +11,7 @@ import hashlib
 from itertools import combinations
 import json
 import math
+import re
 import time
 
 from importlib import metadata
@@ -121,6 +122,7 @@ def method_metadata() -> dict:
             "optimal_uniqueness_policy": {
                 "scope": "equal_optimal_objectives_only",
                 "max_extra_assignments": _MAX_OPTIMAL_UNIQUENESS_CHECKS,
+                "infeasibility_proof": "proven_infeasible_only",
                 "failure_separation": "budget_vs_solver_error_vs_unverified_alternative",
                 "claim": "model_optimum_tie_check_not_exhaustive_electronic_search",
             }}
@@ -181,6 +183,8 @@ def _complete_graph(smiles: str, max_atoms: int):
     # Reparse the canonical connectivity for stable solver ordering, including
     # when the original representative differs only in bond orders.
     ordered = Chem.MolFromSmiles(canonical, params)
+    if ordered is None:
+        raise _InputProblem("input_incomplete", "smiles_parse_failed")
     ordered.UpdatePropertyCache(strict=False)
     return ordered, canonical, charges
 
@@ -213,6 +217,55 @@ def _atom_states(atom):
     return sorted(states)
 
 
+_HIGHS_STATUS_RE = re.compile(r"\(HiGHS Status (\d+):")
+_HIGHS_INFEASIBLE = 8
+# HiGHS status codes that represent resource/budget exhaustion:
+# 13 = TimeLimit, 14 = IterationLimit, 16 = SolutionLimit (returned for mip_max_nodes), 18 = MemoryLimit.
+_HIGHS_BUDGET_STATUSES = frozenset({13, 14, 16, 18})
+
+
+def _highs_status_code(result) -> int | None:
+    match = _HIGHS_STATUS_RE.search(str(getattr(result, "message", "") or ""))
+    return int(match.group(1)) if match else None
+
+
+def _is_proven_infeasible(result) -> bool:
+    """Confirm the solver proved infeasibility rather than reporting a model error.
+
+    SciPy's HiGHS wrapper maps both kInfeasible (8) and kModelError (2) to
+    status == 2; only an explicit infeasibility proof may certify uniqueness
+    or model infeasibility.
+    """
+    if int(result.status) != 2:
+        return False
+    highs_code = _highs_status_code(result)
+    if highs_code is not None:
+        return highs_code == _HIGHS_INFEASIBLE
+    message = str(getattr(result, "message", "") or "").lower()
+    return "infeasible" in message and "model error" not in message and "unbounded" not in message
+
+
+def _is_budget_limit(result) -> bool:
+    """Detect time, iteration, node/solution, or memory limit termination.
+
+    In SciPy/HiGHS, hitting ``node_limit`` (``mip_max_nodes``) returns SciPy
+    status == 4 with HiGHS status 16 (Solution limit reached) rather than
+    status == 1.
+    """
+    status = int(result.status)
+    if status == 1:
+        return True
+    if status != 4:
+        return False
+    highs_code = _highs_status_code(result)
+    if highs_code is not None:
+        return highs_code in _HIGHS_BUDGET_STATUSES
+    message = str(getattr(result, "message", "") or "").lower()
+    return any(token in message for token in (
+        "time limit", "iteration limit", "node limit", "solution limit", "memory limit",
+    ))
+
+
 def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
     """Prove each integer objective optimal before considering the next one.
 
@@ -240,11 +293,11 @@ def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
         used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
         fields.update(solver_status=int(result.status), solver_message=str(result.message),
                       solver_nodes_used=used_nodes)
-        if result.status == 1:
+        if _is_budget_limit(result):
             return None, {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
                           "reason": "solver_budget", "truncated": True}, matrix, rhs, deadline, used_nodes
         if result.status != 0 or result.x is None:
-            infeasible = result.status == 2 and not scores
+            infeasible = _is_proven_infeasible(result) and not scores
             return None, {**fields, "optimization_complete": infeasible,
                           "status": "no_candidate" if infeasible else "solver_failed",
                           "reason": "model_infeasible" if infeasible else "solver_failed"}, matrix, rhs, deadline, used_nodes
@@ -376,7 +429,10 @@ def _extract_candidate(graph, states, offsets, values, options: LewisOptions, or
         return None, {"status": "solver_failed", "reason": "candidate_serialization_failed"}
     # Sanitization is performed on a copy and may standardize charges/bonds.
     # Verify its output still has exactly the supplied atoms and connectivity.
-    _candidate_graph, candidate_key, candidate_charges = _complete_graph(candidate, options.max_atoms)
+    try:
+        _candidate_graph, candidate_key, candidate_charges = _complete_graph(candidate, options.max_atoms)
+    except (_InputProblem, ValueError, RuntimeError):
+        return None, {"status": "candidate_rejected", "reason": "candidate_rdkit_check_failed"}
     if candidate_key != original_key or any(candidate_charges):
         return None, {"status": "solver_failed", "reason": "candidate_graph_or_charge_changed"}
     return {
@@ -458,6 +514,7 @@ def _check_optimal_uniqueness(
     checked = 1
     unverified = 0
     last_solver_status: int | None = None
+    last_solver_message: str | None = None
     zero_obj = np.zeros(total_width)
 
     def _outcome(
@@ -470,6 +527,7 @@ def _check_optimal_uniqueness(
             "optimal_uniqueness": status,
             "optimal_uniqueness_reason": reason,
             "optimal_uniqueness_solver_status": last_solver_status,
+            "optimal_uniqueness_solver_message": last_solver_message,
             "alternative_candidate_smiles": alternatives or [],
             "optimal_assignments_checked": checked,
             "unverified_optimal_assignments": unverified,
@@ -495,13 +553,14 @@ def _check_optimal_uniqueness(
         )
         used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
         last_solver_status = int(result.status)
-        if result.status == 2:
+        last_solver_message = str(getattr(result, "message", "") or "") or None
+        if _is_proven_infeasible(result):
             if unverified > 0:
                 return _outcome("inconclusive_unverified_alternative", "alternative_representation_rejected")
             if checked == 1:
                 return _outcome("unique_assignment", "no_other_optimal_assignment")
             return _outcome("unique_canonical_smiles", "equivalent_optimal_assignments_only")
-        if result.status == 1:
+        if _is_budget_limit(result):
             return _outcome("inconclusive_budget", "solver_budget")
         if result.status != 0 or result.x is None:
             return _outcome("inconclusive_solver_error", "solver_failed")
@@ -674,6 +733,7 @@ def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
               "optimal_uniqueness": "not_evaluated",
               "optimal_uniqueness_reason": None,
               "optimal_uniqueness_solver_status": None,
+              "optimal_uniqueness_solver_message": None,
               "alternative_candidate_smiles": [],
               "optimal_assignments_checked": 0,
               "unverified_optimal_assignments": 0,
