@@ -21,6 +21,7 @@ import numpy as np
 from .rng_events import MoleculeRow, net_reaction_key
 
 OFFICIAL_TIMELINE_SCHEMAS = frozenset({"1.1", "1.2"})
+_OPTIONAL_SPECIES_COLUMNS = ("species/formula", "species/ring_system")
 BLOCK_ROWS = 65_536
 _PS_PER_UNIT = {"fs": 1e-3, "ps": 1.0, "ns": 1e3}
 _LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
@@ -116,8 +117,10 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
 
     def column(name: str, *, text: bool = False, size: int | None = None) -> int:
         value = handle.get(name)
-        if not isinstance(value, h5py.Dataset):
+        if value is None:
             raise OfficialTimelineError(f"missing dataset {name}", state="incomplete")
+        if not isinstance(value, h5py.Dataset):
+            raise OfficialTimelineError(f"incompatible column {name}")
         string = h5py.check_string_dtype(value.dtype)
         valid_type = (
             string is not None and string.encoding == "utf-8" and string.length is None
@@ -141,7 +144,7 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
     column("atoms/type_name", text=True)
     species = column("species/name", text=True)
     if version == "1.2":
-        for path in ("species/formula", "species/ring_system"):
+        for path in _OPTIONAL_SPECIES_COLUMNS:
             if path in handle:
                 column(path, text=True, size=species)
     molecules = column("molecules/species_id")
@@ -275,6 +278,13 @@ class OfficialTimelineView:
                 raise OfficialTimelineError("invalid frame source references")
             frame_offset += len(sources)
         species_count = len(self.raw["species/name"])
+        if _text(self.raw.attrs.get("schema_version", "")) == "1.2":
+            for path in _OPTIONAL_SPECIES_COLUMNS:
+                if path in self.raw:
+                    dataset = self.raw[path].asstr()
+                    for start in range(0, species_count, BLOCK_ROWS):
+                        if any(not value for value in dataset[start:start + BLOCK_ROWS]):
+                            raise OfficialTimelineError(f"empty value in {path}")
         for (ids,) in self._chunks("molecules/species_id"):
             if np.any(ids < 0) or np.any(ids >= species_count):
                 raise OfficialTimelineError("unknown molecule species")
