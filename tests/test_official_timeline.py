@@ -167,6 +167,28 @@ def test_hysteresis_source(tmp_path, version, kind, hmm, form, break_threshold, 
         assert exc.value.state == "incompatible"
 
 
+@pytest.mark.parametrize(("kind", "pairs", "valid"), [
+    ("dump", {"H-H": 1.75, "C-O": 1.30}, True),
+    ("dump", {"O-H": 1.6, "H-O": 1.5}, False),
+    ("dump", {"H-Qq": 1.75}, False), ("dump", {"H-H": True}, False),
+    ("dump", {"H-H": float("inf")}, False), ("dump", {"H-H": 1.25}, False),
+    ("dump", {}, False), ("bond", {"H-H": 1.75}, False),
+])
+def test_coordinate_pair_break_metadata(tmp_path, kind, pairs, valid):
+    path = write_official_timeline(tmp_path / "test.timeline.h5", parameters={
+        "inputfiletype": kind, "runHMM": False,
+        "bond_hysteresis": {"form": 1.25, "break": 0.5 if kind == "bond" else 1.35, "pair_break": pairs},
+    })
+    with h5py.File(path, "r+") as handle:
+        handle.attrs.update(schema_version="1.2", molecule_range_basis="hysteresis signal")
+    if valid:
+        with NativeHdf5EvidenceAdapter(select_timed_evidence(timeline_file=str(path))) as adapter:
+            assert adapter.transition(0, None).after_molecules[0].bond_ids == ("0-1-1",)
+    else:
+        with pytest.raises(TimedEvidenceDataError, match="bond_hysteresis"):
+            select_timed_evidence(timeline_file=str(path))
+
+
 @pytest.mark.parametrize("hysteresis", [
     [0.6, 0.3],
     {"form": 0.6},
