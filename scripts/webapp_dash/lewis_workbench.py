@@ -34,6 +34,16 @@ _REASONS = {"neutral_assumption_required": "需明确选择中性片段假设",
             "species_not_in_prepared_catalogue": "该物种不在已准备的代表结构目录中"}
 
 
+_UNIQUENESS = {
+    "unique_assignment": "模型最优解唯一（当前 8 级目标下无其他同分分配）",
+    "unique_canonical_smiles": "模型最优解仅含等价共振/对称分配（规范 SMILES 唯一）",
+    "multiple_optimal_candidates": "模型存在多个等优候选（建议结合键长或量化复核）",
+    "inconclusive_unverified_alternative": "求解器找到其他等优整数分配，但其结构表示未通过校验，无法宣称模型最优解唯一",
+    "inconclusive_budget": "已达到检查次数或求解资源上限，未能判定模型最优解是否唯一",
+    "inconclusive_solver_error": "模型最优解唯一性复求失败，无法判定是否唯一（增加预算通常无效）",
+}
+
+
 def reason_label(value):
     if str(value).startswith("unsupported_elements:"):
         return "不支持的元素：" + value.split(":", 1)[1]
@@ -47,6 +57,20 @@ def annotation_panel(annotation):
     candidate = value.get("candidate_smiles")
     if candidate:
         children.append(html.Code(candidate, style={"overflowWrap": "anywhere"}))
+        uniqueness = value.get("optimal_uniqueness")
+        if uniqueness in _UNIQUENESS:
+            note = _UNIQUENESS[uniqueness]
+            if uniqueness == "inconclusive_unverified_alternative" and value.get("unverified_optimal_assignments"):
+                note += f"（未通过校验：{value['unverified_optimal_assignments']} 个）"
+            elif uniqueness == "inconclusive_solver_error":
+                if value.get("optimal_uniqueness_reason") == "invalid_integer_solution":
+                    note += "；返回解违反整数或约束检查"
+                elif value.get("optimal_uniqueness_solver_status") is not None:
+                    note += f"；求解器状态码：{value['optimal_uniqueness_solver_status']}"
+            alts = value.get("alternative_candidate_smiles") or []
+            if alts:
+                note += f"；示例替代：{', '.join(str(item) for item in alts)}"
+            children.append(html.P(note, className="small mb-1"))
         image = svc.render_lewis_svg(value)
         if image.get("ok"):
             children.append(html.Iframe(srcDoc=image["svg"], title="Lewis 候选结构",

@@ -519,3 +519,246 @@ def test_method_metadata_records_solver_version_without_importing_it():
     from reacnet_scope.lewis import method_metadata
 
     assert method_metadata()["scipy_version"] == scipy.__version__
+
+
+def test_optimal_uniqueness_distinguishes_unique_resonance_and_tied_alternatives():
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["optimal_uniqueness"] == "unique_assignment"
+    assert co["alternative_candidate_smiles"] == []
+    assert co["optimal_assignments_checked"] == 1
+    assert co["candidate_search_complete"] is False
+
+    h2co = annotate_lewis("[H][C]([H])[O]", options=neutral())
+    assert h2co["status"] == "generated"
+    assert h2co["candidate_smiles"] == "[H]C([H])=O"
+    assert h2co["optimal_uniqueness"] == "unique_assignment"
+    assert h2co["optimal_assignments_checked"] == 1
+
+    # 2-chlorophenol has two Kekule ring assignments that serialize to one canonical SMILES.
+    cp2 = annotate_lewis("[H][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", options=neutral())
+    assert cp2["status"] == "generated"
+    assert cp2["optimal_uniqueness"] == "unique_canonical_smiles"
+    assert cp2["alternative_candidate_smiles"] == []
+    assert cp2["optimal_assignments_checked"] == 2
+
+    # Symmetric allyl radical has two mirror-image radical assignments with identical canonical SMILES.
+    allyl = annotate_lewis("[H][C]([H])[C]([H])[C]([H])[H]", options=neutral())
+    assert allyl["status"] == "generated"
+    assert allyl["optimal_uniqueness"] == "unique_canonical_smiles"
+    assert allyl["alternative_candidate_smiles"] == []
+    assert allyl["optimal_assignments_checked"] == 2
+
+    # Propargyl radical has two distinct tied optimal candidates (propargyl vs allenyl) on all 8 objectives.
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["optimal_uniqueness"] == "multiple_optimal_candidates"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert len(propargyl["alternative_candidate_smiles"]) == 1
+    assert {propargyl["candidate_smiles"], propargyl["alternative_candidate_smiles"][0]} == {
+        "[H]C#C[C]([H])[H]", "[H][C]=C=C([H])[H]",
+    }
+
+    # 1-chloroallyl radical has two distinct asymmetric radical positions tied on all 8 objectives.
+    cl_allyl = annotate_lewis("[H][C]([Cl])[C]([H])[C]([H])[H]", options=neutral())
+    assert cl_allyl["status"] == "generated"
+    assert cl_allyl["optimal_uniqueness"] == "multiple_optimal_candidates"
+    assert cl_allyl["optimal_assignments_checked"] == 2
+    assert len(cl_allyl["alternative_candidate_smiles"]) == 1
+    assert cl_allyl["alternative_candidate_smiles"][0] != cl_allyl["candidate_smiles"]
+
+
+def test_optimal_uniqueness_budget_exhaustion_preserves_primary_candidate(monkeypatch):
+    from reacnet_scope import lewis
+
+    monkeypatch.setattr(lewis, "_MAX_OPTIMAL_UNIQUENESS_CHECKS", 1)
+    # 2-chlorophenol needs 2 extra checks (Kekule B + infeasibility proof); cap=1 must stay inconclusive.
+    cp2 = annotate_lewis("[H][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", options=neutral())
+    assert cp2["status"] == "generated"
+    assert cp2["candidate_smiles"] is not None
+    assert cp2["optimal_uniqueness"] == "inconclusive_budget"
+    assert cp2["optimal_uniqueness_reason"] == "extra_assignment_cap"
+    assert cp2["alternative_candidate_smiles"] == []
+    assert cp2["optimal_assignments_checked"] == 2
+    assert cp2["unverified_optimal_assignments"] == 0
+
+
+def test_unverified_alternative_assignment_never_reports_unique(monkeypatch):
+    original_sanitize = Chem.SanitizeMol
+    calls = {"count": 0}
+
+    def fail_second_sanitize(mol, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            return Chem.SanitizeFlags.SANITIZE_PROPERTIES
+        return original_sanitize(mol, *args, **kwargs)
+
+    monkeypatch.setattr(Chem, "SanitizeMol", fail_second_sanitize)
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["optimal_uniqueness"] == "inconclusive_unverified_alternative"
+    assert propargyl["optimal_uniqueness_reason"] == "alternative_representation_rejected"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert propargyl["unverified_optimal_assignments"] == 1
+    assert propargyl["alternative_candidate_smiles"] == []
+
+
+def test_alternative_smiles_reparse_failure_preserves_primary_candidate(monkeypatch):
+    baseline = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert baseline["optimal_uniqueness"] == "multiple_optimal_candidates"
+    alt_smiles = baseline["alternative_candidate_smiles"][0]
+    original_from_smiles = Chem.MolFromSmiles
+
+    def fail_alternative_parse(smiles, *args, **kwargs):
+        if smiles == alt_smiles:
+            return None
+        return original_from_smiles(smiles, *args, **kwargs)
+
+    monkeypatch.setattr(Chem, "MolFromSmiles", fail_alternative_parse)
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["candidate_smiles"] == baseline["candidate_smiles"]
+    assert propargyl["optimal_uniqueness"] == "inconclusive_unverified_alternative"
+    assert propargyl["optimal_uniqueness_reason"] == "alternative_representation_rejected"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert propargyl["unverified_optimal_assignments"] == 1
+    assert propargyl["alternative_candidate_smiles"] == []
+
+
+def test_highs_model_error_status_2_is_not_treated_as_uniqueness_proof(monkeypatch):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    model_error_msg = "(HiGHS Status 2: model_status is Model error; primal_status is None)"
+
+    def wrapped(objective, *args, **kwargs):
+        if not any(objective):
+            return SimpleNamespace(status=2, message=model_error_msg, x=None, mip_node_count=0)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["candidate_smiles"] is not None
+    assert propargyl["solver_status"] == 0
+    assert propargyl["optimal_uniqueness"] == "inconclusive_solver_error"
+    assert propargyl["optimal_uniqueness_reason"] == "solver_failed"
+    assert propargyl["optimal_uniqueness_solver_status"] == 2
+    assert propargyl["optimal_uniqueness_solver_message"] == model_error_msg
+    assert propargyl["optimal_assignments_checked"] == 1
+    assert propargyl["unverified_optimal_assignments"] == 0
+
+
+def test_highs_solution_limit_status_4_is_classified_as_budget_limit(monkeypatch):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    node_limit_msg = (
+        "The HiGHS status code was not recognized. "
+        "(HiGHS Status 16: model_status is Solution limit reached; primal_status is None)"
+    )
+
+    def wrapped(objective, *args, **kwargs):
+        if not any(objective):
+            return SimpleNamespace(status=4, message=node_limit_msg, x=None, mip_node_count=1)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["candidate_smiles"] == "[C-]#[O+]"
+    assert co["solver_status"] == 0
+    assert co["optimal_uniqueness"] == "inconclusive_budget"
+    assert co["optimal_uniqueness_reason"] == "solver_budget"
+    assert co["optimal_uniqueness_solver_status"] == 4
+    assert co["optimal_uniqueness_solver_message"] == node_limit_msg
+    assert co["optimal_assignments_checked"] == 1
+    assert co["unverified_optimal_assignments"] == 0
+
+
+@pytest.mark.parametrize(("mode", "expected_reason", "expected_status"), [
+    ("solver_status_4", "solver_failed", 4),
+    ("invalid_integer", "invalid_integer_solution", 0),
+])
+def test_uniqueness_solver_failure_is_separated_from_budget_limit(monkeypatch, mode, expected_reason, expected_status):
+    from reacnet_scope import lewis
+
+    bounds, constraint, solve = lewis.require_solver()
+    def wrapped(objective, *args, **kwargs):
+        # The uniqueness pass uses an all-zero objective vector after all 8 stages finish.
+        if not any(objective):
+            if mode == "solver_status_4":
+                return SimpleNamespace(status=4, message="Internal solver failure", x=None, mip_node_count=0)
+            return SimpleNamespace(status=0, message="Optimal", x=[0.5] * len(objective), mip_node_count=0)
+        return solve(objective, *args, **kwargs)
+
+    monkeypatch.setattr(lewis, "require_solver", lambda: (bounds, constraint, wrapped))
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["candidate_smiles"] == "[C-]#[O+]"
+    assert co["solver_status"] == 0
+    assert co["optimal_uniqueness"] == "inconclusive_solver_error"
+    assert co["optimal_uniqueness_reason"] == expected_reason
+    assert co["optimal_uniqueness_solver_status"] == expected_status
+    assert co["optimal_assignments_checked"] == 1
+    assert co["unverified_optimal_assignments"] == 0
+
+
+def test_dash_annotation_panel_distinguishes_uniqueness_failure_modes():
+    from scripts.webapp_dash.lewis_workbench import annotation_panel
+
+    def _text(node) -> str:
+        if node is None:
+            return ""
+        if isinstance(node, str):
+            return node
+        if isinstance(node, list):
+            return " ".join(_text(item) for item in node)
+        children = getattr(node, "children", None)
+        return _text(children)
+
+    unverified = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[H]C#C[C]([H])[H]",
+        "optimal_uniqueness": "inconclusive_unverified_alternative",
+        "unverified_optimal_assignments": 1,
+    }))
+    assert "未通过校验" in unverified
+    assert "无法宣称模型最优解唯一" in unverified
+
+    solver_err = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_solver_error",
+        "optimal_uniqueness_reason": "solver_failed",
+        "optimal_uniqueness_solver_status": 4,
+    }))
+    assert "复求失败" in solver_err
+    assert "增加预算通常无效" in solver_err
+    assert "求解器状态码：4" in solver_err
+    assert "求解资源上限" not in solver_err
+
+    invalid_int = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_solver_error",
+        "optimal_uniqueness_reason": "invalid_integer_solution",
+        "optimal_uniqueness_solver_status": 0,
+    }))
+    assert "违反整数或约束检查" in invalid_int
+    assert "求解资源上限" not in invalid_int
+
+    memory_limited = _text(annotation_panel({
+        "status": "generated",
+        "reason": "ok",
+        "candidate_smiles": "[C-]#[O+]",
+        "optimal_uniqueness": "inconclusive_budget",
+        "optimal_uniqueness_reason": "solver_budget",
+        "optimal_uniqueness_solver_status": 4,
+        "optimal_uniqueness_solver_message": "(HiGHS Status 18: Memory limit reached)",
+    }))
+    assert "检查次数或求解资源上限" in memory_limited
+    assert "增加预算通常无效" not in memory_limited
