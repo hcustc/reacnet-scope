@@ -19,6 +19,37 @@ VERSION = '2'
 FRAME_BLOCK = 262144
 
 
+def has_state_atom_lookup(connection) -> bool:
+    """Return whether both atom-lookup tables exist in the lineage index."""
+    return (
+        connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('lineage_state_ids', 'lineage_atom_states')"
+        ).fetchone()[0]
+        == 2
+    )
+
+
+def build_state_atom_lookup(connection):
+    """Index every occupied-state definition, including states without event ports.
+
+    The caller owns the transaction. Atom lookup must include partial overlaps
+    so a conflicting assignment cannot certify a carrier's plateau.
+    """
+    # Store the long state key once, not once per atom. These explicit integer
+    # primary keys remain stable if a published database is copied or vacuumed.
+    connection.execute("DROP TABLE IF EXISTS lineage_atom_states")
+    connection.execute("DROP TABLE IF EXISTS lineage_state_ids")
+    connection.execute("CREATE TABLE lineage_state_ids(id INTEGER PRIMARY KEY, state_key TEXT NOT NULL)")
+    connection.execute("INSERT INTO lineage_state_ids SELECT rowid, state_key FROM lineage_states")
+    connection.execute("""CREATE TABLE lineage_atom_states(
+        atom_id INTEGER NOT NULL, state_id INTEGER NOT NULL,
+        PRIMARY KEY(atom_id, state_id)) WITHOUT ROWID""")
+    connection.execute("""INSERT INTO lineage_atom_states
+        SELECT j.value, q.rowid FROM lineage_states q, json_each(q.atoms) j
+        ORDER BY j.value, q.rowid""")
+
+
 def _segment_bounds(packed, frame, lower, upper):
     """Find the exact occupied run around one occurrence frame in bounded blocks."""
     cursor = frame
@@ -74,6 +105,8 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
         DROP TABLE IF EXISTS lineage_occurrences;
         DROP TABLE IF EXISTS lineage_segment_atoms;
         DROP TABLE IF EXISTS lineage_segments;
+        DROP TABLE IF EXISTS lineage_atom_states;
+        DROP TABLE IF EXISTS lineage_state_ids;
         DROP TABLE IF EXISTS lineage_states;
         DROP TABLE IF EXISTS lineage_state_occupancy;
         DROP TABLE IF EXISTS lineage_frames;
@@ -149,6 +182,7 @@ def materialize_segments(connection, *, replicate_id, native=None, molecules_fil
                     pending_count = 0
             tick(frame)
         flush()
+    build_state_atom_lookup(connection)
     connection.execute('CREATE INDEX temp.lineage_chunks_order ON lineage_chunks(state_key)')
     # Source boundaries are indexed on disk; a dataset may contain many files.
     connection.execute('''INSERT INTO lineage_boundaries SELECT a.frame FROM lineage_frames a
