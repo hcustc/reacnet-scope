@@ -7,20 +7,18 @@
 
 - [CONTEXT.md](../../CONTEXT.md)：术语和身份。领域相关工作先读它；输出与测试命名沿用
   已定义概念及其边界，避免使用各条目的 `_Avoid_` 同义替代。
-- [软件设计基准](../software-design-baseline.md)：产品范围、输入、分析与发布验收契约。
-  按功能读相关章节。它不是“这些能力均已实现”的声明。
-- [ADR](../adr/)：已接受决策及理由。先查 [ADR 索引](../adr/README.md) 的状态与替代范围，
-  再沿 ADR 顶部说明确认有效条款；0019、0021–0025 使用正文内的 Status 行而非 YAML
-  frontmatter，不因此认定为草稿。部分替代的 ADR 中，只有明确
-  列出的条款失效；先核对替代范围，再使用仍有效的决策。被替代的历史条款不作当前验收依据。
+- [软件设计基准](../software-design-baseline.md)：产品范围、输入、分析与发布验收契约，是
+  日常开发的**主要单一事实源**。按功能读相关章节。它不是“这些能力均已实现”的声明。
+- [ADR](../adr/)：顶层仅保留现行有效的核心架构与科学决策；已替代及早期 UI／导入流程过渡态
+  ADR 已归档至 `docs/adr/archive/`，其有效条款均已汇总进设计基准。日常开发先查基准，只在
+  需要追溯核心决策理由时再按 [ADR 索引](../adr/README.md) 查阅顶层有效 ADR；`archive/` 中的
+  历史文件不作日常阅读或验收依据。
 - README 与专题说明：使用说明。它们与有效契约冲突时，
   报告差异，不能仅凭文件更近或测试已通过判断哪一项有效。
 
-当前有两个 `0012-*` ADR，引用时使用完整文件名和链接，不能只写“ADR-0012”。
-候选路径相关的 `0012-discover-only-sampled-candidate-paths.md` 已被
+现行顶层只有一个 `0012-*` ADR（[`0012-estimate-channel-rates-from-prepared-exposure.md`](../adr/0012-estimate-channel-rates-from-prepared-exposure.md)）；原候选路径版的 `0012-discover-only-sampled-candidate-paths.md` 已由
 [`0013-separate-candidate-discovery-from-continuous-md-support.md`](../adr/0013-separate-candidate-discovery-from-continuous-md-support.md)
-替代；动力学的 [`0012-estimate-channel-rates-from-prepared-exposure.md`](../adr/0012-estimate-channel-rates-from-prepared-exposure.md)
-是另一个决策。
+替代并归档至 `docs/adr/archive/`。
 
 ## 修改领域文档
 

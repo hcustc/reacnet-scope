@@ -7,7 +7,7 @@ date: 2026-09-19
 
 Compatibility retention of the v3 `candidate-paths` command and Candidate
 scoring, and the packaging of frozen Fate and rate capabilities, are refined by
-[ADR-0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md).
+[ADR-0034](../0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md).
 The surface decisions below otherwise remain accepted.
 
 The ordinary Dash product surface is organized around five workspaces:

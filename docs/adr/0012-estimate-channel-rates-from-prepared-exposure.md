@@ -6,7 +6,7 @@ date: 2026-08-28
 # Estimate Channel Rates from Prepared Exposure
 
 Ordinary Direct Reaction Channel queries no longer calculate this estimate
-([ADR-0014](0014-converge-dash-around-five-workspaces.md)), and its code moves to
+([ADR-0014](archive/0014-converge-dash-around-five-workspaces.md)), and its code moves to
 an optional extra ([ADR-0034](0034-deprecate-v3-candidate-ranking-and-split-frozen-capabilities.md)).
 The estimation model and evidence requirements below remain accepted.
 

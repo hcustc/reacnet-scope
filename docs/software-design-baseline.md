@@ -2,11 +2,13 @@
 
 状态：已接受
 日期：2026-08-03
-最近产品范围修订：2026-11-09（直接通道主线，候选路径为可选工具；v3 候选评分弃用与冻结能力处置）
+最近产品范围修订：2026-11-25（收口当前主线为 RNG 证据适配与 MD-to-QC 证据流，归档已替代及过渡态 UI ADR；2026-11-09 确定直接通道主线与冻结能力处置）
 
 本文档定义 ReacNet Scope 当前版本的产品范围、领域语义、功能契约和发布验收基准。它不是对现有实现状态的声明；代码是否符合本文档，需要另行审查。
 
-术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准，难以逆转的设计决策以 [`docs/adr/`](adr/) 中已接受 ADR 为准。ADR 的有效状态见 [ADR 索引](adr/README.md)。旧的设计稿与实施计划已从仓库删除，仅存于 git 历史，不构成当前功能承诺。
+术语以根目录 [`CONTEXT.md`](../CONTEXT.md) 为准；本基准是日常开发的现行单一事实源。难以逆转的核心架构/科学决策理由见 [`docs/adr/`](adr/) 顶层有效 ADR，已替代及早期 UI／导入流程过渡态 ADR 已归档至 `docs/adr/archive/`（见 [ADR 索引](adr/README.md)）。旧的设计稿与实施计划已从仓库删除，仅存于 git 历史，不构成当前功能承诺。
+
+> **当前阶段推进重点（2026-11-25）**：近期开发围绕 **RNG 官方 timeline（schema 1.1/1.2、物理单位与滞回判键）适配** 与 **CLI/API 侧 MD-to-QC 证据流**（`skeleton_lineage`、`geometry_audit`、`topology_classifier`、`plateau` 平台窗导出、`qc_manifest`、`render-report`）展开。通用 Dash 界面打磨、0.2.0 弃用清理、三平台打包与 10⁶/10⁷ 压测门槛及既有非阻塞 backlog issues 暂按延后项处理，非明确排期不主动扩张。
 
 ## 1. 产品定位
 
@@ -57,7 +59,7 @@ DFT 评估所选事件这一步作为基元反应的化学合理性，Continuous
 “分子变化追踪”作为所选实例的可选下钻，不是候选成立或几何导出的前置条件。Path Verification
 与 Species Fate Analysis 的科学契约继续有效，但不挂载独立 Dash 页面；公共 CLI/API 默认兼容
 保留。旧页面 ID 恢复时只归一到所属工作区，不运行退役分析。候选步骤与事件交接规则见
-[ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)，主线与候选定位见
+[ADR-0020](adr/archive/0020-center-dash-on-candidate-step-occurrences.md)，主线与候选定位见
 [ADR-0033](adr/0033-make-direct-channels-the-mainline-and-candidates-optional.md)。
 
 ## 4. 正式辅助能力
@@ -184,7 +186,7 @@ PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecat
 - 点击“开始分析”才验证最新源修订并提交；取消、迟到结果、无权限、冲突或源变化均保留原 Current Dataset。
 - 可向已登记文件集合补充来源，保持集合身份并生成新源修订。旧目录型入口在 API/CLI 保持兼容；由其文件建立显式集合时创建独立集合身份。
 - 成功后回到发起分析页，普通入口按证据进入物种、元素分布或事件分析，无需经过概览。数据概览与准备任务仍可直接访问。
-- 决策与兼容边界见 [ADR-0021](adr/0021-import-explicit-rng-file-collections.md) 和 [ADR-0023](adr/0023-read-data-on-the-application-host.md)；文件夹主流程见 [ADR-0024](adr/0024-import-rng-output-folders.md)，可复用列表与批量导入见 [ADR-0025](adr/0025-imported-dataset-library.md)。
+- 历史导入演进归档见 [ADR-0021](adr/archive/0021-import-explicit-rng-file-collections.md)、[ADR-0023](adr/archive/0023-read-data-on-the-application-host.md)、[ADR-0024](adr/archive/0024-import-rng-output-folders.md) 与 [ADR-0025](adr/archive/0025-imported-dataset-library.md)。
 
 ### 8.3 Dataset Workspace
 
@@ -212,7 +214,7 @@ PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecat
 
 ## 10. Dash 信息架构与会话
 
-普通导航为五个平级入口：“RNG 数据／物种／反应／演化／事件”；展示决定见 [ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)。内部可保留原页面 ID 和单份控件，但不显示旧工作区任务排或空白核查入口。
+普通导航为五个平级入口：“RNG 数据／物种／反应／演化／事件”；历史展示演进归档见 [ADR-0029](adr/archive/0029-open-analysis-from-species-reactions-evolution-and-events.md)。内部可保留原页面 ID 和单份控件，但不显示旧工作区任务排或空白核查入口。
 
 - RNG 数据管理导入列表、Current Dataset、各项能力和 Preparation Task。
 - 物种提供分子式、质量和精确结构检索；选择精确结构后显示一份身份、结构与统计详情，主操作为一步直接通道（相关反应），另可打开丰度趋势或可选的候选路线；路线入口不得排在直接通道之前。路线工具带入当前精确物种，在工具内选择后续、前驱或两物种连接模式；检索空态可独立填写候选路线起终点。
@@ -220,7 +222,7 @@ PBC 与几何检查基础。按用途分别处置（[ADR-0034](adr/0034-deprecat
 - 演化默认展示当前目标、可编辑条件及丰度曲线。物种可按分子式、精确 RNG SMILES、中性单同位素质量与元素包含／排除／计数范围筛选，组合条件取交集；返回按精确 Species 分页，不能以同分子式代表结构替代其他异构体。累计采样丰度排行是按需展开的辅助入口，打开前不执行排行查询；选行仍可在当前页绘制曲线。输入元素原子数条件即可在同一曲线区显示全部匹配物种的逐帧总量，可查看精确成员或按成员拆分，无需切换模式。多组元素分布与指定时间点下钻保留独立高级入口。列表选择和组内下钻不自动跳到物种页；继续研究路线或反应须显式进入物种详情。排行必须标注已分析帧范围、显示上限和精确结构身份；多来源物种比较仍由演化入口进入。
 - 事件独立查询 Reaction Occurrence。同一事件从候选步骤、反应或事件结果打开时共用详情，再按需展开全宽核查、轨迹、事件包、DFT 初始几何或分子变化追踪。
 
-物种详情内的分析结果以该详情的精确 Species 为明确目标，保留输入参数及结果自身的来源与修订；从详情进入丰度趋势时直接绘制该精确物种的曲线，独立工具允许手工输入。没有跨详情持续存在的“研究物种”身份，也不自动设置此身份。浏览 B 不改变已经生成的 A 结果的目标。返回链在会话内有界保存来源、修订、查询与选择位置；返回不重新执行分析。过期来源或修订不得借返回链恢复旧证据。详见 [ADR-0030](adr/0030-use-local-species-focus-in-dash.md)。
+物种详情内的分析结果以该详情的精确 Species 为明确目标，保留输入参数及结果自身的来源与修订；从详情进入丰度趋势时直接绘制该精确物种的曲线，独立工具允许手工输入。没有跨详情持续存在的“研究物种”身份，也不自动设置此身份。浏览 B 不改变已经生成的 A 结果的目标。返回链在会话内有界保存来源、修订、查询与选择位置；返回不重新执行分析。过期来源或修订不得借返回链恢复旧证据。历史焦点演进归档见 [ADR-0030](adr/archive/0030-use-local-species-focus-in-dash.md)。
 
 丰度趋势默认使用 Current Dataset；“添加对比来源”在同一分析中确认逐来源精确 Species、索引和时间口径，无 Current Dataset 时也可独立比较。比较不切换 Current Dataset。比较结果的另一来源物种只有在用户显式切换、验证成功且修订仍匹配后才能用于普通单源分析。返回单源趋势保留输入和结果。反应对比同样不合并来源或事件身份。
 
@@ -426,7 +428,7 @@ Continuous MD Support 在 hypergraph discovery 与 network filtering/ranking 之
 
 #### 11.7.1 Molecule Lineage（界面：分子变化追踪）
 
-所选 Reaction Occurrence 的可选下钻采用 [ADR-0018](adr/0018-explore-segment-occurrence-lineage.md) 的 Molecular Lineage Explorer：由 Reaction Occurrence 连接 Continuity Segments 形成时间有向 lineage 图。界面称“分子变化追踪”；领域对象、schema 和公共 API 继续使用 Molecular Lineage。现有 `molecule-lineage/v2` 端点追踪入口兼容保留，不把事件端点相同当作逐帧连续段证明。产品入口优先级见 [ADR-0020](adr/0020-center-dash-on-candidate-step-occurrences.md)。
+所选 Reaction Occurrence 的可选下钻采用 [ADR-0018](adr/0018-explore-segment-occurrence-lineage.md) 的 Molecular Lineage Explorer：由 Reaction Occurrence 连接 Continuity Segments 形成时间有向 lineage 图。界面称“分子变化追踪”；领域对象、schema 和公共 API 继续使用 Molecular Lineage。现有 `molecule-lineage/v2` 端点追踪入口兼容保留，不把事件端点相同当作逐帧连续段证明。产品入口优先级历史归档见 [ADR-0020](adr/archive/0020-center-dash-on-candidate-step-occurrences.md)。
 
 - preparation 从已发布 RNG 逐帧状态或等价的精确状态帧区间流式生成 segments。Species、原子集合与键集合共同定义状态；不重做判键/去噪，不将 `miso` 设为独立准入条件。源文件边界、中断后重现产生不同 segments。
 - Explorer 从事件一侧的具体 Molecule Instance 定位所属 segment；一次展开读取该 segment 的前序或首次状态变化 occurrence，保留事件全部输入和输出。split/merge 是图结构，不选最大继承产物，不做事件可信度诊断。无法连接时终止该分支。

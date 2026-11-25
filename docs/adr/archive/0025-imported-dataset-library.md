@@ -6,7 +6,7 @@ Originally accepted 2026-09-22; extends ADR-0024.
 - Still accepted: Dataset Library, Current Dataset independence, preparation,
   and comparison-source decisions.
 - Superseded: navigation grouping and the placement of comparison tasks. Use
-  [software design baseline §10](../software-design-baseline.md#10-dash-信息架构与会话)
+  [software design baseline §10](../../software-design-baseline.md#10-dash-信息架构与会话)
   and [ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md).
 
 Navigation supersession (2026-09-25): the historical groupings below were

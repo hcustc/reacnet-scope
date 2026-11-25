@@ -49,5 +49,5 @@ Candidate Path under a separately named reaction workspace in
 target-Species plan's navigation and required-start instructions. ADR-0020's
 step, occurrence and evidence handoff rules remain accepted. ADR-0025's Dataset
 Library, two-phase switch and comparison-source independence remain accepted.
-[ADR-0026](0026-search-candidates-by-anchor-mode.md) continues to define the
+[ADR-0026](../0026-search-candidates-by-anchor-mode.md) continues to define the
 three Candidate search modes. No scientific result schema or public API changes.
