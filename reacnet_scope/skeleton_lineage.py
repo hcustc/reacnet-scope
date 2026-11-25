@@ -17,14 +17,19 @@ import hashlib
 import json
 import sqlite3
 import time
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from . import lineage_segments
 from .event_index import EVENT_EVIDENCE_STORE
 from .indexes import IndexNotReadyError
-from .lineage_segments import VERSION as LINEAGE_SEGMENTS_VERSION
+from .lineage_segments import VERSION as LINEAGE_SEGMENTS_VERSION, state_record
 from .provenance import collect_runtime_provenance
 from .service_types import ServiceError
 from .workspace_services import _event_artifact_paths
@@ -96,6 +101,15 @@ def _normalize_segment(raw: Mapping[str, Any], anchors: set[int]) -> dict[str, A
     atom_ids = sorted({int(a) for a in raw["atom_ids"]})
     bonds = [str(b) for b in raw.get("bonds", ())]
     conn_sig, canon_atoms, edges = connectivity_signature(atom_ids, bonds)
+    # A missing order is unknown. Edge-only inputs still support connectivity.
+    orders = set()
+    for bond in bonds:
+        parts = bond.split("-", 2)
+        if len(parts) != 3 or not parts[2]:
+            orders = None
+            break
+        a, b = sorted(map(int, parts[:2]))
+        orders.add((a, b, parts[2]))
     start_frame = int(raw["start_frame"])
     end_frame = int(raw["end_frame"])
     frame_count = max(1, end_frame - start_frame + 1)
@@ -110,6 +124,7 @@ def _normalize_segment(raw: Mapping[str, Any], anchors: set[int]) -> dict[str, A
         "frame_count": frame_count,
         "atom_ids": list(canon_atoms),
         "connectivity_edges": [list(pair) for pair in edges],
+        "_bond_orders": orders,
         "connectivity_signature": conn_sig,
         "ring_count": cyclomatic_ring_count(canon_atoms, edges),
         "retained_anchors": sorted(anchors & set(canon_atoms)),
@@ -163,7 +178,10 @@ def _fold_excursion(
         "end_timestep": right["end_timestep"],
         "frame_count": right["end_frame"] - left["start_frame"] + 1,
         "species_frame_counts": dict(sorted(counts.items())),
-        "bond_order_flips_merged": left["bond_order_flips_merged"] + right["bond_order_flips_merged"],
+        "bond_order_flips_merged": (
+            left["bond_order_flips_merged"] + middle["bond_order_flips_merged"]
+            + right["bond_order_flips_merged"]
+        ),
         "oscillation_excursions_folded": (
             left["oscillation_excursions_folded"]
             + right["oscillation_excursions_folded"]
@@ -293,17 +311,16 @@ def build_skeleton_timeline(
     else:
         # Pass 1: merge contiguous segments with identical bond-order-free connectivity.
         merged: list[dict[str, Any]] = []
-        for item in ordered:
+        for idx, item in enumerate(ordered):
             if (
                 merged
                 and merged[-1]["end_frame"] + 1 == item["start_frame"]
                 and merged[-1]["source_id"] == item["source_id"]
                 and merged[-1]["connectivity_signature"] == item["connectivity_signature"]
             ):
-                is_flip = (
-                    set(merged[-1]["species_frame_counts"].keys())
-                    != set(item["species_frame_counts"].keys())
-                )
+                previous = ordered[idx - 1]["_bond_orders"]
+                current = item["_bond_orders"]
+                is_flip = previous is not None and current is not None and previous != current
                 merged[-1] = _merge_platform(merged[-1], item, is_flip=is_flip)
             else:
                 merged.append(item)
@@ -390,6 +407,42 @@ def build_skeleton_timeline(
     }
 
 
+@contextmanager
+def _lineage_reader(artifacts, max_seconds=10.0):
+    """Pin all lineage queries for one report to one published SQLite snapshot."""
+    source, molecules = _event_artifact_paths(artifacts)
+    if not source:
+        raise ServiceError(
+            "缺少反应事件源（.timeline.h5 或兼容 CSV）。",
+            reason="missing_source",
+        )
+    try:
+        opened = EVENT_EVIDENCE_STORE.open_required(source, molecules)
+    except (IndexNotReadyError, OSError, ValueError) as exc:
+        raise ServiceError(str(exc), reason="lineage_index_unavailable") from exc
+
+    index_path = Path(opened["index_path"])
+    con = sqlite3.connect(index_path.as_uri() + "?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    deadline = time.monotonic() + max_seconds
+    con.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    try:
+        con.execute("BEGIN")
+        version_row = con.execute(
+            "SELECT value FROM meta WHERE key='lineage_segments_version'"
+        ).fetchone()
+        if not version_row or version_row[0] != LINEAGE_SEGMENTS_VERSION:
+            raise ServiceError(
+                "skeleton 谱系追踪需要连续分子段索引；请在数据集准备中重建事件索引。",
+                reason="lineage_rebuild_required",
+            )
+        yield con, index_path
+    except (sqlite3.OperationalError, zlib.error) as exc:
+        raise ServiceError("谱系查询未完成：" + str(exc), reason="lineage_read_incomplete") from exc
+    finally:
+        con.close()
+
+
 def trace_skeleton_lineage(
     artifacts: Mapping[str, Any],
     *,
@@ -416,32 +469,9 @@ def trace_skeleton_lineage(
             reason="invalid_mode",
         )
 
-    source, molecules = _event_artifact_paths(artifacts)
-    if not source:
-        raise ServiceError(
-            "缺少反应事件源（.timeline.h5 或兼容 CSV）。",
-            reason="missing_source",
-        )
-    try:
-        opened = EVENT_EVIDENCE_STORE.open_required(source, molecules)
-    except (IndexNotReadyError, OSError, ValueError) as exc:
-        raise ServiceError(str(exc), reason="lineage_index_unavailable") from exc
-
-    index_path = Path(opened["index_path"])
-    con = sqlite3.connect(index_path.as_uri() + "?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    deadline = time.monotonic() + max_seconds
-    con.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    source, _ = _event_artifact_paths(artifacts)
     truncated = False
-    try:
-        version_row = con.execute(
-            "SELECT value FROM meta WHERE key='lineage_segments_version'"
-        ).fetchone()
-        if not version_row or version_row[0] != LINEAGE_SEGMENTS_VERSION:
-            raise ServiceError(
-                "skeleton 谱系追踪需要连续分子段索引；请在数据集准备中重建事件索引。",
-                reason="lineage_rebuild_required",
-            )
+    with _lineage_reader(artifacts, max_seconds) as (con, index_path):
         placeholders = ",".join("?" for _ in anchors)
         params: list[Any] = list(anchors)
         where = [f"a.atom_id IN ({placeholders})"]
@@ -488,11 +518,6 @@ def trace_skeleton_lineage(
             }
             for row in rows
         ]
-    except sqlite3.OperationalError as exc:
-        raise ServiceError("谱系查询未完成：" + str(exc), reason="lineage_read_incomplete") from exc
-    finally:
-        con.close()
-
     units = resolve_trajectory_units(
         artifacts, lammps_units=lammps_units, timestep_ps=timestep_ps,
     )
@@ -513,6 +538,92 @@ def trace_skeleton_lineage(
     if "physical_unit_sources" in units:
         report["provenance"]["physical_unit_sources"] = units["physical_unit_sources"]
     return report
+
+
+def _occupancy_slice(packed, block, lo, hi):
+    """Unpack only the requested inclusive range from a little-endian frame bitmap."""
+    data = zlib.decompress(packed)
+    first_byte = (lo - block) // 8
+    stop_byte = (hi - block) // 8 + 1
+    if stop_byte > len(data):
+        raise ServiceError("Incomplete lineage occupancy block.", reason="lineage_read_incomplete")
+    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8)[first_byte:stop_byte], bitorder="little")
+    start = (lo - block) % 8
+    return bits[start:start + hi - lo + 1].astype(bool)
+
+
+def _carrier_bound(con, frames, atoms, species, bonds):
+    """Walk outward through unique carrier occupancy, stopping at the first gap.
+
+    Each bit is one analyzed frame in this small endpoint window. Include *all*
+    states touching a carrier atom: another molecule claiming even one atom
+    makes the frame ambiguous, including when both states share a skeleton.
+    """
+    endpoint = frames[0]["frame"]
+    first, last = sorted((endpoint, frames[-1]["frame"]))
+    wanted = set(atoms)
+    carrier_bonds = [bond for bond in bonds if set(map(int, bond.split("-")[:2])) <= wanted]
+    endpoint_key, _, _ = state_record(species, atoms, carrier_bonds)
+    edges = strip_bond_orders(carrier_bonds)
+    atoms_json = json.dumps(atoms)
+    occupied = np.zeros(last - first + 1, dtype=bool)
+    supported = np.zeros_like(occupied)
+    ambiguous = np.zeros_like(occupied)
+    endpoint_observed = False
+    block_size = lineage_segments.FRAME_BLOCK
+    rows = con.execute("""
+        WITH touched AS (
+            SELECT DISTINCT state_id FROM lineage_atom_states
+            WHERE atom_id IN (SELECT value FROM json_each(?))
+        )
+        SELECT q.state_key, q.atoms, q.bonds, c.block_start, c.packed_frames
+        FROM touched t CROSS JOIN lineage_state_ids k
+        CROSS JOIN lineage_states q CROSS JOIN lineage_occupancy_chunks c
+        WHERE k.id=t.state_id AND q.state_key=k.state_key AND c.state_key=q.state_key
+          AND c.block_start BETWEEN ? AND ?
+    """, (atoms_json, first // block_size * block_size, last // block_size * block_size))
+    for key, state_atoms, state_bonds, block, packed in rows:
+        lo = max(first, block)
+        hi = min(last, block + block_size - 1)
+        window = slice(lo - first, hi - first + 1)
+        present = _occupancy_slice(packed, block, lo, hi)
+        if not present.any():
+            continue
+        ambiguous[window] |= occupied[window] & present
+        occupied[window] |= present
+        if state_atoms == atoms_json and strip_bond_orders(json.loads(state_bonds)) == edges:
+            supported[window] |= present
+        if key == endpoint_key and lo <= endpoint <= hi:
+            endpoint_observed = present[endpoint - lo]
+
+    valid = supported & ~ambiguous
+    if not endpoint_observed or not valid[endpoint - first]:
+        raise ServiceError("Carrier endpoint lacks unique exact-state occupancy.",
+                           reason="incomplete_event_plateau")
+    bound = frames[0]["timestep"]
+    for row in frames[1:]:
+        if not valid[row["frame"] - first]:
+            break
+        bound = row["timestep"]
+    return bound
+
+
+def _outward_frames(con, frame, timestep, direction):
+    # One extra analyzed frame lets extraction record clipping at its 100-frame cap.
+    first, last = sorted((frame, frame + direction * (EVENT_PLATEAU_MAX_PADDING + 1)))
+    rows = con.execute(
+        "SELECT frame, timestep, source_id FROM lineage_frames "
+        "WHERE frame BETWEEN ? AND ? ORDER BY frame", (first, last)
+    ).fetchall()[::direction]
+    if (not rows or rows[0]["frame"] != frame or rows[0]["timestep"] != timestep
+            or rows[0]["source_id"] is None):
+        raise ServiceError("Event endpoint does not match the analyzed frame.",
+                           reason="incomplete_event_plateau")
+    for idx, (prev, curr) in enumerate(zip(rows, rows[1:]), 1):
+        if (curr["frame"] != prev["frame"] + direction or curr["source_id"] != prev["source_id"]
+                or curr["timestep"] is None or direction * (curr["timestep"] - prev["timestep"]) <= 0):
+            return rows[:idx]
+    return rows
 
 
 def find_event_plateau_window(
@@ -542,51 +653,31 @@ def find_event_plateau_window(
     if before >= after:
         raise ServiceError("Plateau mode requires increasing endpoint timesteps.", reason="invalid_event_time")
 
-    endpoints = []
-    for side, frame, timestep, atom_sets in zip(
-        ("reactant", "product"), (transition, transition + 1), (before, after), carriers
-    ):
-        bonds = event.get(f"{side}_bonds") or ()
-        if isinstance(bonds, str):
-            bonds = bonds.split(";")
-        edges = strip_bond_orders(bonds)
-        platforms = []
-        for atoms in atom_sets:
-            # Topology returns are retained in this window, including short excursions.
-            lineage = trace_skeleton_lineage(
-                artifacts,
-                anchor_atom_ids=atoms,
-                oscillation_max_frames=0,
-                start_frame=max(0, frame - EVENT_PLATEAU_MAX_PADDING),
-                end_frame=frame + EVENT_PLATEAU_MAX_PADDING,
-                min_anchor_overlap=len(atoms),
-            )
-            expected_signature, _, _ = connectivity_signature(
-                atoms, (f"{a}-{b}" for a, b in edges if a in atoms and b in atoms)
-            )
-            matches = [
-                plateau for plateau in lineage["timeline"]
-                if plateau["atom_ids"] == list(atoms)
-                and plateau["connectivity_signature"] == expected_signature
-                and plateau["start_frame"] <= frame <= plateau["end_frame"]
-                and plateau["start_timestep"] is not None
-                and plateau["end_timestep"] is not None
-                and plateau["start_timestep"] <= timestep <= plateau["end_timestep"]
-            ]
-            if lineage["truncated"] or len(matches) != 1:
-                raise ServiceError(
-                    f"Could not establish a unique {side} skeleton plateau for atoms {list(atoms)}.",
-                    reason="incomplete_event_plateau",
-                )
-            platforms.append(matches[0])
-        endpoints.append(platforms)
+    bounds = []
+    source_ids = set()
+    with _lineage_reader(artifacts) as (con, _):
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                           "AND name='lineage_atom_states'").fetchone():
+            raise ServiceError("Run reacnet-scope prepare build event for this dataset "
+                               "to index existing occupancy by atom.",
+                               reason="plateau_lookup_required")
+        for side, frame, timestep, direction, sets in zip(
+            ("reactant", "product"), (transition, transition + 1), (before, after), (-1, 1), carriers
+        ):
+            frames = _outward_frames(con, frame, timestep, direction)
+            source_ids.add(frames[0]["source_id"])
+            bonds = event.get(f"{side}_bonds") or ()
+            if isinstance(bonds, str):
+                bonds = list(filter(None, bonds.split(";")))
+            species = {tuple(sorted(p["atom_ids"])): p["species"] for p in event[f"{side}_participants"]}
+            ends = [_carrier_bound(con, frames, atoms, species[atoms], bonds) for atoms in sets]
+            bounds.append(max(ends) if direction < 0 else min(ends))
 
-    source_ids = {item["source_id"] for platforms in endpoints for item in platforms}
-    if len(source_ids) != 1 or None in source_ids:
+    if len(source_ids) != 1:
         raise ServiceError("Plateau export requires one trajectory source.", reason="ambiguous_plateau_source")
     return {
-        "start_timestep": max(item["start_timestep"] for item in endpoints[0]),
-        "end_timestep": min(item["end_timestep"] for item in endpoints[1]),
+        "start_timestep": bounds[0],
+        "end_timestep": bounds[1],
         "reactant_carrier_atom_ids": carriers[0],
         "product_carrier_atom_ids": carriers[1],
         "shared_carrier_atom_count": maximum,

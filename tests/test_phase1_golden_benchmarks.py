@@ -231,6 +231,26 @@ def test_event_package_records_deterministic_provenance() -> None:
     assert doc["coordinate_length_unit"] == "angstrom"
 
 
+def test_bond_flips_follow_adjacent_orders_even_with_one_representative_name():
+    samples = [
+        ("A", ["1-2-1", "2-3-1"]),
+        ("A", ["1-2-2", "2-3-2"]),  # simultaneous pair changes form one transition
+        ("B", ["3-2-2", "2-1-2"]),  # label, endpoint orientation and row order only
+        ("A", ["1-2-1", "2-3-1"]),
+    ]
+    segments = [dict(segment_id=str(i), start_frame=i, end_frame=i, species=name,
+                     bonds=bonds, atom_ids=[1, 2, 3], source_id=1)
+                for i, (name, bonds) in enumerate(samples)]
+    def count(window):
+        report = build_skeleton_timeline(window, anchor_atom_ids=[1, 2, 3], oscillation_max_frames=0)
+        assert report["plateau_count"] == 1
+        return report["total_bond_order_flips_merged"]
+
+    assert count(segments[:2]) == 1
+    assert count(segments[1:3]) == 0
+    assert count(segments) == 2
+
+
 def test_golden_case1_c5_co_merges_high_temp_carbonyl_bond_order_flips() -> None:
     """Case 1 (C5_CO): 2500 K C=O stretching flips single/double bond labels across 1-frame segments."""
     ring_atoms = [301, 302, 303, 304, 305, 310, 311]
