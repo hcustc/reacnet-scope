@@ -519,3 +519,63 @@ def test_method_metadata_records_solver_version_without_importing_it():
     from reacnet_scope.lewis import method_metadata
 
     assert method_metadata()["scipy_version"] == scipy.__version__
+
+
+def test_optimal_uniqueness_distinguishes_unique_resonance_and_tied_alternatives():
+    co = annotate_lewis("[C][O]", options=neutral())
+    assert co["status"] == "generated"
+    assert co["optimal_uniqueness"] == "unique_assignment"
+    assert co["alternative_candidate_smiles"] == []
+    assert co["optimal_assignments_checked"] == 1
+    assert co["candidate_search_complete"] is False
+
+    h2co = annotate_lewis("[H][C]([H])[O]", options=neutral())
+    assert h2co["status"] == "generated"
+    assert h2co["candidate_smiles"] == "[H]C([H])=O"
+    assert h2co["optimal_uniqueness"] == "unique_assignment"
+    assert h2co["optimal_assignments_checked"] == 1
+
+    # 2-chlorophenol has two Kekule ring assignments that serialize to one canonical SMILES.
+    cp2 = annotate_lewis("[H][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", options=neutral())
+    assert cp2["status"] == "generated"
+    assert cp2["optimal_uniqueness"] == "unique_canonical_smiles"
+    assert cp2["alternative_candidate_smiles"] == []
+    assert cp2["optimal_assignments_checked"] == 2
+
+    # Symmetric allyl radical has two mirror-image radical assignments with identical canonical SMILES.
+    allyl = annotate_lewis("[H][C]([H])[C]([H])[C]([H])[H]", options=neutral())
+    assert allyl["status"] == "generated"
+    assert allyl["optimal_uniqueness"] == "unique_canonical_smiles"
+    assert allyl["alternative_candidate_smiles"] == []
+    assert allyl["optimal_assignments_checked"] == 2
+
+    # Propargyl radical has two distinct tied optimal candidates (propargyl vs allenyl) on all 8 objectives.
+    propargyl = annotate_lewis("[H][C]([H])[C][C][H]", options=neutral())
+    assert propargyl["status"] == "generated"
+    assert propargyl["optimal_uniqueness"] == "multiple_optimal_candidates"
+    assert propargyl["optimal_assignments_checked"] == 2
+    assert len(propargyl["alternative_candidate_smiles"]) == 1
+    assert {propargyl["candidate_smiles"], propargyl["alternative_candidate_smiles"][0]} == {
+        "[H]C#C[C]([H])[H]", "[H][C]=C=C([H])[H]",
+    }
+
+    # 1-chloroallyl radical has two distinct asymmetric radical positions tied on all 8 objectives.
+    cl_allyl = annotate_lewis("[H][C]([Cl])[C]([H])[C]([H])[H]", options=neutral())
+    assert cl_allyl["status"] == "generated"
+    assert cl_allyl["optimal_uniqueness"] == "multiple_optimal_candidates"
+    assert cl_allyl["optimal_assignments_checked"] == 2
+    assert len(cl_allyl["alternative_candidate_smiles"]) == 1
+    assert cl_allyl["alternative_candidate_smiles"][0] != cl_allyl["candidate_smiles"]
+
+
+def test_optimal_uniqueness_budget_exhaustion_preserves_primary_candidate(monkeypatch):
+    from reacnet_scope import lewis
+
+    monkeypatch.setattr(lewis, "_MAX_OPTIMAL_UNIQUENESS_CHECKS", 1)
+    # 2-chlorophenol needs 2 extra checks (Kekule B + infeasibility proof); cap=1 must stay inconclusive.
+    cp2 = annotate_lewis("[H][O][C]1[C]([H])[C]([H])[C]([H])[C]([H])[C]1[Cl]", options=neutral())
+    assert cp2["status"] == "generated"
+    assert cp2["candidate_smiles"] is not None
+    assert cp2["optimal_uniqueness"] == "inconclusive_budget"
+    assert cp2["alternative_candidate_smiles"] == []
+    assert cp2["optimal_assignments_checked"] == 2

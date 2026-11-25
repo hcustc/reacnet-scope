@@ -29,6 +29,7 @@ _OBJECTIVES = ("charged_shell_deficit", "small_ring_unsaturation",
 _ELECTRONEGATIVITY = {"H": 220, "B": 204, "C": 255, "N": 304, "O": 344, "F": 398,
                       "Si": 190, "P": 219, "S": 258, "Cl": 316, "Br": 296, "I": 266}
 _MAX_AROMATIC_SIX_CYCLES = 64
+_MAX_OPTIMAL_UNIQUENESS_CHECKS = 8
 _HALOGENS = frozenset({"F", "Cl", "Br", "I"})
 # Valence electrons and closed-shell bond-order sums by formal charge.
 # Lower sums retain unpaired electrons; P/S additionally permit expanded shells.
@@ -116,7 +117,12 @@ def method_metadata() -> dict:
             "radical_electrons_basis": "RDKit_representation_not_electronic_state",
             "neutral_carbon_pairing": "all_allowed_unpaired_lone_pair_partitions",
             "electron_assignment_claim": "one_model_assignment_not_spin_identification",
-            "candidate_policy": "one_model_optimum_not_exhaustive_enumeration"}
+            "candidate_policy": "one_model_optimum_not_exhaustive_enumeration",
+            "optimal_uniqueness_policy": {
+                "scope": "equal_optimal_objectives_only",
+                "max_extra_assignments": _MAX_OPTIMAL_UNIQUENESS_CHECKS,
+                "claim": "model_optimum_tie_check_not_exhaustive_electronic_search",
+            }}
 
 
 class _InputProblem(ValueError):
@@ -225,7 +231,7 @@ def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
         remaining = deadline - time.monotonic()
         if remaining <= 0 or used_nodes >= options.max_nodes:
             return None, {**fields, "status": "timeout" if remaining <= 0 else "truncated",
-                          "reason": "solver_budget", "truncated": True}
+                          "reason": "solver_budget", "truncated": True}, matrix, rhs, deadline, used_nodes
         result = milp(objective, integrality=np.ones(len(objective)), bounds=Bounds(lower, upper),
                       constraints=LinearConstraint(matrix, rhs, rhs),
                       options={"time_limit": remaining, "node_limit": options.max_nodes - used_nodes,
@@ -235,17 +241,17 @@ def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
                       solver_nodes_used=used_nodes)
         if result.status == 1:
             return None, {**fields, "status": "timeout" if "time" in str(result.message).lower() else "truncated",
-                          "reason": "solver_budget", "truncated": True}
+                          "reason": "solver_budget", "truncated": True}, matrix, rhs, deadline, used_nodes
         if result.status != 0 or result.x is None:
             infeasible = result.status == 2 and not scores
             return None, {**fields, "optimization_complete": infeasible,
                           "status": "no_candidate" if infeasible else "solver_failed",
-                          "reason": "model_infeasible" if infeasible else "solver_failed"}
+                          "reason": "model_infeasible" if infeasible else "solver_failed"}, matrix, rhs, deadline, used_nodes
         values = np.rint(result.x)
         if (not np.allclose(values, result.x, atol=1e-5)
                 or not np.allclose(matrix @ values, rhs)
                 or np.any(values < lower) or np.any(values > upper)):
-            return None, {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}
+            return None, {**fields, "status": "solver_failed", "reason": "invalid_integer_solution"}, matrix, rhs, deadline, used_nodes
         optimum = int(round(float(objective @ values)))
         scores[name] = optimum
         fields["optimization_stages_completed"] += 1
@@ -253,7 +259,7 @@ def _optimize(objectives, matrix, rhs, lower, upper, options, seconds):
         # buying even one unit of a higher-priority objective.
         matrix = np.vstack((matrix, objective))
         rhs = np.append(rhs, optimum)
-    return values, {**fields, "optimization_complete": True}
+    return values, {**fields, "optimization_complete": True}, matrix, rhs, deadline, used_nodes
 
 
 def _charge_policy_holds(molecule):
@@ -335,6 +341,189 @@ def _aromatic_six_cycles(graph, deadline):
     for start in sorted(eligible):
         visit([start])
     return sorted(rings)
+
+
+def _extract_candidate(graph, states, offsets, values, options: LewisOptions, original_key: str):
+    """Build, sanitize, and validate one MILP integer assignment."""
+    molecule = Chem.RWMol(graph)
+    for j, bond in enumerate(molecule.GetBonds()):
+        bond.SetBondType({1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}[int(values[j])])
+    model_atoms = []
+    for i, items in enumerate(states):
+        _b, charge, radicals, _deficit, _expanded = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
+        atom = molecule.GetAtomWithIdx(i)
+        atom.SetFormalCharge(charge)
+        atom.SetNumRadicalElectrons(radicals)
+        atom.SetNoImplicit(True)
+        nonbonding = _STATES[atom.GetSymbol()][0] - charge - _b
+        model_atoms.append({"index": i, "element": atom.GetSymbol(), "isotope": atom.GetIsotope(),
+                            "formal_charge": charge, "unpaired_electrons": radicals,
+                            "lone_pairs": (nonbonding - radicals) // 2})
+    model_graph = {"index_basis": "local_zero_based_not_RNG_atom_ids", "atoms": model_atoms,
+                   "bonds": [[b.GetBeginAtomIdx(), b.GetEndAtomIdx(), int(b.GetBondTypeAsDouble())]
+                             for b in molecule.GetBonds()]}
+    try:
+        with rdBase.BlockLogs():
+            checked = Chem.Mol(molecule)
+            flag = Chem.SanitizeMol(checked, catchErrors=True)
+            if flag != Chem.SanitizeFlags.SANITIZE_NONE:
+                return None, {"status": "candidate_rejected", "reason": "candidate_rdkit_check_failed"}
+            candidate = Chem.MolToSmiles(checked, canonical=True)
+            if not _charge_policy_holds(checked):
+                return None, {"status": "candidate_rejected", "reason": "candidate_charge_policy_failed"}
+    except (ValueError, RuntimeError):
+        return None, {"status": "solver_failed", "reason": "candidate_serialization_failed"}
+    # Sanitization is performed on a copy and may standardize charges/bonds.
+    # Verify its output still has exactly the supplied atoms and connectivity.
+    _candidate_graph, candidate_key, candidate_charges = _complete_graph(candidate, options.max_atoms)
+    if candidate_key != original_key or any(candidate_charges):
+        return None, {"status": "solver_failed", "reason": "candidate_graph_or_charge_changed"}
+    return {
+        "candidate_smiles": candidate,
+        "model_graph": model_graph,
+        "model_atoms": model_atoms,
+        "model_unpaired_electrons": sum(a["unpaired_electrons"] for a in model_atoms),
+        "formal_charge": sum(a.GetFormalCharge() for a in checked.GetAtoms()),
+        "radical_electrons": sum(a.GetNumRadicalElectrons() for a in checked.GetAtoms()),
+    }, None
+
+
+def _check_optimal_uniqueness(
+    graph, states, offsets, bonds, ring_offsets, primary_values, primary_extracted,
+    locked_matrix, locked_rhs, lower, upper, options: LewisOptions,
+    deadline: float, used_nodes: int, original_key: str,
+) -> dict:
+    """Bounded tie-check on the locked optimal objective set via exact no-good cuts.
+
+    Distinguishes unique optimal assignments, symmetry/Kekule-equivalent optimal
+    sets, and genuinely distinct tied optimal candidates without discarding the
+    primary candidate if the remaining budget is exhausted.
+    """
+    Bounds, LinearConstraint, milp = require_solver()
+    sym_classes = tuple(Chem.CanonicalRankAtoms(graph, breakTies=False))
+
+    def _signature(smiles_text: str, atoms_list: list[dict]) -> tuple:
+        return (
+            smiles_text,
+            tuple(sorted(
+                (sym_classes[a["index"]], a["formal_charge"], a["unpaired_electrons"], a["lone_pairs"])
+                for a in atoms_list
+            )),
+        )
+
+    primary_smiles = primary_extracted["candidate_smiles"]
+    primary_sig = _signature(primary_smiles, primary_extracted["model_atoms"])
+
+    # Attach exact {1,2,3} binary indicators to non-ring heavy bonds so every
+    # assignment is uniquely excluded by one linear no-good cut.
+    base_width = locked_matrix.shape[1]
+    extra_bonds = [j for j in range(len(bonds)) if upper[j] > 1 and j not in ring_offsets]
+    bond_indicators = dict(ring_offsets)
+    total_width = base_width + 3 * len(extra_bonds)
+    if extra_bonds:
+        ext_matrix = np.zeros((locked_matrix.shape[0] + 2 * len(extra_bonds), total_width))
+        ext_matrix[:locked_matrix.shape[0], :base_width] = locked_matrix
+        ext_rhs = np.zeros(ext_matrix.shape[0])
+        ext_rhs[:len(locked_rhs)] = locked_rhs
+        ext_lower = np.zeros(total_width)
+        ext_lower[:base_width] = lower
+        ext_upper = np.ones(total_width)
+        ext_upper[:base_width] = upper
+        for k, j in enumerate(extra_bonds):
+            col = base_width + 3 * k
+            row = locked_matrix.shape[0] + 2 * k
+            bond_indicators[j] = col
+            ext_matrix[row, col:col + 3] = 1
+            ext_rhs[row] = 1
+            ext_matrix[row + 1, j] = 1
+            ext_matrix[row + 1, col:col + 3] = (-1, -2, -3)
+    else:
+        ext_matrix, ext_rhs, ext_lower, ext_upper = locked_matrix, locked_rhs, lower, upper
+
+    def _cut_row(sol_values):
+        row = np.zeros(total_width)
+        count = 0
+        for i, items in enumerate(states):
+            row[offsets[i] + int(np.argmax(sol_values[offsets[i]:offsets[i] + len(items)]))] = 1
+            count += 1
+        for j, col in bond_indicators.items():
+            row[col + (int(round(float(sol_values[j]))) - 1)] = 1
+            count += 1
+        return row, count - 1
+
+    cut_rows: list[np.ndarray] = []
+    cut_ubs: list[float] = []
+    current_values = primary_values
+    checked = 1
+    zero_obj = np.zeros(total_width)
+
+    for _ in range(_MAX_OPTIMAL_UNIQUENESS_CHECKS):
+        row, ub = _cut_row(current_values)
+        cut_rows.append(row)
+        cut_ubs.append(float(ub))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or used_nodes >= options.max_nodes:
+            return {
+                "optimal_uniqueness": "inconclusive_budget",
+                "alternative_candidate_smiles": [],
+                "optimal_assignments_checked": checked,
+                "solver_nodes_used": used_nodes,
+            }
+        all_matrix = np.vstack((ext_matrix, np.asarray(cut_rows)))
+        all_lb = np.concatenate((ext_rhs, np.full(len(cut_ubs), -np.inf)))
+        all_ub = np.concatenate((ext_rhs, np.asarray(cut_ubs)))
+        result = milp(
+            zero_obj,
+            integrality=np.ones(total_width),
+            bounds=Bounds(ext_lower, ext_upper),
+            constraints=LinearConstraint(all_matrix, all_lb, all_ub),
+            options={"time_limit": remaining, "node_limit": options.max_nodes - used_nodes, "mip_rel_gap": 0.0},
+        )
+        used_nodes += int(getattr(result, "mip_node_count", 0) or 0)
+        if result.status == 2:
+            return {
+                "optimal_uniqueness": "unique_assignment" if checked == 1 else "unique_canonical_smiles",
+                "alternative_candidate_smiles": [],
+                "optimal_assignments_checked": checked,
+                "solver_nodes_used": used_nodes,
+            }
+        if result.status != 0 or result.x is None:
+            return {
+                "optimal_uniqueness": "inconclusive_budget",
+                "alternative_candidate_smiles": [],
+                "optimal_assignments_checked": checked,
+                "solver_nodes_used": used_nodes,
+            }
+        alt_values = np.rint(result.x)
+        if (not np.allclose(alt_values, result.x, atol=1e-5)
+                or not np.allclose(ext_matrix @ alt_values, ext_rhs)
+                or np.any(np.asarray(cut_rows) @ alt_values > np.asarray(cut_ubs) + 1e-5)
+                or np.any(alt_values < ext_lower) or np.any(alt_values > ext_upper)):
+            return {
+                "optimal_uniqueness": "inconclusive_budget",
+                "alternative_candidate_smiles": [],
+                "optimal_assignments_checked": checked,
+                "solver_nodes_used": used_nodes,
+            }
+        current_values = alt_values
+        extracted, error = _extract_candidate(graph, states, offsets, alt_values, options, original_key)
+        if error is not None:
+            continue
+        checked += 1
+        alt_smiles = extracted["candidate_smiles"]
+        if _signature(alt_smiles, extracted["model_atoms"]) != primary_sig:
+            return {
+                "optimal_uniqueness": "multiple_optimal_candidates",
+                "alternative_candidate_smiles": [alt_smiles] if alt_smiles != primary_smiles else [],
+                "optimal_assignments_checked": checked,
+                "solver_nodes_used": used_nodes,
+            }
+    return {
+        "optimal_uniqueness": "inconclusive_budget",
+        "alternative_candidate_smiles": [],
+        "optimal_assignments_checked": checked,
+        "solver_nodes_used": used_nodes,
+    }
 
 
 def _solve(graph, options: LewisOptions, seconds: float) -> dict:
@@ -436,51 +625,34 @@ def _solve(graph, options: LewisOptions, seconds: float) -> dict:
         matrix[row + 24, [column, column + 13, column + 26]] = 1
         rhs[row + 24] = 1
         objectives[aromatic_objective, column + 26] = 1
-    values, fields = _optimize(objectives, matrix, rhs, lower, upper, options,
-                               seconds - (time.monotonic() - started))
+    values, fields, locked_matrix, locked_rhs, deadline, used_nodes = _optimize(
+        objectives, matrix, rhs, lower, upper, options,
+        seconds - (time.monotonic() - started),
+    )
     fields["eligible_six_ring_count"] = len(aromatic_rings)
     if values is None:
         return fields
-    molecule = Chem.RWMol(graph)
-    for j, bond in enumerate(molecule.GetBonds()):
-        bond.SetBondType({1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE, 3: Chem.BondType.TRIPLE}[int(values[j])])
-    model_atoms = []
-    for i, items in enumerate(states):
-        _b, charge, radicals, _deficit, _expanded = items[int(np.argmax(values[offsets[i]:offsets[i] + len(items)]))]
-        atom = molecule.GetAtomWithIdx(i)
-        atom.SetFormalCharge(charge)
-        atom.SetNumRadicalElectrons(radicals)
-        atom.SetNoImplicit(True)
-        nonbonding = _STATES[atom.GetSymbol()][0] - charge - _b
-        model_atoms.append({"index": i, "element": atom.GetSymbol(), "isotope": atom.GetIsotope(),
-                            "formal_charge": charge, "unpaired_electrons": radicals,
-                            "lone_pairs": (nonbonding - radicals) // 2})
-    model_graph = {"index_basis": "local_zero_based_not_RNG_atom_ids", "atoms": model_atoms,
-                   "bonds": [[b.GetBeginAtomIdx(), b.GetEndAtomIdx(), int(b.GetBondTypeAsDouble())]
-                             for b in molecule.GetBonds()]}
-    try:
-        with rdBase.BlockLogs():
-            checked = Chem.Mol(molecule)
-            flag = Chem.SanitizeMol(checked, catchErrors=True)
-            if flag != Chem.SanitizeFlags.SANITIZE_NONE:
-                return {**fields, "status": "candidate_rejected", "reason": "candidate_rdkit_check_failed"}
-            candidate = Chem.MolToSmiles(checked, canonical=True)
-            if not _charge_policy_holds(checked):
-                return {**fields, "status": "candidate_rejected", "reason": "candidate_charge_policy_failed"}
-    except (ValueError, RuntimeError):
-        return {**fields, "status": "solver_failed", "reason": "candidate_serialization_failed"}
-    # Sanitization is performed on a copy and may standardize charges/bonds.
-    # Verify its output still has exactly the supplied atoms and connectivity.
-    _candidate_graph, candidate_key, candidate_charges = _complete_graph(candidate, options.max_atoms)
     original_key = Chem.MolToSmiles(graph, canonical=True, allHsExplicit=True)
-    if candidate_key != original_key or any(candidate_charges):
-        return {**fields, "status": "solver_failed", "reason": "candidate_graph_or_charge_changed"}
-    return {**fields, "status": "generated", "reason": "one_heuristic_candidate",
-            "candidate_smiles": candidate, "candidate_count": 1,
-            "model_graph": model_graph,
-            "model_unpaired_electrons": sum(a["unpaired_electrons"] for a in model_atoms),
-            "formal_charge": sum(a.GetFormalCharge() for a in checked.GetAtoms()),
-            "radical_electrons": sum(a.GetNumRadicalElectrons() for a in checked.GetAtoms())}
+    extracted, error = _extract_candidate(graph, states, offsets, values, options, original_key)
+    if error is not None:
+        return {**fields, **error}
+    uniqueness = _check_optimal_uniqueness(
+        graph, states, offsets, bonds, ring_offsets, values, extracted,
+        locked_matrix, locked_rhs, lower, upper, options,
+        deadline, used_nodes, original_key,
+    )
+    return {
+        **fields,
+        **uniqueness,
+        "status": "generated",
+        "reason": "one_heuristic_candidate",
+        "candidate_smiles": extracted["candidate_smiles"],
+        "candidate_count": 1,
+        "model_graph": extracted["model_graph"],
+        "model_unpaired_electrons": extracted["model_unpaired_electrons"],
+        "formal_charge": extracted["formal_charge"],
+        "radical_electrons": extracted["radical_electrons"],
+    }
 
 
 def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
@@ -498,6 +670,9 @@ def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
     result = {"schema_version": LEWIS_SCHEMA, "original_species": smiles,
               "original_smiles": smiles, "candidate_smiles": None,
               "candidate_count": 0, "candidate_search_complete": False,
+              "optimal_uniqueness": "not_evaluated",
+              "alternative_candidate_smiles": [],
+              "optimal_assignments_checked": 0,
               "optimization_complete": False, "truncated": False,
               "input_graph_id": None, "input_source": input_source,
               "coverage": "selected_representative_only" if miso == 2 else
@@ -525,6 +700,7 @@ def annotate_lewis(smiles: str, *, options: LewisOptions | None = None,
             if _cache is not None and solved["status"] not in {"timeout", "truncated", "solver_failed"}:
                 _cache[key] = solved
         result.update(solved)
+        result["alternative_candidate_smiles"] = list(result.get("alternative_candidate_smiles") or [])
     except _InputProblem as exc:
         result.update(status=exc.status, reason=exc.reason, truncated=exc.status in {"timeout", "truncated"})
     result["elapsed_seconds"] = time.monotonic() - started

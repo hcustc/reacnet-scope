@@ -82,7 +82,7 @@ prepare_lewis_annotations(
   RDKit 自由基电子；两者都不能证明真实 CF₂ 的单重态/三重态。
 - 原始 SMILES 定义的显式/隐式氢被保留；无法可靠解析氢数时拒判，不能任意补氢。
 - `optimization_complete` 表示有界模型优化是否完成；`candidate_search_complete=false`
-  表示没有穷举替代候选。成功返回一个结构不证明唯一性、真实电子态、稳定性或机理。
+  表示没有穷举全部可行/次优候选。`optimal_uniqueness` 报告在锁定当前 8 级目标最优值后、有界无好割（最多 8 次额外复求）的等优解唯一性检查结果：`unique_assignment`（模型最优分配唯一）、`unique_canonical_smiles`（仅有等价共振或图对称分配，规范 SMILES 与对称轨道电子分配一致）、`multiple_optimal_candidates`（存在其他等优候选，并在 `alternative_candidate_smiles` 列出示例替代 SMILES，建议结合键长或量化复核）或 `inconclusive_budget`（达到复求次数或时间/节点预算，不影响主候选）。成功返回一个唯一最优模型解仍不证明真实电子态、自旋或化学有效性。
   `candidate_count` 是返回的候选数，不是已穷举的结构数。`candidate_rejected` 只说明返回的
   这个候选未通过表示检查，不意味着模型内其他候选全部不成立。
 - 超时或节点截断不采用中途解。低频、自由基、离子、不支持或未找到候选都不会自动删除物种。
