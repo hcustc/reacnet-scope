@@ -19,6 +19,17 @@ VERSION = '2'
 FRAME_BLOCK = 262144
 
 
+def has_state_atom_lookup(connection) -> bool:
+    """Return whether both atom-lookup tables exist in the lineage index."""
+    return (
+        connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('lineage_state_ids', 'lineage_atom_states')"
+        ).fetchone()[0]
+        == 2
+    )
+
+
 def build_state_atom_lookup(connection):
     """Index every occupied-state definition, including states without event ports.
 
@@ -27,6 +38,8 @@ def build_state_atom_lookup(connection):
     """
     # Store the long state key once, not once per atom. These explicit integer
     # primary keys remain stable if a published database is copied or vacuumed.
+    connection.execute("DROP TABLE IF EXISTS lineage_atom_states")
+    connection.execute("DROP TABLE IF EXISTS lineage_state_ids")
     connection.execute("CREATE TABLE lineage_state_ids(id INTEGER PRIMARY KEY, state_key TEXT NOT NULL)")
     connection.execute("INSERT INTO lineage_state_ids SELECT rowid, state_key FROM lineage_states")
     connection.execute("""CREATE TABLE lineage_atom_states(

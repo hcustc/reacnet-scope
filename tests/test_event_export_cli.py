@@ -182,6 +182,61 @@ def test_existing_lineage_lookup_preparation_is_atomic_and_retryable(tmp_path, m
     EVENT_EVIDENCE_STORE.build(source, molecules)
     assert cli.main(args) == 0
 
+    # Partial lookup state (only lineage_state_ids dropped) is detected and repaired.
+    with closing(sqlite3.connect(index)) as con, con:
+        con.execute("DROP TABLE lineage_state_ids")
+    assert cli.main([*args, "--force"]) != 0
+    EVENT_EVIDENCE_STORE.build(source, molecules)
+    assert cli.main([*args, "--force"]) == 0
+
+
+def test_plateau_extends_reactant_backward_across_blocks_and_stops_at_interruption(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from reacnet_scope import lineage_segments
+
+    monkeypatch.setenv("REACNET_SCOPE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(lineage_segments, "FRAME_BLOCK", 8)
+    trajectory = tmp_path / "run.lammpstrj"
+    reactionevent = tmp_path / "run.lammpstrj.reactionevent.csv"
+    molecules = tmp_path / "run.lammpstrj.molecules.csv"
+    reaction = tmp_path / "run.lammpstrj.reactionabcd"
+
+    # Event occurs at frame 12 (timestep 120 -> 130): [C][O] -> [C] + [O].
+    # Frames 3..12 carry [C][O] across a FRAME_BLOCK=8 boundary with bond-order flips;
+    # frame 2 has a partial-atom conflict, while frames 0..1 carry [C][O] again.
+    timesteps = range(0, 140, 10)
+    trajectory.write_text("".join(_frame(step) for step in timesteps), encoding="utf-8")
+    reactionevent.write_text(
+        "Timestep_Index,Reactant,Product\n12,[C][O],[C]+[O]\n",
+        encoding="utf-8",
+    )
+    mol_rows = ["Timestep,Species,AtomIDs,BondIDs\n"]
+    for step in (0, 10):
+        mol_rows.append(f"{step},[C][O],0;1,0-1-1\n")
+    mol_rows.append("20,[C][O],0;1,0-1-1\n20,[O],1,\n")
+    for step in range(30, 130, 10):
+        mol_rows.append(f"{step},[C][O],0;1,0-1-{1 + (step // 10) % 2}\n")
+    mol_rows.append("130,[C],0,\n130,[O],1,\n")
+    molecules.write_text("".join(mol_rows), encoding="utf-8")
+    reaction.write_text("1 [C][O]->[C]+[O]\n", encoding="utf-8")
+
+    EVENT_EVIDENCE_STORE.build(str(reactionevent), str(molecules))
+    TRAJECTORY_INDEX_STORE.build(str(trajectory))
+    event_id = EVENT_EVIDENCE_STORE.query_events(
+        str(reactionevent), str(molecules), "[C][O]->[C]+[O]", limit=1
+    )["rows"][0]["event_id"]
+
+    out = tmp_path / "backward.zip"
+    assert cli.main([
+        "export-event", "--case", str(tmp_path), "--event-id", event_id,
+        "--window-mode", "plateau", "--out", str(out),
+    ]) == 0
+    with ZipFile(out) as archive:
+        doc = json.loads(archive.read("event.json"))
+    assert [f["source_timestep"] for f in doc["frames"]] == list(range(30, 140, 10))
+    assert [f["bond_state"] for f in doc["frames"]] == [*["unassigned"] * 9, "before", "after"]
+
 
 def test_export_event_cli_writes_package_without_persisting_type_override(
     tmp_path: Path,

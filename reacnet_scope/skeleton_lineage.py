@@ -562,7 +562,10 @@ def _carrier_bound(con, frames, atoms, species, bonds):
     endpoint = frames[0]["frame"]
     first, last = sorted((endpoint, frames[-1]["frame"]))
     wanted = set(atoms)
-    carrier_bonds = [bond for bond in bonds if set(map(int, bond.split("-")[:2])) <= wanted]
+    carrier_bonds = [
+        bond for bond in bonds
+        if len(bond.split("-", 2)) >= 2 and set(map(int, bond.split("-")[:2])) <= wanted
+    ]
     endpoint_key, _, _ = state_record(species, atoms, carrier_bonds)
     edges = strip_bond_orders(carrier_bonds)
     atoms_json = json.dumps(atoms)
@@ -656,8 +659,7 @@ def find_event_plateau_window(
     bounds = []
     source_ids = set()
     with _lineage_reader(artifacts) as (con, _):
-        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                           "AND name='lineage_atom_states'").fetchone():
+        if not lineage_segments.has_state_atom_lookup(con):
             raise ServiceError("Run reacnet-scope prepare build event for this dataset "
                                "to index existing occupancy by atom.",
                                reason="plateau_lookup_required")
@@ -668,8 +670,12 @@ def find_event_plateau_window(
             source_ids.add(frames[0]["source_id"])
             bonds = event.get(f"{side}_bonds") or ()
             if isinstance(bonds, str):
-                bonds = list(filter(None, bonds.split(";")))
-            species = {tuple(sorted(p["atom_ids"])): p["species"] for p in event[f"{side}_participants"]}
+                bonds = bonds.split(";")
+            bonds = [str(bond) for bond in bonds if bond]
+            species = {
+                tuple(sorted(set(p["atom_ids"]))): p["species"]
+                for p in event[f"{side}_participants"]
+            }
             ends = [_carrier_bound(con, frames, atoms, species[atoms], bonds) for atoms in sets]
             bounds.append(max(ends) if direction < 0 else min(ends))
 

@@ -1768,21 +1768,19 @@ class EventEvidenceStore:
     @staticmethod
     def _prepare_plateau_lookup(opened, reaction_source, molecule_source):
         """Add the atom lookup to an existing v2 index during explicit preparation."""
-        from .lineage_segments import VERSION, build_state_atom_lookup
+        from .lineage_segments import VERSION, build_state_atom_lookup, has_state_atom_lookup
 
         path = Path(opened["index_path"])
         with closing(_readonly_connection(path)) as reader:
             version = reader.execute(
                 "SELECT value FROM meta WHERE key='lineage_segments_version'"
             ).fetchone()
-            if not version or version[0] != VERSION or reader.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lineage_atom_states'"
-            ).fetchone():
+            if not version or version[0] != VERSION or has_state_atom_lookup(reader):
                 return
 
         # The ordinary preparation lock serializes writers. A failed backfill
         # rolls back both the table and its contents while readers keep v2.
-        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)) as writer, writer:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=30.0)) as writer, writer:
             writer.execute("BEGIN IMMEDIATE")
             build_state_atom_lookup(writer)
             for source in (reaction_source, molecule_source):
