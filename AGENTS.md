@@ -6,13 +6,16 @@
 `reacnet_scope` Python API、`reacnet-scope` CLI 和 Dash Web；三者共享核心分析。
 
 - 开始领域相关工作前读 [CONTEXT.md](CONTEXT.md)，按任务读取
-  [软件设计基准](docs/software-design-baseline.md) 的相关章节和有效 ADR。
-- 术语由 `CONTEXT.md` 定义；产品契约由设计基准定义；决策理由与替代关系见
-  [docs/adr/](docs/adr/)。文档使用规则见 [domain.md](docs/agents/domain.md)。
+  [软件设计基准](docs/software-design-baseline.md) 的相关章节。
+- **单一事实源**：术语由 `CONTEXT.md` 定义，现行产品与科学契约以设计基准为准；
+  [docs/adr/](docs/adr/) 顶层仅保留现行核心架构/科学决策及理由，已替代和早期 UI 演进
+  ADR 已归档至 `docs/adr/archive/`，日常开发与验收不回读归档目录。文档规则见
+  [domain.md](docs/agents/domain.md)。
+- **当前阶段开发主线与延后范围**：现阶段优先服务**上游 RNG timeline（schema 1.1/1.2、物理单位、滞回判键）适配**与 **MD-to-QC 证据工作流**（`skeleton_lineage`、`geometry_audit`、`topology_classifier`、`plateau` 平台窗导出、`qc_manifest`、`render-report`）。除非任务明确指定，不主动展开 Dash 历史 UI 细节改造、0.2.0 弃用移除、跨平台压测打包或陈旧 backlog issues（如 `#29–#33`、`#39–#41`、`#53–#54`）。
 - 设计基准描述目标契约，代码与测试描述当前实现。发现差异时明确指出，不能用旧实现、
   旧测试或日期化计划反向改写已接受语义，也不借小任务修复所有历史偏差。
-- 读取 ADR 时先核对顶部 Status 与替代范围：部分替代只使列明的决策失效，其他决策继续
-  有效；被替代的历史条款不能作为当前验收依据。不能仅按日期选择 ADR 或把测试当成产品契约。
+- 需要查阅核心决策理由时先查 [ADR 索引](docs/adr/README.md) 顶部状态与替代范围：部分替代
+  只使列明的决策失效，其他决策继续有效；`docs/adr/archive/` 中的历史条款不作当前验收依据。
 - 用户明确要求改变契约时，在该任务内同步相关文档和实现；skill 的流程不扩大任务范围。
 
 ## 仓库导航

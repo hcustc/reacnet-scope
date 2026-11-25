@@ -62,12 +62,12 @@ transition state, and its expansion remains frozen.
 ## Supersession
 
 This supersedes only the statement in
-[ADR-0020](0020-center-dash-on-candidate-step-occurrences.md) that Candidate
+[ADR-0020](archive/0020-center-dash-on-candidate-step-occurrences.md) that Candidate
 Path is a co-equal entry of the ordinary mainline, and the baseline's
 release-critical path through Candidate Path. ADR-0020's step, occurrence,
 handoff, return, Molecular Lineage and DFT export decisions remain accepted.
-[ADR-0029](0029-open-analysis-from-species-reactions-evolution-and-events.md)
-and [ADR-0030](0030-use-local-species-focus-in-dash.md) navigation and local
+[ADR-0029](archive/0029-open-analysis-from-species-reactions-evolution-and-events.md)
+and [ADR-0030](archive/0030-use-local-species-focus-in-dash.md) navigation and local
 Species focus are unchanged. No scientific result schema, CLI/API identity,
 index preparation rule or Candidate structural identity changes.
 

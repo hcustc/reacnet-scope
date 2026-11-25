@@ -63,7 +63,7 @@ structural identity, Step Evidence or any prepared index.
 
 This refines the frozen-capability paragraph of the design baseline and the
 compatibility retention of `candidate-paths` and Candidate scoring described in
-[ADR-0014](0014-converge-dash-around-five-workspaces.md). ADR-0014's surface
+[ADR-0014](archive/0014-converge-dash-around-five-workspaces.md). ADR-0014's surface
 decisions otherwise remain accepted. Fate and rate decisions in
 [ADR-0011](0011-prepare-molecular-continuity-for-query-time-fate.md) and
 [`0012-estimate-channel-rates-from-prepared-exposure.md`](0012-estimate-channel-rates-from-prepared-exposure.md)

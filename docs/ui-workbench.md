@@ -1,6 +1,6 @@
 # Dash 工作台 UI 开发约定
 
-五个平级入口“RNG 数据／物种／反应／演化／事件”共用紧凑桌面布局；各入口在对象详情或观察结果附近显示相关操作，不显示旧常驻任务排。事件从路线、反应或独立查询进入同一详情抽屉，再按需展开全宽核查。领域身份、能力、索引及导出契约仍以 [软件设计基准](software-design-baseline.md) 为准；展示决策见 [ADR-0029](adr/0029-open-analysis-from-species-reactions-evolution-and-events.md)。
+五个平级入口“RNG 数据／物种／反应／演化／事件”共用紧凑桌面布局；各入口在对象详情或观察结果附近显示相关操作，不显示旧常驻任务排。事件从路线、反应或独立查询进入同一详情抽屉，再按需展开全宽核查。领域身份、能力、索引及导出契约仍以 [软件设计基准](software-design-baseline.md) 为准；历史展示演进归档见 [ADR-0029](adr/archive/0029-open-analysis-from-species-reactions-evolution-and-events.md)。
 
 ## 组件与依赖
 

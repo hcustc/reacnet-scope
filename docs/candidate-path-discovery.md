@@ -19,7 +19,7 @@ Dash 默认按净转化方向展开：完整正逆反应按精确 Species 及计
 
 全部观测方向下可选折叠三个分析帧间隔内、完整原子参与者返回的短暂往返，也可调整窗口或只折叠
 精确键级也恢复的事件。低频和短寿命本身不触发折叠；步骤页始终保留原始事件，并可选择具体事件
-查看真实键图和首次后续消耗。见 [ADR-0017](adr/0017-qualify-candidate-events-and-check-selected-history.md)。
+查看真实键图和首次后续消耗。历史背景见 [ADR-0017](adr/archive/0017-qualify-candidate-events-and-check-selected-history.md)。
 
 CLI 的 `--mode explore|reverse|target` 分别对应仅起点、仅终点、双端。
 `--max-steps` 是双端查询的可选上限；单端每次展开一步，
