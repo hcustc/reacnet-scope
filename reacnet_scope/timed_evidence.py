@@ -16,6 +16,7 @@ import numpy as np
 
 from .rng_events import MoleculeRow, reaction_key
 from ._official_timeline import (
+    OFFICIAL_TIMELINE_SCHEMAS,
     OfficialTimelineError,
     OfficialTimelineView,
     TimelinePhysicalUnits,
@@ -25,7 +26,7 @@ from ._official_timeline import (
 
 TimedEvidenceKind = Literal["native_hdf5", "legacy_csv"]
 
-_SUPPORTED_NATIVE_TIMELINE_SCHEMAS = frozenset({"1", "2", "1.1"})
+_SUPPORTED_NATIVE_TIMELINE_SCHEMAS = OFFICIAL_TIMELINE_SCHEMAS | {"1", "2"}
 
 _MEMBERSHIP_RANGE_CHUNK_SIZE = 262_144
 _MEMBERSHIP_ATOM_PREFETCH_BYTES = 16 * 1024**2
@@ -219,7 +220,7 @@ class NativeHdf5EvidenceAdapter:
     def __enter__(self) -> "NativeHdf5EvidenceAdapter":
         self._handle = h5py.File(self.selection.timeline_file, "r")
         try:
-            if self.selection.schema_version == "1.1":
+            if self.selection.schema_version in OFFICIAL_TIMELINE_SCHEMAS:
                 frames, _units = inspect_official_timeline(self._handle)
                 self._handle = OfficialTimelineView(self._handle, frames)
             self._load_indexes()
@@ -741,7 +742,7 @@ class NativeHdf5EvidenceAdapter:
                 or len({tuple(pair) for pair in bond_atoms}) != len(bond_atoms)
             ):
                 raise TimedEvidenceDataError(
-                    "timeline HDF5 1.1: invalid molecule atoms or bonds", state="incompatible"
+                    "official timeline HDF5: invalid molecule atoms or bonds", state="incompatible"
                 )
         bonds = tuple(
             f"{int(pair[0])}-{int(pair[1])}-{int(order)}"
@@ -1118,7 +1119,7 @@ def _inspect_native_timeline(path: Path) -> TimedEvidenceSelection:
                     f"timeline HDF5 schema is incompatible: {schema_version or 'missing'}",
                     state="incompatible",
                 )
-            if schema_version == "1.1":
+            if schema_version in OFFICIAL_TIMELINE_SCHEMAS:
                 try:
                     frames, physical_units = inspect_official_timeline(handle)
                 except OfficialTimelineError as exc:
@@ -1465,7 +1466,7 @@ def native_membership_bytes(selection: TimedEvidenceSelection) -> int:
 
     if selection.kind != "native_hdf5" or not selection.molecule_enabled:
         return 0
-    if selection.schema_version == "1.1":
+    if selection.schema_version in OFFICIAL_TIMELINE_SCHEMAS:
         # Resource estimates must remain metadata-only. Exact-event indexing
         # does not allocate this matrix; callers can still display its size.
         with h5py.File(selection.timeline_file, "r") as handle:

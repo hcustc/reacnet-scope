@@ -1,4 +1,4 @@
-"""Read-only normalization of the upstream RNG 1.1 timeline contract.
+"""Read-only normalization of the upstream RNG 1.1 and 1.2 timeline contracts.
 
 Only the timed-evidence adapter uses this module. Selection inspects metadata;
 offline adapter preparation derives transition blocks in bounded reads. No
@@ -20,6 +20,7 @@ import numpy as np
 
 from .rng_events import MoleculeRow, net_reaction_key
 
+OFFICIAL_TIMELINE_SCHEMAS = frozenset({"1.1", "1.2"})
 BLOCK_ROWS = 65_536
 _PS_PER_UNIT = {"fs": 1e-3, "ps": 1.0, "ns": 1e3}
 _LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
@@ -27,7 +28,7 @@ _LAMMPS_STEP_INPUTS = {"bond", "lammpsbondfile", "dump", "lammpsdumpfile"}
 
 @dataclass(frozen=True)
 class TimelinePhysicalUnits:
-    """Caller-supplied units from RNG's schema 1.1 configuration."""
+    """Caller-supplied units from the RNG timeline configuration."""
 
     timestep_value: float | None
     time_unit: str | None
@@ -52,7 +53,7 @@ class TimelinePhysicalUnits:
 
 class OfficialTimelineError(ValueError):
     def __init__(self, message: str, *, state: str = "incompatible") -> None:
-        super().__init__(f"timeline HDF5 1.1: {message}")
+        super().__init__(f"official timeline HDF5: {message}")
         self.state = state
 
 
@@ -83,7 +84,8 @@ def _physical_units(parameters: dict[str, Any]) -> TimelinePhysicalUnits | None:
 
 def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalUnits | None]:
     """Validate metadata/column alignment without scanning payload tables."""
-    if _text(handle.attrs.get("schema_version", "")) != "1.1":
+    version = _text(handle.attrs.get("schema_version", ""))
+    if version not in OFFICIAL_TIMELINE_SCHEMAS:
         raise OfficialTimelineError("unsupported schema version")
     if _text(handle.attrs.get("format", "")) != "reacnetgenerator-timeline":
         raise OfficialTimelineError("unexpected format")
@@ -137,7 +139,11 @@ def inspect_official_timeline(handle: h5py.File) -> tuple[int, TimelinePhysicalU
     column("frames/source_frame", size=frames)
     column("atoms/type")
     column("atoms/type_name", text=True)
-    column("species/name", text=True)
+    species = column("species/name", text=True)
+    if version == "1.2":
+        for path in ("species/formula", "species/ring_system"):
+            if path in handle:
+                column(path, text=True, size=species)
     molecules = column("molecules/species_id")
     atoms = column("molecules/atom_index")
     bonds = column("molecules/bond_order")

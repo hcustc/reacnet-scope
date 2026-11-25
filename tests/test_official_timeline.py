@@ -103,8 +103,17 @@ def write_official_timeline(path: Path, *, copies: int = 1, reverse: bool = Fals
     return path
 
 
-def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(tmp_path):
+@pytest.mark.parametrize("version,descriptors", [
+    ("1.1", ()), ("1.2", ()), ("1.2", ("formula",)), ("1.2", ("formula", "ring_system")),
+])
+def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(tmp_path, version, descriptors):
     upstream = write_official_timeline(tmp_path / "official.timeline.h5")
+    with h5py.File(upstream, "r+") as handle:
+        handle.attrs["schema_version"] = version
+        if "formula" in descriptors:
+            handle.create_dataset("species/formula", data=["C", "O", "CO"], dtype=h5py.string_dtype())
+        if "ring_system" in descriptors:
+            handle.create_dataset("species/ring_system", data=["acyclic"] * 3, dtype=h5py.string_dtype())
     fork = write_timeline(tmp_path / "fork.timeline.h5", schema_version="2")
     evidence = []
     for path in (upstream, fork):
@@ -115,6 +124,16 @@ def test_official_dictionary_ids_and_split_bonds_match_existing_exact_evidence(t
             assert adapter.membership_shape == (2, 2)
     assert evidence[0] == evidence[1]
     assert evidence[0].after_molecules[0].bond_ids == ("0-1-1",)
+
+
+@pytest.mark.parametrize("field", ["formula", "ring_system"])
+def test_invalid_optional_descriptor_alignment(tmp_path, field):
+    path = write_official_timeline(tmp_path / "test.timeline.h5")
+    with h5py.File(path, "r+") as handle:
+        handle.attrs["schema_version"] = "1.2"
+        handle.create_dataset(f"species/{field}", data=["one"], dtype=h5py.string_dtype())
+    with pytest.raises(TimedEvidenceDataError, match=f"incompatible column species/{field}"):
+        select_timed_evidence(timeline_file=str(path))
 
 
 def test_selection_and_resource_estimates_do_not_scan_official_payload(tmp_path, monkeypatch):
@@ -153,7 +172,7 @@ def test_bounded_normalization_without_optional_full_array_caches(tmp_path, monk
 
 
 @pytest.mark.parametrize("attribute,value,state", [
-    ("schema_version", "1.2", "incompatible"),
+    ("schema_version", "1.3", "incompatible"),
     ("status", "incomplete", "incomplete"),
     ("format", "another-format", "incompatible"),
     ("capabilities", '[]', "incompatible"),
